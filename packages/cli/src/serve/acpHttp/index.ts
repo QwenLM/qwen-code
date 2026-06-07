@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
+import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
@@ -13,6 +16,7 @@ import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
+import { WsStream } from './wsStream.js';
 import { RPC, error as rpcError, isRequest, parseInbound } from './jsonRpc.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
@@ -34,11 +38,15 @@ export interface MountAcpHttpOptions {
   enabled?: boolean;
   path?: string;
   maxConnections?: number;
+  /** Bearer token for WS auth (WS bypasses Express middleware). */
+  token?: string;
 }
 
 export interface AcpHttpHandle {
   dispose(): void;
   registry: ConnectionRegistry;
+  /** Attach HTTP server post-listen to enable WebSocket upgrade. */
+  attachServer(server: import('node:http').Server): void;
 }
 
 /**
@@ -344,7 +352,255 @@ export function mountAcpHttp(
     res.status(202).end();
   });
 
-  return { dispose: () => registry.dispose(), registry };
+  // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
+  let wss: WebSocketServer | undefined;
+
+  function setupWebSocket(httpServer: import('node:http').Server): void {
+    if (wss) return;
+    wss = new WebSocketServer({ noServer: true });
+
+    httpServer.on(
+      'upgrade',
+      (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        const url = new URL(
+          req.url ?? '/',
+          `http://${req.headers.host ?? 'localhost'}`,
+        );
+        if (url.pathname !== path) {
+          socket.destroy();
+          return;
+        }
+
+        // CSRF: reject non-loopback origins on WS upgrade.
+        const origin = req.headers['origin'];
+        const fromLoopback = isLoopbackSocket(socket);
+        if (origin && !fromLoopback) {
+          try {
+            const originHost = new URL(origin).hostname;
+            if (
+              originHost !== '127.0.0.1' &&
+              originHost !== 'localhost' &&
+              originHost !== '[::1]' &&
+              originHost !== '::1'
+            ) {
+              socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+              socket.destroy();
+              return;
+            }
+          } catch {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        }
+
+        // Auth: WS bypasses Express middleware. Same posture as REST:
+        // loopback without token = allow; non-loopback/token-mismatch = reject.
+        if (opts.token) {
+          const authHeader = req.headers['authorization'];
+          const scheme = authHeader
+            ?.slice(0, authHeader.indexOf(' '))
+            .toLowerCase();
+          const credentials = authHeader
+            ?.slice(authHeader.indexOf(' ') + 1)
+            .trim();
+          if (scheme !== 'bearer' || credentials !== opts.token) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        } else if (!fromLoopback) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
+        wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          let initialized = false;
+          const initTimer = setTimeout(() => {
+            if (!initialized) {
+              ws.close(1002, 'Initialize timeout');
+            }
+          }, 30_000);
+          initTimer.unref?.();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let connRef: any;
+
+          ws.on('message', async (rawData: Buffer | string) => {
+            let text: string;
+            try {
+              text =
+                typeof rawData === 'string'
+                  ? rawData
+                  : rawData.toString('utf8');
+            } catch {
+              ws.close(1003, 'Only text frames supported');
+              return;
+            }
+
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              ws.send(
+                JSON.stringify(rpcError(null, RPC.PARSE_ERROR, 'Parse error')),
+              );
+              return;
+            }
+
+            if (Array.isArray(parsed)) {
+              ws.send(
+                JSON.stringify({
+                  error: 'Batch JSON-RPC not supported',
+                }),
+              );
+              return;
+            }
+
+            const inbound = parseInbound(parsed);
+            if (!inbound.ok) {
+              ws.send(JSON.stringify(inbound.error));
+              return;
+            }
+            const message = inbound.message;
+
+            if (!initialized) {
+              if (!isRequest(message) || message.method !== 'initialize') {
+                ws.send(
+                  JSON.stringify(
+                    rpcError(
+                      isRequest(message) ? message.id : null,
+                      RPC.INVALID_REQUEST,
+                      'First message must be initialize',
+                    ),
+                  ),
+                );
+                ws.close(1002, 'Protocol error');
+                return;
+              }
+
+              const conn = registry.create(fromLoopback);
+              if (!conn) {
+                ws.send(
+                  JSON.stringify(
+                    rpcError(
+                      message.id,
+                      RPC.INTERNAL_ERROR,
+                      'Too many connections',
+                    ),
+                  ),
+                );
+                ws.close(1013, 'Connection cap');
+                return;
+              }
+
+              const requestedVersion =
+                message.params &&
+                typeof message.params === 'object' &&
+                !Array.isArray(message.params)
+                  ? (message.params as Record<string, unknown>)[
+                      'protocolVersion'
+                    ]
+                  : undefined;
+
+              // WS: single socket serves as conn stream + all session streams.
+              const stream = new WsStream(
+                ws,
+                () => {
+                  writeStderrLine(
+                    `qwen serve: /acp WS closed (${conn.connectionId.slice(0, 8)})`,
+                  );
+                  registry.delete(conn.connectionId);
+                },
+                () => conn.touch(),
+              );
+              conn.attachConnStream(stream);
+
+              ws.send(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: message.id,
+                  result: dispatcher.buildInitializeResult(
+                    conn.connectionId,
+                    requestedVersion,
+                  ),
+                }),
+              );
+
+              initialized = true;
+              clearTimeout(initTimer);
+              connRef = conn;
+              writeStderrLine(
+                `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
+              );
+              return;
+            }
+
+            // Subsequent messages
+            const conn = connRef;
+            if (!conn || conn.destroyed) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(null, RPC.INTERNAL_ERROR, 'Connection lost'),
+                ),
+              );
+              ws.close(1011, 'Connection lost');
+              return;
+            }
+
+            // Lazy session stream attachment for WS
+            if (
+              isRequest(message) &&
+              message.params &&
+              typeof message.params === 'object'
+            ) {
+              const sid = (message.params as Record<string, unknown>)[
+                'sessionId'
+              ];
+              if (typeof sid === 'string' && conn.ownsSession(sid)) {
+                const binding = conn.sessions.get(sid);
+                if (binding && !binding.stream) {
+                  const ac = new AbortController();
+                  conn.attachSessionStream(sid, conn.connStream!, ac);
+                  void dispatcher
+                    .pumpSessionEvents(conn, sid, ac.signal)
+                    .catch((err: unknown) => {
+                      writeStderrLine(
+                        `qwen serve: /acp WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
+                      );
+                    });
+                }
+              }
+            }
+
+            await dispatcher
+              .handle(conn, message, undefined, fromLoopback)
+              .catch((err: unknown) => {
+                writeStderrLine(
+                  `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
+          });
+        });
+      },
+    );
+
+    writeStderrLine(`qwen serve: /acp WebSocket transport enabled on ${path}`);
+  }
+
+  return {
+    dispose: () => {
+      registry.dispose();
+      if (wss) {
+        wss.close();
+        wss = undefined;
+      }
+    },
+    registry,
+    attachServer(server: import('node:http').Server) {
+      setupWebSocket(server);
+    },
+  };
 }
 
 function headerOf(req: Request, name: string): string | undefined {
@@ -358,6 +614,14 @@ function headerOf(req: Request, name: string): string | undefined {
  * headers like `X-Forwarded-For`). Replicated here rather than imported
  * from `server.ts` to avoid a server↔acpHttp import cycle.
  */
+function isLoopbackSocket(socket: Duplex): boolean {
+  const addr = (socket as unknown as { remoteAddress?: string }).remoteAddress;
+  if (typeof addr !== 'string') return false;
+  return (
+    addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.')
+  );
+}
+
 function isLoopbackReq(req: Request): boolean {
   const addr = req.socket?.remoteAddress;
   if (typeof addr !== 'string') return false;

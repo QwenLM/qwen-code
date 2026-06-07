@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { logSafe } from './jsonRpc.js';
-import type { SseStream } from './sseStream.js';
+import type { TransportStream } from './transportStream.js';
 
 /**
  * Per-stream cap on frames buffered before the client attaches its SSE
@@ -59,7 +59,7 @@ export interface SessionBinding {
    */
   clientId?: string;
   /** Session-scoped SSE stream (the client's `GET /acp` with both headers). */
-  stream?: SseStream;
+  stream?: TransportStream;
   /** Frames emitted before the session stream attached, flushed on attach. */
   buffer: unknown[];
   /**
@@ -90,7 +90,7 @@ export interface PendingClientRequest {
 export class AcpConnection {
   readonly connectionId: string;
   /** Connection-scoped SSE stream (the client's `GET /acp` with only the conn header). */
-  connStream?: SseStream;
+  connStream?: TransportStream;
   /** Frames emitted before the connection stream attached, flushed on attach. */
   private readonly connBuffer: unknown[] = [];
   readonly sessions = new Map<string, SessionBinding>();
@@ -206,7 +206,7 @@ export class AcpConnection {
   }
 
   /** Attach the connection-scoped stream and flush any buffered frames. */
-  attachConnStream(stream: SseStream): void {
+  attachConnStream(stream: TransportStream): void {
     // A reconnect cancels any pending grace-period reap.
     this.clearGraceTimer();
     // Close any prior connection stream so its heartbeat interval + socket
@@ -242,7 +242,7 @@ export class AcpConnection {
    */
   attachSessionStream(
     sessionId: string,
-    stream: SseStream,
+    stream: TransportStream,
     abort: AbortController,
   ): SessionBinding {
     const binding = this.getOrCreateSession(sessionId);
@@ -285,7 +285,11 @@ export class AcpConnection {
   private teardownBinding(binding: SessionBinding): void {
     binding.abort.abort();
     binding.promptAbort?.abort();
-    binding.stream?.close();
+    // Don't close the stream if it's the shared connStream (WS reuses
+    // one socket for all sessions — closing it kills the entire connection).
+    if (binding.stream && binding.stream !== this.connStream) {
+      binding.stream.close();
+    }
     this.abandonPendingForSession(binding.sessionId, binding.clientId);
     this.onDetachSession?.(binding.sessionId, binding.clientId);
   }

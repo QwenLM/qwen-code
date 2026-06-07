@@ -1248,6 +1248,12 @@ export async function runQwenServe(
         });
       }
 
+      // Enable WebSocket transport now that http.Server is available.
+      const acpHandle = app.locals?.['acpHandle'] as
+        | { attachServer?: (s: typeof server) => void }
+        | undefined;
+      acpHandle?.attachServer?.(server);
+
       resolve(handle);
     });
     server.once('error', reject);

@@ -25,8 +25,17 @@ export class WsStream implements TransportStream {
       );
       this.close();
     });
+    let alive = true;
+    ws.on('pong', () => {
+      alive = true;
+    });
     this.heartbeat = setInterval(() => {
       if (this._closed) return;
+      if (!alive) {
+        this.close();
+        return;
+      }
+      alive = false;
       this.onHeartbeat?.();
       this.ws.ping();
     }, 15_000);
@@ -56,7 +65,7 @@ export class WsStream implements TransportStream {
         this.close();
       }
     });
-    return next;
+    return this.writeChain;
   }
 
   get isClosed(): boolean {
