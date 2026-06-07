@@ -140,11 +140,7 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async setWorkspaceSetting(
-      scope: 'user' | 'workspace',
-      key: string,
-      value: unknown,
-    ) {
+    async setWorkspaceSetting(scope: 'workspace', key: string, value: unknown) {
       const client = requireClient(getClient, 'Set setting failed');
       return withActionTimeout(
         client.setWorkspaceSetting(scope, key, value),

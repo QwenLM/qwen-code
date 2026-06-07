@@ -140,7 +140,7 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
     autoLoad: true,
   });
   const [scope, setScope] = useState<Scope>('workspace');
-  const [selectedIdx, setSelectedIdx] = useState(1);
+  const [selectedIdx, setSelectedIdx] = useState(0);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [editMode, setEditMode] = useState<{
