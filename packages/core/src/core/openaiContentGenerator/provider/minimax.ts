@@ -49,7 +49,10 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     try {
       const { hostname } = new URL(baseUrl);
       return MINIMAX_HOSTNAMES.has(hostname.toLowerCase());
-    } catch {
+    } catch (e) {
+      debugLogger.debug(
+        `isMiniMaxProvider: failed to parse baseUrl "${baseUrl}": ${e}`,
+      );
       return false;
     }
   }
@@ -109,14 +112,21 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     const { response_format: _rf, ...rest } = baseRequest;
 
     // MiniMax accepts temperature only in (0.0, 1.0]; rewrite invalid values.
+    // The `!(original > 0)` check catches negative numbers and NaN in a single
+    // comparison (since `NaN > 0` is `false`).
     const original = rest.temperature;
     let temperature: number;
-    if (original == null || original === 0) {
+    if (original == null || !(original > 0)) {
       temperature = 1.0;
       if (original === 0) {
         // Only log when the user explicitly set 0; null/undefined is a default fill.
         debugLogger.debug(
           `temperature=0 is not supported; using 1.0 instead (request ${userPromptId})`,
+        );
+      } else if (typeof original === 'number') {
+        // Negative or NaN — log because the user passed something explicit.
+        debugLogger.debug(
+          `temperature=${original} is out of (0.0, 1.0]; using 1.0 instead (request ${userPromptId})`,
         );
       }
     } else if (original > 1.0) {

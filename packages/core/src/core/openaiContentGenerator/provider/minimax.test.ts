@@ -99,6 +99,16 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
         false,
       );
     });
+
+    it('returns false for a malformed base URL without a scheme', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'api.minimax.io/v1',
+      } as ContentGeneratorConfig;
+      expect(MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)).toBe(
+        false,
+      );
+    });
   });
 
   describe('getDefaultGenerationConfig', () => {
@@ -182,6 +192,28 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
         model: 'MiniMax-M2.7',
         messages: [{ role: 'user', content: 'Hello' }],
         temperature: 1.0,
+      };
+
+      const result = provider.buildRequest(request, userPromptId);
+      expect(result.temperature).toBe(1.0);
+    });
+
+    it('sets temperature to 1.0 when temperature is negative', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'MiniMax-M2.7',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: -0.5,
+      };
+
+      const result = provider.buildRequest(request, userPromptId);
+      expect(result.temperature).toBe(1.0);
+    });
+
+    it('sets temperature to 1.0 when temperature is NaN', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'MiniMax-M2.7',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: Number.NaN,
       };
 
       const result = provider.buildRequest(request, userPromptId);

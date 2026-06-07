@@ -161,6 +161,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   [/^minimax-m3/i, LIMITS['128k']],
   [/^minimax-m2\.7/i, LIMITS['64k']],
+  [/^minimax-m2\.5/i, LIMITS['64k']],
+  [/^minimax-/i, LIMITS['64k']],
 
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];

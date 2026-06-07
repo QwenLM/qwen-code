@@ -187,6 +187,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // MiniMax
   [/^minimax-m3/i, LIMITS['128k']], // MiniMax-M3: 128K output
   [/^minimax-m2\.7/i, LIMITS['64k']], // MiniMax-M2.7 / M2.7-highspeed: 64K output
+  [/^minimax-m2\.5/i, LIMITS['64k']], // MiniMax-M2.5: 64K output
+  [/^minimax-/i, LIMITS['64k']], // MiniMax fallback: 64K output
 
   // Kimi
   [/^kimi-k2\.5/, LIMITS['32k']],
