@@ -418,5 +418,234 @@ describe('useHistoryManager', () => {
         expect(tool.resultDisplay).toBe(`content-${i}`);
       }
     });
+
+    it('should handle mixed-type history (interleaved thoughts + tool_groups)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add interleaved thoughts and tool_groups
+      for (let i = 0; i < 30; i++) {
+        act(() => {
+          // Add thought
+          result.current.addItem(
+            {
+              type: 'gemini_thought_content',
+              text: `thought-${i}`,
+            } as HistoryItemWithoutId,
+            ts + i * 2,
+          );
+          // Add tool_group
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: 'completed',
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i * 2 + 1,
+          );
+        });
+      }
+
+      expect(result.current.history).toHaveLength(60);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // compactOldItems keeps most recent 20 of each type
+      // With 30 thoughts: removes 10 oldest
+      // With 30 tool_groups: compacts 10 oldest (replaces resultDisplay)
+      const remainingThoughts = result.current.history.filter(
+        (item) =>
+          item.type === 'gemini_thought' ||
+          item.type === 'gemini_thought_content',
+      );
+      const remainingToolGroups = result.current.history.filter(
+        (item) => item.type === 'tool_group',
+      );
+
+      // 10 thoughts removed, 20 kept
+      expect(remainingThoughts).toHaveLength(20);
+      // All 30 tool_groups kept (but 10 have resultDisplay replaced)
+      expect(remainingToolGroups).toHaveLength(30);
+
+      // The kept thoughts should be the newest ones
+      expect(remainingThoughts[0]).toEqual(
+        expect.objectContaining({ text: 'thought-10' }),
+      );
+
+      // First 10 tool_groups should have resultDisplay compacted
+      for (let i = 0; i < 10; i++) {
+        const tool = (remainingToolGroups[i] as unknown as HistoryItemToolGroup)
+          .tools[0];
+        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      }
+
+      // Last 20 tool_groups should be untouched
+      for (let i = 10; i < 30; i++) {
+        const tool = (remainingToolGroups[i] as unknown as HistoryItemToolGroup)
+          .tools[0];
+        expect(tool.resultDisplay).toBe(`content-${i}`);
+      }
+    });
+
+    it('should compact gemini_thought type (not just gemini_thought_content)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add 30 gemini_thought items
+      for (let i = 0; i < 30; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'gemini_thought',
+              text: `thought-${i}`,
+            } as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      expect(result.current.history).toHaveLength(30);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // Should keep only 20
+      expect(result.current.history).toHaveLength(20);
+      expect(result.current.history[0]).toEqual(
+        expect.objectContaining({ text: 'thought-10' }),
+      );
+    });
+
+    it('should compact non-string resultDisplay types (TodoResultDisplay, AnsiOutputDisplay)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add tool_groups with various resultDisplay types
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'tool',
+                  description: '',
+                  resultDisplay:
+                    i % 3 === 0
+                      ? { type: 'todo', items: ['item1'] } // TodoResultDisplay
+                      : i % 3 === 1
+                        ? { ansiOutput: '\x1b[31mred\x1b[0m' } // AnsiOutputDisplay
+                        : { type: 'task_execution', result: 'data' }, // AgentResultDisplay
+                  status: 'completed',
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // First 5 (oldest) should be compacted
+      for (let i = 0; i < 5; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      }
+
+      // Last 20 (newest) should be untouched
+      for (let i = 5; i < 25; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).not.toBe(
+          '[Old tool result content cleared]',
+        );
+      }
+    });
+
+    it('should not compact tool_groups with null resultDisplay', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add 25 tool_groups with null resultDisplay
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'tool',
+                  description: '',
+                  resultDisplay: null,
+                  status: 'completed',
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      const before = result.current.history;
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // Should not compact since all resultDisplay are null
+      expect(result.current.history).toBe(before);
+    });
+
+    it('should not compact non-compactable types (Retry, Notification)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add various non-compactable types
+      const nonCompactableTypes = ['retry', 'notification', 'user', 'gemini'];
+
+      for (let i = 0; i < 30; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: nonCompactableTypes[
+                i % nonCompactableTypes.length
+              ] as HistoryItemWithoutId['type'],
+              text: `item-${i}`,
+            } as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      const before = result.current.history;
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // Should not compact non-compactable types
+      expect(result.current.history).toBe(before);
+    });
   });
 });
