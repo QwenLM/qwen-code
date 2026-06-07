@@ -55,12 +55,13 @@ export const useMemoryMonitor = ({
       );
 
       // UI history compaction when heap exceeds threshold
+      const now = Date.now();
       if (
         compactOldItems &&
         memUsage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD &&
-        Date.now() - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
+        now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
       ) {
-        lastCompactRef.current = Date.now();
+        lastCompactRef.current = now;
         debugLogger.debug(
           `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
             `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +

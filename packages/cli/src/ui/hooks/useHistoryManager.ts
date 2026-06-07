@@ -186,26 +186,15 @@ export function useHistory(): UseHistoryManagerReturn {
           if (item.type !== 'tool_group') return item;
           toolGroupsSeen++;
           if (toolGroupsSeen > toolGroupsToCompact) return item;
-          const hasOldOutput = item.tools.some(
-            (t) =>
-              typeof t.resultDisplay === 'string' ||
-              (typeof t.resultDisplay === 'object' &&
-                t.resultDisplay !== null &&
-                'fileDiff' in t.resultDisplay),
-          );
+          // Check for any non-null resultDisplay (covers string, FileDiff,
+          // AnsiOutputDisplay, AgentResultDisplay, etc.)
+          const hasOldOutput = item.tools.some((t) => t.resultDisplay != null);
           if (!hasOldOutput) return item;
           toolGroupsCompacted++;
           return {
             ...item,
             tools: item.tools.map((t) => {
-              if (typeof t.resultDisplay === 'string') {
-                return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
-              }
-              if (
-                typeof t.resultDisplay === 'object' &&
-                t.resultDisplay !== null &&
-                'fileDiff' in t.resultDisplay
-              ) {
+              if (t.resultDisplay != null) {
                 return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
               }
               return t;
