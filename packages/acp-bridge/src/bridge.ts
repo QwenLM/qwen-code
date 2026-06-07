@@ -2649,97 +2649,108 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
 
-      await entry.promptQueue;
-      if (entry.promptActive) {
-        throw new BranchWhilePromptActiveError(sessionId);
-      }
-
       let originatorClientId: string | undefined;
       if (context?.clientId !== undefined) {
         originatorClientId = resolveTrustedClientId(entry, context.clientId);
       }
 
-      if (
-        byId.size + inFlightSpawns.size + inFlightRestores.size >=
-        maxSessions
-      ) {
-        throw new SessionLimitExceededError(maxSessions);
-      }
+      const branchResult = entry.promptQueue.then(async () => {
+        if (entry.promptActive) {
+          throw new BranchWhilePromptActiveError(sessionId);
+        }
 
-      const ci = await ensureChannel();
-      const result = (await withTimeout(
-        ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
-          sessionId,
-          cwd: boundWorkspace,
-          name: req.name,
-        }),
-        initTimeoutMs,
-        'branchSession',
-      )) as { newSessionId: string; title: string; forkedFrom: string };
+        if (
+          byId.size + inFlightSpawns.size + inFlightRestores.size >=
+          maxSessions
+        ) {
+          throw new SessionLimitExceededError(maxSessions);
+        }
 
-      if (
-        !result ||
-        typeof result.newSessionId !== 'string' ||
-        typeof result.title !== 'string'
-      ) {
-        throw new Error(
-          `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
-        );
-      }
+        const ci = await ensureChannel();
+        const result = (await withTimeout(
+          ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+            sessionId,
+            cwd: boundWorkspace,
+            name: req.name,
+          }),
+          initTimeoutMs,
+          'branchSession',
+        )) as { newSessionId: string; title: string };
 
-      let restored;
-      try {
-        restored = await restoreSession('resume', {
-          sessionId: result.newSessionId,
-          workspaceCwd: boundWorkspace,
-          clientId: context?.clientId,
-        });
-      } catch (restoreErr) {
-        writeStderrLine(
-          `qwen serve: branchSession resume failed for ${result.newSessionId}, attempting cleanup...`,
-        );
-        try {
-          await ci.connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionClose,
-            { sessionId: result.newSessionId, cwd: boundWorkspace },
+        if (
+          !result ||
+          typeof result.newSessionId !== 'string' ||
+          typeof result.title !== 'string'
+        ) {
+          throw new Error(
+            `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
           );
-        } catch {
-          /* best-effort */
         }
-        throw restoreErr;
-      }
 
-      const newEntry = byId.get(result.newSessionId);
-      if (newEntry) newEntry.displayName = result.title;
-
-      const eventData = {
-        sourceSessionId: sessionId,
-        newSessionId: result.newSessionId,
-        displayName: result.title,
-      };
-      entry.events.publish({
-        type: 'session_branched',
-        data: eventData,
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-      for (const e of byId.values()) {
-        if (e.sessionId !== sessionId && e.sessionId !== result.newSessionId) {
-          e.events.publish({
-            type: 'session_branched',
-            data: eventData,
-            ...(originatorClientId ? { originatorClientId } : {}),
+        let restored;
+        try {
+          restored = await restoreSession('resume', {
+            sessionId: result.newSessionId,
+            workspaceCwd: boundWorkspace,
+            clientId: context?.clientId,
           });
+        } catch (restoreErr) {
+          writeStderrLine(
+            `qwen serve: branchSession resume failed for ${result.newSessionId}, attempting cleanup...`,
+          );
+          try {
+            await ci.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionClose,
+              { sessionId: result.newSessionId, cwd: boundWorkspace },
+            );
+          } catch (cleanupErr) {
+            writeStderrLine(
+              `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+            );
+          }
+          throw restoreErr;
         }
-      }
 
-      return {
-        ...restored,
-        title: result.title,
-        forkedFrom: {
-          sessionId,
-          title: entry.displayName ?? sessionId.slice(0, 8),
-        },
-      };
+        const newEntry = byId.get(result.newSessionId);
+        if (newEntry) newEntry.displayName = result.title;
+
+        const eventData = {
+          sourceSessionId: sessionId,
+          newSessionId: result.newSessionId,
+          displayName: result.title,
+        };
+        entry.events.publish({
+          type: 'session_branched',
+          data: eventData,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        for (const e of byId.values()) {
+          if (
+            e.sessionId !== sessionId &&
+            e.sessionId !== result.newSessionId
+          ) {
+            e.events.publish({
+              type: 'session_branched',
+              data: eventData,
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          }
+        }
+
+        return {
+          ...restored,
+          title: result.title,
+          forkedFrom: {
+            sessionId,
+            title: entry.displayName ?? sessionId.slice(0, 8),
+          },
+        };
+      });
+      entry.promptQueue = branchResult.then(
+        () => undefined,
+        () => undefined,
+      );
+      return branchResult;
     },
 
     async closeSession(sessionId, context) {

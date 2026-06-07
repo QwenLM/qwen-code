@@ -3378,11 +3378,15 @@ class QwenAgent implements Agent {
                 );
               }
             } catch (err) {
-              sessionService.removeSession(newSessionId).catch(() => {});
+              sessionService.removeSession(newSessionId).catch((rmErr) => {
+                process.stderr.write(
+                  `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
+                );
+              });
               throw err;
             }
 
-            return { newSessionId, title, forkedFrom: sessionId };
+            return { newSessionId, title };
           },
         );
       }
