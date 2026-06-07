@@ -1011,6 +1011,21 @@ export class ModelsConfig {
           ? { ...this.generationConfigSources['apiKey'] }
           : undefined
         : undefined;
+      const baseUrlSource = this.generationConfigSources['baseUrl'];
+      const shouldPreserveResolvedBaseUrl =
+        isUnchanged &&
+        !!this._generationConfig.baseUrl &&
+        (baseUrlSource?.kind === 'cli' ||
+          baseUrlSource?.kind === 'env' ||
+          baseUrlSource?.kind === 'settings');
+      const savedBaseUrl = shouldPreserveResolvedBaseUrl
+        ? this._generationConfig.baseUrl
+        : undefined;
+      const savedBaseUrlSource = shouldPreserveResolvedBaseUrl
+        ? baseUrlSource
+          ? { ...baseUrlSource }
+          : undefined
+        : undefined;
 
       this.applyResolvedModelDefaults(resolved);
 
@@ -1020,6 +1035,12 @@ export class ModelsConfig {
         this._generationConfig.apiKey = savedApiKey;
         if (savedApiKeySource) {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
+        }
+      }
+      if (savedBaseUrl) {
+        this._generationConfig.baseUrl = savedBaseUrl;
+        if (savedBaseUrlSource) {
+          this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
         }
       }
 
