@@ -29,7 +29,8 @@ afterEach(async () => {
 beforeEach(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rc-auditq-'));
   store = await TokenStore.open(join(dir, 'tokens.json'));
-  audit = new AuditLog(join(dir, 'audit.log'), () => Date.now());
+  let clock = 0;
+  audit = new AuditLog(join(dir, 'audit.log'), () => ++clock);
 });
 
 async function mount(): Promise<string> {
