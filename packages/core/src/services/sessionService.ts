@@ -1382,4 +1382,3 @@ export async function computeUniqueBranchTitle(
   }
   return `${trimmed} (Branch ${Date.now()})`;
 }
-
