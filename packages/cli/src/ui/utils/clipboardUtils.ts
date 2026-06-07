@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
@@ -463,7 +464,10 @@ export async function saveClipboardImage(
     const timestamp = new Date().getTime();
 
     if (process.platform === 'linux') {
-      const pngPath = path.join(tempDir, `clipboard-${timestamp}.png`);
+      const pngPath = path.join(
+        tempDir,
+        `clipboard-${timestamp}-${randomUUID()}.png`,
+      );
       const tool = getLinuxClipboardTool();
 
       if (tool === 'wl-paste') {
@@ -495,7 +499,10 @@ export async function saveClipboardImage(
       return null;
     }
 
-    const tempFilePath = path.join(tempDir, `clipboard-${timestamp}.png`);
+    const tempFilePath = path.join(
+      tempDir,
+      `clipboard-${timestamp}-${randomUUID()}.png`,
+    );
     const imageData = clipboard.getImageData();
     const buffer = imageData.data;
 
