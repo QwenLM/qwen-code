@@ -187,12 +187,14 @@ export const MainContent = () => {
       prevMergedHistoryRef.current = uiState.history;
       return uiState.history;
     }
-    // compactInline: tools stay within their own group, no cross-group merging.
-    // <Static> is append-only: once rendered, items cannot be updated.
-    // Data-level merging reduces item count, which <Static> can't handle
-    // without a full clearTerminal + remount (causing "withdrawal" flash).
-    // Skip merging here; virtual-scroll mode below handles it fine.
-    if (compactInline || !uiState.useTerminalBuffer) {
+    // <Static> is append-only: merging reduces item count, which <Static>
+    // can't handle without clearTerminal + remount (the flash we're fixing).
+    if (!uiState.useTerminalBuffer) {
+      prevMergedHistoryRef.current = uiState.history;
+      return uiState.history;
+    }
+    // compactInline: user opted into per-group display without cross-group merging.
+    if (compactInline) {
       prevMergedHistoryRef.current = uiState.history;
       return uiState.history;
     }
