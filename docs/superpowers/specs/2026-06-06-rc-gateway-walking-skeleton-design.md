@@ -15,13 +15,13 @@ v0.17.1 codebase surfaced a strategic constraint:
   area (integration branch `daemon_mode_b_main`).
 - Upstream's stated direction (issue #4175): the daemon is a **single-bearer**,
   multi-client runtime for TUI/channels/SDK/IDE clients; **browser clients are
-  explicitly out of scope**; `@qwen-code/webui` is a library for *downstream
-  embedders* to host.
+  explicitly out of scope**; `@qwen-code/webui` is a library for _downstream
+  embedders_ to host.
 - The spec's pairing-auth + hosted web client therefore **diverge** from
   upstream and would live in the files upstream rewrites most.
 
 **Decision (recorded):** build remote-control as a **fork-owned gateway** that
-wraps the *unmodified* daemon and consumes its public contract via the published
+wraps the _unmodified_ daemon and consumes its public contract via the published
 SDK `@qwen-code/sdk`. This keeps `git fetch upstream` clean (zero edits to
 upstream files) and aligns with upstream's "downstream embedder" model.
 
@@ -99,8 +99,8 @@ edits**. It depends on `@qwen-code/sdk` (workspace dependency).
    `resolve(bearer) → {id, scopes} | null`, load/persist.
 
 3. **`pairing.ts`** — in-memory pairing codes. `mint(grantScopes) → {code,
-   expiresAt}` (8+ chars, 5-min TTL, single-use). `redeem(code) → grantScopes |
-   error` (validates existence/expiry/unused, marks used). On gateway boot, an
+expiresAt}` (8+ chars, 5-min TTL, single-use). `redeem(code) → grantScopes |
+error` (validates existence/expiry/unused, marks used). On gateway boot, an
    **owner pairing code** is minted and printed to the operator console.
 
 4. **`auth.ts`** (gateway) — `bearerResolve` middleware parses
@@ -136,22 +136,32 @@ edits**. It depends on `@qwen-code/sdk` (workspace dependency).
 2. Gateway listens on `127.0.0.1:<port>`; prints owner pairing code granting
    `["session:read"]`.
 3. Client `POST /rc/pair/redeem { code, label }` → `{ token, scopes:
-   ["session:read"] }`.
+["session:read"] }`.
 4. Client `GET /rc/session/:id/events` with `Authorization: Bearer <token>`
    (+ optional `Last-Event-ID`) → `bearerResolve` → `requireScope('session:read')`
    → `daemonClient.subscribeEvents` → frames relayed with ids preserved.
 
 ## Error handling
 
-| Condition | Response |
-|---|---|
-| Missing/invalid bearer | `401 { error, code:'unauthorized' }` |
-| Valid token, missing scope | `403 { error, code:'insufficient_scope' }` |
-| Invalid/expired/used pairing code | `400 { error, code:'invalid_pairing_code' }` |
-| Daemon unreachable | `502 { error, code:'daemon_unavailable' }` |
-| Unknown session | `404` |
-| Client disconnects mid-SSE | upstream `subscribeEvents` aborted, resources freed |
-| Daemon child exits | gateway logs + shuts down (no auto-restart this cycle) |
+| Condition                         | Response                                               |
+| --------------------------------- | ------------------------------------------------------ |
+| Missing/invalid bearer            | `401 { error, code:'unauthorized' }`                   |
+| Valid token, missing scope        | `403 { error, code:'insufficient_scope' }`             |
+| Invalid/expired/used pairing code | `400 { error, code:'invalid_pairing_code' }`           |
+| Daemon unreachable                | `502 { error, code:'daemon_unavailable' }`             |
+| Unknown session                   | `404`                                                  |
+| Client disconnects mid-SSE        | upstream `subscribeEvents` aborted, resources freed    |
+| Daemon child exits                | gateway logs + shuts down (no auto-restart this cycle) |
+
+**Known limitation (this cycle):** the proxy route awaits the first upstream
+frame before sending `200` + SSE headers downstream (so a connect-phase error
+surfaces as a clean `502` instead of after headers are committed). The SDK's
+`subscribeEvents` does not expose a "connected but idle" signal between the HTTP
+`200` and the first frame, so for a live session that is idle with no replay
+backlog, the downstream client stays in `CONNECTING` until the daemon emits
+something. Acceptable for the skeleton; the follow-on fix is to send headers on
+connect plus a heartbeat comment to keep an idle stream open (depends on the SDK
+surfacing a connect-only signal, or dropping to a lower-level call).
 
 ## Testing strategy (TDD)
 
