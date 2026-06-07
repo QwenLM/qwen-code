@@ -12,6 +12,12 @@ import type { Request, Response } from 'express';
 import { TokenStore } from './tokenStore.js';
 import { bearerResolve, requireScope } from './auth.js';
 import { SESSION_READ } from './scopes.js';
+import type { AuditEntry, AuditRecorder } from './auditLog.js';
+
+function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
+  const calls: AuditEntry[] = [];
+  return { calls, record: async (e: AuditEntry) => void calls.push(e) };
+}
 
 function fakeRes(): Response & { _status: number; _json: unknown } {
   const res = {
@@ -80,5 +86,37 @@ describe('auth middleware', () => {
     expect(called).toBe(false);
     expect(res._status).toBe(403);
     expect(res._json).toMatchObject({ code: 'insufficient_scope' });
+  });
+
+  it('records auth_failed on a bad token', () => {
+    const audit = fakeAudit();
+    const req = { headers: {}, path: '/rc/tokens' } as Request;
+    bearerResolve(store, audit)(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'auth_failed',
+      detail: { path: '/rc/tokens' },
+    });
+    expect(audit.calls[0].actorTokenId).toBeUndefined();
+  });
+
+  it('does not record when auth succeeds', async () => {
+    const audit = fakeAudit();
+    const { token } = await store.issue([SESSION_READ], 'phone');
+    const req = { headers: { authorization: `Bearer ${token}` } } as Request;
+    bearerResolve(store, audit)(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(0);
+  });
+
+  it('records scope_denied with actor and required scope', () => {
+    const audit = fakeAudit();
+    const req = { rcClient: { id: 'x', scopes: [] } } as Request;
+    requireScope(SESSION_READ, audit)(req, fakeRes(), () => {});
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'scope_denied',
+      actorTokenId: 'x',
+      detail: { required: SESSION_READ },
+    });
   });
 });
