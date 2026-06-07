@@ -99,6 +99,7 @@ async function exploreAction(context: CommandContext, args: string) {
       );
     }
   }
+  return undefined;
 }
 
 async function listAction(context: CommandContext, args: string) {
@@ -232,6 +233,7 @@ async function installAction(context: CommandContext, args: string) {
     );
     return;
   }
+  return undefined;
 }
 
 export async function completeExtensions(
