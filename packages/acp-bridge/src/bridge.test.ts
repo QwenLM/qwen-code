@@ -7634,6 +7634,9 @@ describe('extractErrorCode', () => {
 
   it('returns undefined when code is not string or number', () => {
     expect(extractErrorCode({ code: true })).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // §2.3 side-channel state layer: publish helpers + reconciliation + snapshot
 // ---------------------------------------------------------------------------
