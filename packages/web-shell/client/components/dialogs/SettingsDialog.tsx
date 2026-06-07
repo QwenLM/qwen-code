@@ -149,6 +149,7 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
   } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const selectedIdxRef = useRef(selectedIdx);
 
   const rows = useMemo(
     () => flattenGroups(groupByCategory(settings)),
@@ -172,10 +173,17 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
   }, [error, settings, status, t, restartPending]);
 
   useEffect(() => {
-    if (selectedIdx >= rows.length && rows.length > 0) {
-      setSelectedIdx(Math.max(rows.length - 1, 0));
+    if (rows.length === 0) return;
+    if (selectedIdx >= rows.length) {
+      setSelectedIdx(nextSettingIdx(rows, rows.length, -1));
+    } else if (rows[selectedIdx]?.type !== 'setting') {
+      setSelectedIdx(nextSettingIdx(rows, selectedIdx - 1, 1));
     }
-  }, [selectedIdx, rows.length]);
+  }, [selectedIdx, rows]);
+
+  useEffect(() => {
+    selectedIdxRef.current = selectedIdx;
+  }, [selectedIdx]);
 
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
@@ -199,9 +207,6 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
           if (result?.requiresRestart) {
             setRestartPending(true);
             setMessage(t('settings.requiresRestart'));
-          } else {
-            setRestartPending(false);
-            setMessage(null);
           }
         })
         .catch((err: unknown) => {
@@ -305,22 +310,13 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
       }
       if ((e.key === 'Enter' || e.key === ' ') && !busyKey) {
         e.preventDefault();
-        const row = rows[selectedIdx];
+        const row = rows[selectedIdxRef.current];
         if (row?.type === 'setting' && row.setting) {
           handleAction(row.setting);
         }
       }
     },
-    [
-      busyKey,
-      editMode,
-      handleAction,
-      handleEditSubmit,
-      onClose,
-      reload,
-      rows,
-      selectedIdx,
-    ],
+    [busyKey, editMode, handleAction, handleEditSubmit, onClose, reload, rows],
   );
 
   const scopeLabel =
@@ -387,6 +383,7 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
               )}
               onMouseEnter={() => setSelectedIdx(i)}
               onClick={() => {
+                if (busyKey) return;
                 setSelectedIdx(i);
                 handleAction(setting);
               }}
