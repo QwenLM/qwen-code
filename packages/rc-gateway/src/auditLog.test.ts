@@ -129,4 +129,20 @@ describe('AuditLog', () => {
     const rows = await audit.query({});
     expect(rows.map((r) => r.target)).toEqual(['a']);
   });
+
+  it('does not lose records when concurrent writes trigger rotation', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    // Tiny cap → every write after the first rotates; large maxFiles → keep all.
+    const audit = new AuditLog(path, () => ++t, { maxBytes: 10, maxFiles: 20 });
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        audit.record({ action: 'token_minted', target: String(i) }),
+      ),
+    );
+    const rows = await audit.query({ limit: 100 });
+    // Without serialized writes, interleaved rotation clobbers archives and
+    // some of the 10 entries are lost. With the write mutex, all 10 survive.
+    expect(new Set(rows.map((r) => r.target)).size).toBe(10);
+  });
 });

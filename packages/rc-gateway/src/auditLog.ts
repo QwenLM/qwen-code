@@ -83,6 +83,8 @@ function clampLimit(n: number | undefined): number {
 export class AuditLog implements AuditRecorder, AuditReader {
   private readonly maxBytes: number;
   private readonly maxFiles: number;
+  /** Serializes writes so concurrent records can't interleave through rotation. */
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly filePath: string,
@@ -94,6 +96,15 @@ export class AuditLog implements AuditRecorder, AuditReader {
   }
 
   async record(entry: AuditEntry): Promise<void> {
+    // Serialize writes: concurrent fire-and-forget record() calls must not
+    // interleave through rotation's archive-shift (which would clobber an
+    // archive and lose history). doRecord never rejects, so the chain never
+    // rejects — the never-throw contract is preserved.
+    this.writeChain = this.writeChain.then(() => this.doRecord(entry));
+    return this.writeChain;
+  }
+
+  private async doRecord(entry: AuditEntry): Promise<void> {
     try {
       await mkdir(dirname(this.filePath), { recursive: true });
       await this.rotateIfNeeded();
