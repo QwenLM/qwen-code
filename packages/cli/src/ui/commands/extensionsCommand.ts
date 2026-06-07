@@ -115,9 +115,7 @@ async function listTextAction(context: CommandContext, _args: string) {
     return {
       type: 'message' as const,
       messageType: MessageType.INFO,
-      content: t(
-        'No extensions installed. Use /extensions install <source> to install one.',
-      ),
+      content: t('No extensions installed.'),
     };
   }
 
@@ -130,8 +128,11 @@ async function listTextAction(context: CommandContext, _args: string) {
       ? ` (${redactUrlCredentials(ext.installMetadata.source)})`
       : '';
     const caps: string[] = [];
-    if (ext.mcpServers && Object.keys(ext.mcpServers).length > 0) {
-      caps.push(`${Object.keys(ext.mcpServers).length} MCP servers`);
+    const mcpCount = ext.mcpServers
+      ? Object.keys(ext.mcpServers).length
+      : 0;
+    if (mcpCount > 0) {
+      caps.push(`${mcpCount} MCP servers`);
     }
     if (ext.skills && ext.skills.length > 0) {
       caps.push(`${ext.skills.length} skills`);
