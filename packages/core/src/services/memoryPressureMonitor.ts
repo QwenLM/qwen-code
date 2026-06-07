@@ -253,6 +253,8 @@ export class MemoryPressureMonitor extends EventEmitter {
         return {
           action: 'aggressive',
           steps: [
+            'evict_cold_cache',
+            'compact_history',
             'clear_file_cache',
             ...(this.config.enableExplicitGC ? ['trigger_gc' as const] : []),
           ],

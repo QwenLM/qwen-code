@@ -138,8 +138,10 @@ function createMemUsage(
 }
 
 async function drainCleanupMeasurement(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  // Each cleanup step has an await Promise.resolve() boundary.
+  // With up to 4 steps (evict_cold_cache, compact_history, clear_file_cache, trigger_gc),
+  // we need enough microtask drains to let them all complete.
+  for (let i = 0; i < 6; i++) await Promise.resolve();
   await new Promise<void>((resolve) => setImmediate(resolve));
   await Promise.resolve();
 }
@@ -589,7 +591,7 @@ describe('MemoryPressureMonitor', () => {
       expect(evictSpy).toHaveBeenCalledWith(30);
     });
 
-    it('calls clear on critical pressure', () => {
+    it('calls clear on critical pressure', async () => {
       const clearSpy = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
@@ -603,6 +605,7 @@ describe('MemoryPressureMonitor', () => {
 
       setMemUsage(14 * 1024 * 1024 * 1024); // 14/16 = 0.875 >= 0.80: critical
       monitor.performCheck();
+      await drainCleanupMeasurement();
       expect(clearSpy).toHaveBeenCalled();
     });
 
@@ -654,8 +657,9 @@ describe('MemoryPressureMonitor', () => {
       await drainCleanupMeasurement();
 
       expect(clearSpy).toHaveBeenCalledTimes(1);
+      // critical steps now include evict_cold_cache (30 min) before clear_file_cache
       expect(evictSpy).toHaveBeenCalledWith(60);
-      expect(evictSpy).not.toHaveBeenCalledWith(30);
+      expect(evictSpy).toHaveBeenCalledWith(30);
     });
 
     it('cancels queued cleanup when the session is reset', async () => {
