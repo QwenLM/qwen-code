@@ -861,7 +861,7 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Compact Inline',
         category: 'UI',
-        requiresRestart: false,
+        requiresRestart: true,
         default: false,
         description:
           'Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.',
