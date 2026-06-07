@@ -526,7 +526,8 @@ export class DaemonClient {
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/hooks`,
       { headers: this.headers() },
       async (res) => {
-        if (!res.ok) throw await this.failOnError(res, `GET /session/${sessionId}/hooks`);
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /session/:id/hooks');
         return (await res.json()) as DaemonSessionHooksStatus;
       },
     );
