@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -96,11 +96,23 @@ async function saveFromCommand(
   args: string[],
   destination: string,
 ): Promise<boolean> {
+  // Open with O_EXCL first to refuse symlink following.
+  // If file already exists (race), return false immediately.
+  let fd;
+  try {
+    fd = await fs.open(
+      destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+    );
+  } catch {
+    return false;
+  }
+
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const fileStream = createWriteStream(destination);
+    const fileStream = fd.createWriteStream();
     let stderr = '';
     let resolved = false;
 
