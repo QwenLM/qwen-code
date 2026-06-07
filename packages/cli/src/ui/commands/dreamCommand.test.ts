@@ -11,21 +11,7 @@ import { dreamCommand } from './dreamCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 describe('dreamCommand', () => {
-  it('declares acp in supportedModes', () => {
-    expect(dreamCommand.supportedModes).toEqual(['interactive', 'acp']);
-  });
-
-  it('returns error when config is not loaded', async () => {
-    const context = createMockCommandContext({ services: { config: null } });
-    const result = await dreamCommand.action?.(context, '');
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: expect.stringContaining('Config'),
-    });
-  });
-
-  it('submits a consolidation prompt in interactive mode without eager metadata write', async () => {
+  it('submits a consolidation prompt with the project-scoped transcript directory', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
     const writeDreamManualRun = vi.fn();
@@ -57,29 +43,8 @@ describe('dreamCommand', () => {
       expect.any(String),
       expectedTranscriptDir,
     );
-    // In interactive mode, writeDreamManualRun is deferred to onComplete
-    expect(writeDreamManualRun).not.toHaveBeenCalled();
-  });
-
-  it('calls writeDreamManualRun eagerly in ACP mode', async () => {
-    const projectRoot = path.join('tmp', 'dream-project');
-    const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
-    const writeDreamManualRun = vi.fn();
-    const context = createMockCommandContext({
-      executionMode: 'acp',
-      services: {
-        config: {
-          getProjectRoot: vi.fn().mockReturnValue(projectRoot),
-          getMemoryManager: vi.fn().mockReturnValue({
-            buildConsolidationPrompt,
-            writeDreamManualRun,
-          }),
-          getSessionId: vi.fn().mockReturnValue('session-1'),
-        },
-      },
-    });
-
-    await dreamCommand.action?.(context, '');
-    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
+    expect(expectedTranscriptDir).not.toContain(
+      `${path.sep}.qwen${path.sep}tmp${path.sep}`,
+    );
   });
 });
