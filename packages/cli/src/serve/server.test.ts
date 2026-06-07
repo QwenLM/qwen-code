@@ -178,6 +178,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_hooks',
   'session_hooks',
   'workspace_extensions',
+  'session_branch',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -209,7 +210,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
-      f !== 'workspace_extensions',
+      f !== 'workspace_extensions' &&
+      f !== 'session_branch',
   ),
   'workspace_settings',
   'workspace_init',
@@ -229,6 +231,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_hooks',
   'session_hooks',
   'workspace_extensions',
+  'session_branch',
 ] as const;
 
 interface FakeBridgeOpts {

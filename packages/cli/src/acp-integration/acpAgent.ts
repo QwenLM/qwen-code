@@ -3340,45 +3340,51 @@ class QwenAgent implements Agent {
         }
 
         const newSessionId = randomUUID();
-        const sessionService = new SessionService(cwd);
-        await sessionService.forkSession(sessionId, newSessionId);
+        return await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            await sessionService.forkSession(sessionId, newSessionId);
 
-        let title: string;
-        try {
-          let baseName: string;
-          if (typeof name === 'string' && name.trim().length > 0) {
-            baseName = name.trim();
-          } else {
-            const existingTitle = recording?.getCurrentCustomTitle();
-            const stripped = existingTitle
-              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-              .trim();
-            if (stripped && stripped.length > 0) {
-              baseName = stripped;
-            } else {
-              baseName = sessionId.slice(0, 8);
+            let title: string;
+            try {
+              let baseName: string;
+              if (typeof name === 'string' && name.trim().length > 0) {
+                baseName = name.trim();
+              } else {
+                const existingTitle = recording?.getCurrentCustomTitle();
+                const stripped = existingTitle
+                  ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+                  .trim();
+                if (stripped && stripped.length > 0) {
+                  baseName = stripped;
+                } else {
+                  baseName = sessionId.slice(0, 8);
+                }
+              }
+
+              title = await computeUniqueBranchTitle(baseName, sessionService);
+              const renamed = await sessionService.renameSession(
+                newSessionId,
+                title,
+                'manual',
+              );
+              if (!renamed) {
+                throw new RequestError(
+                  -32603,
+                  `Failed to set title on forked session ${newSessionId}`,
+                  { errorKind: 'internal', sessionId: newSessionId },
+                );
+              }
+            } catch (err) {
+              sessionService.removeSession(newSessionId).catch(() => {});
+              throw err;
             }
-          }
 
-          title = await computeUniqueBranchTitle(baseName, sessionService);
-          const renamed = await sessionService.renameSession(
-            newSessionId,
-            title,
-            'manual',
-          );
-          if (!renamed) {
-            throw new RequestError(
-              -32603,
-              `Failed to set title on forked session ${newSessionId}`,
-              { errorKind: 'internal', sessionId: newSessionId },
-            );
-          }
-        } catch (err) {
-          sessionService.removeSession(newSessionId).catch(() => {});
-          throw err;
-        }
-
-        return { newSessionId, title, forkedFrom: sessionId };
+            return { newSessionId, title, forkedFrom: sessionId };
+          },
+        );
       }
       default:
         throw RequestError.methodNotFound(method);
