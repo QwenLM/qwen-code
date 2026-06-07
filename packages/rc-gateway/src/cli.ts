@@ -10,7 +10,7 @@ import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { createGatewayApp } from './server.js';
-import { SESSION_READ } from './scopes.js';
+import { OWNER, SESSION_READ } from './scopes.js';
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -28,13 +28,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
 
   const port = opts.gatewayPort ?? 4170;
   app.listen(port, '127.0.0.1', () => {
-    const { code, expiresAt } = pairing.mint([SESSION_READ]);
+    const { code, expiresAt } = pairing.mint([OWNER, SESSION_READ]);
     // eslint-disable-next-line no-console
     console.log(
       [
         `qwen-rc gateway listening on http://127.0.0.1:${port}`,
         `owner pairing code: ${code}`,
-        `  (expires ${new Date(expiresAt).toISOString()}, grants [${SESSION_READ}])`,
+        `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}])`,
         `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
       ].join('\n'),
     );
