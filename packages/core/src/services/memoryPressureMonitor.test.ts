@@ -106,8 +106,31 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
+    geminiClient?: {
+      isInitialized?: () => boolean;
+      getChat?: () => {
+        getHistoryShallow?: () => unknown[];
+        getHistory?: () => unknown[];
+        setHistory?: (h: unknown[]) => void;
+      };
+    } | null;
+    clearContextOnIdle?: {
+      clearContextMinutes: number;
+      toolResultsNumToKeep: number;
+    };
   } = {},
 ): Config {
+  const client =
+    overrides.geminiClient === undefined
+      ? {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => [],
+            getHistory: () => [],
+            setHistory: vi.fn(),
+          }),
+        }
+      : overrides.geminiClient;
   return {
     getFileReadCache: () =>
       ({
@@ -115,6 +138,12 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
+    getGeminiClient: () => client as never,
+    getClearContextOnIdle: () => ({
+      clearContextMinutes: 60,
+      toolResultsNumToKeep: 5,
+      ...overrides.clearContextOnIdle,
+    }),
   } as unknown as Config;
 }
 
@@ -1167,6 +1196,120 @@ describe('MemoryPressureMonitor', () => {
       }
 
       expect(monitor.getConsecutiveFailures()).toBe(3);
+    });
+  });
+
+  describe('compact_history step', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('skips compaction when client is not initialized', async () => {
+      const setHistory = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => false,
+            getChat: () => ({
+              getHistoryShallow: () => [{ role: 'user' }],
+              getHistory: () => [{ role: 'user' }],
+              setHistory,
+            }),
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs compaction step without errors when client is initialized', async () => {
+      const setHistory = vi.fn();
+      const originalHistory = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => originalHistory,
+              getHistory: () => [...originalHistory],
+              setHistory,
+            }),
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      // The step ran without errors — no crash, no failure count
+      expect(monitor.getConsecutiveFailures()).toBe(0);
+    });
+
+    it('handles empty history without errors', async () => {
+      const setHistory = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => [],
+              getHistory: () => [],
+              setHistory,
+            }),
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+
+    it('handles exceptions during compaction gracefully', async () => {
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => {
+              throw new Error('chat unavailable');
+            },
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      // Should not throw — the error is caught internally
+      expect(monitor.getConsecutiveFailures()).toBe(0);
+    });
+
+    it('handles getGeminiClient returning null', async () => {
+      const setHistory = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: null,
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(setHistory).not.toHaveBeenCalled();
     });
   });
 

@@ -1895,6 +1895,59 @@ describe('Gemini Client (client.ts)', () => {
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
+
+    it('runs microcompaction on SendMessageType.Hook', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'goal continuation' }],
+        new AbortController().signal,
+        'prompt-hook-test',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction ran — history was replaced
+      expect(setHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('does not run microcompaction on SendMessageType.ToolResult', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'tool result' }],
+        new AbortController().signal,
+        'prompt-toolresult-test',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction did NOT run
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
   });
 
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.

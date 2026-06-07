@@ -10,6 +10,9 @@ import {
   useMemoryMonitor,
   MEMORY_CHECK_INTERVAL,
   MEMORY_WARNING_THRESHOLD,
+  MEMORY_UI_COMPACT_THRESHOLD,
+  MEMORY_DEBUG_INTERVAL,
+  UI_COMPACT_COOLDOWN_MS,
 } from './useMemoryMonitor.js';
 import process from 'node:process';
 import { MessageType } from '../types.js';
@@ -67,5 +70,75 @@ describe('useMemoryMonitor', () => {
     rerender();
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('should call compactOldItems when heapUsed exceeds 5GB threshold', () => {
+    const compactOldItems = vi.fn();
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not call compactOldItems when heapUsed is below threshold', () => {
+    const compactOldItems = vi.fn();
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD - 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).not.toHaveBeenCalled();
+  });
+
+  it('should respect 5-minute cooldown for compactOldItems', () => {
+    const compactOldItems = vi.fn();
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+
+    // First call triggers compaction
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
+
+    // Within cooldown — should not trigger again
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
+
+    // After cooldown — should trigger again
+    vi.advanceTimersByTime(UI_COMPACT_COOLDOWN_MS);
+    expect(compactOldItems).toHaveBeenCalledTimes(2);
+  });
+
+  it('should keep running compactOldItems after warning interval self-destructs', () => {
+    const compactOldItems = vi.fn();
+    // RSS above warning threshold, heap below compaction threshold initially
+    memoryUsageSpy.mockReturnValue({
+      rss: MEMORY_WARNING_THRESHOLD + 1,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD - 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+
+    // Warning fires and self-destructs
+    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    expect(addItem).toHaveBeenCalledTimes(1);
+
+    // Now heap exceeds threshold — compaction should still work
+    memoryUsageSpy.mockReturnValue({
+      rss: MEMORY_WARNING_THRESHOLD + 1,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+    } as NodeJS.MemoryUsage);
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
   });
 });
