@@ -98,6 +98,19 @@ describe('directoryCommand', () => {
   });
 
   describe('show', () => {
+    it('should return error when config is null', async () => {
+      if (!showCommand?.action) throw new Error('No action');
+      const nullConfigContext = {
+        services: { config: null },
+      } as unknown as CommandContext;
+      const result = await showCommand.action(nullConfigContext, '');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Configuration'),
+      });
+    });
+
     it('should return the list of directories', async () => {
       if (!showCommand?.action) throw new Error('No action');
       const result = await showCommand.action(mockContext, '');
@@ -113,6 +126,19 @@ describe('directoryCommand', () => {
   });
 
   describe('add', () => {
+    it('should return error when config is null', async () => {
+      if (!addCommand?.action) throw new Error('No action');
+      const nullConfigContext = {
+        services: { config: null },
+      } as unknown as CommandContext;
+      const result = await addCommand.action(nullConfigContext, '/some/path');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Configuration'),
+      });
+    });
+
     it('should return an error if no path is provided', async () => {
       if (!addCommand?.action) throw new Error('No action');
       const result = await addCommand.action(mockContext, '');
@@ -359,6 +385,26 @@ describe('directoryCommand', () => {
         'context.includeDirectories',
         [validPath],
       );
+    });
+
+    it('should warn when gemini.addDirectoryContext throws', async () => {
+      vi.mocked(mockConfig.getGeminiClient).mockReturnValue({
+        addDirectoryContext: vi
+          .fn()
+          .mockRejectedValue(new Error('gemini unavailable')),
+      } as unknown as ReturnType<typeof mockConfig.getGeminiClient>);
+      const newPath = path.normalize('/home/user/new-project');
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, newPath);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'warning',
+      });
+      const content = (result as { content: string }).content;
+      expect(content).toContain(
+        'Error notifying model of new directories: gemini unavailable',
+      );
+      expect(content).toContain('Successfully added directories');
     });
   });
   it('should correctly expand a Windows-style home directory path', () => {
