@@ -101,10 +101,10 @@ async function exploreAction(context: CommandContext, args: string) {
   }
 }
 
-async function listAction(context: CommandContext, _args: string) {
+async function listAction(context: CommandContext, args: string) {
   const mode = context.executionMode ?? 'interactive';
   if (mode !== 'interactive') {
-    return listTextAction(context, _args);
+    return listTextAction(context, args);
   }
   return {
     type: 'dialog' as const,
