@@ -66,6 +66,8 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonRewindSnapshotInfo,
+  DaemonRewindResult,
 } from './types.js';
 
 /**
@@ -1132,6 +1134,48 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/approval-mode');
         }
         return (await res.json()) as DaemonApprovalModeResult;
+      },
+    );
+  }
+
+  async getRewindSnapshots(
+    sessionId: string,
+  ): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind/snapshots`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/rewind/snapshots',
+          );
+        }
+        return (await res.json()) as { snapshots: DaemonRewindSnapshotInfo[] };
+      },
+    );
+  }
+
+  async rewindSession(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonRewindResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ promptId }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/rewind');
+        }
+        return (await res.json()) as DaemonRewindResult;
       },
     );
   }

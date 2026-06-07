@@ -27,6 +27,24 @@ import type {
   ServeSessionStatsStatus,
 } from './status.js';
 
+export interface RewindSnapshotInfo {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
+export interface RewindRequest {
+  promptId: string;
+}
+
+export interface RewindResponse {
+  rewound: boolean;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  filesFailed: string[];
+}
+
 export interface BridgeSpawnRequest {
   /** Absolute path to the workspace root the child inherits as cwd. */
   workspaceCwd: string;
@@ -404,6 +422,24 @@ export interface AcpSessionBridge {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<ShellCommandResult>;
+
+  /**
+   * List rewindable snapshots for a session with per-turn diff stats.
+   */
+  getRewindSnapshots(
+    sessionId: string,
+  ): Promise<{ snapshots: RewindSnapshotInfo[] }>;
+
+  /**
+   * Rewind a session to a previous turn: truncates conversation history
+   * and restores files. File restore is best-effort — if the snapshot
+   * is missing, conversation is still rewound and `filesChanged` is empty.
+   */
+  rewindSession(
+    sessionId: string,
+    req: RewindRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<RewindResponse>;
 
   /**
    * T2.8 (#4514): Add a runtime MCP server through the ACP child's

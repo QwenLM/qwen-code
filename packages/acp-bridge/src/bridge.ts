@@ -53,6 +53,8 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   isNotCurrentlyGeneratingCancelError,
+  SessionBusyError,
+  InvalidRewindTargetError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -3479,6 +3481,83 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } finally {
         signal?.removeEventListener('abort', onSignalAbort);
       }
+    },
+
+    async getRewindSnapshots(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      );
+    },
+
+    async rewindSession(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+
+      let response: Record<string, unknown>;
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionRewind,
+              { sessionId, promptId: req.promptId, rewindFiles: true },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionRewind,
+          ),
+          getTransportClosedReject(entry),
+        ])) as Record<string, unknown>;
+      } catch (err) {
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object' && 'errorKind' in data) {
+          const kind = (data as { errorKind: string }).errorKind;
+          const msg =
+            (err as { message?: string })?.message ?? 'Rewind failed';
+          if (kind === 'session_busy') {
+            throw new SessionBusyError(sessionId, msg);
+          }
+          if (kind === 'invalid_rewind_target') {
+            throw new InvalidRewindTargetError(sessionId, msg);
+          }
+        }
+        throw err;
+      }
+
+      const targetTurnIndex =
+        (response['targetTurnIndex'] as number) ?? 0;
+      const filesChanged =
+        (response['filesChanged'] as string[]) ?? [];
+      const filesFailed =
+        (response['filesFailed'] as string[]) ?? [];
+
+      try {
+        entry.events.publish({
+          type: 'session_rewound',
+          data: {
+            sessionId,
+            promptId: req.promptId,
+            targetTurnIndex,
+            filesChanged,
+            filesFailed,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+
+      return {
+        rewound: filesFailed.length === 0,
+        targetTurnIndex,
+        filesChanged,
+        filesFailed,
+      };
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {

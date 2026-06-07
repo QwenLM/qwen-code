@@ -107,6 +107,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'user_shell_result',
   'turn_complete',
   'turn_error',
+  'session_rewound',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -624,6 +625,16 @@ export interface DaemonTurnErrorData {
   [key: string]: unknown;
 }
 
+export interface DaemonSessionRewoundData {
+  sessionId: string;
+  promptId: string;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  filesFailed: string[];
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 /**
  * Fired when `POST /workspace/mcp/servers` succeeds, including both
  * fresh additions and replace-on-existing-name. The event fans out to
@@ -796,6 +807,10 @@ export type DaemonTurnErrorEvent = DaemonEventEnvelope<
   'turn_error',
   DaemonTurnErrorData
 >;
+export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
+  'session_rewound',
+  DaemonSessionRewoundData
+>;
 
 export type DaemonAuthEvent =
   | DaemonAuthDeviceFlowStartedEvent
@@ -824,7 +839,8 @@ export type DaemonControlEvent =
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
   | DaemonMcpServerAddedEvent
-  | DaemonMcpServerRemovedEvent;
+  | DaemonMcpServerRemovedEvent
+  | DaemonSessionRewoundEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -1055,6 +1071,8 @@ export interface DaemonSessionViewState {
   lastFollowupSuggestion?: DaemonFollowupSuggestionData;
   lastTurnComplete?: DaemonTurnCompleteData;
   lastTurnError?: DaemonTurnErrorData;
+  rewindCount: number;
+  lastRewind?: DaemonSessionRewoundData;
 }
 
 /**
@@ -1149,6 +1167,8 @@ export function createDaemonSessionViewState(
     resyncRequiredCount: seed.resyncRequiredCount ?? 0,
     lastResyncRequired: seed.lastResyncRequired,
     lastFollowupSuggestion: seed.lastFollowupSuggestion,
+    rewindCount: seed.rewindCount ?? 0,
+    lastRewind: seed.lastRewind,
   };
 }
 
@@ -1332,9 +1352,26 @@ export function asKnownDaemonEvent(
       return isTurnErrorData(event.data)
         ? (event as DaemonTurnErrorEvent)
         : undefined;
+    case 'session_rewound':
+      return isSessionRewoundData(event.data)
+        ? (event as DaemonSessionRewoundEvent)
+        : undefined;
     default:
       return undefined;
   }
+}
+
+function isSessionRewoundData(
+  value: unknown,
+): value is DaemonSessionRewoundData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    isFiniteNumber(value['targetTurnIndex']) &&
+    Array.isArray(value['filesChanged']) &&
+    Array.isArray(value['filesFailed'])
+  );
 }
 
 export function reduceDaemonSessionEvent(
@@ -1688,6 +1725,12 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_added':
     case 'mcp_server_removed':
       return base;
+    case 'session_rewound':
+      return {
+        ...base,
+        rewindCount: base.rewindCount + 1,
+        lastRewind: mergeOriginator(event.data, event),
+      };
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

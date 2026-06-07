@@ -107,6 +107,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
+  sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
 } as const;
 
 /**
@@ -122,6 +123,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
+  sessionRewind: 'qwen/control/session/rewind',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',

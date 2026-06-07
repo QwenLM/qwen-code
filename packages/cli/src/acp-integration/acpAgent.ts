@@ -2134,6 +2134,51 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots: {
+        const sessionId = params['sessionId'];
+        if (
+          typeof sessionId !== 'string' ||
+          !SESSION_ID_RE.test(sessionId)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessions.get(sessionId as string);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+        const fhs = session.getConfig().getFileHistoryService();
+        const snapshots = fhs.getSnapshots();
+        const prefix = (sessionId as string) + '########';
+        const results = await Promise.all(
+          snapshots
+            .map((s, idx) => ({ s, idx }))
+            .filter(
+              ({ s }) =>
+                s.promptId.startsWith(prefix) &&
+                /^\d+$/.test(s.promptId.slice(prefix.length)),
+            )
+            .map(async ({ s, idx }) => {
+              const stats = await fhs.getDiffStats(s.promptId);
+              return {
+                promptId: s.promptId,
+                turnIndex: idx,
+                timestamp: s.timestamp.toISOString(),
+                diffStats: {
+                  filesChanged: stats?.filesChanged?.length ?? 0,
+                  insertions: stats?.insertions ?? 0,
+                  deletions: stats?.deletions ?? 0,
+                },
+              };
+            }),
+        );
+        return { snapshots: results } as unknown as Record<string, unknown>;
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // Single-server MCP restart with budget pre-check. Soft skips
         // return structured 200 responses; hard errors propagate as
@@ -2836,22 +2881,13 @@ class QwenAgent implements Agent {
         );
         return { success };
       }
-      case 'rewindSession': {
+      case 'rewindSession':
+      case SERVE_CONTROL_EXT_METHODS.sessionRewind: {
         const sessionId = params['sessionId'] as string;
-        const targetTurnIndex = params['targetTurnIndex'];
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing sessionId',
-          );
-        }
-        if (
-          !Number.isInteger(targetTurnIndex) ||
-          (targetTurnIndex as number) < 0
-        ) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing targetTurnIndex',
           );
         }
         const session = this.sessions.get(sessionId);
@@ -2862,11 +2898,98 @@ class QwenAgent implements Agent {
           );
         }
 
+        let turnIndex: number | undefined = params['targetTurnIndex'] as
+          | number
+          | undefined;
+        const promptId = params['promptId'] as string | undefined;
+
+        if (promptId && (turnIndex === undefined || turnIndex === null)) {
+          const prefix = sessionId + '########';
+          if (!promptId.startsWith(prefix)) {
+            throw new RequestError(-32602, 'Invalid promptId format', {
+              errorKind: 'invalid_rewind_target',
+            });
+          }
+          const suffix = promptId.slice(prefix.length);
+          if (!/^\d+$/.test(suffix)) {
+            throw new RequestError(
+              -32602,
+              'Invalid promptId: non-numeric turn suffix',
+              { errorKind: 'invalid_rewind_target' },
+            );
+          }
+          // Derive turnIndex from the snapshot's position in the array,
+          // NOT from the promptId suffix. Session.turn is monotonic and
+          // does not reset on rewind, so after a rewind cycle the suffix
+          // no longer matches the turn's position in the current history.
+          const fhs = session.getConfig().getFileHistoryService();
+          const snapshots = fhs.getSnapshots();
+          const snapshotIdx = snapshots.findIndex(
+            (s) => s.promptId === promptId,
+          );
+          if (snapshotIdx < 0) {
+            throw new RequestError(
+              -32602,
+              'Snapshot not found for the given promptId',
+              { errorKind: 'invalid_rewind_target' },
+            );
+          }
+          turnIndex = snapshotIdx;
+        }
+
+        if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing targetTurnIndex',
+          );
+        }
+
         const historyBeforeRewind = session.captureHistorySnapshot();
+        let rewindResult;
+        try {
+          rewindResult = session.rewindToTurn(turnIndex as number);
+        } catch (err) {
+          if (err instanceof RequestError) {
+            const msg = err.message;
+            if (msg.includes('Cannot rewind while a prompt is running')) {
+              throw new RequestError(err.code, msg, {
+                errorKind: 'session_busy',
+              });
+            }
+            if (msg.includes('compressed or does not exist')) {
+              throw new RequestError(err.code, msg, {
+                errorKind: 'invalid_rewind_target',
+              });
+            }
+          }
+          throw err;
+        }
+
+        let filesChanged: string[] = [];
+        let filesFailed: string[] = [];
+        const rewindFiles = params['rewindFiles'] !== false;
+        if (rewindFiles && promptId) {
+          const fhs = session.getConfig().getFileHistoryService();
+          try {
+            const fileResult = await fhs.rewind(promptId, true);
+            filesChanged = fileResult.filesChanged;
+            filesFailed = fileResult.filesFailed;
+          } catch (err) {
+            const reason =
+              err instanceof Error ? err.message : String(err);
+            debugLogger.error(
+              `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+            );
+            filesFailed = [`file-history-rewind: ${reason}`];
+          }
+        }
+
         return {
           success: true,
           historyBeforeRewind,
-          ...session.rewindToTurn(targetTurnIndex as number),
+          ...rewindResult,
+          filesChanged,
+          filesFailed,
         };
       }
       case 'restoreSessionHistory': {

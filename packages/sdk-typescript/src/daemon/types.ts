@@ -1322,3 +1322,17 @@ export interface PermissionResponse {
   outcome: PermissionOutcome;
   [key: string]: unknown;
 }
+
+export interface DaemonRewindSnapshotInfo {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
+export interface DaemonRewindResult {
+  rewound: boolean;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  filesFailed: string[];
+}
