@@ -354,18 +354,11 @@ describe('useHistoryManager', () => {
         result.current.compactOldItems();
       });
 
-      // First (oldest) should be blanked
+      // First (oldest) should be replaced with cleared message
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
-      const display = tool.resultDisplay as {
-        fileDiff: string;
-        originalContent: string | null;
-        newContent: string;
-      };
-      expect(display.fileDiff).toBe('');
-      expect(display.originalContent).toBeNull();
-      expect(display.newContent).toBe('');
+      expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
     });
 
     it('should return same reference for empty history', () => {

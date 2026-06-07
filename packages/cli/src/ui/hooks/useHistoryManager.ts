@@ -206,15 +206,7 @@ export function useHistory(): UseHistoryManagerReturn {
                 t.resultDisplay !== null &&
                 'fileDiff' in t.resultDisplay
               ) {
-                return {
-                  ...t,
-                  resultDisplay: {
-                    ...t.resultDisplay,
-                    fileDiff: '',
-                    originalContent: null,
-                    newContent: '',
-                  },
-                };
+                return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
               }
               return t;
             }),
