@@ -59,4 +59,37 @@ describe('TokenStore', () => {
     await store.issue([SESSION_READ], 'phone');
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
+
+  it('lists issued tokens as metadata only (no hash, no raw token)', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    const list = store.list();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id,
+      scopes: [SESSION_READ],
+      label: 'phone',
+    });
+    expect(typeof list[0].createdAt).toBe('number');
+    const serialized = JSON.stringify(list);
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain('tokenHash');
+  });
+
+  it('revokes a token by id: removes it, persists, stops resolving', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    expect(store.revoke(id)).toBe(true);
+    expect(store.resolve(`Bearer ${token}`)).toBeNull();
+    const reopened = await TokenStore.open(path);
+    expect(reopened.list()).toHaveLength(0);
+    expect(reopened.resolve(`Bearer ${token}`)).toBeNull();
+  });
+
+  it('revoke returns false for an unknown id', async () => {
+    const store = await TokenStore.open(path);
+    await store.issue([SESSION_READ], 'phone');
+    expect(store.revoke('does-not-exist')).toBe(false);
+    expect(store.list()).toHaveLength(1);
+  });
 });

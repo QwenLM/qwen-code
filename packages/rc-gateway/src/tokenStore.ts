@@ -18,6 +18,14 @@ interface TokenRecord {
   createdAt: number;
 }
 
+/** Public metadata about an issued token. Never includes secret material. */
+export interface TokenInfo {
+  id: string;
+  scopes: RcScope[];
+  label: string;
+  createdAt: number;
+}
+
 interface PersistShape {
   tokens: TokenRecord[];
 }
@@ -89,6 +97,25 @@ export class TokenStore {
       }
     }
     return null;
+  }
+
+  /** List issued tokens as metadata only (no hash, no raw token). */
+  list(): TokenInfo[] {
+    return this.records.map((r) => ({
+      id: r.id,
+      scopes: [...r.scopes],
+      label: r.label,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  /** Remove a token by id. Returns true if a record was removed. */
+  revoke(id: string): boolean {
+    const before = this.records.length;
+    this.records = this.records.filter((r) => r.id !== id);
+    if (this.records.length === before) return false;
+    void this.persist();
+    return true;
   }
 
   private async persist(): Promise<void> {
