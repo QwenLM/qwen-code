@@ -29,6 +29,14 @@ const EXTENSION_EXPLORE_URL = {
 type ExtensionExploreSource = keyof typeof EXTENSION_EXPLORE_URL;
 
 async function exploreAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: MessageType.ERROR,
+      content: t('/extensions explore is only available in interactive mode.'),
+    };
+  }
   const source = args.trim();
   const extensionsUrl = source
     ? EXTENSION_EXPLORE_URL[source as ExtensionExploreSource]
@@ -93,7 +101,11 @@ async function exploreAction(context: CommandContext, args: string) {
   }
 }
 
-async function listAction(_context: CommandContext, _args: string) {
+async function listAction(context: CommandContext, _args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return listTextAction(context, _args);
+  }
   return {
     type: 'dialog' as const,
     dialog: 'extensions_manage' as const,
@@ -152,6 +164,14 @@ async function listTextAction(context: CommandContext, _args: string) {
 }
 
 async function installAction(context: CommandContext, args: string) {
+  const mode = context.executionMode ?? 'interactive';
+  if (mode !== 'interactive') {
+    return {
+      type: 'message' as const,
+      messageType: MessageType.ERROR,
+      content: t('/extensions install is only available in interactive mode.'),
+    };
+  }
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
     debugLogger.error(
