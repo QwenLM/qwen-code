@@ -454,6 +454,7 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     __resetActiveGoalStoreForTests();
   });
@@ -3295,10 +3296,8 @@ hello
     });
 
     it('should inject the current date on every UserQuery turn', async () => {
-      // Reset date injection state from prior tests
       client['lastInjectedDate'] = undefined;
-      // Freeze time to a specific date
-      vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -3332,15 +3331,11 @@ hello
         ],
         expect.any(AbortSignal),
       );
-
-      vi.useRealTimers();
     });
 
     it('should not inject duplicate date on the same day', async () => {
-      // Reset date injection state from prior tests
       client['lastInjectedDate'] = undefined;
-      // Freeze time to a specific date
-      vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
 
       const mockStream1 = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -3396,16 +3391,11 @@ hello
       // Second call should NOT have date prefix (already injected today)
       const secondCall = mockTurnRunFn.mock.calls[1];
       expect(secondCall[1][0]).toBe('Second question');
-
-      vi.useRealTimers();
     });
 
     it('should re-inject date when session spans midnight', async () => {
-      // Reset date injection state from prior tests
       client['lastInjectedDate'] = undefined;
 
-      // Use dates that are clearly different days in any timezone
-      // by setting the clock at noon local time on each day
       vi.setSystemTime(new Date('2026-06-04T12:00:00Z'));
 
       const mockStream1 = (async function* () {
@@ -3466,8 +3456,6 @@ hello
       expect(secondCall[1][0]).toMatch(
         /^<system-reminder>\nThe current date is:.*June 5, 2026/,
       );
-
-      vi.useRealTimers();
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
