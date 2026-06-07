@@ -6,13 +6,16 @@
 
 import { useEffect, useRef } from 'react';
 import process from 'node:process';
+import v8 from 'v8';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
 
 const debugLogger = createDebugLogger('MEMORY_MONITOR');
 
 export const MEMORY_WARNING_THRESHOLD = 7 * 1024 * 1024 * 1024; // 7GB in bytes
-export const MEMORY_UI_COMPACT_THRESHOLD = 5 * 1024 * 1024 * 1024; // 5GB in bytes
+export const MEMORY_UI_COMPACT_THRESHOLD = Math.floor(
+  v8.getHeapStatistics().heap_size_limit * 0.65,
+); // 65% of V8 heap limit
 export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
 export const MEMORY_DEBUG_INTERVAL = 30 * 1000; // 30 seconds for debug logging
 export const UI_COMPACT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
