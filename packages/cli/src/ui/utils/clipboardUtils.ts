@@ -388,8 +388,12 @@ async function saveFileWithWlPaste(
               bmpPath,
               tempFilePath,
             ],
-            { stdio: ['ignore', 'ignore', 'ignore'] },
+            { stdio: ['ignore', 'ignore', 'pipe'] },
           );
+          let stderr = '';
+          child.stderr.on('data', (d: Buffer) => {
+            stderr += d.toString();
+          });
           const timer = setTimeout(() => {
             try {
               child.kill();
@@ -401,7 +405,12 @@ async function saveFileWithWlPaste(
           child.on('close', (code) => {
             clearTimeout(timer);
             if (code === 0) resolve();
-            else reject(new Error(`python3 exited with code ${code}`));
+            else
+              reject(
+                new Error(
+                  `python3 exited with code ${code}${stderr ? ': ' + stderr.trim() : ''}`,
+                ),
+              );
           });
           child.on('error', (err) => {
             clearTimeout(timer);
