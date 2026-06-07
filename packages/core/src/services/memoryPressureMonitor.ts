@@ -513,7 +513,10 @@ export class MemoryPressureMonitor extends EventEmitter {
           const settings = this.coreConfig.getClearContextOnIdle();
           const result = microcompactHistory(history, Date.now() - 1, {
             ...settings,
-            toolResultsThresholdMinutes: 0,
+            toolResultsThresholdMinutes:
+              settings.toolResultsThresholdMinutes < 0
+                ? settings.toolResultsThresholdMinutes
+                : 0,
           });
           if (result.meta) {
             chat.setHistory(result.history);
