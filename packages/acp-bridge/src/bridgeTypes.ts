@@ -19,8 +19,10 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
+  ServeSessionHooksStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
@@ -354,6 +356,12 @@ export interface AcpSessionBridge {
 
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;
+
+  /** Read workspace-level hook configuration status. */
+  getWorkspaceHooksStatus(): Promise<ServeWorkspaceHooksStatus>;
+
+  /** Read session-scoped hook status for a live session. */
+  getSessionHooksStatus(sessionId: string): Promise<ServeSessionHooksStatus>;
 
   /**
    * Switch the active model service for a session. Throws

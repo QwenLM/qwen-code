@@ -5,6 +5,7 @@
  */
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
+import type { HookEventName } from '@qwen-code/qwen-code-core';
 import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -108,6 +109,8 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
+  workspaceHooks: 'qwen/status/workspace/hooks',
+  sessionHooks: 'qwen/status/session/hooks',
 } as const;
 
 /**
@@ -655,6 +658,155 @@ export interface ServeWorkspaceAgentsStatus {
   workspaceCwd: string;
   agents: ServeWorkspaceAgentSummary[];
   errors?: ServeStatusCell[];
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4514 T3.9: workspace + session hooks diagnostic surfaces.
+// ---------------------------------------------------------------------------
+
+export type ServeHookMatcherKind =
+  | 'toolName'
+  | 'agentType'
+  | 'trigger'
+  | 'sessionTrigger'
+  | 'error'
+  | 'notificationType';
+
+export interface ServeHookEventMeta {
+  description: string;
+  matcherKind?: ServeHookMatcherKind;
+}
+
+export interface ServeCommandHookConfig {
+  type: 'command';
+  command: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  async?: boolean;
+  shell?: 'bash' | 'powershell';
+  statusMessage?: string;
+}
+
+export interface ServeHttpHookConfig {
+  type: 'http';
+  url: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  if?: string;
+  statusMessage?: string;
+  once?: boolean;
+}
+
+export interface ServeFunctionHookConfig {
+  type: 'function';
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  errorMessage?: string;
+  statusMessage?: string;
+}
+
+export interface ServePromptHookConfig {
+  type: 'prompt';
+  prompt: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  model?: string;
+  statusMessage?: string;
+}
+
+export interface ServeUnknownHookConfig {
+  type: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  statusMessage?: string;
+}
+
+export type ServeHookConfig =
+  | ServeCommandHookConfig
+  | ServeHttpHookConfig
+  | ServeFunctionHookConfig
+  | ServePromptHookConfig
+  | ServeUnknownHookConfig;
+
+export type ServeHookSource =
+  | 'project'
+  | 'user'
+  | 'system'
+  | 'extensions'
+  | 'session';
+
+export interface ServeHookEntry {
+  kind: 'hook';
+  eventName: string;
+  config: ServeHookConfig;
+  source: ServeHookSource;
+  matcher?: string;
+  sequential?: boolean;
+  enabled: boolean;
+  hookId?: string;
+  skillRoot?: string;
+}
+
+export interface ServeWorkspaceHooksStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  initialized: boolean;
+  disabled: boolean;
+  hooks: ServeHookEntry[];
+  events: Record<string, ServeHookEventMeta>;
+  errors?: ServeStatusCell[];
+}
+
+export interface ServeSessionHooksStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  disabled: boolean;
+  hooks: ServeHookEntry[];
+  errors?: ServeStatusCell[];
+}
+
+export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
+  PreToolUse: { description: 'Before tool execution', matcherKind: 'toolName' },
+  PostToolUse: { description: 'After tool execution', matcherKind: 'toolName' },
+  PostToolUseFailure: { description: 'After tool execution fails', matcherKind: 'toolName' },
+  PostToolBatch: { description: 'After a batch of tool calls resolves' },
+  Notification: { description: 'When notifications are sent', matcherKind: 'notificationType' },
+  UserPromptSubmit: { description: 'When the user submits a prompt' },
+  SessionStart: { description: 'When a new session is started', matcherKind: 'sessionTrigger' },
+  Stop: { description: 'Right before Qwen Code concludes its response' },
+  SubagentStart: { description: 'When a subagent is started', matcherKind: 'agentType' },
+  SubagentStop: { description: 'Right before a subagent concludes its response', matcherKind: 'agentType' },
+  PreCompact: { description: 'Before conversation compaction', matcherKind: 'trigger' },
+  PostCompact: { description: 'After conversation compaction', matcherKind: 'trigger' },
+  SessionEnd: { description: 'When a session is ending', matcherKind: 'sessionTrigger' },
+  PermissionRequest: { description: 'When a permission dialog is displayed', matcherKind: 'toolName' },
+  PermissionDenied: { description: 'When a tool call is denied', matcherKind: 'toolName' },
+  StopFailure: { description: 'When the turn ends due to an API error', matcherKind: 'error' },
+  TodoCreated: { description: 'When a new todo item is created' },
+  TodoCompleted: { description: 'When a todo item is marked as completed' },
+};
+
+export function createIdleWorkspaceHooksStatus(
+  workspaceCwd: string,
+): ServeWorkspaceHooksStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: false,
+    disabled: false,
+    hooks: [],
+    events: IDLE_HOOK_EVENTS,
+  };
 }
 
 export function createIdleWorkspaceMemoryStatus(

@@ -1336,3 +1336,144 @@ export interface DaemonRewindResult {
   filesChanged: string[];
   filesFailed: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Issue #4514 T3.9: workspace + session hooks diagnostic surfaces.
+// ---------------------------------------------------------------------------
+
+/**
+ * Widened event-name union for hook events. Core's `HookEventName` is a
+ * closed enum; the `(string & {})` arm keeps SDK consumers forward-compat
+ * when the daemon returns a new event name not yet in the SDK's enum.
+ */
+export type DaemonHookEventName =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PostToolBatch'
+  | 'Notification'
+  | 'UserPromptSubmit'
+  | 'SessionStart'
+  | 'Stop'
+  | 'SubagentStart'
+  | 'SubagentStop'
+  | 'PreCompact'
+  | 'PostCompact'
+  | 'SessionEnd'
+  | 'PermissionRequest'
+  | 'PermissionDenied'
+  | 'StopFailure'
+  | 'TodoCreated'
+  | 'TodoCompleted'
+  | (string & {});
+
+export type DaemonHookMatcherKind =
+  | 'toolName'
+  | 'agentType'
+  | 'trigger'
+  | 'sessionTrigger'
+  | 'error'
+  | 'notificationType';
+
+export interface DaemonHookEventMeta {
+  description: string;
+  matcherKind?: DaemonHookMatcherKind;
+}
+
+export interface DaemonCommandHookConfig {
+  type: 'command';
+  command: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  async?: boolean;
+  shell?: 'bash' | 'powershell';
+  statusMessage?: string;
+}
+
+export interface DaemonHttpHookConfig {
+  type: 'http';
+  url: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  if?: string;
+  statusMessage?: string;
+  once?: boolean;
+}
+
+export interface DaemonFunctionHookConfig {
+  type: 'function';
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  errorMessage?: string;
+  statusMessage?: string;
+}
+
+export interface DaemonPromptHookConfig {
+  type: 'prompt';
+  prompt: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  model?: string;
+  statusMessage?: string;
+}
+
+export interface DaemonUnknownHookConfig {
+  type: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  statusMessage?: string;
+}
+
+export type DaemonHookConfig =
+  | DaemonCommandHookConfig
+  | DaemonHttpHookConfig
+  | DaemonFunctionHookConfig
+  | DaemonPromptHookConfig
+  | DaemonUnknownHookConfig;
+
+export type DaemonHookSource =
+  | 'project'
+  | 'user'
+  | 'system'
+  | 'extensions'
+  | 'session';
+
+export interface DaemonHookEntry {
+  kind: 'hook';
+  eventName: DaemonHookEventName;
+  config: DaemonHookConfig;
+  source: DaemonHookSource;
+  matcher?: string;
+  sequential?: boolean;
+  enabled: boolean;
+  hookId?: string;
+  skillRoot?: string;
+}
+
+export interface DaemonWorkspaceHooksStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  disabled: boolean;
+  hooks: DaemonHookEntry[];
+  events: Record<string, DaemonHookEventMeta>;
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonSessionHooksStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  disabled: boolean;
+  hooks: DaemonHookEntry[];
+  errors?: DaemonStatusCell[];
+}

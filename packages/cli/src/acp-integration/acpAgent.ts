@@ -45,6 +45,7 @@ import type {
   Config,
   ConversationRecord,
   DeviceAuthorizationData,
+  HookConfig,
   McpBudgetEvent,
   McpBudgetMode,
   McpTransportKind,
@@ -142,6 +143,12 @@ import {
   type ServeWorkspaceToolsStatus,
   type ServeSessionContextUsageStatus,
   type ServeSessionStatsStatus,
+  type ServeHookConfig,
+  type ServeHookEntry,
+  type ServeHookSource,
+  type ServeSessionHooksStatus,
+  type ServeWorkspaceHooksStatus,
+  IDLE_HOOK_EVENTS,
 } from '../serve/status.js';
 import {
   collectContextData,
@@ -2028,6 +2035,155 @@ class QwenAgent implements Agent {
     };
   }
 
+  private serializeHookConfig(config: HookConfig): ServeHookConfig {
+    switch (config.type) {
+      case 'command':
+        return {
+          type: 'command',
+          command: config.command,
+          ...(config.name !== undefined ? { name: config.name } : {}),
+          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
+          ...(config.env ? { env: config.env } : {}),
+          ...(config.async !== undefined ? { async: config.async } : {}),
+          ...(config.shell ? { shell: config.shell } : {}),
+          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+        };
+      case 'http':
+        return {
+          type: 'http',
+          url: config.url,
+          ...(config.name !== undefined ? { name: config.name } : {}),
+          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
+          ...(config.headers ? { headers: config.headers } : {}),
+          ...(config.allowedEnvVars ? { allowedEnvVars: config.allowedEnvVars } : {}),
+          ...(config.if !== undefined ? { if: config.if } : {}),
+          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+          ...(config.once !== undefined ? { once: config.once } : {}),
+        };
+      case 'function':
+        return {
+          type: 'function',
+          ...(config.id !== undefined ? { id: config.id } : {}),
+          ...(config.name !== undefined ? { name: config.name } : {}),
+          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
+          ...(config.errorMessage !== undefined ? { errorMessage: config.errorMessage } : {}),
+          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+        };
+      case 'prompt':
+        return {
+          type: 'prompt',
+          prompt: config.prompt,
+          ...(config.name !== undefined ? { name: config.name } : {}),
+          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
+          ...(config.model ? { model: config.model } : {}),
+          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+        };
+      default:
+        return { type: (config as { type: string }).type };
+    }
+  }
+
+  private buildWorkspaceHooksStatus(config: Config): ServeWorkspaceHooksStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const disabled = config.getDisableAllHooks();
+      const hookSystem = config.getHookSystem();
+      if (!hookSystem) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          initialized: true,
+          disabled,
+          hooks: [],
+          events: IDLE_HOOK_EVENTS,
+        };
+      }
+      const registryEntries = hookSystem.getAllHooks();
+      const hooks: ServeHookEntry[] = registryEntries.map(
+        (entry): ServeHookEntry => ({
+          kind: 'hook',
+          eventName: entry.eventName,
+          config: this.serializeHookConfig(entry.config),
+          source: entry.source as ServeHookSource,
+          ...(entry.matcher ? { matcher: entry.matcher } : {}),
+          ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
+          enabled: entry.enabled,
+        }),
+      );
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        disabled,
+        hooks,
+        events: IDLE_HOOK_EVENTS,
+      };
+    } catch (error) {
+      let disabled = false;
+      try {
+        disabled = config.getDisableAllHooks();
+      } catch {
+        // config may be in a broken state; fall back to false
+      }
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: false,
+        disabled,
+        hooks: [],
+        events: IDLE_HOOK_EVENTS,
+        errors: [this.errorCell('hooks', error)],
+      };
+    }
+  }
+
+  private buildSessionHooksStatus(sessionId: string): ServeSessionHooksStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const disabled = config.getDisableAllHooks();
+      const hookSystem = config.getHookSystem();
+      if (!hookSystem) {
+        return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks: [] };
+      }
+      const sessionHooks = hookSystem.getSessionHooksManager().getAllSessionHooks(sessionId);
+      const hooks: ServeHookEntry[] = sessionHooks.map(
+        (entry): ServeHookEntry => ({
+          kind: 'hook',
+          eventName: entry.eventName,
+          config: this.serializeHookConfig(entry.config),
+          source: 'session',
+          ...(entry.matcher ? { matcher: entry.matcher } : {}),
+          ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
+          enabled: true,
+          hookId: entry.hookId,
+          ...(entry.skillRoot ? { skillRoot: entry.skillRoot } : {}),
+        }),
+      );
+      return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks };
+    } catch (error) {
+      let disabled = false;
+      try {
+        disabled = config.getDisableAllHooks();
+      } catch {
+        // config may be in a broken state; fall back to false
+      }
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        disabled,
+        hooks: [],
+        errors: [this.errorCell('session_hooks', error)],
+      };
+    }
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -2178,6 +2334,15 @@ class QwenAgent implements Agent {
             }),
         );
         return { snapshots: results } as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.workspaceHooks:
+        return this.buildWorkspaceHooksStatus(this.config) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.sessionHooks: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(undefined, 'Invalid or missing sessionId');
+        }
+        return this.buildSessionHooksStatus(sessionId) as unknown as Record<string, unknown>;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // Single-server MCP restart with budget pre-check. Soft skips

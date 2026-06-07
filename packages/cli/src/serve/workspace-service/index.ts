@@ -23,6 +23,7 @@ import {
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceSkillsStatus,
   createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceHooksStatus,
   createIdleEnvStatus,
   createIdleAcpPreflightCells,
   type ServeWorkspacePreflightStatus,
@@ -246,6 +247,13 @@ export function createDaemonWorkspaceService(
         cells: [...daemonCells, ...acpCells],
         ...(errors && errors.length > 0 ? { errors } : {}),
       } as ServeWorkspacePreflightStatus;
+    },
+
+    async getWorkspaceHooksStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceHooks,
+        () => createIdleWorkspaceHooksStatus(boundWorkspace),
+      );
     },
 
     // -- Mutations --
