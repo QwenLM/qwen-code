@@ -12,6 +12,7 @@ import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
+    isEnabled: vi.fn().mockReturnValue(true),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),

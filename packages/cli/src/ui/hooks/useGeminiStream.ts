@@ -936,10 +936,12 @@ export const useGeminiStream = (
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
         if (!prev) {
-          debugLogger.debug(
-            `[THOUGHT_MERGE] New thought: subject="${incoming.subject?.substring(0, 50)}", ` +
-              `description length=${incoming.description?.length ?? 0}`,
-          );
+          if (debugLogger.isEnabled()) {
+            debugLogger.debug(
+              `[THOUGHT_MERGE] New thought: subject="${incoming.subject?.substring(0, 50)}", ` +
+                `description length=${incoming.description?.length ?? 0}`,
+            );
+          }
           return incoming;
         }
         const subject = incoming.subject || prev.subject;

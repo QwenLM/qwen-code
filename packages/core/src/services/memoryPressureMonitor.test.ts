@@ -23,6 +23,7 @@ import type { Config } from '../config/config.js';
 // Hoisted so vi.mock can consume it.
 const { mockDebugLogger } = vi.hoisted(() => ({
   mockDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(true),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),

@@ -408,6 +408,7 @@ describe('Gemini Client (client.ts)', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -615,6 +616,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -2348,6 +2350,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('compact hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),

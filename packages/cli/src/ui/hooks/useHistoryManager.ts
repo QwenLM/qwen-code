@@ -123,9 +123,11 @@ export function useHistory(): UseHistoryManagerReturn {
 
   // Clears the entire history state and resets the ID counter.
   const clearItems = useCallback(() => {
-    debugLogger.debug(
-      `[CLEAR_HISTORY] Clearing history, memory before=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
-    );
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[CLEAR_HISTORY] Clearing history, memory before=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
     setHistory([]);
     messageIdCounterRef.current = 0;
   }, []);
@@ -184,12 +186,12 @@ export function useHistory(): UseHistoryManagerReturn {
         })
         .map((item) => {
           if (item.type !== 'tool_group') return item;
-          toolGroupsSeen++;
-          if (toolGroupsSeen > toolGroupsToCompact) return item;
           // Check for any non-null resultDisplay (covers string, FileDiff,
           // AnsiOutputDisplay, AgentResultDisplay, etc.)
           const hasOldOutput = item.tools.some((t) => t.resultDisplay != null);
           if (!hasOldOutput) return item;
+          toolGroupsSeen++;
+          if (toolGroupsSeen > toolGroupsToCompact) return item;
           toolGroupsCompacted++;
           return {
             ...item,
@@ -203,12 +205,14 @@ export function useHistory(): UseHistoryManagerReturn {
         });
 
       if (thoughtRemoved > 0 || toolGroupsCompacted > 0) {
-        debugLogger.debug(
-          `[COMPACT_UI_HISTORY] removed ${thoughtRemoved} thought item(s), ` +
-            `compacted ${toolGroupsCompacted} tool group(s), ` +
-            `historyLength ${prev.length} -> ${next.length}, ` +
-            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
-        );
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[COMPACT_UI_HISTORY] removed ${thoughtRemoved} thought item(s), ` +
+              `compacted ${toolGroupsCompacted} tool group(s), ` +
+              `historyLength ${prev.length} -> ${next.length}, ` +
+              `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+          );
+        }
       }
       return thoughtRemoved > 0 || toolGroupsCompacted > 0 ? next : prev;
     });

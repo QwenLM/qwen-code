@@ -44,15 +44,17 @@ export const useMemoryMonitor = ({
       const external = memUsage.external / 1024 / 1024;
       const arrayBuffers = memUsage.arrayBuffers / 1024 / 1024;
 
-      debugLogger.debug(
-        `[MEMORY_USAGE] ` +
-          `heapUsed=${heapUsed.toFixed(1)}MB, ` +
-          `heapTotal=${heapTotal.toFixed(1)}MB, ` +
-          `rss=${rss.toFixed(1)}MB, ` +
-          `external=${external.toFixed(1)}MB, ` +
-          `arrayBuffers=${arrayBuffers.toFixed(1)}MB, ` +
-          `heapUtilization=${((heapUsed / heapTotal) * 100).toFixed(1)}%`,
-      );
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[MEMORY_USAGE] ` +
+            `heapUsed=${heapUsed.toFixed(1)}MB, ` +
+            `heapTotal=${heapTotal.toFixed(1)}MB, ` +
+            `rss=${rss.toFixed(1)}MB, ` +
+            `external=${external.toFixed(1)}MB, ` +
+            `arrayBuffers=${arrayBuffers.toFixed(1)}MB, ` +
+            `heapUtilization=${((heapUsed / heapTotal) * 100).toFixed(1)}%`,
+        );
+      }
 
       // UI history compaction when heap exceeds threshold
       const now = Date.now();
@@ -62,11 +64,13 @@ export const useMemoryMonitor = ({
         now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
       ) {
         lastCompactRef.current = now;
-        debugLogger.debug(
-          `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
-            `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +
-            `compacting UI history`,
-        );
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
+              `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +
+              `compacting UI history`,
+          );
+        }
         compactOldItems();
       }
     }, MEMORY_DEBUG_INTERVAL);

@@ -33,11 +33,13 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     const memBefore = process.memoryUsage();
-    debugLogger.debug(
-      `[CLEAR_START] Starting clear command, ` +
-        `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
-        `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
-    );
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[CLEAR_START] Starting clear command, ` +
+          `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
 
     if (config) {
       if (hasBlockingBackgroundWork(config)) {
@@ -107,15 +109,17 @@ export const clearCommand: SlashCommand = {
     }
 
     const memAfter = process.memoryUsage();
-    const heapDiff = (memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024;
-    const rssDiff = (memAfter.rss - memBefore.rss) / 1024 / 1024;
-    debugLogger.debug(
-      `[CLEAR_END] Clear command completed, ` +
-        `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
-        `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
-        `heapDiff=${heapDiff.toFixed(1)}MB, ` +
-        `rssDiff=${rssDiff.toFixed(1)}MB`,
-    );
+    if (debugLogger.isEnabled()) {
+      const heapDiff = (memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024;
+      const rssDiff = (memAfter.rss - memBefore.rss) / 1024 / 1024;
+      debugLogger.debug(
+        `[CLEAR_END] Clear command completed, ` +
+          `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
+          `heapDiff=${heapDiff.toFixed(1)}MB, ` +
+          `rssDiff=${rssDiff.toFixed(1)}MB`,
+      );
+    }
 
     if (context.executionMode !== 'interactive') {
       return {

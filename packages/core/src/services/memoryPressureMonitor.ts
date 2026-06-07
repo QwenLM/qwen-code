@@ -514,7 +514,7 @@ export class MemoryPressureMonitor extends EventEmitter {
           const result = microcompactHistory(history, Date.now() - 1, {
             ...settings,
             toolResultsThresholdMinutes:
-              settings.toolResultsThresholdMinutes < 0
+              (settings.toolResultsThresholdMinutes ?? 0) < 0
                 ? settings.toolResultsThresholdMinutes
                 : 0,
           });

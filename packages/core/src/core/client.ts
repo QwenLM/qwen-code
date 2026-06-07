@@ -583,12 +583,14 @@ export class GeminiClient {
   async resetChat(): Promise<void> {
     const memBefore = process.memoryUsage();
     const historyLength = this.chat?.getHistoryLength() ?? 0;
-    debugLogger.debug(
-      `[RESET_CHAT_START] Starting resetChat, ` +
-        `historyLength=${historyLength}, ` +
-        `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
-        `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
-    );
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[RESET_CHAT_START] Starting resetChat, ` +
+          `historyLength=${historyLength}, ` +
+          `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
 
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
@@ -615,14 +617,16 @@ export class GeminiClient {
 
     const memAfter = process.memoryUsage();
     const newHistoryLength = this.chat?.getHistoryLength() ?? 0;
-    debugLogger.debug(
-      `[RESET_CHAT_END] resetChat completed, ` +
-        `oldHistoryLength=${historyLength}, ` +
-        `newHistoryLength=${newHistoryLength}, ` +
-        `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
-        `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
-        `heapDiff=${((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)}MB`,
-    );
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[RESET_CHAT_END] resetChat completed, ` +
+          `oldHistoryLength=${historyLength}, ` +
+          `newHistoryLength=${newHistoryLength}, ` +
+          `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
+          `heapDiff=${((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
   }
 
   getLoopDetectionService(): LoopDetectionService {
