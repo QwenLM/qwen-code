@@ -13,5 +13,8 @@ export const SESSION_READ: RcScope = 'session:read';
 /** Management scope: list / mint / revoke tokens. */
 export const OWNER: RcScope = 'owner';
 
+/** Vote on a session's pending permission requests. */
+export const APPROVE: RcScope = 'approve';
+
 /** All scopes the gateway recognizes (used to reject unknown mint scopes). */
-export const KNOWN_SCOPES: readonly RcScope[] = [OWNER, SESSION_READ];
+export const KNOWN_SCOPES: readonly RcScope[] = [OWNER, SESSION_READ, APPROVE];

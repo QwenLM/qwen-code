@@ -28,6 +28,8 @@ export interface StubDaemonOptions {
    * observe that the upstream subscription was aborted.
    */
   holdOpenMs?: number;
+  /** Status for POST /session/:id/permission/:requestId (default 200 = accepted). */
+  permissionStatus?: number;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -43,6 +45,7 @@ export async function startStubDaemon(
     eventsAbortedByClient: false,
   };
   const app = express();
+  app.use(express.json());
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -85,6 +88,11 @@ export async function startStubDaemon(
       return;
     }
     res.end();
+  });
+
+  app.post('/session/:id/permission/:requestId', (_req, res) => {
+    const status = opts.permissionStatus ?? 200;
+    res.status(status).json(status === 200 ? {} : { error: 'no pending' });
   });
 
   const server: Server = await new Promise((resolve) => {

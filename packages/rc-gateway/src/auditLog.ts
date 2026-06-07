@@ -21,7 +21,8 @@ export type AuditAction =
   | 'auth_failed'
   | 'scope_denied'
   | 'session_attached'
-  | 'session_detached';
+  | 'session_detached'
+  | 'permission_voted';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -32,6 +33,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'scope_denied',
   'session_attached',
   'session_detached',
+  'permission_voted',
 ];
 
 export interface AuditEntry {
