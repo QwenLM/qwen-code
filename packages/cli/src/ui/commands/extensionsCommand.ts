@@ -123,7 +123,18 @@ async function listTextAction(context: CommandContext, _args: string) {
     };
   }
 
-  const extensions = config.getExtensions();
+  let extensions;
+  try {
+    extensions = config.getExtensions();
+  } catch (error) {
+    return {
+      type: 'message' as const,
+      messageType: 'error' as const,
+      content: t('Failed to read extensions: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  }
   if (extensions.length === 0) {
     return {
       type: 'message' as const,
