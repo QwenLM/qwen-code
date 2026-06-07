@@ -831,7 +831,7 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
 };
 
 // ---------------------------------------------------------------------------
-// Issue #4514 T3.9: workspace extensions diagnostic surface.
+// Workspace extensions diagnostic surface.
 // ---------------------------------------------------------------------------
 
 export type ServeExtensionInstallType =
