@@ -212,6 +212,8 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
 
   const handleAction = useCallback(
     (setting: DaemonSettingDescriptor) => {
+      if (editMode && editMode.key === setting.key) return;
+      setEditMode(null);
       if (scope !== 'workspace') return;
       if (SUB_DIALOG_KEYS.has(setting.key)) {
         onSubDialog(setting.key);
@@ -232,7 +234,7 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
         });
       }
     },
-    [handleSetValue, onSubDialog, scope],
+    [editMode, handleSetValue, onSubDialog, scope],
   );
 
   const handleEditSubmit = useCallback(() => {

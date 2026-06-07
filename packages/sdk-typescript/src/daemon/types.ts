@@ -1027,7 +1027,7 @@ export interface DaemonWorkspaceSettingsStatus {
 
 export interface DaemonSettingUpdateResult {
   key: string;
-  scope: 'user' | 'workspace';
+  scope: 'workspace';
   value: unknown;
   requiresRestart: boolean;
 }

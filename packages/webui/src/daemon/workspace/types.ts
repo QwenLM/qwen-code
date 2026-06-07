@@ -151,7 +151,7 @@ export interface DaemonWorkspaceActions {
   // Settings
   loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
   setWorkspaceSetting(
-    scope: 'user' | 'workspace',
+    scope: 'workspace',
     key: string,
     value: unknown,
   ): Promise<DaemonSettingUpdateResult>;

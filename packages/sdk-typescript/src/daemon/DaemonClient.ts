@@ -1337,9 +1337,9 @@ export class DaemonClient {
     );
   }
 
-  async workspaceSettings(
-    opts?: { clientId?: string },
-  ): Promise<DaemonWorkspaceSettingsStatus> {
+  async workspaceSettings(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceSettingsStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/settings`,
       {
@@ -1356,7 +1356,7 @@ export class DaemonClient {
   }
 
   async setWorkspaceSetting(
-    scope: 'user' | 'workspace',
+    scope: 'workspace',
     key: string,
     value: unknown,
     opts?: { clientId?: string },
