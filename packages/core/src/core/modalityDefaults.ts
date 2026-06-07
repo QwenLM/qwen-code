@@ -66,8 +66,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^glm-/, {}],
 
   // -------------------
-  // MiniMax — text-only
+  // MiniMax
   // -------------------
+  // M3 supports image input (images only, no video/audio/documents)
+  [/^minimax-m3/, { image: true }],
+  // M2.7 and earlier: text-only
   [/^minimax-/, {}],
 
   // -------------------

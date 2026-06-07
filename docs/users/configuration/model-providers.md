@@ -199,10 +199,11 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 MiniMax provides OpenAI-compatible chat models. Configure using the `openai` auth type with MiniMax's base URL. MiniMax requires temperature to be in the range `(0.0, 1.0]` — the provider enforces this automatically.
 
-| Model ID                 | Description                                              |
-| ------------------------ | -------------------------------------------------------- |
-| `MiniMax-M2.7`           | Peak performance, ultimate value — handles complex tasks |
-| `MiniMax-M2.7-highspeed` | Same performance, faster and more agile                  |
+| Model ID                 | Description                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `MiniMax-M3`             | Latest model (default) — 512K context, up to 128K output, supports image input |
+| `MiniMax-M2.7`           | Peak performance, ultimate value — handles complex tasks                       |
+| `MiniMax-M2.7-highspeed` | Same performance, faster and more agile                                        |
 
 ```json
 {
@@ -211,6 +212,19 @@ MiniMax provides OpenAI-compatible chat models. Configure using the `openai` aut
   },
   "modelProviders": {
     "openai": [
+      {
+        "id": "MiniMax-M3",
+        "name": "MiniMax-M3",
+        "envKey": "MINIMAX_API_KEY",
+        "baseUrl": "https://api.minimax.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 524288,
+          "samplingParams": {
+            "temperature": 1.0,
+            "max_tokens": 131072
+          }
+        }
+      },
       {
         "id": "MiniMax-M2.7",
         "name": "MiniMax-M2.7",

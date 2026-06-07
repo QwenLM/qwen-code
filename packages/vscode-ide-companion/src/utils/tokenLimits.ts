@@ -122,7 +122,7 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-/, 202_752 as TokenCount],
 
   // MiniMax
-  [/^minimax-m2\.5/i, LIMITS['192k']],
+  [/^minimax-m3/i, LIMITS['512k']],
   [/^minimax-/i, LIMITS['200k']],
 
   // Moonshot / Kimi
@@ -159,7 +159,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-5/, LIMITS['16k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
-  [/^minimax-m2\.5/i, LIMITS['64k']],
+  [/^minimax-m3/i, LIMITS['128k']],
+  [/^minimax-m2\.7/i, LIMITS['64k']],
 
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];

@@ -171,8 +171,16 @@ describe('defaultModalities', () => {
   });
 
   describe('MiniMax', () => {
-    it('returns text-only for MiniMax-M2.5', () => {
-      expect(defaultModalities('MiniMax-M2.5')).toEqual({});
+    it('returns image for MiniMax-M3', () => {
+      const m = defaultModalities('MiniMax-M3');
+      expect(m.image).toBe(true);
+      expect(m.pdf).toBeUndefined();
+      expect(m.audio).toBeUndefined();
+      expect(m.video).toBeUndefined();
+    });
+
+    it('returns text-only for MiniMax-M2.7', () => {
+      expect(defaultModalities('MiniMax-M2.7')).toEqual({});
     });
   });
 

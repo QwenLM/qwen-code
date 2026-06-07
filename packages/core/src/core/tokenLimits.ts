@@ -28,7 +28,7 @@ const LIMITS = {
   '32k': 32_768,
   '64k': 65_536,
   '128k': 131_072,
-  '192k': 196_608, // MiniMax-M2.5 context window
+  '192k': 196_608,
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
   '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
@@ -136,8 +136,8 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // MiniMax
   // -------------------
-  [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
-  [/^minimax-/i, LIMITS['200k']], // MiniMax fallback (M2.7 / M2.7-highspeed / others): 200K
+  [/^minimax-m3/i, LIMITS['512k']], // MiniMax-M3: 512K
+  [/^minimax-/i, LIMITS['200k']], // MiniMax fallback (M2.7 / M2.7-highspeed): 200K
 
   // -------------------
   // Moonshot / Kimi
@@ -185,8 +185,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
+  [/^minimax-m3/i, LIMITS['128k']], // MiniMax-M3: 128K output
   [/^minimax-m2\.7/i, LIMITS['64k']], // MiniMax-M2.7 / M2.7-highspeed: 64K output
-  [/^minimax-m2\.5/i, LIMITS['64k']],
 
   // Kimi
   [/^kimi-k2\.5/, LIMITS['32k']],

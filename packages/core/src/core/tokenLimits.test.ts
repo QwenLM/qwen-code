@@ -193,12 +193,13 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
-    it('should return 196608 for MiniMax-M2.5 (latest)', () => {
-      expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
+    it('should return 512K for MiniMax-M3 (latest)', () => {
+      expect(tokenLimit('MiniMax-M3')).toBe(524288);
     });
 
-    it('should return 200K for MiniMax fallback', () => {
-      expect(tokenLimit('MiniMax-M2.1')).toBe(200000);
+    it('should return 200K for MiniMax fallback (M2.7 / M2.7-highspeed)', () => {
+      expect(tokenLimit('MiniMax-M2.7')).toBe(200000);
+      expect(tokenLimit('MiniMax-M2.7-highspeed')).toBe(200000);
     });
   });
 
@@ -308,7 +309,8 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for MiniMax', () => {
-      expect(tokenLimit('MiniMax-M2.5', 'output')).toBe(65536);
+      expect(tokenLimit('MiniMax-M3', 'output')).toBe(131072);
+      expect(tokenLimit('MiniMax-M2.7', 'output')).toBe(65536);
     });
 
     it('should return correct output limits for Kimi', () => {
