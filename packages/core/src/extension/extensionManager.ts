@@ -58,7 +58,10 @@ import {
   type MarketplaceSource,
   type DiscoveredPlugin,
 } from './marketplaceRegistry.js';
-import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseInstallSource,
+} from './marketplace.js';
 import {
   isGeminiExtensionConfig,
   convertGeminiExtensionPackage,
@@ -553,8 +556,25 @@ export class ExtensionManager {
     }
     const config = await loadMarketplaceConfigFromSource(trimmed);
     if (!config) {
+      // A "marketplace" is a Claude-format collection (.claude-plugin/
+      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
+      // not a marketplace — guide the user to install it directly instead.
+      let isInstallableExtension = false;
+      try {
+        await parseInstallSource(trimmed);
+        isInstallableExtension = true;
+      } catch {
+        // Not a recognizable install source either.
+      }
+      const redacted = redactUrlCredentials(trimmed);
+      if (isInstallableExtension) {
+        throw new Error(
+          `"${redacted}" looks like a single extension, not a marketplace. ` +
+            `Install it directly with: /extensions install ${redacted}`,
+        );
+      }
       throw new Error(
-        `No marketplace found at "${redactUrlCredentials(trimmed)}". ` +
+        `No marketplace found at "${redacted}". ` +
           `Expected a .claude-plugin/marketplace.json.`,
       );
     }

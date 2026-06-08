@@ -530,7 +530,11 @@ export const InstalledTab = ({
             const isSelected = globalIndex === selectedIndex;
             const marker = isSelected ? '●' : ' ';
             const kindBadge =
-              item.kind === 'mcp' ? t('MCP') : `v${item.extension.version}`;
+              item.kind === 'mcp'
+                ? t('MCP')
+                : t('Extension v{{version}}', {
+                    version: item.extension.version,
+                  });
             const statusColor = item.isActive
               ? theme.status.success
               : theme.text.secondary;

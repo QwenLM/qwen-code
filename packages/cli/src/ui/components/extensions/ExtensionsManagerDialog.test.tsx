@@ -283,6 +283,8 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('User');
     expect(frame).toContain('Disabled');
     expect(frame).toContain('beta');
+    // Plugins show their type + version (parallel to "MCP"), not a bare version.
+    expect(frame).toContain('Extension v1.0.0');
   });
 
   it('toggles favorite when pressing f on the Installed tab', async () => {
