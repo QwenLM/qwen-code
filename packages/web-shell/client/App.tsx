@@ -12,7 +12,6 @@ import {
   useDaemonFollowupSuggestion,
   useSessionNotices,
   useStreamingState,
-  useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
   type DaemonSessionNotice,
@@ -633,7 +632,6 @@ export function App({
     [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
   );
   const store = useTranscriptStore();
-  const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
@@ -1436,17 +1434,9 @@ export function App({
             store.appendLocalUserMessage(text);
             handleTasksSlashCommand({
               cmd,
-              promptBlocked,
               getTasks: sessionActions.getTasks,
               dispatch: (events) => store.dispatch(events),
               reportError,
-              interactiveHint: t('tasks.dumpHint'),
-              labels: {
-                empty: t('tasks.empty'),
-                title: t('tasks.title'),
-                count: (count: number) => t('tasks.count', { count }),
-                defaultHint: t('tasks.dumpHint'),
-              },
             });
             return true;
           }

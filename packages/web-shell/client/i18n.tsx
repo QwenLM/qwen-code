@@ -725,7 +725,6 @@ const EN: Messages = {
   'todo.more': (v) => `... and ${v?.count ?? 0} more`,
   'todo.title': 'Current tasks',
   'tasks.title': 'Background tasks',
-  'tasks.count': (v) => `${v?.count ?? 0} total`,
   'tasks.empty': 'No tasks currently running',
   'tasks.moreAbove': (v) => `^ ${v?.count ?? 0} more above`,
   'tasks.moreBelow': (v) => `v ${v?.count ?? 0} more below`,
@@ -736,8 +735,6 @@ const EN: Messages = {
   'tasks.paused': 'Paused',
   'tasks.kind.shell': 'Shell',
   'tasks.kind.monitor': 'Monitor',
-  'tasks.dumpHint':
-    'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
   'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} local agent paused`,
@@ -1492,7 +1489,6 @@ const ZH: Messages = {
   'todo.more': (v) => `... 以及其他 ${v?.count ?? 0} 个`,
   'todo.title': '当前任务',
   'tasks.title': '后台任务',
-  'tasks.count': (v) => `共 ${v?.count ?? 0} 个`,
   'tasks.empty': '当前没有运行中的任务',
   'tasks.moreAbove': (v) => `^ 上方还有 ${v?.count ?? 0} 个`,
   'tasks.moreBelow': (v) => `v 下方还有 ${v?.count ?? 0} 个`,
@@ -1503,8 +1499,6 @@ const ZH: Messages = {
   'tasks.paused': '已暂停',
   'tasks.kind.shell': 'Shell',
   'tasks.kind.monitor': '监控',
-  'tasks.dumpHint':
-    '提示：聚焦底部的后台任务 pill（在空输入框按 ↓），然后按 Enter 打开带详情视图和实时更新的交互面板。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
