@@ -267,6 +267,15 @@ describe('gateway app', () => {
     expect(res.headers.get('content-type')).toMatch(/javascript/);
   });
 
+  it('serves the enrollment UI at /ui/index.html', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/index.html`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('id="enable"');
+    expect(body).toContain('sw.js');
+  });
+
   it('404s unknown /ui assets', async () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/does-not-exist.js`);

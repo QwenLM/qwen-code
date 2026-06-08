@@ -105,7 +105,9 @@ try {
     20000,
     'daemon health',
   );
-  ok('real qwen serve boots with --hostname/--port/--require-auth and is healthy');
+  ok(
+    'real qwen serve boots with --hostname/--port/--require-auth and is healthy',
+  );
 
   // Gateway in front of the real daemon.
   const store = await TokenStore.open(join(workspace, 'tokens.json'));
@@ -127,7 +129,9 @@ try {
   // 2. Gateway health.
   {
     const r = await fetch(`${gw}/rc/health`);
-    r.status === 200 ? ok('gateway /rc/health 200') : bad(`gateway health ${r.status}`);
+    r.status === 200
+      ? ok('gateway /rc/health 200')
+      : bad(`gateway health ${r.status}`);
   }
 
   // 2b. Session event pump (cycle 10): starts cleanly against the REAL daemon
@@ -165,7 +169,9 @@ try {
   // 4. Events without a token -> 401.
   {
     const r = await fetch(`${gw}/rc/session/nope/events`);
-    r.status === 401 ? ok('events without token -> 401') : bad(`no-token ${r.status}`);
+    r.status === 401
+      ? ok('events without token -> 401')
+      : bad(`no-token ${r.status}`);
   }
 
   // 5. Events with a no-scope token -> 403.
@@ -180,7 +186,9 @@ try {
     const r = await fetch(`${gw}/rc/session/nope/events`, {
       headers: { Authorization: `Bearer ${weak}` },
     });
-    r.status === 403 ? ok('events with no-scope token -> 403') : bad(`no-scope ${r.status}`);
+    r.status === 403
+      ? ok('events with no-scope token -> 403')
+      : bad(`no-scope ${r.status}`);
   }
 
   // 6. Authenticated, scoped proxy actually reaches the REAL daemon.
@@ -195,7 +203,9 @@ try {
         signal: ac.signal,
       });
       r.status === 502 || r.status === 404
-        ? ok(`scoped proxy reached real daemon (status ${r.status} for unknown session)`)
+        ? ok(
+            `scoped proxy reached real daemon (status ${r.status} for unknown session)`,
+          )
         : bad(`unexpected proxy status ${r.status}`);
     } catch (e) {
       bad(`proxy request errored/hung: ${e}`);
@@ -210,6 +220,13 @@ try {
     r.status === 200 && body.includes('qwen-rc viewer')
       ? ok('web viewer served at /ui/')
       : bad(`/ui/ returned ${r.status}`);
+  }
+  // The push service worker is served at /ui/sw.js (public static asset).
+  {
+    const r = await fetch(`${gw}/ui/sw.js`);
+    r.status === 200
+      ? ok('service worker served at /ui/sw.js')
+      : bad(`/ui/sw.js returned ${r.status}`);
   }
 
   // Permission vote with an approve-scoped token reaches the real daemon.
