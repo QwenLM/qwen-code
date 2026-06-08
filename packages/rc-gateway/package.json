@@ -17,7 +17,8 @@
   "dependencies": {
     "@qwen-code/sdk": "*",
     "express": "^4.21.2",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
