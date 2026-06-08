@@ -32,7 +32,8 @@ export type AuditAction =
   | 'policy_decision'
   | 'push_suppressed'
   | 'routing_snoozed'
-  | 'routing_unsnoozed';
+  | 'routing_unsnoozed'
+  | 'push_prefs_updated';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -54,6 +55,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'push_suppressed',
   'routing_snoozed',
   'routing_unsnoozed',
+  'push_prefs_updated',
 ];
 
 export interface AuditEntry {
