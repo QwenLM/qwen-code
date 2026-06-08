@@ -49,7 +49,7 @@ interface ServeArgs {
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
-  'rate-limit': boolean;
+  'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
   'rate-limit-read'?: number;
@@ -183,7 +183,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('rate-limit', {
         type: 'boolean',
-        default: false,
         description:
           'Enable per-tier HTTP rate limiting. Tiers: prompt (10/min), ' +
           'mutation (30/min), read (120/min). Health, heartbeat, SSE, ' +
@@ -302,12 +301,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       // path will report the same error to the user via Session.
     }
 
-    // Rate limit resolution + validation (only when enabled).
-    // CLI flag takes precedence; env var is fallback only when CLI is default (false).
-    const rateLimit = argv['rate-limit']
-      ? true
-      : process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
-        process.env['QWEN_SERVE_RATE_LIMIT'] === 'true';
+    // Rate limit resolution: --rate-limit / --no-rate-limit override env var.
+    // With no default, argv['rate-limit'] is undefined when neither flag is passed.
+    const rateLimit =
+      argv['rate-limit'] ??
+      (process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
+        process.env['QWEN_SERVE_RATE_LIMIT'] === 'true');
     let rateLimitPrompt: number | undefined;
     let rateLimitMutation: number | undefined;
     let rateLimitRead: number | undefined;
