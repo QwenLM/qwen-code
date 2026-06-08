@@ -3339,6 +3339,11 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ language: 'en' });
       expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        language: 'en',
+        outputLanguage: null,
+        refreshed: false,
+      });
       expect(bridge.setLanguageCalls[0]?.params.syncOutputLanguage).toBe(false);
     });
 
@@ -3401,6 +3406,20 @@ describe('createServeApp', () => {
         .send({ language: 'zh' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('500 when bridge throws an unexpected error', async () => {
+      const bridge = fakeBridge({
+        setLanguageImpl: async () => {
+          throw new Error('unexpected failure');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+      expect(res.status).toBe(500);
     });
   });
 

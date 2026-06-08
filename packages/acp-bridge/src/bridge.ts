@@ -3184,8 +3184,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
-      } catch {
-        /* bus closed */
+      } catch (err) {
+        writeServeDebugLine(
+          `language_changed event publish failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       return {
