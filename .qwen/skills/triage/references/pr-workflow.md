@@ -2,13 +2,7 @@
 
 Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
-Before posting or labeling, evaluate the tiered comment gate and label gate
-from `SKILL.md`. Record the gate decisions in the staged report. Include the
-`<!-- qwen-maintain:pr-intake -->` marker in all PR comments.
-
-**Comment style:** write like a human maintainer — conversational, concise,
-bilingual. No bullet-point checklists that feel auto-generated. See the
-Format section in `SKILL.md` for anti-patterns and distillation rules.
+**Comment style:** write like a human maintainer — conversational, concise, bilingual. No bullet-point checklists that feel auto-generated.
 
 ### Comment Management
 
@@ -24,6 +18,10 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 1 | Gate findings                                 |
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
+
+**Terminal gate exception:** if Stage 1a template check fails, submit exactly
+one `CHANGES_REQUESTED` review and stop. Do not also post or update a Stage 1
+issue comment, and do not continue to Stage 2, Stage 3, or approval.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
@@ -55,7 +53,7 @@ This is the most important stage — catch problems before anyone spends time re
 
 **1a. Template check:**
 
-PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop.
+PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop. This is the only public output for this terminal gate.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
@@ -69,30 +67,16 @@ Ask the hard questions before reading a single line of code:
 - Is it within qwen-code's core mission, or does it pull focus from what matters more?
 - "Can do" ≠ "should do" — technically feasible doesn't mean we should ship it.
 
-External changelogs or competitor behavior are optional context, not required
-gate checks and never rejection by themselves.
+CHANGELOG is a reference signal, not the sole criterion:
+
+```bash
+curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
+```
+
+- **Found** → cite version/line as supporting signal.
+- **Not found** → not a rejection. The area may still be relevant.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
-
-Closed PRs are design history, not automatic negative precedent. Treat them as
-reject signal only when maintainers explicitly rejected the direction.
-
-Judge author validation only from evidence supplied by the PR author; do not run
-tests to manufacture missing evidence. Expected evidence: screenshots or tmux
-logs for TUI changes, command transcript for CLI behavior, reproduction plus
-fixed behavior for bug fixes, test output or usage examples for API/SDK changes,
-before/after numbers for performance, workflow run or actionlint output for CI,
-and relevant checks for refactors. Docs-only PRs may be N/A.
-
-For scope, exclude generated files, lockfiles, snapshots, and schemas. Under 800
-changed lines is normal; 800-1500 lines should be split if concerns are
-separable; over 1500 lines should be split unless the PR is clearly cohesive.
-
-Label hints: `need-discussion` + `status/ready-for-human` for unclear product
-direction, `status/need-information` for incomplete body, and
-`status/waiting-for-feedback` for missing author validation. Move to deep review
-only when product fit, body completeness, validation, and scope are all good
-enough.
 
 **1c. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
 
@@ -108,7 +92,6 @@ Post a single Stage 1 comment. Be direct — say what you actually think, not wh
 
 ```markdown
 <!-- qwen-triage stage=1 -->
-<!-- qwen-maintain:pr-intake -->
 
 Thanks for the PR!
 
@@ -140,7 +123,8 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 — _Qwen Code · qwen3.7-max_
 ```
 
-Save this comment's ID. If template fails or direction is escalated → stop here.
+Save this comment's ID. If direction is escalated → stop here. Template
+failures already stopped in Stage 1a.
 
 ### Stage 2: Review + Test
 
@@ -208,14 +192,11 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` and `<!-- qwen-maintain:pr-intake -->` at the top): code review findings + testing result.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result.
 
 **⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
-<!-- qwen-triage stage=2 -->
-<!-- qwen-maintain:pr-intake -->
-
 ## Before (installed build)
 
 <!-- paste capture-pane output here inside ``` -->
@@ -242,7 +223,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
-**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` and `<!-- qwen-maintain:pr-intake -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 

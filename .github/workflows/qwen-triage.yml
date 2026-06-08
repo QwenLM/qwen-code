@@ -24,7 +24,14 @@ jobs:
     timeout-minutes: 30
     concurrency:
       group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-      cancel-in-progress: true
+      cancel-in-progress: >-
+        ${{
+          github.event_name != 'issue_comment' ||
+          (startsWith(github.event.comment.body, '@qwen-code /triage') &&
+           (github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'))
+        }}
     runs-on: 'ubuntu-latest'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
@@ -70,7 +77,6 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
-              "maxSessionTurns": 25,
               "coreTools": [
                 "run_shell_command",
                 "write_file",
