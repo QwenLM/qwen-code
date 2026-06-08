@@ -349,11 +349,15 @@ The reaper callback runs on the Node.js event loop. Key considerations:
 ### 4.8 Wire-format change
 
 The `session_closed` event's `data.reason` field already exists with value
-`'client_close'`. We add `'idle_timeout'` as a new value. This is
-backward-compatible — existing SDK code that checks `reason === 'client_close'`
-will simply not match the new value, and the generic terminal-frame handler
-(`isTerminalLifecycleEvent`) already handles `session_closed` regardless of
-reason.
+`'client_close'`. We add two new values:
+
+- `'idle_timeout'` — emitted by the idle reaper (backstop for crashed clients)
+- `'last_client_detached'` — emitted by close-on-last-detach (normal tab close)
+
+This is backward-compatible — existing SDK code that checks
+`reason === 'client_close'` will simply not match the new values, and the
+generic terminal-frame handler (`isTerminalLifecycleEvent`) already handles
+`session_closed` regardless of reason.
 
 ---
 

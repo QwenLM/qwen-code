@@ -1970,7 +1970,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       connection: ci.connection,
       events,
       promptQueue: Promise.resolve(),
-      promptActive: false,
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -2390,11 +2389,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
-    // Synchronous teardown block — mirrors `killSession` ordering.
-    // `byId.delete` runs BEFORE `await notifyAgentSessionClose` so any
-    // concurrent caller (reaper tick, detach-close, explicit DELETE)
-    // that does `byId.get(sessionId)` gets `undefined` and throws
-    // `SessionNotFoundError`, preventing duplicate close cascades.
+    // Synchronous teardown block — intentionally diverges from killSession:
+    // tombstone + event publish + bus close all run BEFORE
+    // notifyAgentSessionClose, so concurrent callers see
+    // byId.get(sessionId) === undefined and throw SessionNotFoundError,
+    // and late agent frames arriving during the RPC are dropped by the
+    // closed bus.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
     byId.delete(sessionId);
@@ -2704,7 +2704,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 } else {
                   entry.activePromptOriginatorClientId = originatorClientId;
                 }
-                entry.promptActive = true;
                 try {
                   // Echo the user prompt to the session bus so other SSE-subscribed
                   // clients see the input alongside the agent response.
@@ -2736,7 +2735,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .finally(() => {
                     entry.promptActive = false;
                     delete entry.activePromptOriginatorClientId;
-                    entry.promptActive = false;
                   });
 
                 // Race against channel termination: if the underlying transport
@@ -4454,14 +4452,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       } else if (
         entry.clientIds.size === 0 &&
-        entry.events.subscriberCount === 0
+        entry.events.subscriberCount === 0 &&
+        !entry.promptActive
       ) {
-        // Last registered client left AND no SSE subscribers remain.
-        // Close the session immediately so it doesn't linger in memory.
-        // The JSONL transcript on disk is preserved — session/load or
-        // session/resume can restore it later. The idle reaper serves
-        // as a backstop for the case where the detach request was never
-        // sent (client crash, kill -9, network failure).
+        // Last registered client left, no SSE subscribers remain, and
+        // no prompt is in flight. Close the session immediately so it
+        // doesn't linger in memory. The JSONL transcript on disk is
+        // preserved — session/load or session/resume can restore it
+        // later. When a prompt IS active, skip the close and let the
+        // idle reaper handle it after the prompt completes.
         await closeSessionImpl(sessionId, undefined, {
           reason: 'last_client_detached',
         }).catch((err) => {

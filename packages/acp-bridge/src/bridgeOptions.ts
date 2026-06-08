@@ -347,10 +347,11 @@ export interface BridgeOptions {
    */
   sessionReapIntervalMs?: number;
   /**
-   * A session with zero SSE subscribers, zero registered clients, and
-   * no active prompt that has not received a heartbeat for this many
-   * milliseconds is reaped. Default: 1_800_000 (30 minutes). `0` or
-   * `Infinity` disables idle reaping.
+   * A session with zero SSE subscribers and no active prompt that has
+   * not received a heartbeat for this many milliseconds is reaped.
+   * Note: `clientIds.size` is intentionally NOT checked — the reaper
+   * covers the crash path where clients never sent a detach request.
+   * Default: 1_800_000 (30 minutes). `0` or `Infinity` disables.
    */
   sessionIdleTimeoutMs?: number;
 }
