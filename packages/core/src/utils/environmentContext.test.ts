@@ -399,6 +399,9 @@ describe('formatDateForContext', () => {
     const result = formatDateForContext();
     expect(typeof result).toBe('string');
     expect(result.length).toBeGreaterThan(0);
+  });
+});
+
 describe('startup reminder builders', () => {
   function registry(overrides: Partial<ToolRegistry>): ToolRegistry {
     return {
