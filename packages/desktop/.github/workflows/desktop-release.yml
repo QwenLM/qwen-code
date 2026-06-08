@@ -191,11 +191,30 @@ jobs:
 
       - name: Check out Qwen Code source
         if: ${{ inputs.qwen_code_source == 'source_branch' }}
-        uses: actions/checkout@v4
-        with:
-          repository: QwenLM/qwen-code
-          ref: ${{ inputs.qwen_code_ref }}
-          path: qwen-code-source
+        shell: bash
+        env:
+          QWEN_CODE_REF_INPUT: ${{ inputs.qwen_code_ref }}
+          QWEN_CODE_SOURCE_ROOT: ${{ runner.temp }}/qwen-code-source
+        run: |
+          set -euo pipefail
+
+          if [ -z "$QWEN_CODE_REF_INPUT" ]; then
+            echo "::error::qwen_code_ref is required when qwen_code_source is source_branch."
+            exit 1
+          fi
+
+          rm -rf "$QWEN_CODE_SOURCE_ROOT"
+          git init "$QWEN_CODE_SOURCE_ROOT"
+          git -C "$QWEN_CODE_SOURCE_ROOT" remote add origin https://github.com/QwenLM/qwen-code.git
+
+          if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "$QWEN_CODE_REF_INPUT"; then
+            if ! git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/heads/$QWEN_CODE_REF_INPUT"; then
+              git -C "$QWEN_CODE_SOURCE_ROOT" fetch --depth=1 origin "refs/tags/$QWEN_CODE_REF_INPUT"
+            fi
+          fi
+
+          git -C "$QWEN_CODE_SOURCE_ROOT" checkout --detach FETCH_HEAD
+          git config --global --add safe.directory "$QWEN_CODE_SOURCE_ROOT"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -213,7 +232,7 @@ jobs:
 
       - name: Install Qwen Code source dependencies
         if: ${{ inputs.qwen_code_source == 'source_branch' }}
-        working-directory: qwen-code-source
+        working-directory: ${{ runner.temp }}/qwen-code-source
         run: npm ci
 
       - name: Bump desktop version
@@ -227,7 +246,7 @@ jobs:
         env:
           QWEN_CODE_REF_INPUT: ${{ inputs.qwen_code_ref }}
           QWEN_CODE_SOURCE_INPUT: ${{ inputs.qwen_code_source }}
-          QWEN_CODE_SOURCE_ROOT: ${{ github.workspace }}/qwen-code-source
+          QWEN_CODE_SOURCE_ROOT: ${{ runner.temp }}/qwen-code-source
           QWEN_CODE_VERSION_INPUT: ${{ inputs.qwen_code_version }}
         run: |
           set -euo pipefail
