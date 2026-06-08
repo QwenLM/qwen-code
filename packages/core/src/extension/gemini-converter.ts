@@ -25,6 +25,9 @@ export interface GeminiExtensionConfig {
   mcpServers?: Record<string, unknown>;
   contextFileName?: string | string[];
   settings?: ExtensionSetting[];
+  agents?: string | string[];
+  skills?: string | string[];
+  commands?: string | string[];
 }
 
 /**
@@ -47,13 +50,16 @@ export function convertGeminiToQwenConfig(
 
   const settings: ExtensionSetting[] | undefined = geminiConfig.settings;
 
-  // Direct field mapping
+  // Direct field mapping, including auto-detected fields
   return {
     name: geminiConfig.name,
     version: geminiConfig.version,
     mcpServers: geminiConfig.mcpServers as ExtensionConfig['mcpServers'],
     contextFileName: geminiConfig.contextFileName,
     settings,
+    agents: geminiConfig.agents,
+    skills: geminiConfig.skills,
+    commands: geminiConfig.commands,
   };
 }
 
@@ -63,6 +69,7 @@ export function convertGeminiToQwenConfig(
  * 1. Converted qwen-extension.json
  * 2. Commands converted from TOML to MD
  * 3. All other files/folders preserved
+ * 4. Auto-detected agents/skills/commands directory references
  *
  * @param extensionDir Path to the Gemini extension directory
  * @returns Object containing converted config and the temporary directory path
@@ -85,7 +92,38 @@ export async function convertGeminiExtensionPackage(
       await convertCommandsDirectory(commandsDir);
     }
 
-    // Step 3: Create qwen-extension.json with converted config
+    // Step 3: Auto-detect and add agents/skills/commands directory references
+    // if they exist but are not declared in the config
+    const agentsDir = path.join(tmpDir, 'agents');
+    const skillsDir = path.join(tmpDir, 'skills');
+    const commandsDirAfterConvert = path.join(tmpDir, 'commands');
+
+    if (fs.existsSync(agentsDir) && !geminiConfig.agents) {
+      geminiConfig.agents = 'agents';
+      debugLogger.info(
+        `Auto-detected agents directory at ${agentsDir}, adding to config`,
+      );
+    }
+
+    if (fs.existsSync(skillsDir) && !geminiConfig.skills) {
+      geminiConfig.skills = 'skills';
+      debugLogger.info(
+        `Auto-detected skills directory at ${skillsDir}, adding to config`,
+      );
+    }
+
+    if (
+      fs.existsSync(commandsDirAfterConvert) &&
+      !geminiConfig.commands &&
+      fs.readdirSync(commandsDirAfterConvert).length > 0
+    ) {
+      geminiConfig.commands = 'commands';
+      debugLogger.info(
+        `Auto-detected commands directory at ${commandsDirAfterConvert}, adding to config`,
+      );
+    }
+
+    // Step 4: Create qwen-extension.json with converted config
     const qwenConfigPath = path.join(tmpDir, 'qwen-extension.json');
     fs.writeFileSync(
       qwenConfigPath,
