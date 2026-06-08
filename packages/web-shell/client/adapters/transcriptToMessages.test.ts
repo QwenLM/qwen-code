@@ -1189,7 +1189,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('renders pending subagent permission blocks as agent tools', () => {
+  it('does not render pending permission blocks as tool messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
         id: 'perm-agent-1',
@@ -1239,27 +1239,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       },
     ]);
 
-    expect(messages).toHaveLength(2);
-    const agentA =
-      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    const agentB =
-      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
-    expect(agentA).toMatchObject({
-      callId: 'agent-call-1',
-      toolName: 'agent',
-      status: 'pending',
-      title: '查询阿里云官网活动',
-      args: {
-        description: '查询阿里云官网活动',
-        subagent_type: 'general-purpose',
-      },
-    });
-    expect(agentB).toMatchObject({
-      callId: 'agent-call-2',
-      toolName: 'agent',
-      status: 'pending',
-      title: '查询百度云官网活动',
-    });
+    expect(messages).toEqual([]);
   });
 
   it('merges the real subagent tool update after a permission block', () => {

@@ -296,6 +296,10 @@ export function transcriptBlocksToDaemonMessages(
         const permissionToolCall = permissionBlockToToolCall(permBlock);
         if (!permissionToolCall) break;
         const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
+        // Pending permissions are rendered by the dedicated permission UI.
+        if (!permBlock.resolved) {
+          break;
+        }
 
         const existingPermission = toolsByCallId.get(permissionToolCall.callId);
         if (existingPermission) {
@@ -347,10 +351,6 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        // Unresolved: render as pending agent awaiting approval.
-        appendToolCallMessage(messages, block.id, permissionToolCall);
-        toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
-        needsNewContentMessage = true;
         break;
       }
 
