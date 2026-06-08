@@ -17,6 +17,7 @@ export interface PushPayload {
   summary: string; // <=140
   url: string; // '/ui/?session=<id>'
   requestId?: string; // present for permission.required
+  approveOptionId?: string; // opaque option id for inline approve; not sensitive
 }
 
 const MAX_SUMMARY = 140;
@@ -55,6 +56,8 @@ export function buildPayload(
         str(data.toolName) ||
         'a tool call';
       const requestId = str(data.requestId);
+      const options = data.options as Array<{ optionId?: unknown }> | undefined;
+      const approveOptionId = str(options?.[0]?.optionId);
       return {
         v: 1,
         kind: 'permission.required',
@@ -63,6 +66,7 @@ export function buildPayload(
         summary: truncate('Permission needed: ' + toolName),
         url: sessionUrl(ctx.sessionId),
         ...(requestId ? { requestId } : {}),
+        ...(approveOptionId ? { approveOptionId } : {}),
       };
     }
     default:

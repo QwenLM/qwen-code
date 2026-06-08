@@ -75,6 +75,34 @@ describe('buildPayload', () => {
     expect(JSON.stringify(p)).not.toContain(SECRET);
   });
 
+  it('carries approveOptionId from the first option; omits it when absent; never leaks args', () => {
+    const SECRET = 'SUPER-SECRET-API-KEY-9f3a';
+    const withOptions = buildPayload(
+      {
+        type: 'permission_request',
+        data: {
+          toolCall: {
+            name: 'run_shell_command',
+            args: { command: `curl -H "auth: ${SECRET}"`, path: '/etc/passwd' },
+          },
+          requestId: 'req-12',
+          options: [{ optionId: 'opt-allow' }, { optionId: 'opt-deny' }],
+        },
+      },
+      { sessionId: 's6' },
+    );
+    expect(withOptions!.approveOptionId).toBe('opt-allow');
+    expect(JSON.stringify(withOptions)).not.toContain(SECRET);
+    expect(JSON.stringify(withOptions)).not.toContain('/etc/passwd');
+
+    const noOptions = buildPayload(
+      { type: 'permission_request', data: { requestId: 'req-13' } },
+      { sessionId: 's7' },
+    );
+    expect(noOptions!.approveOptionId).toBeUndefined();
+    expect('approveOptionId' in noOptions!).toBe(false);
+  });
+
   it('encodes the sessionId in the url', () => {
     const p = buildPayload(
       { type: 'permission_request', data: {} },
