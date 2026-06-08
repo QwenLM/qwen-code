@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
@@ -108,7 +109,43 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    '打开技能面板（浏览、搜索、启停、选择）。',
+  // SkillsManagerDialog (`/skills` 弹出的面板)
+  'Manage Skills': '管理技能',
+  'Skills configuration saved.': '技能配置已保存。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    '技能配置已保存，但刷新失败：{{error}}。请重启以确保新状态生效。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    '当前工作区未受信任，工作区设置会被合并配置忽略。请先执行 /trust，或直接编辑 ~/.qwen/settings.json 在用户范围管理技能。',
+  'SkillManager not available.': 'SkillManager 不可用。',
+  'Loading skills…': '正在加载技能…',
+  'Failed to load skills: {{error}}': '加载技能失败：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    '保存技能配置失败：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    '所有可用技能均已禁用。请编辑 ~/.qwen/settings.json 或 .qwen/settings.json（skills.disabled）以重新启用。',
+  'Press esc to close.': '按 Esc 关闭。',
+  '{{count}} skills · ': '{{count}} 个技能 · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} 个技能 · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    '空格 启停 · 回车 选中(填入输入框) · Esc 保存并退出 · 工作区范围',
+  'Search:': '搜索：',
+  'type to filter…': '输入以过滤…',
+  'No skills are currently available.': '当前没有可用的技能。',
+  'All available skills are locked at a higher scope (see below).':
+    '所有可用技能都被更高范围锁定（详见下方）。',
+  'No skills match the search.': '没有匹配搜索的技能。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '被更高范围设置锁定（此处无法切换）：',
+  'higher scope': '更高范围',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [已锁定：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 导航 · 退格 编辑搜索',
+  // Note: Project / User / Extension are already translated elsewhere in
+  // this file. `Bundled` is new — only the SkillsManagerDialog uses it
+  // as a level label so far.
+  Bundled: '内置',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
@@ -184,8 +221,8 @@ export default {
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '连接 LLM 提供商',
-  'Copy the last result or code snippet to clipboard':
-    '将最后的结果或代码片段复制到剪贴板',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '将最近的 AI 回复复制到剪贴板（/copy N 复制倒数第 N 条）',
   'Show working-tree change stats versus HEAD':
     '显示工作区相对 HEAD 的变更统计',
   'Could not determine current working directory.': '无法确定当前工作目录。',
@@ -451,7 +488,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
-  Default: '默认',
+  'Ask permissions': '请求授权',
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
@@ -701,6 +738,7 @@ export default {
   'After tool execution fails': '工具执行失败后',
   'When notifications are sent': '发送通知时',
   'When the user submits a prompt': '用户提交提示时',
+  'When a slash command expands into a prompt': '斜杠命令展开为提示时',
   'When a new session is started': '新会话开始时',
   'Right before Qwen Code concludes its response': 'Qwen Code 结束响应之前',
   'When a subagent (Agent tool call) is started':
@@ -722,6 +760,8 @@ export default {
     '命令输入为包含通知消息和类型的 JSON。',
   'Input to command is JSON with original user prompt text.':
     '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':
     '命令输入为包含会话启动来源的 JSON。',
   'Input to command is JSON with session end reason.':
@@ -749,6 +789,8 @@ export default {
     '仅向用户显示 stderr 但继续工具调用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止处理，擦除原始提示，仅向用户显示 stderr',
+  'block expanded prompt submission and show stderr to user only':
+    '阻止提交展开后的提示，并仅向用户显示 stderr',
   'stdout shown to Qwen': '向 Qwen 显示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '仅向用户显示 stderr（忽略阻塞错误）',
@@ -837,12 +879,13 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': '工具审批模式',
-  '{{mode}} mode': '{{mode}} 模式',
   'Analyze only, do not modify files or execute commands':
     '仅分析，不修改文件或执行命令',
   'Require approval for file edits or shell commands':
     '需要批准文件编辑或 shell 命令',
   'Automatically approve file edits': '自动批准文件编辑',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分类器自动批准安全的工具调用',
   'Automatically approve all tools': '自动批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
@@ -1720,6 +1763,18 @@ export default {
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '将独立安装回滚到上一个版本',
+  'Rollback is not available in ACP mode.': '回滚在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滚仅适用于独立安装。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滚成功。请重启终端以使用上一个版本。',
+  'Rollback failed:': '回滚失败：',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滚需要手动操作。请将安装目录中的 qwen-code.old 重命名为 qwen-code。',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

@@ -11,6 +11,7 @@ import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
 import { FORCE_ENCRYPTED_FILE_ENV_VAR } from './token-storage/index.js';
 import type { OAuthCredentials, OAuthToken } from './token-storage/types.js';
 import { QWEN_DIR } from '../utils/paths.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 // Mock debugLogger
 const mockDebugLogger = vi.hoisted(() => ({
@@ -31,6 +32,10 @@ vi.mock('node:fs', () => ({
     mkdir: vi.fn(),
     unlink: vi.fn(),
   },
+}));
+
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
 }));
 
 vi.mock('node:path', () => ({
@@ -142,7 +147,7 @@ describe('MCPOAuthTokenStorage', () => {
       it('should save token with restricted permissions', async () => {
         vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
         vi.mocked(fs.mkdir).mockResolvedValue(undefined);
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         await tokenStorage.saveToken(
           'test-server',
@@ -155,10 +160,10 @@ describe('MCPOAuthTokenStorage', () => {
           path.join('/mock/home', QWEN_DIR),
           { recursive: true },
         );
-        expect(fs.writeFile).toHaveBeenCalledWith(
+        expect(atomicWriteFile).toHaveBeenCalledWith(
           path.join('/mock/home', QWEN_DIR, 'mcp-oauth-tokens.json'),
           expect.stringContaining('test-server'),
-          { mode: 0o600 },
+          { mode: 0o600, forceMode: true, noFollow: true },
         );
       });
 
@@ -170,7 +175,7 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockResolvedValue(
           JSON.stringify([existingCredentials]),
         );
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         const newToken: OAuthToken = {
           ...mockToken,
@@ -178,7 +183,7 @@ describe('MCPOAuthTokenStorage', () => {
         };
         await tokenStorage.saveToken('existing-server', newToken);
 
-        const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+        const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
         const savedData = JSON.parse(
           writeCall[1] as string,
         ) as OAuthCredentials[];
@@ -192,7 +197,7 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
         vi.mocked(fs.mkdir).mockResolvedValue(undefined);
         const writeError = new Error('Disk full');
-        vi.mocked(fs.writeFile).mockRejectedValue(writeError);
+        vi.mocked(atomicWriteFile).mockRejectedValue(writeError);
 
         await expect(
           tokenStorage.saveToken('test-server', mockToken),
@@ -247,11 +252,11 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockResolvedValue(
           JSON.stringify([credentials1, credentials2]),
         );
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         await tokenStorage.deleteCredentials('server1');
 
-        const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+        const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
         const savedData = JSON.parse(writeCall[1] as string);
 
         expect(savedData).toHaveLength(1);
@@ -269,7 +274,7 @@ describe('MCPOAuthTokenStorage', () => {
         expect(fs.unlink).toHaveBeenCalledWith(
           path.join('/mock/home', QWEN_DIR, 'mcp-oauth-tokens.json'),
         );
-        expect(fs.writeFile).not.toHaveBeenCalled();
+        expect(atomicWriteFile).not.toHaveBeenCalled();
       });
 
       it('should handle removal of non-existent token gracefully', async () => {
@@ -279,7 +284,7 @@ describe('MCPOAuthTokenStorage', () => {
 
         await tokenStorage.deleteCredentials('non-existent');
 
-        expect(fs.writeFile).not.toHaveBeenCalled();
+        expect(atomicWriteFile).not.toHaveBeenCalled();
         expect(fs.unlink).not.toHaveBeenCalled();
       });
 

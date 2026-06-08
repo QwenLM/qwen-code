@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFileSync } from './atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('INSTALLATION');
@@ -32,7 +33,9 @@ export class InstallationManager {
     const installationIdFile = this.getInstallationIdPath();
     const dir = path.dirname(installationIdFile);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(installationIdFile, installationId, 'utf-8');
+    atomicWriteFileSync(installationIdFile, installationId, {
+      encoding: 'utf-8',
+    });
   }
 
   /**

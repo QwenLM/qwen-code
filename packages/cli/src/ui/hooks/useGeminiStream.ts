@@ -1164,11 +1164,15 @@ export const useGeminiStream = (
           'Response stopped due to malformed function call.',
         [FinishReason.IMAGE_SAFETY]:
           'Response stopped due to image safety violations.',
-        [FinishReason.UNEXPECTED_TOOL_CALL]:
-          'Response stopped due to unexpected tool call.',
         [FinishReason.IMAGE_PROHIBITED_CONTENT]:
           'Response stopped due to image prohibited content.',
+        [FinishReason.IMAGE_RECITATION]:
+          'Response stopped due to image recitation policy.',
+        [FinishReason.IMAGE_OTHER]:
+          'Response stopped due to other image-related reasons.',
         [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
+        [FinishReason.UNEXPECTED_TOOL_CALL]:
+          'Response stopped due to unexpected tool call.',
       };
 
       const message = finishReasonMessages[finishReason];
@@ -1853,6 +1857,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1878,7 +1883,9 @@ export const useGeminiStream = (
           const onComplete = submitPromptOnCompleteRef.current;
           if (onComplete) {
             submitPromptOnCompleteRef.current = null;
-            void onComplete();
+            void onComplete().catch((err) => {
+              debugLogger.error('onComplete callback failed:', err);
+            });
           }
 
           // After the turn completes, wire up notifications for any background
@@ -1918,6 +1925,7 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          submitPromptOnCompleteRef.current = null;
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
         }

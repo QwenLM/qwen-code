@@ -21,6 +21,7 @@ import { SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PromptRequest,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
@@ -188,11 +189,21 @@ describe('Session', () => {
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
+    recordNotification: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+  };
+  let mockBackgroundTaskRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+  };
+  let mockMonitorRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+  };
+  let mockBackgroundShellRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
@@ -226,20 +237,27 @@ describe('Session', () => {
         compressionStatus: core.CompressionStatus.NOOP,
       }),
     };
+    mockBackgroundTaskRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
+    mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
+    mockBackgroundShellRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
+      recordNotification: vi.fn(),
       rewindRecording: vi.fn(),
     };
 
     mockToolRegistry = {
       getTool: vi.fn(),
-      // #executePrompt → #buildInitialSystemReminders calls
-      // getToolRegistry().ensureTool(ToolNames.AGENT) on every session.prompt(),
-      // so the default mock must provide it (#1151 / #3479).
       ensureTool: vi.fn().mockResolvedValue(true),
     };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
@@ -261,12 +279,6 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
-      // #buildInitialSystemReminders iterates listSubagents() on every
-      // session.prompt(). Default to an empty list so tests that don't
-      // exercise subagent reminders don't need to stub it (#1151 / #3479).
-      getSubagentManager: vi.fn().mockReturnValue({
-        listSubagents: vi.fn().mockResolvedValue([]),
-      }),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
@@ -277,6 +289,13 @@ describe('Session', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getBackgroundTaskRegistry: vi
+        .fn()
+        .mockReturnValue(mockBackgroundTaskRegistry),
+      getBackgroundShellRegistry: vi
+        .fn()
+        .mockReturnValue(mockBackgroundShellRegistry),
+      getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
     } as unknown as Config;
 
     mockClient = {
@@ -423,18 +442,41 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
+    it('rejects rewinds while a notification prompt is processing', () => {
+      (
+        session as unknown as { notificationProcessing: boolean }
+      ).notificationProcessing = true;
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a notification abort controller is active', () => {
+      (
+        session as unknown as { notificationAbortController: AbortController }
+      ).notificationAbortController = new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
     it('restores a captured history snapshot', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       const snapshot = session.captureHistorySnapshot();
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
       expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a prompt is running', () => {
@@ -460,6 +502,28 @@ describe('Session', () => {
       (
         session as unknown as { cronAbortController: AbortController }
       ).cronAbortController = new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a notification prompt is processing', () => {
+      (
+        session as unknown as { notificationProcessing: boolean }
+      ).notificationProcessing = true;
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a notification abort controller is active', () => {
+      (
+        session as unknown as { notificationAbortController: AbortController }
+      ).notificationAbortController = new AbortController();
 
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
@@ -798,6 +862,529 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('drains background task notifications through ACP after the prompt is idle', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'I saw the background result.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "worker" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        expect.stringMatching(/^test-session-id########notification\d+$/),
+      );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [
+          {
+            text: '<task-notification><status>completed</status></task-notification>',
+          },
+        ],
+        'Background agent "worker" completed.',
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background agent "worker" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              toolUseId: 'tool-1',
+            },
+          },
+        },
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'I saw the background result.' },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'agent-1',
+              status: 'completed',
+              kind: 'agent',
+              toolUseId: 'tool-1',
+            },
+          },
+        },
+      });
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        '_qwencode/end_turn',
+        {
+          sessionId: 'test-session-id',
+          reason: 'end_turn',
+          source: 'background_notification',
+        },
+      );
+    });
+
+    it('cancels an in-flight background notification prompt', async () => {
+      const notificationCompression = {
+        signal: undefined as AbortSignal | undefined,
+      };
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockResolvedValueOnce({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: core.CompressionStatus.NOOP,
+        })
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationCompression.signal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: core.CompressionStatus.NOOP,
+            };
+          },
+        );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+      });
+
+      await session.cancelPendingPrompt();
+
+      expect(notificationCompression.signal?.aborted).toBe(true);
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'cancelled',
+            source: 'background_notification',
+          },
+        );
+      });
+    });
+
+    it('aborts an in-flight background notification before accepting a user prompt', async () => {
+      const noopCompression = {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      };
+      let notificationSignal: AbortSignal | undefined;
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockResolvedValueOnce(noopCompression)
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationSignal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return noopCompression;
+          },
+        )
+        .mockResolvedValue(noopCompression);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(notificationSignal).toBeDefined();
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'interrupt notification' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(notificationSignal?.aborted).toBe(true);
+    });
+
+    it('drops oldest background notifications when the queue reaches its cap', () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      for (let index = 0; index < 25; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(queued).toHaveLength(20);
+      expect(queued[0]?.taskId).toBe('agent-5');
+      expect(queued.at(-1)?.taskId).toBe('agent-24');
+    });
+
+    it('emits end_turn even when notification error display fails', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockRejectedValueOnce(new Error('notification blew up'));
+      mockClient.sessionUpdate = vi.fn().mockImplementation(async (params) => {
+        const text = (
+          (params as SessionNotification).update as {
+            content?: { text?: string };
+          }
+        )?.content?.text;
+        if (text?.includes('[notification error]')) {
+          throw new Error('display failed');
+        }
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            content: expect.objectContaining({
+              text: expect.stringContaining('[notification error]'),
+            }),
+          }),
+        });
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          {
+            sessionId: 'test-session-id',
+            reason: 'end_turn',
+            source: 'background_notification',
+          },
+        );
+      });
+    });
+
+    it('flushes notification rewrite metadata even without usage metadata', async () => {
+      const flushTurn = vi.fn().mockResolvedValue(undefined);
+      const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
+      const interceptUpdate = vi.fn().mockResolvedValue(undefined);
+      session.messageRewriter = {
+        interceptUpdate,
+        flushTurn,
+        waitForPendingRewrites,
+      } as unknown as Session['messageRewriter'];
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'notification response' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() => {
+        expect(flushTurn).toHaveBeenCalled();
+      });
+    });
+
+    it('does not enqueue running monitor notifications for model follow-up', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Monitor "dev server" event #1: ready',
+        '<task-notification><status>running</status></task-notification>',
+        {
+          monitorId: 'monitor-1',
+          status: 'running',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          _meta: expect.objectContaining({
+            backgroundTask: expect.objectContaining({
+              taskId: 'monitor-1',
+              status: 'running',
+            }),
+          }),
+        }),
+      });
+    });
+
+    it('drains background shell notifications through ACP after the prompt is idle', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'The shell finished successfully.' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      callback(
+        'Background shell "npm test" completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        {
+          shellId: 'shell-1',
+          status: 'completed',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              text: '<task-notification><kind>shell</kind></task-notification>',
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        expect.stringMatching(/^test-session-id########notification\d+$/),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background shell "npm test" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'shell-1',
+              status: 'completed',
+              kind: 'shell',
+              toolUseId: undefined,
+            },
+          },
+        },
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'The shell finished successfully.',
+          },
+          _meta: {
+            source: 'background_notification_response',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'shell-1',
+              status: 'completed',
+              kind: 'shell',
+              toolUseId: undefined,
+            },
+          },
+        },
+      });
+    });
+
     it('continues ACP prompt ids after replaying resumed history', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -3184,20 +3771,7 @@ describe('Session', () => {
         return capture;
       };
 
-      const stubEmptySubagents = () => {
-        (mockConfig as unknown as Record<string, unknown>)[
-          'getSubagentManager'
-        ] = vi.fn().mockReturnValue({
-          listSubagents: vi.fn().mockResolvedValue([]),
-        });
-        // ensureTool is called on the result of getToolRegistry(); add it.
-        (
-          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
-        ).ensureTool = vi.fn().mockResolvedValue(true);
-      };
-
       it('prepends plan-mode reminder when approval mode is PLAN (#1151)', async () => {
-        stubEmptySubagents();
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         const capture = captureFirstTurnMessage();
 
@@ -3220,7 +3794,6 @@ describe('Session', () => {
       });
 
       it('does not prepend plan-mode reminder in default approval mode', async () => {
-        stubEmptySubagents();
         mockConfig.getApprovalMode = vi
           .fn()
           .mockReturnValue(ApprovalMode.DEFAULT);
@@ -3236,40 +3809,111 @@ describe('Session', () => {
         );
         expect(hasPlanReminder).toBe(false);
       });
+    });
+  });
 
-      it('prepends subagent reminder when user-level subagents exist', async () => {
-        (mockConfig as unknown as Record<string, unknown>)[
-          'getSubagentManager'
-        ] = vi.fn().mockReturnValue({
-          listSubagents: vi.fn().mockResolvedValue([
-            { name: 'researcher', level: 'user' },
-            { name: 'planner', level: 'project' },
-            // builtin entries are filtered out, matching client.ts:853.
-            { name: 'builtin-helper', level: 'builtin' },
-          ]),
-        });
-        (
-          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
-        ).ensureTool = vi.fn().mockResolvedValue(true);
-        mockConfig.getApprovalMode = vi
-          .fn()
-          .mockReturnValue(ApprovalMode.DEFAULT);
-        const capture = captureFirstTurnMessage();
+  describe('dispose', () => {
+    type SessionInternals = {
+      notificationQueue: unknown[];
+      cronQueue: string[];
+      notificationProcessing: boolean;
+      disposed: boolean;
+    };
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hi' }],
-        });
+    it('clears notification and cron queues, marks disposed, and unregisters callbacks', () => {
+      const internals = session as unknown as SessionInternals;
+      internals.notificationQueue.push({ taskId: 'stale' });
+      internals.cronQueue.push('stale-cron-prompt');
+      internals.notificationProcessing = true;
+      expect(internals.disposed).toBe(false);
 
-        const reminder = capture.parts.find(
-          (p) =>
-            p.text &&
-            p.text.includes('researcher') &&
-            p.text.includes('planner'),
-        );
-        expect(reminder).toBeTruthy();
-        expect(reminder!.text).not.toContain('builtin-helper');
-      });
+      session.dispose();
+
+      expect(internals.disposed).toBe(true);
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.cronQueue).toHaveLength(0);
+      expect(internals.notificationProcessing).toBe(false);
+      expect(
+        mockBackgroundTaskRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockMonitorRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenLastCalledWith(undefined);
+    });
+
+    it('aborts an active notificationAbortController and nulls the reference', () => {
+      type NotificationInternals = {
+        notificationAbortController: AbortController | null;
+      };
+      const internals = session as unknown as NotificationInternals;
+      const ac = new AbortController();
+      internals.notificationAbortController = ac;
+
+      session.dispose();
+
+      expect(ac.signal.aborted).toBe(true);
+      expect(internals.notificationAbortController).toBeNull();
+    });
+
+    it('aborts cronAbortController and resets cron state on dispose', () => {
+      type CronInternals = {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+        cronCompletion: Promise<void> | null;
+      };
+      const internals = session as unknown as CronInternals;
+      const ac = new AbortController();
+      internals.cronAbortController = ac;
+      internals.cronProcessing = true;
+      internals.cronCompletion = Promise.resolve();
+
+      session.dispose();
+
+      expect(ac.signal.aborted).toBe(true);
+      expect(internals.cronAbortController).toBeNull();
+      expect(internals.cronProcessing).toBe(false);
+      expect(internals.cronCompletion).toBeNull();
+    });
+
+    it('is idempotent — repeated dispose() calls do not throw or re-register', () => {
+      const internals = session as unknown as SessionInternals;
+      session.dispose();
+      const callsAfterFirst =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length;
+
+      expect(() => session.dispose()).not.toThrow();
+      expect(internals.disposed).toBe(true);
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.cronQueue).toHaveLength(0);
+      // The second dispose still unregisters (passes undefined again), which
+      // is harmless. We only care that no surprise re-registration occurs.
+      const last =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(-1);
+      expect(last?.[0]).toBeUndefined();
+      expect(
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length,
+      ).toBeGreaterThanOrEqual(callsAfterFirst);
+    });
+
+    it('guards #drainNotificationQueue from processing after dispose', () => {
+      type DrainInternals = {
+        disposed: boolean;
+        notificationQueue: unknown[];
+        notificationProcessing: boolean;
+      };
+      const internals = session as unknown as DrainInternals;
+
+      // Simulate a queued notification, then dispose before drain runs
+      internals.notificationQueue.push({ taskId: 'late-arrival' });
+      session.dispose();
+
+      // After dispose, the queue is cleared and processing is stopped
+      expect(internals.notificationQueue).toHaveLength(0);
+      expect(internals.notificationProcessing).toBe(false);
+      expect(internals.disposed).toBe(true);
     });
   });
 });

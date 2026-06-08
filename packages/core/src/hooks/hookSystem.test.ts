@@ -87,12 +87,14 @@ describe('HookSystem', () => {
 
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
+      fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
       firePreToolUseEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
       firePostToolUseFailureEvent: vi.fn(),
+      firePostToolBatchEvent: vi.fn(),
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
@@ -228,6 +230,16 @@ describe('HookSystem', () => {
 
       expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
         'UserPromptSubmit',
+      );
+    });
+
+    it('should check the correct event name for UserPromptExpansion', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('UserPromptExpansion');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptExpansion',
       );
     });
 
@@ -430,6 +442,86 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('Some additional context');
+    });
+  });
+
+  describe('fireUserPromptExpansionEvent', () => {
+    it('should fire UserPromptExpansion event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).toHaveBeenCalledWith(
+        'goal',
+        'write tests',
+        'expanded prompt',
+        undefined,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should return DefaultHookOutput with blocking decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Blocked by policy',
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeUndefined();
     });
   });
 
@@ -842,6 +934,59 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.systemMessage).toBe('Tool executed successfully');
+    });
+  });
+
+  describe('firePostToolBatchEvent', () => {
+    it('should fire PostToolBatch event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolBatch',
+            additionalContext: 'batch context',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const toolCalls = [
+        {
+          tool_name: 'read_file',
+          tool_input: { path: 'README.md' },
+          tool_use_id: 'call-1',
+          status: 'success' as const,
+          tool_response: { output: 'contents' },
+        },
+      ];
+      const result = await hookSystem.firePostToolBatchEvent(toolCalls);
+
+      expect(mockHookEventHandler.firePostToolBatchEvent).toHaveBeenCalledWith(
+        toolCalls,
+        PermissionMode.Default,
+        undefined,
+      );
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('batch context');
+    });
+
+    it('should return undefined when no final output', async () => {
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue({
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      });
+
+      const result = await hookSystem.firePostToolBatchEvent([]);
+
+      expect(result).toBeUndefined();
     });
   });
 

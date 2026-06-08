@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell-Modus',
   'YOLO mode': 'YOLO-Modus',
+  'Auto mode': 'Auto-Modus',
   'plan mode': 'Planungsmodus',
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
   'Accepting edits': 'Änderungen werden akzeptiert',
@@ -90,7 +91,41 @@ export default {
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
-  'List available skills.': 'Verfügbare Skills auflisten.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Skills-Panel öffnen (durchsuchen, suchen, ein/aus, auswählen).',
+  'Manage Skills': 'Skills verwalten',
+  'Skills configuration saved.': 'Skills-Konfiguration gespeichert.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Skills-Konfiguration gespeichert, aber Aktualisierung fehlgeschlagen: {{error}}. Bitte neu starten, um den neuen Zustand zu übernehmen.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'Arbeitsbereich ist nicht vertrauenswürdig; Arbeitsbereichseinstellungen werden in der zusammengeführten Konfiguration ignoriert. Führe zuerst /trust aus oder bearbeite ~/.qwen/settings.json direkt, um Skills auf Benutzerebene zu verwalten.',
+  'SkillManager not available.': 'SkillManager nicht verfügbar.',
+  'Loading skills…': 'Skills werden geladen…',
+  'Failed to load skills: {{error}}':
+    'Skills konnten nicht geladen werden: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'Speichern der Skill-Konfiguration fehlgeschlagen: {{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Alle verfügbaren Skills sind deaktiviert. Bearbeite ~/.qwen/settings.json oder .qwen/settings.json (skills.disabled), um sie wieder zu aktivieren.',
+  'Press esc to close.': 'Esc drücken, um zu schließen.',
+  '{{count}} skills · ': '{{count}} Skills · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} Skills · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Leertaste umschalten · Enter auswählen (in Eingabe) · Esc speichern & beenden · Arbeitsbereich',
+  'Search:': 'Suche:',
+  'type to filter…': 'Tippen zum Filtern…',
+  'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
+  'All available skills are locked at a higher scope (see below).':
+    'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
+  'No skills match the search.': 'Keine Skills passen zur Suche.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'higher scope': 'höhere Ebene',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [gesperrt: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navigieren · Rücktaste bearbeitet Suche',
+  Bundled: 'Mitgeliefert',
   'Available Qwen Code CLI tools:': 'Verfügbare Qwen Code CLI-Werkzeuge:',
   'No tools available': 'Keine Werkzeuge verfügbar',
   'View or change the approval mode for tool usage':
@@ -170,8 +205,8 @@ export default {
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'Connect an LLM provider': 'LLM-Anbieter verbinden',
-  'Copy the last result or code snippet to clipboard':
-    'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für die N-letzte)',
 
   // ============================================================================
   // Commands - Agents
@@ -381,7 +416,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Standard',
+  'Ask permissions': 'Berechtigung anfragen',
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
@@ -653,6 +688,8 @@ export default {
   'After tool execution fails': 'Wenn die Tool-Ausführung fehlschlägt',
   'When notifications are sent': 'Wenn Benachrichtigungen gesendet werden',
   'When the user submits a prompt': 'Wenn der Benutzer einen Prompt absendet',
+  'When a slash command expands into a prompt':
+    'Wenn ein Slash-Befehl zu einem Prompt erweitert wird',
   'When a new session is started': 'Wenn eine neue Sitzung gestartet wird',
   'Right before Qwen Code concludes its response':
     'Direkt bevor Qwen Code seine Antwort abschließt',
@@ -679,6 +716,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
   'Input to command is JSON with original user prompt text.':
     'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
     'Die Eingabe an den Befehl ist JSON mit der Sitzungsstart-Quelle.',
   'Input to command is JSON with session end reason.':
@@ -707,6 +746,8 @@ export default {
     'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
   'block processing, erase original prompt, and show stderr to user only':
     'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
+  'block expanded prompt submission and show stderr to user only':
+    'Einreichen des erweiterten Prompts blockieren und stderr nur dem Benutzer anzeigen',
   'stdout shown to Qwen': 'stdout dem Qwen anzeigen',
   'show stderr to user only (blocking errors ignored)':
     'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',
@@ -802,13 +843,14 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Werkzeug-Genehmigungsmodus',
-  '{{mode}} mode': '{{mode}}-Modus',
   'Analyze only, do not modify files or execute commands':
     'Nur analysieren, keine Dateien ändern oder Befehle ausführen',
   'Require approval for file edits or shell commands':
     'Genehmigung für Dateibearbeitungen oder Shell-Befehle erforderlich',
   'Automatically approve file edits':
     'Dateibearbeitungen automatisch genehmigen',
+  'Use classifier to automatically approve safe tool calls':
+    'Klassifikator verwenden, um sichere Werkzeugaufrufe automatisch zu genehmigen',
   'Automatically approve all tools': 'Alle Werkzeuge automatisch genehmigen',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',

@@ -66,6 +66,11 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(3);
     });
 
+    it('should return exit codes for UserPromptExpansion event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.UserPromptExpansion);
+      expect(exitCodes).toHaveLength(3);
+    });
+
     it('should return exit codes for Notification event', () => {
       const exitCodes = getHookExitCodes(HookEventName.Notification);
       expect(exitCodes).toHaveLength(2);
@@ -131,6 +136,11 @@ describe('hooks constants', () => {
     it('should return description for UserPromptSubmit', () => {
       const desc = getHookShortDescription(HookEventName.UserPromptSubmit);
       expect(desc).toBe('When the user submits a prompt');
+    });
+
+    it('should return description for UserPromptExpansion', () => {
+      const desc = getHookShortDescription(HookEventName.UserPromptExpansion);
+      expect(desc).toBe('When a slash command expands into a prompt');
     });
 
     it('should return description for SessionStart', () => {
@@ -231,8 +241,10 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUseFailure);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolBatch);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.Notification);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptSubmit);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptExpansion);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionEnd);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStart);
@@ -245,8 +257,10 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
     });
 
-    it('should have 17 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(17);
+    it('should include every hook event', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(
+        Object.values(HookEventName).length,
+      );
     });
   });
 
@@ -259,6 +273,7 @@ describe('hooks constants', () => {
       expect(supportsMatchers(HookEventName.Notification)).toBe(true);
       expect(supportsMatchers(HookEventName.SessionStart)).toBe(true);
       expect(supportsMatchers(HookEventName.SessionEnd)).toBe(true);
+      expect(supportsMatchers(HookEventName.UserPromptExpansion)).toBe(true);
       expect(supportsMatchers(HookEventName.SubagentStart)).toBe(true);
       expect(supportsMatchers(HookEventName.SubagentStop)).toBe(true);
       expect(supportsMatchers(HookEventName.PreCompact)).toBe(true);
@@ -268,6 +283,7 @@ describe('hooks constants', () => {
 
     it('returns false for events without matchers', () => {
       expect(supportsMatchers(HookEventName.Stop)).toBe(false);
+      expect(supportsMatchers(HookEventName.PostToolBatch)).toBe(false);
       expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);
