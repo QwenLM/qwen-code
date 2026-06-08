@@ -1084,7 +1084,7 @@ describe('ChatCompressionService', () => {
       debug: vi.fn(),
     });
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: '中'.repeat(Math.ceil(COMPACT_MAX_OUTPUT_TOKENS / 1.5)),
+      text: '\u4e00'.repeat(Math.ceil(COMPACT_MAX_OUTPUT_TOKENS / 1.5)),
       usage: undefined,
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
