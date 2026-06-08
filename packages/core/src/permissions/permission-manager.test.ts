@@ -144,7 +144,7 @@ describe('parseRule', () => {
     expect(r.specifierKind).toBeUndefined();
   });
 
-  it('parses Bash alias (Claude Code compat)', async () => {
+  it('parses Bash alias', async () => {
     const r = parseRule('Bash');
     expect(r.toolName).toBe('run_shell_command');
   });
@@ -517,7 +517,7 @@ describe('resolvePathPattern', () => {
   });
 
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
-    // This is a gotcha from the Claude Code docs
+    // Leading slash patterns are project-root relative.
     expect(resolvePathPattern('/Users/alice/file', projectRoot, cwd)).toBe(
       '/project/Users/alice/file',
     );
@@ -2455,5 +2455,207 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
     pm.initialize();
     expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
     expect(pm.getStrippedDangerousRules()).toBeUndefined();
+  });
+});
+
+// ─── Compound shell + cd + wrapper → virtual-op rule matching ───────────────
+//
+// Regression coverage for compound shell writes reaching protected paths
+// through `cd` and shell wrappers.
+
+describe('PermissionManager — compound shell write attribution', () => {
+  it('deny rule matches a write after `cd` into a subdir', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && echo '{}' > settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ask rule matches a write through nested shell wrappers', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.mcp.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'bash -lc "sh -c \'echo hi > .mcp.json\'"',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('allow rule on the same shell command does NOT downgrade a virtual-op deny', async () => {
+    // The Bash allow rule covers the literal command, but the cross-command
+    // virtual-op pass surfaces the write target and the deny rule on
+    // .qwen/settings.json escalates the verdict. Allow + virtual-op deny
+    // → deny, matching the "deny > ask > allow" priority.
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd src && bash -lc 'echo ok > generated.txt'",
+        cwd: '/repo',
+      }),
+    ).toBe(false);
+  });
+
+  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasMatchingAskRule({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
+  it('escalates dynamic-cd writes when path-specific deny rules may apply', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
+
+  it('preserves wildcard deny rules for dynamic-cd writes', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(*)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
   });
 });

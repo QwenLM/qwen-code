@@ -33,6 +33,7 @@ import {
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
@@ -49,6 +50,7 @@ import {
   logMalformedJsonResponse,
   logFileOperation,
   logRipgrepFallback,
+  logSkillLaunch,
   logToolOutputTruncated,
   logExtensionEnable,
   logExtensionDisable,
@@ -56,6 +58,7 @@ import {
   logExtensionUninstall,
   logHookCall,
   logApiError,
+  logApiRetry,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
@@ -69,6 +72,7 @@ import {
   ToolCallEvent,
   UserPromptEvent,
   RipgrepFallbackEvent,
+  SkillLaunchEvent,
   MalformedJsonResponseEvent,
   makeChatCompressionEvent,
   FileOperationEvent,
@@ -79,6 +83,7 @@ import {
   ExtensionUninstallEvent,
   HookCallEvent,
   ApiErrorEvent,
+  ApiRetryEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -574,6 +579,53 @@ describe('loggers', () => {
           error: 'rg not found',
         }),
       );
+    });
+  });
+
+  describe('logSkillLaunch', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logSkillLaunchEvent');
+    });
+
+    it('forwards the event to QwenLogger and emits an OTLP record', () => {
+      const event = new SkillLaunchEvent('test-skill', true, 'prompt-id-42');
+
+      logSkillLaunch(mockConfig, event);
+
+      expect(QwenLogger.prototype.logSkillLaunchEvent).toHaveBeenCalledWith(
+        event,
+      );
+
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      expect(emittedEvent.body).toBe(
+        'Skill launch: test-skill. Success: true.',
+      );
+      expect(emittedEvent.attributes).toEqual(
+        expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_SKILL_LAUNCH,
+          skill_name: 'test-skill',
+          success: true,
+          prompt_id: 'prompt-id-42',
+        }),
+      );
+    });
+
+    it('forwards to QwenLogger even when OTLP SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = new SkillLaunchEvent('another-skill', false, 'prompt-id-7');
+
+      logSkillLaunch(mockConfig, event);
+
+      expect(QwenLogger.prototype.logSkillLaunchEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
     });
   });
 
@@ -1642,6 +1694,88 @@ describe('loggers', () => {
       expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledTimes(1);
       const passedEvent = mockQwenLogger.logHookCallEvent.mock.calls[0][0];
       expect(passedEvent).toBe(event);
+    });
+  });
+
+  // Phase 4b — logApiRetry: HTTP-status retry telemetry from retryWithBackoff.
+  describe('logApiRetry (Phase 4b)', () => {
+    const mockQwenLogger = {
+      logApiRetryEvent: vi.fn(),
+    };
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger, 'getInstance').mockReturnValue(
+        mockQwenLogger as unknown as QwenLogger,
+      );
+      mockQwenLogger.logApiRetryEvent.mockClear();
+      vi.spyOn(metrics, 'recordApiRetry');
+    });
+
+    function buildEvent(
+      overrides: Partial<{
+        model: string;
+        promptId: string;
+        attemptNumber: number;
+        status: number;
+        delay: number;
+        errorMsg: string;
+        subagentName: string;
+      }> = {},
+    ): ApiRetryEvent {
+      const err = new Error(overrides.errorMsg ?? 'rate limited');
+      return new ApiRetryEvent({
+        model: overrides.model ?? 'qwen3',
+        promptId: overrides.promptId ?? 'p-1',
+        attemptNumber: overrides.attemptNumber ?? 2,
+        error: err,
+        statusCode: overrides.status ?? 429,
+        retryDelayMs: overrides.delay ?? 1500,
+        subagentName: overrides.subagentName,
+      });
+    }
+
+    it('fans out to all 3 sinks: QwenLogger, OTel log, and metric counter', () => {
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent();
+      logApiRetry(mockConfig, event);
+
+      // 1. QwenLogger RUM
+      expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
+      // 2. OTel log signal — picked up by LogToSpanProcessor to bridge as span
+      expect(mockLogger.emit).toHaveBeenCalledTimes(1);
+      const logRecord = mockLogger.emit.mock.calls[0][0];
+      expect(logRecord.body).toContain('API retry attempt 2');
+      expect(logRecord.body).toContain('qwen3');
+      expect(logRecord.body).toContain('status 429');
+      expect(logRecord.attributes['event.name']).toBe('qwen-code.api_retry');
+      expect(logRecord.attributes['attempt_number']).toBe(2);
+      expect(logRecord.attributes['retry_delay_ms']).toBe(1500);
+      expect(logRecord.attributes['status_code']).toBe(429);
+      expect(logRecord.attributes['model']).toBe('qwen3');
+      // 3. Metric counter — tagged with {model}
+      expect(metrics.recordApiRetry).toHaveBeenCalledWith(mockConfig, {
+        model: 'qwen3',
+      });
+    });
+
+    it('propagates subagent_name when present', () => {
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent({ subagentName: 'explore-agent' });
+      logApiRetry(mockConfig, event);
+
+      const logRecord = mockLogger.emit.mock.calls[0][0];
+      expect(logRecord.attributes['subagent_name']).toBe('explore-agent');
+    });
+
+    it('skips logger.emit and metric counter when SDK is not initialized (QwenLogger still called)', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = buildEvent();
+      logApiRetry(mockConfig, event);
+
+      expect(mockQwenLogger.logApiRetryEvent).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+      expect(metrics.recordApiRetry).not.toHaveBeenCalled();
     });
   });
 });

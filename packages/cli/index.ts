@@ -11,6 +11,11 @@ import { initStartupProfiler } from './src/utils/startupProfiler.js';
 // Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
 
+import { initCpuProfiler } from './src/utils/cpuProfiler.js';
+// Initialize early to register SIGUSR1 handler and start recording when
+// QWEN_CODE_CPU_PROFILE=1, capturing as much of the startup as possible.
+initCpuProfiler();
+
 import './src/gemini.js';
 import { main } from './src/gemini.js';
 import { FatalError } from '@qwen-code/qwen-code-core';

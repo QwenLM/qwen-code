@@ -20,7 +20,7 @@ import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
@@ -30,8 +30,13 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
-  const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines, useThemeColors } = useStatusLine();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const {
+    lines: statusLineLines,
+    useThemeColors,
+    respectUserColors,
+    hideContextIndicator,
+  } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -83,6 +88,8 @@ export const Footer: React.FC = () => {
     </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
+  ) : vimEnabled && vimMode === 'NORMAL' ? (
+    <Text color={theme.text.secondary}>-- NORMAL --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
   ) : configInitMessage ? (
@@ -113,7 +120,7 @@ export const Footer: React.FC = () => {
   // alongside the other background-task kinds. The previous `✦ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
-  if (promptTokenCount > 0 && contextWindowSize) {
+  if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
     rightItems.push({
       key: 'context',
       node: (
@@ -153,8 +160,14 @@ export const Footer: React.FC = () => {
           statusLineLines.map((line, i) => (
             <Text
               key={`status-line-${i}`}
-              color={useThemeColors ? theme.text.accent : undefined}
-              dimColor={!useThemeColors}
+              color={
+                respectUserColors
+                  ? undefined
+                  : useThemeColors
+                    ? theme.text.accent
+                    : undefined
+              }
+              dimColor={respectUserColors ? false : !useThemeColors}
               wrap="truncate"
             >
               {line}

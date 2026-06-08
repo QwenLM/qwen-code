@@ -50,6 +50,97 @@ describe('ConsentPrompt', () => {
     );
   });
 
+  it('passes a constrained height to MarkdownDisplay when terminal height is limited', () => {
+    const prompt = 'Are you sure?';
+    render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={12}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 5,
+      },
+      undefined,
+    );
+  });
+
+  it('shows a truncation notice when the prompt is reduced to one row', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={8}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 1,
+      },
+      undefined,
+    );
+    expect(lastFrame()).toContain('Content truncated');
+  });
+
+  it('shows a truncation notice at the two-row prompt boundary', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={9}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 1,
+      },
+      undefined,
+    );
+    expect(lastFrame()).toContain('Content truncated');
+  });
+
+  it('does not show a truncation notice at the three-row prompt boundary', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={10}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 3,
+      },
+      undefined,
+    );
+    expect(lastFrame()).not.toContain('Content truncated');
+  });
+
   it('renders a ReactNode prompt directly', () => {
     const prompt = <Text>Are you sure?</Text>;
     const { lastFrame } = render(

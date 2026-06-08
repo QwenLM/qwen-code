@@ -45,6 +45,7 @@ import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
+import { getApprovalModePromptStyle } from '../approvalModeVisuals.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -243,14 +244,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
-  const isYolo = agentApprovalMode === ApprovalMode.YOLO;
-  const isAutoAccept = agentApprovalMode !== ApprovalMode.DEFAULT;
-
-  const statusColor = isYolo
-    ? theme.status.errorDim
-    : isAutoAccept
-      ? theme.status.warningDim
-      : undefined;
+  const approvalModePromptStyle = getApprovalModePromptStyle(agentApprovalMode);
+  const statusColor = approvalModePromptStyle.color;
 
   const inputBorderColor =
     !isInputActive || agentTabBarFocused
@@ -258,8 +253,11 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       : (statusColor ?? theme.border.focused);
 
   const prefixNode = (
-    <Text color={statusColor ?? theme.text.accent}>{isYolo ? '*' : '>'} </Text>
+    <Text color={statusColor ?? theme.text.accent}>
+      {approvalModePromptStyle.prefix}{' '}
+    </Text>
   );
+  const prefixWidth = 2; // "> " or "* " = 2 chars
 
   return (
     <StreamingContext.Provider value={streamingState}>
@@ -292,6 +290,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           showCursor={isInputActive && !agentTabBarFocused}
           placeholder={'  ' + t('Send a message to this agent')}
           prefix={prefixNode}
+          prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
           isActive={isInputActive && !agentShellFocused}
         />

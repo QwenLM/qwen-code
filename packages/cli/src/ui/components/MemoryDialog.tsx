@@ -114,14 +114,20 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const [focusedSection, setFocusedSection] = useState<
     'autoMemory' | 'autoDream' | 'autoSkill' | 'list'
   >('list');
+  // Read the initial toggle state from the live merged settings rather than
+  // the Config snapshot: Config is frozen at startup and never reflects a
+  // setValue() write, so reopening the dialog would otherwise show stale state.
+  const bareMode = config.getBareMode();
+  const readToggle = (value: boolean | undefined): boolean =>
+    !bareMode && (value ?? true);
   const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
-    config.getManagedAutoMemoryEnabled(),
+    readToggle(loadedSettings.merged.memory?.enableManagedAutoMemory),
   );
   const [autoDreamOn, setAutoDreamOn] = useState(() =>
-    config.getManagedAutoDreamEnabled(),
+    readToggle(loadedSettings.merged.memory?.enableManagedAutoDream),
   );
   const [autoSkillOn, setAutoSkillOn] = useState(() =>
-    config.getAutoSkillEnabled(),
+    readToggle(loadedSettings.merged.memory?.enableAutoSkill),
   );
   const [lastDreamAt, setLastDreamAt] = useState<number | null>(null);
 
