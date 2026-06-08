@@ -9,12 +9,15 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import { acquireSleepInhibitor, SleepInhibitor } from './sleepInhibitor.js';
 
-function createChild(): ChildProcess {
+function createChild(pid: number | undefined = 4242): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   let killed = false;
   Object.defineProperty(child, 'killed', {
     get: () => killed,
   });
+  // A real successful spawn has a numeric pid synchronously; a failed spawn
+  // (e.g. ENOENT) leaves it undefined. Tests pass `undefined` to model that.
+  child.pid = pid;
   child.kill = vi.fn(() => {
     killed = true;
     return true;
@@ -226,6 +229,7 @@ describe('SleepInhibitor', () => {
     const spawn = vi.fn(() => {
       const child = new EventEmitter() as ChildProcess;
       Object.defineProperty(child, 'killed', { get: () => false });
+      child.pid = 4242;
       child.kill = vi.fn(() => {
         throw new Error('ESRCH');
       });
@@ -241,6 +245,36 @@ describe('SleepInhibitor', () => {
       'Failed to stop sleep inhibitor: ESRCH',
     );
     expect(inhibitor.getActiveCount()).toBe(0);
+  });
+
+  it('does not kill a child whose spawn failed (no pid)', () => {
+    // Mimics the container sandbox: `systemd-inhibit` is absent, so the spawn
+    // rejects with ENOENT on the next tick and the child never gets a pid. If
+    // `stop()` (here via the synchronous release before the error event fires)
+    // called `kill()` on this pidless child, the kill would target the
+    // caller's own process group and deliver SIGTERM to this process, aborting
+    // the run. Releasing must therefore be a no-op for a pidless child.
+    const children: ChildProcess[] = [];
+    const spawn = vi.fn(() => {
+      // Pidless child: spawn returned but the process never started (ENOENT).
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, 'killed', { get: () => false });
+      child.pid = undefined;
+      child.kill = vi.fn(() => true);
+      children.push(child);
+      return child;
+    });
+    const logger = { debug: vi.fn(), warn: vi.fn() };
+    const inhibitor = new SleepInhibitor({ platform: 'linux', spawn, logger });
+
+    const handle = inhibitor.acquire('executing tool');
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    handle.release();
+
+    expect(children[0]!.kill).not.toHaveBeenCalled();
+    expect(inhibitor.getActiveCount()).toBe(0);
+    expect(inhibitor.isRunning()).toBe(false);
   });
 
   it('ignores a late error event from an already-replaced child', () => {
