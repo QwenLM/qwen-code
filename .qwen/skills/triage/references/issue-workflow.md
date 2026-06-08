@@ -157,8 +157,7 @@ For welcome-PR comments, use dual markers:
 3. Check welcome-PR readiness: product direction is `aligned`, implementation
    boundary is self-contained, acceptance criteria can be stated without a
    private maintainer decision.
-4. For `discuss` or when AI confidence is insufficient, route to
-   `maintainer-discussion`: @ the relevant domain maintainer, add
-   `need-discussion` + `status/ready-for-human`.
+4. For `discuss` or when AI confidence is insufficient, add
+   `need-discussion` + `status/ready-for-human` and ask maintainers to weigh in.
 5. Append verdict: accept for exploration, suggest a smaller alternative, or
    decline as out of direction.

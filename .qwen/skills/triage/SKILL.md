@@ -27,7 +27,7 @@ Examples:
 
 ## Resolve
 
-- Number: from arg or `ISSUE_NUMBER`/`PR_NUMBER` env
+- Number: from arg or `TARGET_NUMBER`/`ISSUE_NUMBER`/`PR_NUMBER` env
 - Repo: `--repo` → `REPOSITORY` → `GITHUB_REPOSITORY`
 
 If the target is a PR URL (`/pull/`), route to **PR Intake**. If it is an issue

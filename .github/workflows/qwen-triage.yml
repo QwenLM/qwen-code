@@ -16,7 +16,6 @@ permissions:
   contents: 'read'
   issues: 'write'
   pull-requests: 'write'
-  actions: 'write'
 
 jobs:
   triage:
@@ -29,7 +28,9 @@ jobs:
     # mention the phrase in quoted text or mid-sentence descriptions.
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
-        github.event_name == 'pull_request_target' ||
+        (github.event_name == 'pull_request_target' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.draft == false) ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
          startsWith(github.event.comment.body, '@qwen-code /triage') &&
