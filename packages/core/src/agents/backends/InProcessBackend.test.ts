@@ -425,8 +425,10 @@ describe('InProcessBackend', () => {
   });
 
   it('should pass parent custom ignore files to per-agent file service', async () => {
-    const parentConfig = createMockConfig();
-    const backendWithCustomIgnore = new InProcessBackend(parentConfig);
+    const parentConfig = createMockConfig() as unknown as {
+      getFileFilteringOptions: ReturnType<typeof vi.fn>;
+    };
+    const backendWithCustomIgnore = new InProcessBackend(parentConfig as never);
     await backendWithCustomIgnore.init();
 
     await backendWithCustomIgnore.spawnAgent(createSpawnConfig('agent-1'));
