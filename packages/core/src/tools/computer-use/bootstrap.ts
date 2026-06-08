@@ -10,20 +10,22 @@
  * On first invocation of any computer_use__* tool:
  *   1. If not yet approved: prompt the user to install (one-time).
  *   2. Start the client (lazy npx spawn, may take ~60s first time).
- *   3. On macOS only: probe permissions via the upstream `doctor` CLI
- *      (NOT via get_app_state, which has the side-effect of activating
- *      the target app — earlier rounds probed Finder this way and
- *      caused Finder to pop to the foreground at session start). The
- *      doctor command:
- *        - reads TCC + runtime preflight, prints
- *          "Permissions: accessibility=granted, screenRecording=missing"
- *          to stdout, then exits cleanly
- *        - launches the onboarding window via LaunchServices when any
- *          permission is missing — LaunchServices dedups so repeated
- *          invocations just bring the existing window to front
- *      We parse stdout for the probe result and rely on doctor's own
- *      window launching for the UX trigger — no separate spawnDoctor
- *      call needed.
+ *   3. On macOS only: probe permissions via the upstream CLI (NOT via
+ *      get_app_state, which has the side-effect of activating the target
+ *      app — earlier rounds probed Finder this way and caused Finder to
+ *      pop to the foreground at session start). Two distinct commands:
+ *        - `doctor` (initial probe, once): reads TCC + runtime preflight,
+ *          prints "Permissions: accessibility=..., screenRecording=..."
+ *          to stdout, AND launches the onboarding window when any
+ *          permission is missing. This is what shows the window — once.
+ *        - `permission-status` (poll probe): prints the same summary but
+ *          NEVER launches a window. The poll loop uses this so it does
+ *          not spawn a new onboarding window on every iteration.
+ *      `doctor` does NOT dedup its window — each invocation launches a
+ *      fresh one — so polling `doctor` flooded the screen with windows.
+ *      Probing the window-free `permission-status` in the loop fixes that
+ *      while keeping the "grant then auto-continue" UX.
+ *      Requires @qwen-code/open-computer-use >= 0.2.2 for permission-status.
  */
 
 import { execFile } from 'node:child_process';
@@ -39,6 +41,16 @@ const execFileAsync = promisify(execFile);
 export interface BootstrapContext {
   signal: AbortSignal;
   updateOutput?: (output: string) => void;
+  /**
+   * Treat the first-use install as pre-approved, skipping the
+   * promptInstallApproval gate. Set by the caller when the active approval
+   * mode auto-approves tool calls and bypasses ComputerUseTool's confirmation
+   * dialog (YOLO / AUTO_EDIT / AUTO): in those modes the dialog's onConfirm
+   * never records install approval, so without this flag the headless
+   * fallback below would refuse and throw "install declined by user". The
+   * approval is still persisted, so later interactive calls skip the prompt.
+   */
+  autoApproveInstall?: boolean;
 }
 
 /** Result of a permission probe. */
@@ -60,11 +72,20 @@ export interface BootstrapDeps {
    */
   promptInstallApproval: (packageSpec: string) => Promise<boolean>;
   /**
-   * Probe permissions by running the upstream doctor CLI and parsing
-   * its stdout summary. The probe itself triggers the onboarding window
-   * when permissions are missing — no separate spawnDoctor needed.
+   * Initial probe: runs `doctor`, which both reports status AND launches
+   * the onboarding window when permissions are missing. Called exactly
+   * once on a fresh client start so the onboarding window appears one time.
    */
   probePermissions: (packageSpec: string) => Promise<PermissionProbeResult>;
+  /**
+   * Poll probe: runs `permission-status`, which reports status WITHOUT
+   * launching the onboarding window. Called on every poll iteration while
+   * waiting for the user to grant permissions — using the window-free
+   * command here is what prevents the onboarding-window storm.
+   */
+  probePermissionStatus: (
+    packageSpec: string,
+  ) => Promise<PermissionProbeResult>;
   /** Poll interval for the permission watcher. Default 5000ms. */
   pollIntervalMs?: number;
   /** Total poll timeout. Default 10 min. */
@@ -134,6 +155,41 @@ export async function probePermissionsViaDoctor(
   }
 }
 
+/**
+ * Probe macOS permissions via the `permission-status` CLI command —
+ * the window-free counterpart to `doctor`.
+ *
+ * `permission-status` prints the SAME summary line as `doctor` but NEVER
+ * launches the onboarding window. This is the probe the polling loop uses
+ * while waiting for the user to grant permissions: `doctor` re-launches a
+ * fresh onboarding window on every invocation (it does not dedup), so
+ * polling it every few seconds floods the screen with windows. We launch
+ * the window exactly once (the initial `doctor` probe) and then poll this
+ * window-free command.
+ *
+ * Requires `@qwen-code/open-computer-use@>=0.2.2`. On older pinned packages
+ * the command is unknown → npx exits non-zero → we return 'other', which
+ * the poll loop treats as non-blocking (exits the wait; the real tool call
+ * then surfaces any permission error). No window storm either way.
+ */
+export async function probePermissionStatusViaCLI(
+  packageSpec: string,
+): Promise<PermissionProbeResult> {
+  try {
+    const { stdout } = await execFileAsync(
+      'npx',
+      ['-y', packageSpec, 'permission-status'],
+      {
+        timeout: 30000,
+        env: process.env as NodeJS.ProcessEnv,
+      },
+    );
+    return parseDoctorStdout(stdout);
+  } catch {
+    return 'other';
+  }
+}
+
 /** Production defaults — instantiated lazily so tests can override per call. */
 function defaultDeps(): BootstrapDeps {
   const packageSpec = resolveComputerUsePackageSpec();
@@ -153,6 +209,7 @@ function defaultDeps(): BootstrapDeps {
       return process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'] === '1';
     },
     probePermissions: probePermissionsViaDoctor,
+    probePermissionStatus: probePermissionStatusViaCLI,
   };
 }
 
@@ -168,12 +225,20 @@ export async function runBootstrap(
   // Step 1: install approval gate.
   const approved = await isPackageSpecApproved(deps.homeDir, deps.packageSpec);
   if (!approved) {
-    ctx.updateOutput?.('Computer Use needs to be installed (first use).');
-    const ok = await deps.promptInstallApproval(deps.packageSpec);
-    if (!ok) {
-      throw new Error(
-        `Computer Use install declined by user. Re-invoke the tool to be prompted again.`,
-      );
+    if (ctx.autoApproveInstall) {
+      // An auto-approve mode (YOLO / AUTO_EDIT / AUTO) already approved the
+      // tool call and bypassed the confirmation dialog whose onConfirm would
+      // have recorded approval, so honor that intent here instead of falling
+      // through to the headless prompt (which refuses and throws).
+      ctx.updateOutput?.('Computer Use install auto-approved (approval mode).');
+    } else {
+      ctx.updateOutput?.('Computer Use needs to be installed (first use).');
+      const ok = await deps.promptInstallApproval(deps.packageSpec);
+      if (!ok) {
+        throw new Error(
+          `Computer Use install declined by user. Re-invoke the tool to be prompted again.`,
+        );
+      }
     }
     await saveInstallState(deps.homeDir, {
       approvedPackageSpec: deps.packageSpec,
@@ -224,9 +289,11 @@ export async function runBootstrap(
   );
 
   // Track the last probe kind so we can emit a fresh message on
-  // transition (e.g. accessibility → screenRecording). LaunchServices
-  // dedup ensures each subsequent doctor poll re-focuses the existing
-  // window — no separate spawnDoctor call needed.
+  // transition (e.g. accessibility → screenRecording). The onboarding
+  // window was launched once by the initial `doctor` probe above; the
+  // poll loop below uses the window-free `permission-status` command so
+  // it never spawns additional windows while the single onboarding
+  // window stays open.
   let lastProbeKind: PermissionProbeResult = probe;
 
   const startedAt = Date.now();
@@ -240,7 +307,8 @@ export async function runBootstrap(
       );
     }
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    const next = await deps.probePermissions(deps.packageSpec);
+    // Window-free status check — see probePermissionStatusViaCLI.
+    const next = await deps.probePermissionStatus(deps.packageSpec);
     if (next === 'ok' || next === 'other') return;
 
     if (next !== lastProbeKind) {

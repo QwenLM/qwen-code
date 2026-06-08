@@ -174,10 +174,10 @@ export function compactToggleHasVisualEffect(
  * @param absorbedCallIds - Set of tool callIds whose summary label is consumed
  *   by a compact-mode tool_group header (i.e., the corresponding tool_group is
  *   NOT force-expanded). Summaries for these callIds are dropped from the
- *   merged result so MainContent's refreshStatic heuristic fires and the
- *   tool_group re-renders with its label. Summaries for force-expanded groups
- *   pass through unchanged so HistoryItemDisplay can render them as standalone
- *   `● <label>` lines (the compact path doesn't consume their label).
+ *   merged result so the compact header can display the label directly.
+ *   Summaries for force-expanded groups pass through unchanged so
+ *   HistoryItemDisplay can render them as standalone `● <label>` lines (the
+ *   compact path doesn't consume their label).
  * @returns New array with merged tool_groups (does not mutate input)
  */
 export function mergeCompactToolGroups(
@@ -195,11 +195,7 @@ export function mergeCompactToolGroups(
     // Drop `tool_use_summary` items whose preceding callIds are *all* absorbed
     // by a compact tool_group header. Those headers will display the label
     // directly (via the `compactLabel` lookup in MainContent), so keeping the
-    // standalone summary in the merged result would either double-display the
-    // label (if HistoryItemDisplay rendered both) or, more importantly, would
-    // bump mergedHistory.length lock-step with history.length and prevent
-    // refreshStatic from firing — Ink's <Static> would never repaint the
-    // committed tool_group with the new label.
+    // standalone summary in the merged result would double-display the label.
     //
     // Summaries with at least one non-absorbed preceding callId — e.g., when
     // the corresponding tool_group is force-expanded (errors / confirming /

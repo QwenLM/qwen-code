@@ -4301,6 +4301,56 @@ describe('InputPrompt', () => {
       expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
+
+    it('suppresses completion menu navigation for history-restored text until edited', async () => {
+      mockedUseCommandCompletion.mockReturnValue({
+        ...mockCommandCompletion,
+        showSuggestions: true,
+        suggestions: [
+          { label: 'clear', value: 'clear' },
+          { label: 'continuous-learning', value: 'continuous-learning' },
+        ],
+        activeSuggestionIndex: 0,
+      });
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!historyArgs) {
+        throw new Error('useInputHistory was not called');
+      }
+
+      await act(async () => {
+        historyArgs.onChange('/clear');
+      });
+      await wait();
+      mockBuffer.cursor = [0, 0];
+      mockBuffer.visualCursor = [0, 0];
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(false);
+
+      unmount();
+
+      mockedUseCommandCompletion.mockClear();
+      mockedUseInputHistory.mockClear();
+      mockBuffer.setText('/cle');
+      const { unmount: unmountEdited } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(true);
+      unmountEdited();
+    });
   });
 });
 function clean(str: string | undefined): string {

@@ -31,16 +31,18 @@ These commands help you save, restore, and summarize work progress.
 
 Commands for adjusting interface appearance and work environment.
 
-| Command      | Description                                                                                                                                                                       | Usage Examples                |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content                                                                                                                                                     | `/clear` (shortcut: `Ctrl+L`) |
-| `/context`   | Show context window usage breakdown                                                                                                                                               | `/context`                    |
-| → `detail`   | Show per-item context usage breakdown                                                                                                                                             | `/context detail`             |
-| `/diff`      | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                       |
-| `/theme`     | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor                                                                                                                                            | `/editor`                     |
+| Command              | Description                                                                                                                                                                       | Usage Examples                          |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `/clear`             | Clear terminal screen content                                                                                                                                                     | `/clear` (shortcut: `Ctrl+L`)           |
+| `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                              |
+| → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                       |
+| `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                 |
+| `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                |
+| `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                  |
+| `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`                |
+| `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                               |
+| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                           |
+| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch` |
 
 ### 1.3 Language Settings
 
@@ -266,17 +268,17 @@ In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-tex
 
 Commands for obtaining information and performing system settings.
 
-| Command         | Description                                     | Usage Examples                   |
-| --------------- | ----------------------------------------------- | -------------------------------- |
-| `/help`         | Display help information for available commands | `/help` or `/?`                  |
-| `/status`       | Display version information                     | `/status` or `/about`            |
-| `/status paths` | Display current session file and log paths      | `/status paths`                  |
-| `/stats`        | Display detailed statistics for current session | `/stats`                         |
-| `/settings`     | Open settings editor                            | `/settings`                      |
-| `/auth`         | Change authentication method                    | `/auth`                          |
-| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`         | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command         | Description                                                   | Usage Examples                   |
+| --------------- | ------------------------------------------------------------- | -------------------------------- |
+| `/help`         | Display help information for available commands               | `/help` or `/?`                  |
+| `/status`       | Display version information                                   | `/status` or `/about`            |
+| `/status paths` | Display current session file and log paths                    | `/status paths`                  |
+| `/stats`        | Display detailed statistics for current session               | `/stats`                         |
+| `/settings`     | Open settings editor                                          | `/settings`                      |
+| `/auth`         | Change authentication method                                  | `/auth`                          |
+| `/bug`          | Submit issue about Qwen Code                                  | `/bug Button click unresponsive` |
+| `/copy`         | Copy AI output to clipboard (`/copy N` = Nth-last AI message) | `/copy` or `/copy 2`             |
+| `/quit`         | Exit Qwen Code immediately                                    | `/quit` or `/exit`               |
 
 ### 1.10 Common Shortcuts
 
