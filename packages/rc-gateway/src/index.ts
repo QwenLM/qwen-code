@@ -52,3 +52,4 @@ export {
   type PushTransportResult,
   type PushSenderOptions,
 } from './webpush/sender.js';
+export { PushNotifier } from './webpush/notifier.js';
