@@ -99,6 +99,10 @@ export class SessionEventPump {
       this.workspaceCwd = '';
     }
     await this.reconcile();
+    // A concurrent stop() during the awaits above would not have seen a timer
+    // to clear (it's assigned below). Re-check so we don't install a live poll
+    // timer after stop() — honoring the "leaves no open handles" contract.
+    if (this.stopped) return;
     this.timer = this.setIntervalFn(() => {
       void this.reconcile();
     }, this.pollMs);
@@ -118,6 +122,8 @@ export class SessionEventPump {
       // Transient daemon error → try again next tick.
       return;
     }
+    // stop() may have landed during the await — don't spawn loops post-stop.
+    if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
       if (!this.loops.has(s.sessionId)) this.spawnLoop(s);
