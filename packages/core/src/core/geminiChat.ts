@@ -62,6 +62,7 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import { isSystemReminderContent } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
@@ -869,7 +870,7 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   let i = 0;
   while (i < length) {
     if (comprehensiveHistory[i].role === 'user') {
-      curatedHistory.push(comprehensiveHistory[i]);
+      appendCuratedContent(curatedHistory, comprehensiveHistory[i]);
       i++;
     } else {
       const modelOutput: Content[] = [];
@@ -887,6 +888,24 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
     }
   }
   return curatedHistory;
+}
+
+function appendCuratedContent(
+  curatedHistory: Content[],
+  content: Content,
+): void {
+  const lastIndex = curatedHistory.length - 1;
+  const lastContent = lastIndex >= 0 ? curatedHistory[lastIndex] : undefined;
+
+  if (content.role === 'user' && lastContent?.role === 'user') {
+    curatedHistory[lastIndex] = {
+      ...lastContent,
+      parts: [...(lastContent.parts ?? []), ...(content.parts ?? [])],
+    };
+    return;
+  }
+
+  curatedHistory.push(content);
 }
 
 function copyContentContainer(content: Content): Content {
@@ -2589,6 +2608,23 @@ export class GeminiChat {
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
+      // Never pop a *pure* system-reminder user entry. These are structural,
+      // not orphaned turns: the startup-context prelude (history[0]) and
+      // mid-history MCP added-tool reminders injected by
+      // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
+      // announcement permanently — pendingAddedMcpTools is already cleared and
+      // the tool name is already in announcedDeferredToolNames, so
+      // queueAddedMcpToolsReminder won't re-queue it.
+      //
+      // Must check EVERY part, not just parts[0]: a failed user turn in plan
+      // mode (or with subagent/memory reminders) is recorded as one Content
+      // whose parts are [<system-reminder>…, actual prompt]. Matching parts[0]
+      // alone would treat that as structural and preserve the user's prompt
+      // text, which then leaks into the next turn via appendCuratedContent.
+      const lastEntry = this.history[this.history.length - 1];
+      if (lastEntry && isSystemReminderContent(lastEntry)) {
+        break;
+      }
       this.history.pop();
     }
     // Today this is safe even without the reset — only trailing user

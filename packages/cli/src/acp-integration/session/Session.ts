@@ -55,7 +55,8 @@ import {
   MessageBusType,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
-  STARTUP_CONTEXT_MODEL_ACK,
+  getStartupContextLength,
+  isSystemReminderContent,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -517,7 +518,7 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = this.#hasStartupContext(apiHistory) ? 2 : 0;
+    const startIndex = getStartupContextLength(apiHistory);
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -539,18 +540,6 @@ export class Session implements SessionContext {
     return -1;
   }
 
-  #hasStartupContext(apiHistory: Content[]): boolean {
-    if (apiHistory.length < 2) return false;
-    const first = apiHistory[0];
-    const second = apiHistory[1];
-    if (first?.role !== 'user' || second?.role !== 'model') return false;
-    return (
-      second.parts?.some(
-        (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-      ) ?? false
-    );
-  }
-
   #isUserTextContent(content: Content): boolean {
     if (content.role !== 'user') return false;
     if (!content.parts || content.parts.length === 0) return false;
@@ -559,6 +548,14 @@ export class Session implements SessionContext {
       (part) => 'functionResponse' in part,
     );
     if (hasFunctionResponse) return false;
+
+    // Exclude pure <system-reminder> entries (the startup prelude and the
+    // mid-history MCP added-tool reminders). They are structural, not real
+    // user prompts; counting them would shift the rewind truncation index and
+    // silently drop a real turn. A genuine user turn that merely has a
+    // per-turn reminder prepended still has a non-reminder prompt part, so it
+    // is NOT excluded.
+    if (isSystemReminderContent(content)) return false;
 
     return content.parts.some((part) => 'text' in part && part.text);
   }

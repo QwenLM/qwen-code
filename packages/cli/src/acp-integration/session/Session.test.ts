@@ -15,7 +15,12 @@ import {
 } from './Session.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
+} from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type {
@@ -380,8 +385,14 @@ describe('Session', () => {
 
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
-        { role: 'user', parts: [{ text: 'startup context' }] },
-        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
@@ -390,8 +401,45 @@ describe('Session', () => {
 
       const result = session.rewindToTurn(0);
 
-      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
+    });
+
+    it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
+      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
+      // user entry mid-history. Counting it as a real turn would land the
+      // rewind one entry early, dropping the reminder plus a turn's context.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      const result = session.rewindToTurn(1);
+
+      // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
+      // the second prompt (index 4). Counting the reminder would return 3.
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 4 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
     });
 
     it('rejects unreachable user turns', () => {

@@ -1856,14 +1856,15 @@ export class Config {
       .then(async () => {
         // After background discovery completes, push the newly-registered
         // MCP tools into the active GeminiChat so the next model request
-        // sees them. Interactive mode also calls setTools() via
-        // AppContainer's batch-flush effect — this trailing call is
-        // idempotent there, but it's the ONLY path that updates
-        // `chat.tools` for non-interactive runs (no AppContainer).
+        // sees both the updated declarations and added-tool reminder deltas.
+        // Interactive mode also calls setTools() via AppContainer's
+        // batch-flush effect — this trailing call is idempotent there, but
+        // it's the ONLY path that updates `chat.tools` for non-interactive
+        // runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
         // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
-        // every MCP tool — a regression vs the legacy synchronous path.
+        // progressive MCP tools — a regression vs the legacy synchronous path.
         try {
           await this.geminiClient?.setTools();
         } catch (err) {
