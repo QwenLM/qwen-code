@@ -260,6 +260,13 @@ describe('gateway app', () => {
     expect(await res.text()).toContain('qwen-rc viewer');
   });
 
+  it('serves the push service worker at /ui/sw.js without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/sw.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/javascript/);
+  });
+
   it('404s unknown /ui assets', async () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/does-not-exist.js`);
