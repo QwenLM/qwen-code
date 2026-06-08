@@ -1,24 +1,17 @@
-import { appendFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { valid } from 'semver';
+import { appendFileSync } from 'node:fs';
 
-interface PackageVersionSource {
-  label: string;
-  path: string;
-}
+import {
+  desktopReleasePackageSources,
+  normalizeReleaseVersion,
+  readPackageVersion,
+  type PackageVersionSource,
+} from './desktop-release-version.ts';
 
 interface ParsedArgs {
   githubOutput?: string;
   githubSummary?: string;
   version?: string;
 }
-
-const repoRoot = join(import.meta.dir, '..');
-const packageVersionSources: PackageVersionSource[] = [
-  { label: 'root package', path: 'package.json' },
-  { label: 'Electron app package', path: 'apps/electron/package.json' },
-  { label: 'shared package', path: 'packages/shared/package.json' },
-];
 
 function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = {
@@ -56,51 +49,6 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return args;
-}
-
-function normalizeReleaseVersion(input: string): {
-  tag: string;
-  version: string;
-} {
-  const raw = input.trim();
-  if (!raw) {
-    throw new Error('Release version is required.');
-  }
-
-  const refPrefix = 'refs/tags/';
-  const tag = raw.startsWith(refPrefix) ? raw.slice(refPrefix.length) : raw;
-  const candidate = tag.startsWith('v') ? tag.slice(1) : tag;
-  const version = valid(candidate);
-
-  if (!version) {
-    throw new Error(
-      `Invalid release version "${input}". Use SemVer like 0.0.2 or v0.0.2.`,
-    );
-  }
-
-  if (version.includes('+')) {
-    throw new Error(
-      `Release version "${input}" includes build metadata, which is not supported for desktop releases.`,
-    );
-  }
-
-  return {
-    tag: `v${version}`,
-    version,
-  };
-}
-
-function readPackageVersion(path: string): string {
-  const absolutePath = join(repoRoot, path);
-  const packageJson = JSON.parse(readFileSync(absolutePath, 'utf-8')) as {
-    version?: unknown;
-  };
-
-  if (typeof packageJson.version !== 'string' || !packageJson.version.trim()) {
-    throw new Error(`${path} does not define a package version.`);
-  }
-
-  return packageJson.version.trim();
 }
 
 function appendGithubOutput(
@@ -153,7 +101,7 @@ function main(): void {
   }
 
   const { tag, version } = normalizeReleaseVersion(args.version);
-  const packageVersions = packageVersionSources.map((source) => ({
+  const packageVersions = desktopReleasePackageSources.map((source) => ({
     source,
     version: readPackageVersion(source.path),
   }));
