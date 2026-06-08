@@ -2343,9 +2343,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? ` by client ${JSON.stringify(originatorClientId)}`
           : ''),
     );
+    const reason = closeOpts?.reason ?? 'client_close';
     telemetry.event('session.close', {
       'qwen-code.daemon.bridge.operation': 'session.close',
       'session.id': sessionId,
+      'session.close.reason': reason,
     });
     if (defaultEntry === entry) defaultEntry = undefined;
     const ci = channelInfoForEntry(entry);
@@ -2364,7 +2366,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     ci?.client.markSessionClosed(sessionId);
-    const reason = closeOpts?.reason ?? 'client_close';
     try {
       entry.events.publish({
         type: 'session_closed',

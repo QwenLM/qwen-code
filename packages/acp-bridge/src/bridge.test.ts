@@ -9479,4 +9479,36 @@ describe('session idle reaper', () => {
       vi.useRealTimers();
     }
   });
+
+  it('triggers channel idle timer after reaping the last session', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 3_000,
+        channelIdleTimeoutMs: 2_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      // Reaper closes the session after 3s idle
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(bridge.sessionCount).toBe(0);
+      // Channel should still be alive — idle timer just started
+      expect(handle.killed).toBe(false);
+
+      // Channel idle timer fires after 2s more
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
