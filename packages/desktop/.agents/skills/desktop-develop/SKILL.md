@@ -1,6 +1,6 @@
 ---
 name: desktop-develop
-description: Develop, debug, and verify the qwen-code desktop/Electron app with an agent-readable harness. Use when working on packages/desktop, Electron renderer/main/preload code, desktop UI bugs, local desktop runtime failures, Chrome DevTools MCP investigation, desktop logs, messaging gateway issues, or when improving the development feedback loop for desktop features.
+description: Develop, debug, and verify the desktop/Electron app with an agent-readable harness. Use when working on packages/desktop, Electron renderer/main/preload code, desktop UI bugs, local desktop runtime failures, Chrome DevTools MCP investigation, desktop logs, messaging gateway issues, or when improving the development feedback loop for desktop features.
 ---
 
 # Desktop Development Harness
@@ -24,7 +24,6 @@ Important paths:
 - `~/Library/Logs/@craft-agent/electron/main.log`
 - `~/Library/Logs/@craft-agent/electron/main.old.log`
 - `~/.craft-agent/logs/messaging-gateway.log`
-- `~/Library/Logs/Qwen/main.log` for older Qwen app runs
 
 Search logs before guessing:
 

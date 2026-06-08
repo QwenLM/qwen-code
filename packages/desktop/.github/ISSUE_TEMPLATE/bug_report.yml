@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug or unexpected behavior in Craft Agents
+description: Report a bug or unexpected behavior in OpenWork
 labels: ["bug"]
 body:
   - type: markdown
@@ -10,7 +10,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Craft Agents Version
+      label: OpenWork Version
       description: "Found in Settings or the title bar (e.g. 0.4.6)"
       placeholder: "0.4.6"
     validations:
@@ -113,7 +113,7 @@ body:
       description: |
         For **non-UI issues** (crashes, errors, connection problems), please attach relevant logs from a debug session.
 
-        Launch the app with `-- --debug` and reproduce the issue. See the [Troubleshooting section in the README](https://github.com/lukilabs/craft-agents-oss#troubleshooting) for platform-specific commands and log file locations.
+        Launch the app with `-- --debug` and reproduce the issue.
       render: shell
 
   - type: textarea
