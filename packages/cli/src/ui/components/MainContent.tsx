@@ -266,6 +266,12 @@ export const MainContent = () => {
     (item: HistoryItem | HistoryItemWithoutId): string | undefined => {
       if (item.type !== 'tool_group' || item.tools.length === 0)
         return undefined;
+      // When merge is skipped (Static mode or compactInline), tool_groups
+      // render via the full ToolGroupMessage path which ignores compactLabel.
+      // The standalone `● <label>` line in HistoryItemDisplay is the label's
+      // only path to the screen. Suppress the header label to avoid
+      // double-display.
+      if (!uiState.useTerminalBuffer || compactInline) return undefined;
       // Look up ONLY the first tool's callId. A merged group concatenates
       // batch A (earliest calls) then batch B; earlier iterations scanned
       // all callIds and returned "first hit", but async resolution order
@@ -277,7 +283,7 @@ export const MainContent = () => {
       // default "Tool × N" rendering once the lookup misses).
       return summaryByCallId.get(item.tools[0].callId);
     },
-    [summaryByCallId],
+    [summaryByCallId, uiState.useTerminalBuffer, compactInline],
   );
 
   // Virtual viewport path short-circuits below before any of the

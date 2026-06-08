@@ -648,6 +648,77 @@ describe('<MainContent />', () => {
         .filter((id) => id === 1 || id === 2);
       expect(renderedIds).toEqual([1, 2]);
     });
+
+    it('preserves tool_use_summary as standalone line when merge is skipped (Static mode)', () => {
+      staticItemsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      // History with a tool_group followed by its tool_use_summary, then another tool_group.
+      // When merge is skipped (Static mode), absorbedCallIds returns EMPTY_ABSORBED_CALL_IDS
+      // so isSummaryAbsorbed returns false — the summary MUST pass through as a standalone
+      // item and render as `● <label>` line in HistoryItemDisplay.
+      const history = [
+        {
+          id: 1,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'a1',
+              name: 'bash',
+              description: 'run ls',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        {
+          id: 2,
+          type: 'tool_use_summary' as const,
+          precedingToolUseIds: ['a1'],
+          summary: 'Searched in auth/',
+        },
+        {
+          id: 3,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'b1',
+              name: 'bash',
+              description: 'run wc',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <CompactModeProvider
+            value={{ compactMode: true, compactInline: false }}
+          >
+            <UIActionsContext.Provider value={createUIActions()}>
+              <UIStateContext.Provider value={createUIState({ history })}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </UIStateContext.Provider>
+            </UIActionsContext.Provider>
+          </CompactModeProvider>
+        </AppContext.Provider>,
+      );
+
+      // 3 prefix items (header / debug / notifications) + 3 raw history items
+      // (tool_group + tool_use_summary + tool_group). The summary must NOT be dropped.
+      expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(6);
+      // Verify all three history item ids are present.
+      const renderedIds = historyItemDisplayPropsSpy.mock.calls
+        .map((call) => call[0].item.id)
+        .filter((id) => id === 1 || id === 2 || id === 3);
+      expect(renderedIds).toEqual([1, 2, 3]);
+    });
   });
 
   describe('virtual viewport path (ui.useTerminalBuffer)', () => {
