@@ -90,6 +90,35 @@ describe('convertClaudeAgentConfig', () => {
 
     expect(result['tools']).toEqual(['ReadFile', 'NotebookEdit', 'Edit']);
   });
+
+  it('should map Claude permissionMode to Qwen approvalMode via the shared bridge', () => {
+    const cases: Array<[string, string]> = [
+      ['default', 'default'],
+      ['plan', 'plan'],
+      ['acceptEdits', 'auto-edit'],
+      ['auto', 'auto-edit'],
+      ['bypassPermissions', 'yolo'],
+      // dontAsk preserves restrictive intent by mapping to default, not auto-edit.
+      ['dontAsk', 'default'],
+    ];
+    for (const [claudeMode, expectedQwenMode] of cases) {
+      const result = convertClaudeAgentConfig({
+        name: 'a',
+        description: 'd',
+        permissionMode: claudeMode,
+      });
+      expect(result['approvalMode']).toBe(expectedQwenMode);
+    }
+  });
+
+  it('should preserve unknown permissionMode verbatim for surface-on-import diagnostics', () => {
+    const result = convertClaudeAgentConfig({
+      name: 'a',
+      description: 'd',
+      permissionMode: 'mystery-mode',
+    });
+    expect(result['approvalMode']).toBe('mystery-mode');
+  });
 });
 
 describe('mergeClaudeConfigs', () => {

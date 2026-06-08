@@ -27,6 +27,10 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
+import {
+  parseStringOrArray,
+  permissionModeToApprovalMode,
+} from '../subagents/agent-frontmatter-schema.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -132,29 +136,6 @@ const claudeBuildInToolsTransform = (tools: string[]): string[] => {
 };
 
 /**
- * Parses a value that can be either a comma-separated string or an array.
- * Claude agent config can have tools like 'Glob, Grep, Read' or ['Glob', 'Grep', 'Read']
- * @param value The value to parse
- * @returns Array of strings or undefined
- */
-function parseStringOrArray(value: unknown): string[] | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (Array.isArray(value)) {
-    return value.map(String);
-  }
-  if (typeof value === 'string') {
-    // Split by comma and trim whitespace
-    return value
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  }
-  return undefined;
-}
-
-/**
  * Converts a Claude agent config to Qwen Code subagent format.
  * @param claudeAgent Claude agent configuration
  * @returns Converted agent config compatible with Qwen Code SubagentConfig
@@ -187,24 +168,14 @@ export function convertClaudeAgentConfig(
     qwenAgent['model'] = claudeAgent.model;
   }
 
-  // Map Claude permission mode aliases to Qwen ApprovalMode values.
-  // Note: Claude's `dontAsk` denies any tool call that would prompt the user,
-  // making it restrictive. We map it to `default` (which also requires approval)
-  // rather than `auto-edit` (which auto-approves), preserving the restrictive
-  // intent. `bypassPermissions` is the Claude mode that auto-approves everything.
+  // Map Claude permissionMode to Qwen ApprovalMode via the shared bridge in
+  // agent-frontmatter-schema.ts. Unknown values fall back to the raw string so
+  // the user sees an explicit "invalid approvalMode" downstream rather than
+  // silently dropping the field on import.
   if (claudeAgent.permissionMode) {
-    const claudeToQwenMode: Record<string, string> = {
-      default: 'default',
-      plan: 'plan',
-      acceptEdits: 'auto-edit',
-      dontAsk: 'default',
-      bypassPermissions: 'yolo',
-      auto: 'auto-edit',
-    };
-    const mapped =
-      claudeToQwenMode[claudeAgent.permissionMode] ??
+    qwenAgent['approvalMode'] =
+      permissionModeToApprovalMode(claudeAgent.permissionMode) ??
       claudeAgent.permissionMode;
-    qwenAgent['approvalMode'] = mapped;
   }
   if (claudeAgent.hooks) {
     qwenAgent['hooks'] = claudeAgent.hooks;
