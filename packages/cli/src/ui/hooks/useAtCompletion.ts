@@ -155,6 +155,11 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
   useEffect(() => {
     const initialize = async () => {
       try {
+        // Dispose previous instance to prevent worker thread leaks on
+        // re-initialization (cwd/config change triggers RESET → re-init).
+        await fileSearch.current?.dispose?.();
+        fileSearch.current = null;
+
         const searcher = FileSearchFactory.create({
           projectRoot: cwd,
           ignoreDirs: [],
@@ -238,6 +243,8 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       if (slowSearchTimer.current) {
         clearTimeout(slowSearchTimer.current);
       }
+      void fileSearch.current?.dispose?.();
+      fileSearch.current = null;
     };
   }, [state.status, state.pattern, config, cwd]);
 }

@@ -37,6 +37,7 @@ interface FindMessage {
   type: 'find';
   reqId: number;
   pattern: string;
+  limit?: number;
 }
 
 interface DisposeMessage {
@@ -84,7 +85,10 @@ port.on('message', (msg: IncomingMessage) => {
         // Strip the heavy `positions` Set from each item before sending —
         // structuredClone serialises Sets but the @-picker only needs the
         // ranked `item` strings. Keeps IPC payloads small on big result sets.
-        const trimmed = items.map((entry) => ({ item: entry.item }));
+        const limit = msg.limit ?? items.length;
+        const trimmed = items
+          .slice(0, limit)
+          .map((entry) => ({ item: entry.item }));
         port.postMessage({ type: 'result', reqId: msg.reqId, items: trimmed });
       })
       .catch((err: unknown) => {

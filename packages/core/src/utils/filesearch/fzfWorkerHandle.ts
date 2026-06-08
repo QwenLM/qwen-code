@@ -60,7 +60,7 @@ interface Transport {
 
 interface TransportInstance {
   ready(): Promise<void>;
-  find(pattern: string): Promise<Array<FzfResultItem<string>>>;
+  find(pattern: string, limit?: number): Promise<Array<FzfResultItem<string>>>;
   dispose(): Promise<void>;
 }
 
@@ -80,10 +80,11 @@ const inProcessTransport: Transport = {
       async ready() {
         if (constructError) throw constructError;
       },
-      async find(pattern) {
+      async find(pattern, limit?) {
         if (constructError) throw constructError;
         if (!fzf) throw new Error('fzf not initialized');
-        return fzf.find(pattern);
+        const results = await fzf.find(pattern);
+        return limit != null ? results.slice(0, limit) : results;
       },
       async dispose() {
         fzf = null;
@@ -245,12 +246,24 @@ const workerTransport: Transport = {
       ready() {
         return readyPromise;
       },
-      async find(pattern) {
+      async find(pattern, limit?) {
+        if (readyState === 'disposed') {
+          throw new Error('fzf worker disposed');
+        }
         await readyPromise;
         const reqId = nextReqId++;
         return new Promise<Array<FzfResultItem<string>>>((resolve, reject) => {
+          if (readyState === ('disposed' as typeof readyState)) {
+            reject(new Error('fzf worker disposed'));
+            return;
+          }
           pending.set(reqId, { resolve, reject });
-          worker.postMessage({ type: 'find', reqId, pattern });
+          try {
+            worker.postMessage({ type: 'find', reqId, pattern, limit });
+          } catch (err) {
+            pending.delete(reqId);
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
         });
       },
       async dispose() {
@@ -304,14 +317,33 @@ export class FzfWorkerHandle {
       transport = inProcessTransport;
     }
     const inst = transport.spawn(files, options);
-    // Surface init errors at create() time so callers don't get a "fzf not
-    // initialized" surprise on the first find().
-    await inst.ready();
+    try {
+      // Scale timeout with file count — large workspaces legitimately take
+      // longer to build the fzf index, but anything beyond this is a hang.
+      const timeoutMs = Math.max(10_000, files.length / 10);
+      await Promise.race([
+        inst.ready(),
+        new Promise<never>((_, rej) =>
+          setTimeout(
+            () =>
+              rej(
+                new Error(
+                  `fzf worker init timed out after ${timeoutMs}ms (${files.length} files)`,
+                ),
+              ),
+            timeoutMs,
+          ),
+        ),
+      ]);
+    } catch (err) {
+      await inst.dispose();
+      throw err;
+    }
     return new FzfWorkerHandle(inst);
   }
 
-  find(pattern: string): Promise<Array<FzfResultItem<string>>> {
-    return this.inst.find(pattern);
+  find(pattern: string, limit?: number): Promise<Array<FzfResultItem<string>>> {
+    return this.inst.find(pattern, limit);
   }
 
   dispose(): Promise<void> {

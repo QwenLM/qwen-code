@@ -163,8 +163,13 @@ class RecursiveFileSearch implements FileSearch {
       if (pattern.includes('*') || !this.fzf) {
         filteredCandidates = await filter(candidates, pattern, options.signal);
       } else {
+        // Pass a generous limit to the worker so results are trimmed before
+        // IPC serialization — avoids sending 50k+ entries across postMessage
+        // when only ~72 are displayed. The 200 cap leaves headroom for
+        // downstream ignore-filter to drop entries without starving results.
+        const fzfLimit = Math.max(200, (options.maxResults ?? 200) * 3);
         filteredCandidates = await this.fzf
-          .find(pattern)
+          .find(pattern, fzfLimit)
           .then((results: Array<FzfResultItem<string>>) =>
             results.map((entry: FzfResultItem<string>) => entry.item),
           )
