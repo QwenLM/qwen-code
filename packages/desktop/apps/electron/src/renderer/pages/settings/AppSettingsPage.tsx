@@ -7,7 +7,6 @@
  * - Notifications
  * - Network (proxy)
  * - Updates
- * - About (version)
  *
  * Note: AI settings (connections, model, thinking) have been moved to AiSettingsPage.
  * Note: Appearance settings (theme, font) have been moved to AppearanceSettingsPage.
@@ -394,19 +393,6 @@ export default function AppSettingsPage() {
                       </div>
                     </SettingsRow>
                   )}
-                </SettingsCard>
-              </SettingsSection>
-
-              {/* About */}
-              <SettingsSection title={t("settings.about.title")}>
-                <SettingsCard>
-                  <SettingsRow label={t("settings.about.version")}>
-                    <div className="flex items-center gap-2">
-                      <span className="text-muted-foreground">
-                        {APP_VERSION}
-                      </span>
-                    </div>
-                  </SettingsRow>
                 </SettingsCard>
               </SettingsSection>
             </div>
