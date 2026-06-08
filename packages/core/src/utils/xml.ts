@@ -141,8 +141,16 @@ export function escapeSystemReminderTags(text: string): string {
       break;
     }
 
+    const tag = text.slice(tagStart, tagEnd + 1);
+    const escapedTag = escapeSystemReminderTag(tag);
+    if (escapedTag === tag) {
+      escaped += text.slice(cursor, tagStart + 1);
+      cursor = tagStart + 1;
+      continue;
+    }
+
     escaped += text.slice(cursor, tagStart);
-    escaped += escapeSystemReminderTag(text.slice(tagStart, tagEnd + 1));
+    escaped += escapedTag;
     cursor = tagEnd + 1;
   }
 
