@@ -1156,7 +1156,12 @@ export class ExtensionManager {
             installScope,
             currentDir,
           );
-          await this.uninstallExtension(newExtensionName, isUpdate, currentDir);
+          await this.uninstallExtension(
+            newExtensionName,
+            isUpdate,
+            currentDir,
+            installScope,
+          );
         }
         await fs.promises.mkdir(destinationPath, { recursive: true });
 
