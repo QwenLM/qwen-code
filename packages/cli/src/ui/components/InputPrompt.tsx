@@ -1001,6 +1001,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
+          // On Enter, reset completion state after accepting the suggestion
+          // so the dropdown closes (important for @folder paths which
+          // don't append a trailing space by design). Without this, the
+          // @ completion pattern re-matches and re-shows the dropdown.
+          if (key.name === 'return') {
+            completion.resetCompletionState();
+          }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
           // matches BOTH Tab and Enter (see keyBindings.ts and the
           // identical caveat at lines 861-862). Without the

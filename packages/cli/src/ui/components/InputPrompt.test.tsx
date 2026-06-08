@@ -1872,6 +1872,70 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should reset completion state on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should accept the suggestion AND
+    // reset completion state so the dropdown closes (important for folder
+    // paths which don't append a trailing space by design).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Enter should accept the suggestion and reset completion state.
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should autocomplete @path on Tab without submitting or resetting completion', async () => {
+    // Tab means "complete the suggestion, do NOT execute". This is the
+    // standard shell convention. Completion state should NOT reset on Tab
+    // so the user can continue navigating deeper into directories.
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        {
+          label: 'src/components/',
+          value: 'src/components/',
+          isDirectory: true,
+        },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('@src/components/');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Tab should autocomplete but NOT submit and NOT reset completion.
+    stdin.write('\t');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
+    expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
