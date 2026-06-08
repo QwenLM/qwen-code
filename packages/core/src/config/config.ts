@@ -1881,9 +1881,13 @@ export class Config {
         { explicitOnly: this.getBareMode() },
       );
     if (this.getManagedAutoMemoryEnabled()) {
+      // User-level read is best-effort — an EACCES on
+      // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
+      // section out of the system prompt. Project-level read still bubbles
+      // (its failure is a real config-load problem).
       const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
         readAutoMemoryIndex(this.getProjectRoot()),
-        readUserAutoMemoryIndex(),
+        readUserAutoMemoryIndex().catch(() => null),
       ]);
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves

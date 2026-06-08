@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
@@ -34,6 +35,8 @@ import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACTION_AGENT');
 
 type MemoryScopedPermissionManager = Pick<
   PermissionManager,
@@ -228,9 +231,17 @@ function truncate(text: string, maxChars: number): string {
 }
 
 async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
+  // User-level scan is best-effort: a read failure on `~/.qwen/memories/`
+  // must not deny the extraction agent its view of existing project-level
+  // memories (which it uses to avoid creating duplicates).
   const [projectDocs, userDocs] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
-    scanUserAutoMemoryTopicDocuments(),
+    scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; extraction agent will see project-level summaries only: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }),
   ]);
 
   const renderDoc = (doc: (typeof projectDocs)[number], scope: string) => {

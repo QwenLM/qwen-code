@@ -191,43 +191,32 @@ export async function runAutoMemoryExtract(params: {
       params.sessionId,
       agentResult.touchedTopics,
     );
-    // Rebuild each touched scope independently. A throw on the user-level
-    // rebuild (e.g. EACCES on a read-only ~/.qwen/memories/) must not
-    // poison a successful project-level rebuild — that mirrors the same
-    // failure-isolation pattern the user-level scaffold uses above.
-    // Promise.allSettled gives both branches a chance to run and we log
-    // any rejections instead of bubbling them up.
-    const rebuilds: Array<{ scope: string; promise: Promise<unknown> }> = [];
-    if (agentResult.touchedProjectScope) {
-      rebuilds.push({
-        scope: 'project',
-        promise: rebuildManagedAutoMemoryIndex(params.projectRoot),
-      });
-    }
-    if (agentResult.touchedUserScope) {
-      rebuilds.push({
-        scope: 'user',
-        promise: rebuildUserAutoMemoryIndex(),
-      });
-    }
-    // Defensive: if neither flag was set (e.g. an older planner that did not
-    // populate the scope booleans), still refresh the project-level index so
-    // the old behavior is preserved.
-    if (rebuilds.length === 0) {
-      rebuilds.push({
-        scope: 'project',
-        promise: rebuildManagedAutoMemoryIndex(params.projectRoot),
-      });
-    }
-    const settled = await Promise.allSettled(rebuilds.map((r) => r.promise));
-    settled.forEach((result, idx) => {
-      if (result.status === 'rejected') {
-        const scope = rebuilds[idx]?.scope ?? 'unknown';
-        debugLogger.warn(
-          `Auto-memory ${scope}-level index rebuild failed (non-critical, other scopes unaffected): ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
-        );
-      }
-    });
+    // Asymmetric failure isolation:
+    //   * project-level rebuild MUST bubble its error up. The cursor advances
+    //     only after rebuilds complete; a project rebuild failure that gets
+    //     silently swallowed would leave the memory file written, the index
+    //     stale, AND the cursor advanced — the memory becomes un-recallable
+    //     until some later session happens to trigger another rebuild. The
+    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+    //     on next session) is the durability guarantee we must preserve.
+    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+    //     (EACCES) must not poison the project-level rebuild or block the
+    //     cursor. Catch + warn, same shape as the user-level scaffold above.
+    const projectRebuild =
+      agentResult.touchedProjectScope || !agentResult.touchedUserScope
+        ? // Either explicitly touched, or the defensive fallback when both
+          // scope flags were unset (e.g. older planner) — both paths must
+          // surface project-level rebuild failures.
+          rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve();
+    const userRebuild = agentResult.touchedUserScope
+      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+          debugLogger.warn(
+            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        })
+      : Promise.resolve();
+    await Promise.all([projectRebuild, userRebuild]);
   }
 
   const cursor: AutoMemoryExtractCursor = {

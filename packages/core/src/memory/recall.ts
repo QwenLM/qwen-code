@@ -164,14 +164,24 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<RelevantAutoMemoryPromptResult> {
   const t0 = Date.now();
+  // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
+  // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
+  // recall returns nothing at all for the rest of the session. Project-
+  // level scan failures still bubble — they're the only mandatory side.
   const [projectDocs, userDocs] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
-    scanUserAutoMemoryTopicDocuments(),
+    scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }),
   ]);
-  // Project-level docs come first so the stable sort in
-  // selectRelevantAutoMemoryDocuments breaks score+type ties in favour
-  // of the more-specific scope — matching the PR's "project shadows
-  // user" precedence. Reversing this order regresses recall ranking.
+  // Project-level docs come first as a soft hint to the model-based
+  // selector and, in the heuristic fallback (`selectRelevantAutoMemoryDocuments`),
+  // as the stable-sort tie-breaker — matching the PR's "project shadows
+  // user" precedence. The model selector ranks by its own judgement so
+  // this ordering is advisory there, not enforced.
   const docs = filterExcludedAutoMemoryDocuments(
     [...projectDocs, ...userDocs],
     options.excludedFilePaths,
