@@ -1,6 +1,6 @@
 ---
 name: desktop-develop
-description: Develop, debug, and verify the desktop/Electron app with an agent-readable harness. Use when working on packages/desktop, Electron renderer/main/preload code, desktop UI bugs, local desktop runtime failures, Chrome DevTools MCP investigation, desktop logs, messaging gateway issues, or when improving the development feedback loop for desktop features.
+description: Develop, debug, and verify the OpenWork desktop/Electron app with an agent-readable harness. Use when working on packages/desktop, Electron renderer/main/preload code, desktop UI bugs, local desktop runtime failures, Chrome DevTools MCP investigation, desktop logs, messaging gateway issues, or when improving the development feedback loop for desktop features.
 ---
 
 # Desktop Development Harness
