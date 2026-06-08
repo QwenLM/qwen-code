@@ -233,8 +233,18 @@ const navigateToCustomAdvancedConfig = async (
   );
 };
 
+const isTruthyEnv = (value: string | undefined) =>
+  value !== undefined &&
+  value !== '' &&
+  value !== '0' &&
+  value.toLowerCase() !== 'false';
+
+const isAoneRunner = process.cwd().startsWith('/aoneci/');
+
 const isUnreliableTuiInputEnvironment =
-  process.platform === 'win32' || process.env['CI'] === 'true';
+  process.platform === 'win32' ||
+  isTruthyEnv(process.env['CI']) ||
+  isAoneRunner;
 const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog', { timeout: 15000 }, () => {
@@ -569,7 +579,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   });
 
   // ---------------------------------------------------------------------------
-  // TUI input simulation tests — skipped on CI (process.env.CI=true)
+  // TUI input simulation tests — skipped on CI.
   // These tests use stdin.write() to simulate keyboard navigation through
   // multi-step UI flows. On slower CI runners the timing between simulated
   // key presses and React re-renders is unreliable, causing flaky failures.

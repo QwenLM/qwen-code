@@ -676,75 +676,82 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('invalid_agent_type');
   });
 
-  it('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
-    // Windows ignores Unix-style permission bits passed to
-    // `fs.chmod` — the user-agents directory stays writable, the
-    // unlink succeeds, and the partial-delete path this test
-    // exercises is unreachable. SubagentManager's `unlink` import
-    // (`import * as fs from 'fs/promises'`) creates a sealed
-    // namespace object that vitest can't `spyOn`, so a per-platform
-    // mock is also off-limits. The route logic itself is
-    // platform-agnostic; the Ubuntu + macOS runs cover it. Mirrors
-    // the `process.platform === 'win32'` early-return idiom used in
-    // `customBanner.test.ts:232`.
-    if (process.platform === 'win32') return;
+  // chmod 0o555 does not block root — skip in CI Docker containers running as root
+  it.skipIf(process.getuid?.() === 0)(
+    'returns 500 agent_delete_partial when one level unlink silently fails',
+    async () => {
+      // Windows ignores Unix-style permission bits passed to
+      // `fs.chmod` — the user-agents directory stays writable, the
+      // unlink succeeds, and the partial-delete path this test
+      // exercises is unreachable. SubagentManager's `unlink` import
+      // (`import * as fs from 'fs/promises'`) creates a sealed
+      // namespace object that vitest can't `spyOn`, so a per-platform
+      // mock is also off-limits. The route logic itself is
+      // platform-agnostic; the Ubuntu + macOS runs cover it. Mirrors
+      // the `process.platform === 'win32'` early-return idiom used in
+      // `customBanner.test.ts:232`.
+      if (process.platform === 'win32') return;
 
-    const bridge = buildBridgeStub();
-    const app = buildApp({ bridge, boundWorkspace: workspace });
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
 
-    // Set up a project-level agent.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target agent',
-      scope: 'workspace',
-    });
-    // Set up a user-level shadow with the same name.
-    await request(app).post('/workspace/agents').send({
-      name: 'partial-target',
-      description: 'a description longer than ten chars',
-      systemPrompt: 'you are a partial-target user agent',
-      scope: 'global',
-    });
+      // Set up a project-level agent.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target agent',
+        scope: 'workspace',
+      });
+      // Set up a user-level shadow with the same name.
+      await request(app).post('/workspace/agents').send({
+        name: 'partial-target',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a partial-target user agent',
+        scope: 'global',
+      });
 
-    // Lock the user-level agent's containing directory so the unlink
-    // raises EACCES — `SubagentManager.deleteSubagent` swallows the
-    // error and returns "success" because the project-level unlink
-    // worked. Without this PR's per-level `fs.access` verification,
-    // the route would 204 and publish a misleading `agent_changed`
-    // event for the user-level file that's still on disk.
-    const userAgentsDir = path.join(globalDir, 'agents');
-    const userPath = path.join(userAgentsDir, 'partial-target.md');
-    const originalMode = (await fs.stat(userAgentsDir)).mode;
-    await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
-    try {
-      const res = await request(app).delete('/workspace/agents/partial-target');
-      expect(res.status).toBe(500);
-      expect(res.body.code).toBe('agent_delete_partial');
-      expect(res.body.removedLevels).toEqual(['project']);
-      expect(res.body.remainingLevels).toEqual(['user']);
+      // Lock the user-level agent's containing directory so the unlink
+      // raises EACCES — `SubagentManager.deleteSubagent` swallows the
+      // error and returns "success" because the project-level unlink
+      // worked. Without this PR's per-level `fs.access` verification,
+      // the route would 204 and publish a misleading `agent_changed`
+      // event for the user-level file that's still on disk.
+      const userAgentsDir = path.join(globalDir, 'agents');
+      const userPath = path.join(userAgentsDir, 'partial-target.md');
+      const originalMode = (await fs.stat(userAgentsDir)).mode;
+      await fs.chmod(userAgentsDir, 0o555); // r-x: blocks unlink
+      try {
+        const res = await request(app).delete(
+          '/workspace/agents/partial-target',
+        );
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('agent_delete_partial');
+        expect(res.body.removedLevels).toEqual(['project']);
+        expect(res.body.remainingLevels).toEqual(['user']);
 
-      // Event fan-out: only one event for the level that actually
-      // disappeared. The remaining level (still on disk) must NOT
-      // emit a misleading deleted event.
-      const events = (bridge as unknown as { events: RecordedEvent[] }).events;
-      const deletedEvents = events.filter(
-        (e) =>
-          e.type === 'agent_changed' &&
-          (e.data as { change: string }).change === 'deleted',
-      );
-      expect(deletedEvents).toHaveLength(1);
-      expect((deletedEvents[0]?.data as { level: string }).level).toBe(
-        'project',
-      );
+        // Event fan-out: only one event for the level that actually
+        // disappeared. The remaining level (still on disk) must NOT
+        // emit a misleading deleted event.
+        const events = (bridge as unknown as { events: RecordedEvent[] })
+          .events;
+        const deletedEvents = events.filter(
+          (e) =>
+            e.type === 'agent_changed' &&
+            (e.data as { change: string }).change === 'deleted',
+        );
+        expect(deletedEvents).toHaveLength(1);
+        expect((deletedEvents[0]?.data as { level: string }).level).toBe(
+          'project',
+        );
 
-      // Verify the user-level file is still on disk.
-      await expect(fs.access(userPath)).resolves.toBeUndefined();
-    } finally {
-      // Restore permissions so afterEach's rmdir succeeds.
-      await fs.chmod(userAgentsDir, originalMode);
-    }
-  });
+        // Verify the user-level file is still on disk.
+        await expect(fs.access(userPath)).resolves.toBeUndefined();
+      } finally {
+        // Restore permissions so afterEach's rmdir succeeds.
+        await fs.chmod(userAgentsDir, originalMode);
+      }
+    },
+  );
 
   it('DELETE /workspace/agents/:agentType?scope=workspace removes only the project shadow', async () => {
     const bridge = buildBridgeStub();

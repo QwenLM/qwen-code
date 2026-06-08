@@ -383,59 +383,63 @@ describe('workspace memory routes', () => {
       expect(res.body.error).not.toContain(filePath);
     });
 
-    it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
-      // Windows ignores Unix-style permission bits passed to
-      // `fs.chmod` — the directory stays writable, the POST succeeds
-      // with 200, and the EACCES path this test exercises is
-      // unreachable. The route logic itself is platform-agnostic; the
-      // Ubuntu + macOS runs cover it. Mirrors the
-      // `process.platform === 'win32'` early-return idiom already used
-      // in `customBanner.test.ts:232`.
-      if (process.platform === 'win32') return;
+    // chmod 0o555 does not block root — skip in CI Docker containers running as root
+    it.skipIf(process.getuid?.() === 0)(
+      'omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on',
+      async () => {
+        // Windows ignores Unix-style permission bits passed to
+        // `fs.chmod` — the directory stays writable, the POST succeeds
+        // with 200, and the EACCES path this test exercises is
+        // unreachable. The route logic itself is platform-agnostic; the
+        // Ubuntu + macOS runs cover it. Mirrors the
+        // `process.platform === 'win32'` early-return idiom already used
+        // in `customBanner.test.ts:232`.
+        if (process.platform === 'win32') return;
 
-      // Default: production response carries no `errorMessage` or
-      // `filePath` fields — operators read the daemon stderr log
-      // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.
-      const bridge = buildBridgeStub();
-      const app = buildApp({ bridge, boundWorkspace: workspace });
+        // Default: production response carries no `errorMessage` or
+        // `filePath` fields — operators read the daemon stderr log
+        // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace });
 
-      // Force a 500 by making the workspace QWEN.md unwritable. We
-      // chmod the WORKSPACE directory (not the file) so `mkdir` and
-      // `writeFile` will fail with EACCES.
-      const before = await fs.stat(workspace);
-      await fs.chmod(workspace, 0o555);
-      const prevDebug = process.env['QWEN_SERVE_DEBUG'];
-      try {
-        delete process.env['QWEN_SERVE_DEBUG'];
-        const res = await request(app).post('/workspace/memory').send({
-          scope: 'workspace',
-          mode: 'append',
-          content: '- entry',
-        });
-        expect(res.status).toBe(500);
-        expect(res.body.code).toBe('file_error');
-        expect(res.body.scope).toBe('workspace');
-        expect(res.body.mode).toBe('append');
-        // Default response: no errorMessage, no filePath.
-        expect(res.body.errorMessage).toBeUndefined();
-        expect(res.body.filePath).toBeUndefined();
+        // Force a 500 by making the workspace QWEN.md unwritable. We
+        // chmod the WORKSPACE directory (not the file) so `mkdir` and
+        // `writeFile` will fail with EACCES.
+        const before = await fs.stat(workspace);
+        await fs.chmod(workspace, 0o555);
+        const prevDebug = process.env['QWEN_SERVE_DEBUG'];
+        try {
+          delete process.env['QWEN_SERVE_DEBUG'];
+          const res = await request(app).post('/workspace/memory').send({
+            scope: 'workspace',
+            mode: 'append',
+            content: '- entry',
+          });
+          expect(res.status).toBe(500);
+          expect(res.body.code).toBe('file_error');
+          expect(res.body.scope).toBe('workspace');
+          expect(res.body.mode).toBe('append');
+          // Default response: no errorMessage, no filePath.
+          expect(res.body.errorMessage).toBeUndefined();
+          expect(res.body.filePath).toBeUndefined();
 
-        // Toggle debug back on; the same payload now carries the
-        // detail.
-        process.env['QWEN_SERVE_DEBUG'] = '1';
-        const debugRes = await request(app).post('/workspace/memory').send({
-          scope: 'workspace',
-          mode: 'append',
-          content: '- entry',
-        });
-        expect(debugRes.status).toBe(500);
-        expect(typeof debugRes.body.errorMessage).toBe('string');
-      } finally {
-        if (prevDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
-        else process.env['QWEN_SERVE_DEBUG'] = prevDebug;
-        await fs.chmod(workspace, before.mode);
-      }
-    });
+          // Toggle debug back on; the same payload now carries the
+          // detail.
+          process.env['QWEN_SERVE_DEBUG'] = '1';
+          const debugRes = await request(app).post('/workspace/memory').send({
+            scope: 'workspace',
+            mode: 'append',
+            content: '- entry',
+          });
+          expect(debugRes.status).toBe(500);
+          expect(typeof debugRes.body.errorMessage).toBe('string');
+        } finally {
+          if (prevDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
+          else process.env['QWEN_SERVE_DEBUG'] = prevDebug;
+          await fs.chmod(workspace, before.mode);
+        }
+      },
+    );
 
     it('returns 500 memory_discovery_failed when GET helper throws unexpectedly', async () => {
       const bridge = buildBridgeStub();
