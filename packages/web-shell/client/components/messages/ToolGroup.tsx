@@ -62,7 +62,7 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   if (tool.status !== 'completed' && tool.status !== 'failed') return false;
   if (isShellToolName(name)) {
     const text = extractText(tool);
-    return !!text && text.split('\n').length > 1;
+    return !!text && text.trim().length > 0 && text.split('\n').length > 1;
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
     return hasDiffContent(tool);
@@ -427,7 +427,8 @@ function DefaultToolHeaderExtra({
 
 function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   const { renderToolHeaderExtra } = useWebShellCustomization();
-  if (renderToolHeaderExtra) return <>{renderToolHeaderExtra(info)}</>;
+  const customExtra = renderToolHeaderExtra?.(info);
+  if (customExtra) return <>{customExtra}</>;
   return (
     <DefaultToolHeaderExtra
       description={info.description}
