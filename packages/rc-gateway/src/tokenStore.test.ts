@@ -92,4 +92,15 @@ describe('TokenStore', () => {
     expect(await store.revoke('does-not-exist')).toBe(false);
     expect(store.list()).toHaveLength(1);
   });
+
+  it('scopesFor returns a copy of a known token id scopes; undefined otherwise', async () => {
+    const store = await TokenStore.open(path);
+    const { id } = await store.issue([SESSION_READ], 'phone');
+    const scopes = store.scopesFor(id);
+    expect(scopes).toEqual([SESSION_READ]);
+    // Returned array is a copy: mutating it must not affect the store.
+    scopes!.push('owner');
+    expect(store.scopesFor(id)).toEqual([SESSION_READ]);
+    expect(store.scopesFor('does-not-exist')).toBeUndefined();
+  });
 });

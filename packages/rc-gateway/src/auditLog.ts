@@ -25,7 +25,10 @@ export type AuditAction =
   | 'permission_voted'
   | 'prompt_sent'
   | 'push_subscribed'
-  | 'push_unsubscribed';
+  | 'push_unsubscribed'
+  | 'push_sent'
+  | 'push_send_failed'
+  | 'push_subscription_expired';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -40,6 +43,9 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'prompt_sent',
   'push_subscribed',
   'push_unsubscribed',
+  'push_sent',
+  'push_send_failed',
+  'push_subscription_expired',
 ];
 
 export interface AuditEntry {

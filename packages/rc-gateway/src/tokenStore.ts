@@ -99,6 +99,15 @@ export class TokenStore {
     return null;
   }
 
+  /**
+   * Resolve a token id to a copy of its scopes (pure read, no I/O). Used by the
+   * push notifier to scope-gate fan-out. Returns undefined for an unknown id.
+   */
+  scopesFor(id: string): RcScope[] | undefined {
+    const rec = this.records.find((r) => r.id === id);
+    return rec ? [...rec.scopes] : undefined;
+  }
+
   /** List issued tokens as metadata only (no hash, no raw token). */
   list(): TokenInfo[] {
     return this.records.map((r) => ({
