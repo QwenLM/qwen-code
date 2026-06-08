@@ -247,4 +247,36 @@ describe('MemoryDiagnosticsDumper', () => {
     );
     expect(writtenContent.session.available).toBe(false);
   });
+
+  it('includes recentSamples in both Phase 1 and Phase 2 payloads', async () => {
+    const config = createMockConfig();
+    const dumper = new MemoryDiagnosticsDumper(config);
+
+    const fakeSamples = [
+      {
+        ts: 1000000,
+        rss: 500_000_000,
+        heapUsed: 400_000_000,
+        heapTotal: 600_000_000,
+        external: 10_000_000,
+        cpuUserMs: 120,
+        cpuSystemMs: 30,
+        cpuPercent: 15.5,
+      },
+    ];
+
+    await dumper.dump('hard', fakeSamples);
+
+    const phase1 = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+    );
+    expect(phase1.recentSamples).toEqual(fakeSamples);
+    expect(phase1.collectionComplete).toBe(false);
+
+    const phase2 = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
+    );
+    expect(phase2.recentSamples).toEqual(fakeSamples);
+    expect(phase2.collectionComplete).toBe(true);
+  });
 });

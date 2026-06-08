@@ -22,6 +22,7 @@ import { collectMemoryDiagnostics } from '../utils/memoryDiagnostics.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
+import type { RuntimeSample } from './memoryPressureMonitor.js';
 
 const debugLogger = createDebugLogger('MEMORY_DUMP');
 
@@ -66,6 +67,7 @@ export class MemoryDiagnosticsDumper {
    */
   async dump(
     trigger: 'hard' | 'critical',
+    recentSamples: RuntimeSample[] = [],
   ): Promise<MemoryDumpResult | undefined> {
     if (this.dumpCount >= MAX_DUMPS_PER_SESSION) {
       debugLogger.debug(
@@ -101,6 +103,7 @@ export class MemoryDiagnosticsDumper {
         timestamp: new Date().toISOString(),
         memoryUsage: process.memoryUsage(),
         v8HeapStats: v8.getHeapStatistics(),
+        recentSamples,
         session: this.collectSessionStats(),
         suggestion: this.getSuggestion(trigger),
         collectionComplete: false,
@@ -125,6 +128,7 @@ export class MemoryDiagnosticsDumper {
         trigger,
         dumpNumber,
         ...diagnostics,
+        recentSamples,
         session: this.collectSessionStats(),
         suggestion: this.getSuggestion(trigger),
         collectionComplete: true,

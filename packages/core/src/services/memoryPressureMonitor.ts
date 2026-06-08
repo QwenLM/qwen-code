@@ -12,6 +12,99 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
+import {
+  recordMemoryUsage,
+  recordCpuUsage,
+  isPerformanceMonitoringActive,
+  MemoryMetricType,
+} from '../telemetry/metrics.js';
+
+// ─── Runtime Samples Ring Buffer ─────────────────────────────────────────────
+
+/** A single runtime sample capturing memory and CPU at a point in time. */
+export interface RuntimeSample {
+  ts: number;
+  rss: number;
+  heapUsed: number;
+  heapTotal: number;
+  external: number;
+  cpuUserMs: number;
+  cpuSystemMs: number;
+  cpuPercent: number;
+}
+
+const RING_BUFFER_SIZE = 60;
+
+/**
+ * Lightweight ring buffer that holds the most recent N runtime samples.
+ * Only active when telemetry is enabled — zero overhead otherwise.
+ * Stored in memory; written to disk when a diagnostics dump is triggered.
+ */
+class RuntimeSampleRing {
+  private readonly samples: RuntimeSample[] = [];
+  private prevCpuUsage = process.cpuUsage();
+  private prevSampleTime = Date.now();
+
+  record(): RuntimeSample {
+    const now = Date.now();
+    const elapsed = now - this.prevSampleTime;
+    const m = process.memoryUsage();
+    const absCpu = process.cpuUsage();
+    const deltaUser = absCpu.user - this.prevCpuUsage.user;
+    const deltaSystem = absCpu.system - this.prevCpuUsage.system;
+    const cpuTotalUs = deltaUser + deltaSystem;
+
+    // When elapsed is 0 (two checks in the same ms tick), skip updating
+    // prevCpuUsage/prevSampleTime so the CPU delta accumulates into the
+    // next sample instead of being permanently lost.
+    if (elapsed <= 0) {
+      return (
+        this.samples[this.samples.length - 1] ?? {
+          ts: now,
+          rss: m.rss,
+          heapUsed: m.heapUsed,
+          heapTotal: m.heapTotal,
+          external: m.external,
+          cpuUserMs: 0,
+          cpuSystemMs: 0,
+          cpuPercent: 0,
+        }
+      );
+    }
+
+    const cpuPercent = (cpuTotalUs / (elapsed * 1000)) * 100;
+
+    const sample: RuntimeSample = {
+      ts: now,
+      rss: m.rss,
+      heapUsed: m.heapUsed,
+      heapTotal: m.heapTotal,
+      external: m.external,
+      cpuUserMs: deltaUser / 1000,
+      cpuSystemMs: deltaSystem / 1000,
+      cpuPercent: Math.round(cpuPercent * 100) / 100,
+    };
+
+    this.samples.push(sample);
+    if (this.samples.length > RING_BUFFER_SIZE) {
+      this.samples.shift();
+    }
+
+    this.prevCpuUsage = absCpu;
+    this.prevSampleTime = now;
+    return sample;
+  }
+
+  getAll(): RuntimeSample[] {
+    return [...this.samples];
+  }
+
+  reset(): void {
+    this.samples.length = 0;
+    this.prevCpuUsage = process.cpuUsage();
+    this.prevSampleTime = Date.now();
+  }
+}
 
 // Types
 
@@ -106,6 +199,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private cleanupGeneration = 0;
   private readonly effectiveMemoryLimit: number;
   private readonly diagnosticsDumper: MemoryDiagnosticsDumper;
+  private readonly runtimeSamples = new RuntimeSampleRing();
 
   constructor(coreConfig: Config, pressureConfig?: MemoryPressureConfig) {
     super();
@@ -146,6 +240,7 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.cleanupGeneration++;
     this.resetConsecutiveFailures();
     this.diagnosticsDumper.resetForNewSession();
+    this.runtimeSamples.reset();
     this.cleanupInProgress = false;
     this.activeCleanupAction = 'none';
     this.queuedCleanupRecommendation = undefined;
@@ -186,6 +281,25 @@ export class MemoryPressureMonitor extends EventEmitter {
     if (pressure !== 'critical') {
       this.consecutiveIneffectiveAggressiveCleanups = 0;
     }
+
+    // Always record a runtime sample so the ring buffer has history for
+    // local diagnostics dumps, regardless of telemetry state.
+    // Telemetry metric reporting is gated separately by isPerformanceMonitoringActive.
+    try {
+      const sample = this.runtimeSamples.record();
+      if (isPerformanceMonitoringActive()) {
+        recordMemoryUsage(this.coreConfig, sample.rss, {
+          memory_type: MemoryMetricType.RSS,
+        });
+        recordMemoryUsage(this.coreConfig, sample.heapUsed, {
+          memory_type: MemoryMetricType.HEAP_USED,
+        });
+        recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
+      }
+    } catch (err) {
+      debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
+    }
+
     if (pressure === 'normal') return;
 
     const recommendation = this.recommendCleanup(pressure);
@@ -207,7 +321,7 @@ export class MemoryPressureMonitor extends EventEmitter {
     // the file asynchronously in the background; if it fails the minimal file
     // still survives for debugging.
     if (pressure === 'hard' || pressure === 'critical') {
-      void this.diagnosticsDumper.dump(pressure);
+      void this.diagnosticsDumper.dump(pressure, this.runtimeSamples.getAll());
     }
 
     this.executeCleanup(recommendation);
