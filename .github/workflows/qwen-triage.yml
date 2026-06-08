@@ -24,8 +24,9 @@ jobs:
     timeout-minutes: 30
     concurrency:
       group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-      # Keep this authorization list in sync with the issue_comment arm of the
-      # job `if`; concurrency is evaluated before job-level conditions.
+      # Repeat the maintainer /triage check here intentionally: GitHub
+      # evaluates concurrency before the job `if`, so this controls
+      # cancellation, not job eligibility. Other job gates below can diverge.
       cancel-in-progress: >-
         ${{
           github.event_name != 'issue_comment' ||
