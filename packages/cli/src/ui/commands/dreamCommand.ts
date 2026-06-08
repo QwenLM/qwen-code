@@ -40,7 +40,12 @@ export const dreamCommand: SlashCommand = {
     return {
       type: 'submit_prompt',
       content: prompt,
-      onComplete: async () => {
+      onComplete: async (opts?: { errored?: boolean }) => {
+        // onComplete now fires on the error path too (errored: true). Only
+        // record the manual dream run when the turn actually succeeded —
+        // otherwise a failed /dream (API error/abort) would persist a
+        // consolidation record as if it had completed.
+        if (opts?.errored) return;
         await config
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());

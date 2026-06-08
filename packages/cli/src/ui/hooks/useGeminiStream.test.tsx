@@ -42,7 +42,10 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
-import { AUTO_IMPROVE_LOOP_ID_LINE_PREFIX } from '../commands/autoImproveState.js';
+import {
+  AUTO_IMPROVE_LOOP_ID_LINE_PREFIX,
+  markActiveAutoImproveRunCancelled,
+} from '../commands/autoImproveState.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -2514,6 +2517,44 @@ describe('useGeminiStream', () => {
           {
             type: MessageType.INFO,
             text: 'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
+          },
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('shows an error when cron-tick cancellation is not confirmed', async () => {
+      // The cancellation could not be confirmed (e.g. nothing to cancel or a
+      // failed state write) — the UI must not claim the run was cancelled.
+      vi.mocked(markActiveAutoImproveRunCancelled).mockResolvedValueOnce(false);
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Working' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '/auto-improve tick loop-1',
+          SendMessageType.Cron,
+        );
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: "Couldn't confirm auto-improve run cancellation; it may still be active. Run /auto-improve status to check.",
           },
           expect.any(Number),
         );
