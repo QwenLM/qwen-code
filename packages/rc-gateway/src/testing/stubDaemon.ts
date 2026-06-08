@@ -30,6 +30,10 @@ export interface StubDaemonOptions {
   holdOpenMs?: number;
   /** Status for POST /session/:id/permission/:requestId (default 200 = accepted). */
   permissionStatus?: number;
+  /** Status for POST /session/:id/prompt (default 200). */
+  promptStatus?: number;
+  /** stopReason returned by POST /session/:id/prompt on success (default 'end_turn'). */
+  promptStopReason?: string;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -93,6 +97,15 @@ export async function startStubDaemon(
   app.post('/session/:id/permission/:requestId', (_req, res) => {
     const status = opts.permissionStatus ?? 200;
     res.status(status).json(status === 200 ? {} : { error: 'no pending' });
+  });
+
+  app.post('/session/:id/prompt', (_req, res) => {
+    const status = opts.promptStatus ?? 200;
+    if (status === 200) {
+      res.status(200).json({ stopReason: opts.promptStopReason ?? 'end_turn' });
+    } else {
+      res.status(status).json({ error: 'stub error' });
+    }
   });
 
   const server: Server = await new Promise((resolve) => {
