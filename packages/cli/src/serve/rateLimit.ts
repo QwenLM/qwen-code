@@ -26,6 +26,7 @@ export interface RateLimitConfig {
     key: string,
     suppressed: number,
   ) => void;
+  onError?: (err: unknown, path: string) => void;
 }
 
 export interface RateLimiterInstance {
@@ -206,7 +207,7 @@ export function createRateLimiter(
     ? createSampledLogger(config.onLimitReached)
     : undefined;
 
-  // GC: sweep stale buckets and logger state
+  // GC: sweep stale buckets
   function sweep(): void {
     const now = Date.now();
     for (const [key, tierMap] of buckets) {
@@ -221,7 +222,6 @@ export function createRateLimiter(
         buckets.delete(key);
       }
     }
-    sampledLog?.clear();
   }
 
   const gcTimer = setInterval(sweep, GC_TIMER_INTERVAL_MS);
@@ -260,6 +260,10 @@ export function createRateLimiter(
       let tierMap = buckets.get(key);
       if (!tierMap) {
         if (buckets.size >= MAX_BUCKETS) {
+          config.onError?.(
+            new Error(`rate limit bucket overflow: ${buckets.size} keys`),
+            req.path,
+          );
           next();
           return;
         }
@@ -305,8 +309,8 @@ export function createRateLimiter(
           retryAfterMs,
         });
       }
-    } catch {
-      // Fail-open: internal error should not block requests
+    } catch (err) {
+      config.onError?.(err, req.path);
       next();
     }
   };
@@ -327,9 +331,25 @@ export function createRateLimiter(
     dispose() {
       clearInterval(gcTimer);
       buckets.clear();
+      sampledLog?.clear();
     },
     getHitCounts() {
       return { ...hitCounts };
     },
   };
+}
+
+const RATE_LIMITER_KEY = '_rateLimiter';
+
+export function setRateLimiter(
+  app: { locals: Record<string, unknown> },
+  limiter: RateLimiterInstance,
+): void {
+  app.locals[RATE_LIMITER_KEY] = limiter;
+}
+
+export function getRateLimiter(app: {
+  locals: Record<string, unknown>;
+}): RateLimiterInstance | undefined {
+  return app.locals[RATE_LIMITER_KEY] as RateLimiterInstance | undefined;
 }

@@ -57,6 +57,7 @@ import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
+import { getRateLimiter } from './rateLimit.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
@@ -1133,9 +1134,7 @@ export async function runQwenServe(
               }
             }
             // Dispose rate limiter (clear GC timer + buckets).
-            const rl = app.locals['_rateLimiter'] as
-              | { dispose(): void; setDraining(v: boolean): void }
-              | undefined;
+            const rl = getRateLimiter(app);
             if (rl) {
               rl.setDraining(true);
               rl.dispose();

@@ -303,10 +303,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
 
     // Rate limit resolution + validation (only when enabled).
-    const rateLimit =
-      argv['rate-limit'] ||
-      process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
-      process.env['QWEN_SERVE_RATE_LIMIT'] === 'true';
+    // CLI flag takes precedence; env var is fallback only when CLI is default (false).
+    const rateLimit = argv['rate-limit']
+      ? true
+      : process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
+        process.env['QWEN_SERVE_RATE_LIMIT'] === 'true';
     let rateLimitPrompt: number | undefined;
     let rateLimitMutation: number | undefined;
     let rateLimitRead: number | undefined;

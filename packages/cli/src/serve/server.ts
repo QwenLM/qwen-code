@@ -102,7 +102,11 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
-import { createRateLimiter, type RateLimiterInstance } from './rateLimit.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rateLimit.js';
 
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
@@ -901,6 +905,14 @@ export function createServeApp(
             daemonLog.warn(
               `rate limit hit${suppressed > 0 ? ` (${suppressed} suppressed)` : ''}`,
               { tier, key: key.slice(0, 64) },
+            );
+          }
+        : undefined,
+      onError: daemonLog
+        ? (err, path) => {
+            daemonLog.warn(
+              `rate limiter error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
+              { path },
             );
           }
         : undefined,
@@ -3017,7 +3029,7 @@ export function createServeApp(
   );
 
   if (rateLimiter) {
-    app.locals['_rateLimiter'] = rateLimiter;
+    setRateLimiter(app, rateLimiter);
   }
 
   return app;
