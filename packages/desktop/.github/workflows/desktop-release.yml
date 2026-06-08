@@ -52,16 +52,22 @@ env:
 
 jobs:
   release_metadata:
-    name: Validate Release Version
+    name: Prepare Release Source
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     outputs:
+      release_branch: ${{ steps.release-branch.outputs.branch }}
+      release_ref: ${{ steps.release-branch.outputs.ref }}
       tag: ${{ steps.release-version.outputs.tag }}
       version: ${{ steps.release-version.outputs.version }}
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -71,11 +77,61 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Require main for publishing
+        if: ${{ inputs.dry_run == false }}
+        env:
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$SOURCE_REF" != "main" ]; then
+            echo "::error::Desktop releases with dry_run=false must be run from main. Current ref: $SOURCE_REF"
+            exit 1
+          fi
+
+      - name: Bump desktop version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: bun run bump-desktop-version "$INPUT_VERSION"
+
       - name: Validate release version
         id: release-version
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: bun run check-release-version --version "$INPUT_VERSION"
+
+      - name: Create release branch
+        id: release-branch
+        env:
+          IS_DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_TAG: ${{ steps.release-version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          branch="release/desktop-${RELEASE_TAG}"
+          git switch -c "$branch"
+          git add package.json apps/electron/package.json packages/shared/package.json
+
+          if git diff --staged --quiet; then
+            echo "No desktop version changes to commit."
+          else
+            git commit -m "chore(release): desktop ${RELEASE_TAG}"
+          fi
+
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if [ "$IS_DRY_RUN" = "false" ]; then
+            git push --set-upstream origin "$branch"
+            echo "ref=$branch" >> "$GITHUB_OUTPUT"
+          else
+            echo "Dry run enabled. Skipping release branch push."
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     name: Build ${{ matrix.name }}
@@ -102,6 +158,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release_metadata.outputs.release_ref }}
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -116,6 +174,9 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Bump desktop version
+        run: bun run bump-desktop-version "$RELEASE_VERSION"
 
       - name: Confirm release version
         run: bun run check-release-version --version "$RELEASE_VERSION"
@@ -171,7 +232,7 @@ jobs:
           RELEASE_DRAFT: ${{ inputs.draft }}
           RELEASE_NAME: ${{ inputs.release_name }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
-          RELEASE_TARGET: ${{ github.sha }}
+          RELEASE_TARGET: ${{ needs.release_metadata.outputs.release_ref }}
           UPLOAD_CLOBBER: ${{ inputs.clobber }}
         run: |
           set -euo pipefail
@@ -213,6 +274,60 @@ jobs:
             fi
             gh release create "${create_args[@]}"
           fi
+
+  sync-version:
+    name: Sync Release Version to Main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - publish
+      - release_metadata
+    if: ${{ inputs.dry_run == false }}
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Create version sync PR
+        id: version-pr
+        env:
+          GH_TOKEN: ${{ secrets.CI_BOT_PAT || github.token }}
+          RELEASE_BRANCH: ${{ needs.release_metadata.outputs.release_branch }}
+          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          pr_url="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$RELEASE_BRANCH" \
+            --base main \
+            --json url \
+            --jq '.[0].url')"
+
+          if [ -z "$pr_url" ]; then
+            pr_url="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$RELEASE_BRANCH" \
+              --title "chore(release): desktop ${RELEASE_TAG}" \
+              --body "Automated desktop release PR for ${RELEASE_TAG}. Syncs desktop package versions on main.")"
+          fi
+
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.CI_BOT_PAT || github.token }}
+          PR_URL: ${{ steps.version-pr.outputs.url }}
+          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          gh pr merge "$PR_URL" \
+            --squash \
+            --auto \
+            --delete-branch \
+            --subject "chore(release): desktop ${RELEASE_TAG} [skip ci]"
 
   dry-run-summary:
     name: Dry Run Summary
