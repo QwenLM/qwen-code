@@ -15,8 +15,7 @@ import { t } from '../../i18n/index.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  MAX_CUSTOM_SOURCE_LENGTH,
-  MAX_CUSTOM_SOURCES,
+  normalizeStringList,
   readAutoImproveConfig,
   writeAutoImproveConfig,
   type AutoImproveConfig,
@@ -66,26 +65,13 @@ async function resolveRepoRoot(
   }
 }
 
-export function normalizeCustomSources(sources: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const source of sources) {
-    const trimmed = source.trim().slice(0, MAX_CUSTOM_SOURCE_LENGTH);
-    if (!trimmed || seen.has(trimmed)) continue;
-    if (result.length >= MAX_CUSTOM_SOURCES) break;
-    seen.add(trimmed);
-    result.push(trimmed);
-  }
-  return result;
-}
-
 export function applyDraftSource(
   customSources: string[],
   draftSource: string,
   editingIndex: number | null,
 ): string[] {
   const trimmed = draftSource.trim();
-  if (!trimmed) return normalizeCustomSources(customSources);
+  if (!trimmed) return normalizeStringList(customSources);
 
   const next = [...customSources];
   if (
@@ -97,7 +83,7 @@ export function applyDraftSource(
   } else {
     next.push(trimmed);
   }
-  return normalizeCustomSources(next);
+  return normalizeStringList(next);
 }
 
 export function AutoImproveSourceDialog({
@@ -154,7 +140,7 @@ export function AutoImproveSourceDialog({
     const nextConfig: AutoImproveConfig = {
       version: 1,
       sources,
-      customSources: normalizeCustomSources(customSources),
+      customSources: normalizeStringList(customSources),
     };
     if (!repoRoot) {
       setError(t('Repository root is not ready yet.'));

@@ -254,6 +254,9 @@ export async function readActiveAutoImproveLoop(
     ) {
       return null;
     }
+    // A truncated/corrupt active.json (e.g. crash mid-write) must not throw on
+    // every subsequent /auto-improve command — treat it as "no active pointer".
+    if (error instanceof SyntaxError) return null;
     throw error;
   }
 }
@@ -264,11 +267,16 @@ export async function writeActiveAutoImproveLoop(
 ): Promise<void> {
   assertValidLoopId(loopId);
   await ensureAutoImproveRoot(repoRoot);
+  // Atomic write (tmp + rename), consistent with writeAutoImproveLoopState, so
+  // a crash mid-write can't leave a truncated active.json behind.
+  const activePath = getAutoImproveActivePath(repoRoot);
+  const tmpPath = `${activePath}.tmp`;
   await fs.writeFile(
-    getAutoImproveActivePath(repoRoot),
+    tmpPath,
     `${JSON.stringify({ activeLoopId: loopId }, null, 2)}\n`,
     'utf8',
   );
+  await fs.rename(tmpPath, activePath);
 }
 
 export async function clearActiveAutoImproveLoop(
@@ -593,6 +601,9 @@ export async function markActiveAutoImproveRunCancelled(
 ): Promise<boolean> {
   const repoRoot = await resolveRepoRoot(cwd);
   const active = await readActiveAutoImproveLoop(repoRoot);
+  // A cleared active pointer (active === null) is expected when cancelling a
+  // `stopping` run that `stop` already unpointered, so we intentionally do NOT
+  // bail here — the status guard below rejects fully-stopped/orphaned loops.
   if (active && active.activeLoopId !== loopId) return false;
 
   const state = await readAutoImproveLoopState(repoRoot, loopId);
@@ -600,15 +611,16 @@ export async function markActiveAutoImproveRunCancelled(
     return false;
   }
 
-  if (
-    state.currentRun &&
-    isTerminalAutoImproveRunStatus(state.currentRun.status)
-  ) {
+  // If currentRun was already cleared (e.g. by a concurrent markRunCompleted),
+  // there is no in-flight run to cancel — bail instead of clobbering lastRun
+  // with a spurious cancelled-by-user record.
+  if (!state.currentRun) return false;
+  if (isTerminalAutoImproveRunStatus(state.currentRun.status)) {
     return false;
   }
 
   const cancelledRun: AutoImproveRunRef = {
-    ...(state.currentRun ?? { runId: 'cancelled-by-user', status: 'running' }),
+    ...state.currentRun,
     status: 'cancelled',
   };
   state.lastRun = cancelledRun;

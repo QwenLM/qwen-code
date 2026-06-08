@@ -1545,7 +1545,12 @@ export class Session implements SessionContext {
               slashCommandResult,
               [{ type: 'text', text: prompt }],
             );
-            if (processedParts === null) return;
+            if (processedParts === null) {
+              // No prompt was produced — don't let the finally record this as a
+              // successful run.
+              slashOnCompleteErrored = true;
+              return;
+            }
             promptParts = processedParts;
           }
           const promptText = promptParts
@@ -1568,7 +1573,10 @@ export class Session implements SessionContext {
           };
 
           while (nextMessage !== null) {
-            if (ac.signal.aborted) return;
+            if (ac.signal.aborted) {
+              slashOnCompleteErrored = true;
+              return;
+            }
 
             const functionCalls: FunctionCall[] = [];
             let usageMetadata: GenerateContentResponseUsageMetadata | null =
@@ -1588,13 +1596,20 @@ export class Session implements SessionContext {
               if (sendResult.stopReason === 'max_tokens') {
                 this.#stopCronAfterTokenLimit();
               }
+              // The turn produced no response (cancelled / token-limited) — it
+              // did not complete successfully, so don't let the finally mark it
+              // as a successful run.
+              slashOnCompleteErrored = true;
               return;
             }
             const responseStream = sendResult.responseStream;
             nextMessage = null;
 
             for await (const resp of responseStream) {
-              if (ac.signal.aborted) return;
+              if (ac.signal.aborted) {
+                slashOnCompleteErrored = true;
+                return;
+              }
 
               if (
                 resp.type === StreamEventType.CHUNK &&

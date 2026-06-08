@@ -5,19 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  applyDraftSource,
-  normalizeCustomSources,
-} from './AutoImproveSourceDialog.js';
+import { applyDraftSource } from './AutoImproveSourceDialog.js';
 import {
   MAX_CUSTOM_SOURCE_LENGTH,
   MAX_CUSTOM_SOURCES,
+  normalizeStringList,
 } from '../commands/autoImproveState.js';
 
 describe('AutoImproveSourceDialog helpers', () => {
   it('normalizes and deduplicates custom sources', () => {
     expect(
-      normalizeCustomSources([
+      normalizeStringList([
         ' review PR comments ',
         '',
         'review PR comments',
@@ -42,7 +40,7 @@ describe('AutoImproveSourceDialog helpers', () => {
 
   it('truncates sources exceeding MAX_CUSTOM_SOURCE_LENGTH', () => {
     const longSource = 'a'.repeat(MAX_CUSTOM_SOURCE_LENGTH + 50);
-    const result = normalizeCustomSources([longSource]);
+    const result = normalizeStringList([longSource]);
     expect(result).toHaveLength(1);
     expect(result[0]).toHaveLength(MAX_CUSTOM_SOURCE_LENGTH);
   });
@@ -52,7 +50,7 @@ describe('AutoImproveSourceDialog helpers', () => {
       { length: MAX_CUSTOM_SOURCES + 5 },
       (_, i) => `source-${i}`,
     );
-    const result = normalizeCustomSources(sources);
+    const result = normalizeStringList(sources);
     expect(result).toHaveLength(MAX_CUSTOM_SOURCES);
     expect(result).toEqual(sources.slice(0, MAX_CUSTOM_SOURCES));
   });

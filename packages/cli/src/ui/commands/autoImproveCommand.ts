@@ -44,6 +44,14 @@ const execFileAsync = promisify(execFile);
 
 const debugLogger = createDebugLogger('AUTO_IMPROVE');
 
+// Offset hourly cron jobs from :00 so they don't collide with the many other
+// jobs that fire on the hour. Not a bug — do not "fix" this to 0.
+const HOURLY_CRON_MINUTE_OFFSET = 7;
+
+// The repo root is constant for a session, but getRepoRoot() is called on every
+// tick/status/start/stop. Memoize per cwd to avoid re-spawning `git rev-parse`.
+const repoRootCache = new Map<string, Promise<string>>();
+
 type IntervalParseResult =
   | { ok: true; cron: string; cadence: string }
   | { ok: false; error: string };
@@ -131,9 +139,17 @@ function parseInterval(interval: string): IntervalParseResult {
       };
     }
     if (value === 24) {
-      return { ok: true, cron: '7 0 * * *', cadence: '24h' };
+      return {
+        ok: true,
+        cron: `${HOURLY_CRON_MINUTE_OFFSET} 0 * * *`,
+        cadence: '24h',
+      };
     }
-    return { ok: true, cron: `7 */${value} * * *`, cadence: `${value}h` };
+    return {
+      ok: true,
+      cron: `${HOURLY_CRON_MINUTE_OFFSET} */${value} * * *`,
+      cadence: `${value}h`,
+    };
   }
 
   return {
@@ -144,17 +160,23 @@ function parseInterval(interval: string): IntervalParseResult {
 
 async function getRepoRoot(config: Config): Promise<string> {
   const cwd = config.getWorkingDir() || config.getProjectRoot();
-  try {
-    const { stdout } = await execFileAsync('git', [
-      '-C',
-      cwd,
-      'rev-parse',
-      '--show-toplevel',
-    ]);
-    return stdout.trim();
-  } catch {
-    return cwd;
-  }
+  const cached = repoRootCache.get(cwd);
+  if (cached) return cached;
+  const resolved = (async () => {
+    try {
+      const { stdout } = await execFileAsync('git', [
+        '-C',
+        cwd,
+        'rev-parse',
+        '--show-toplevel',
+      ]);
+      return stdout.trim();
+    } catch {
+      return cwd;
+    }
+  })();
+  repoRootCache.set(cwd, resolved);
+  return resolved;
 }
 
 async function getCurrentBranch(repoRoot: string): Promise<string> {
@@ -803,6 +825,10 @@ async function tickAutoImprove(
   // Use freshState (if available) as the write base to avoid overwriting any
   // concurrent changes that landed between the initial read and the re-read.
   const baseState = freshState ?? state;
+  // Override repoRoot with the freshly-resolved (trusted) value before it is
+  // persisted or interpolated into the tick prompt: repoRootDisplay sits before
+  // the USER-PROVIDED DATA fence, so a tampered state.json must not control it.
+  baseState.repoRoot = repoRoot;
   baseState.currentRun = makePendingRunRef();
   await writeAutoImproveLoopState(repoRoot, baseState);
 
