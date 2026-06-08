@@ -45,7 +45,7 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'submit_prompt';
       content: PartListUnion;
-      onComplete?: () => Promise<void>;
+      onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
     }
   | {
       type: 'message';

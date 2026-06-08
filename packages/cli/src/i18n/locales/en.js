@@ -205,6 +205,8 @@ export default {
     'Auto-improve tick skipped: state is missing.',
   'Auto-improve tick skipped: stop was requested.':
     'Auto-improve tick skipped: stop was requested.',
+  'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.':
+    'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
   'Auto-improve tick skipped: loop is not running.':
     'Auto-improve tick skipped: loop is not running.',
   'Auto-improve tick skipped: previous run is still active.':

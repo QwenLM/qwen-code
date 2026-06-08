@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
-import { type Config } from '@qwen-code/qwen-code-core';
+import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
   CommandContext,
@@ -41,6 +41,8 @@ import type {
 } from '../types.js';
 
 const execFileAsync = promisify(execFile);
+
+const debugLogger = createDebugLogger('AUTO_IMPROVE');
 
 type IntervalParseResult =
   | { ok: true; cron: string; cadence: string }
@@ -207,7 +209,18 @@ async function markRunCompleted(
   opts?: { errored?: boolean },
 ): Promise<void> {
   const state = await readAutoImproveLoopState(repoRoot, loopId);
-  if (!state || !state.currentRun) return;
+  if (!state || !state.currentRun) {
+    // No active run to finalize — log so a lost completion (e.g. state
+    // cleared/corrupted, or a concurrent writer already finalized) is
+    // visible rather than silently swallowed.
+    debugLogger.warn(
+      `markRunCompleted: no active run to complete for loop ${loopId} ` +
+        `(state=${state ? 'present' : 'missing'}, currentRun=${
+          state?.currentRun ? 'present' : 'missing'
+        })`,
+    );
+    return;
+  }
   // Preserve terminal statuses set during the tick (e.g. by the tick
   // itself or cancellation). Default to 'failed' when the run is still in
   // a transient state like 'implementing' and an error occurred, otherwise

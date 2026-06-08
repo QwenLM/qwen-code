@@ -762,8 +762,12 @@ export interface ConsoleMessageItem {
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
-  /** Optional callback invoked after the agent turn completes successfully. */
-  onComplete?: () => Promise<void>;
+  /**
+   * Optional callback invoked after the agent turn completes. Receives
+   * `{ errored: true }` when the turn ended in an error so the callback can
+   * record a failed terminal state (mirrors SubmitPromptActionReturn).
+   */
+  onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
 }
 
 /**

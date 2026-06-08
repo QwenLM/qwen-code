@@ -92,6 +92,7 @@ import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import {
   AUTO_IMPROVE_LOOP_ID_LINE_PREFIX,
+  isValidAutoImproveLoopId,
   markActiveAutoImproveRunCancelled,
 } from '../commands/autoImproveState.js';
 
@@ -118,9 +119,14 @@ export function parseAutoImproveTickLoopId(
             .join('\n')
         : '';
   const trimmed = text.trim();
-  // Slash-command pattern: matches `/auto-improve tick <id>` (user-initiated)
+  // Slash-command pattern: matches `/auto-improve tick <id>` (user-initiated).
+  // Validate the captured id so a malformed loop id never reaches
+  // markActiveAutoImproveRunCancelled (which throws on invalid ids).
   const slashMatch = trimmed.match(/^\/auto-improve\s+tick\s+(\S+)$/);
-  if (slashMatch) return slashMatch[1]!;
+  if (slashMatch) {
+    const id = slashMatch[1]!;
+    return isValidAutoImproveLoopId(id) ? id : null;
+  }
   // Expanded-prompt pattern: matches `- Loop id: <id>` inside the full
   // tick prompt body (submit_prompt callback path only).
   if (includeExpandedPrompt) {
@@ -131,7 +137,11 @@ export function parseAutoImproveTickLoopId(
       ?.slice(AUTO_IMPROVE_LOOP_ID_LINE_PREFIX.length)
       .trim()
       .split(/\s+/)[0];
-    if (expandedPromptLoopId) return expandedPromptLoopId;
+    if (expandedPromptLoopId) {
+      return isValidAutoImproveLoopId(expandedPromptLoopId)
+        ? expandedPromptLoopId
+        : null;
+    }
   }
   return null;
 }
@@ -1953,7 +1963,16 @@ export const useGeminiStream = (
           const onComplete = submitPromptOnCompleteRef.current;
           if (onComplete) {
             submitPromptOnCompleteRef.current = null;
-            void onComplete();
+            // Clear the auto-improve loop id on the success path too (the
+            // error path already does this) so a later unrelated Ctrl+C does
+            // not see a stale id and spuriously cancel a new tick.
+            currentAutoImproveLoopIdRef.current = null;
+            // onComplete performs a read-modify-write on state.json; swallow
+            // and log any rejection so an I/O error can't crash the process
+            // via an unhandled rejection.
+            void onComplete().catch((err: unknown) => {
+              debugLogger.warn('submitPrompt onComplete threw:', err);
+            });
           }
 
           // After the turn completes, wire up notifications for any background
@@ -1983,7 +2002,9 @@ export const useGeminiStream = (
           submitPromptOnCompleteRef.current = null;
           currentAutoImproveLoopIdRef.current = null;
           if (onComplete) {
-            void onComplete({ errored: true });
+            void onComplete({ errored: true }).catch((err: unknown) => {
+              debugLogger.warn('submitPrompt onComplete (errored) threw:', err);
+            });
           }
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');

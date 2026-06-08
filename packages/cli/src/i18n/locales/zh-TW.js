@@ -187,6 +187,8 @@ export default {
     '自動改善執行已跳過：狀態遺失。',
   'Auto-improve tick skipped: stop was requested.':
     '自動改善執行已跳過：已請求停止。',
+  'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.':
+    '自動改善執行已取消。循環仍處於活動狀態；執行 /auto-improve stop 可停止後續執行。',
   'Auto-improve tick skipped: loop is not running.':
     '自動改善執行已跳過：循環未執行。',
   'Auto-improve tick skipped: previous run is still active.':
