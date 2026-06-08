@@ -122,7 +122,12 @@ jobs:
           REQUESTER: '${{ github.event.sender.login }}'
         run: |-
           set -euo pipefail
-          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission' 2>/dev/null || true)"
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission')"; then
+            echo "Failed to check permission for ${REQUESTER}." >&2
+            echo "Failed to check permission for ${REQUESTER}." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           case "$permission" in
             admin|maintain|write)
               echo "should_review=true" >> "$GITHUB_OUTPUT"
