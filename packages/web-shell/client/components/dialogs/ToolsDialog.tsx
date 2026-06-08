@@ -117,8 +117,10 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     return t('tools.summary', { enabled, total: tools.length });
   }, [status, tools, t]);
 
+  // resume-picker-keyboard-only: disable mouse hover highlight to prevent
+  // hover from fighting keyboard selection for focus
   return (
-    <div className={dp('resume-picker')}>
+    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('tools.title')}</span>
         <span className={dp('resume-picker-count')}>{summary}</span>
@@ -131,11 +133,11 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
         </button>
       </div>
 
-      <div className={dp('resume-picker-search')}>
-        <span className={dp('resume-picker-search-hint')}>
-          {message || (loading ? t('tools.loading') : summary)}
-        </span>
-      </div>
+      {message && (
+        <div className={dp('resume-picker-search')}>
+          <span className={dp('resume-picker-search-hint')}>{message}</span>
+        </div>
+      )}
 
       <div className={dp('resume-picker-sep')} />
 
@@ -143,42 +145,59 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
         {!loading && tools.length === 0 && (
           <div className={dp('resume-picker-empty')}>{t('tools.empty')}</div>
         )}
-        {tools.map((tool, i) => (
-          <div
-            key={tool.name}
-            className={dp(
-              'resume-picker-item',
-              i === selectedIdx ? 'selected' : undefined,
-            )}
-            onMouseEnter={() => setSelectedIdx(i)}
-          >
-            <div className={dp('resume-picker-item-row')}>
-              <span className={dp('resume-picker-item-prefix')}>
-                {i === selectedIdx ? '›' : ' '}
-              </span>
-              <span className={dp('resume-picker-item-title')}>
-                {toolLabel(tool)}
-              </span>
-              <span className={dp('resume-picker-item-badge')}>
-                {busyTool === tool.name
-                  ? '...'
-                  : tool.enabled
-                    ? t('tools.status.enabled')
-                    : t('tools.status.disabled')}
-              </span>
-            </div>
-            {tool.displayName && tool.displayName !== tool.name && (
-              <div className={dp('resume-picker-item-meta')}>{tool.name}</div>
-            )}
-            {tool.description && expandedTools.has(tool.name) && (
-              <div className={dp('dialog-detail')}>
-                <div className={dp('dialog-detail-body')}>
-                  {tool.description}
-                </div>
+        {tools.map((tool, i) => {
+          const expanded = expandedTools.has(tool.name);
+          const desc = tool.description ?? '';
+          const internalName =
+            tool.displayName && tool.displayName !== tool.name ? tool.name : '';
+          const metaText = expanded
+            ? ''
+            : internalName ||
+              (desc.length > 80 ? `${desc.slice(0, 80)}...` : desc);
+
+          return (
+            <div
+              key={tool.name}
+              className={dp(
+                'resume-picker-item',
+                'resume-picker-session-item',
+                i === selectedIdx ? 'selected' : undefined,
+              )}
+              onClick={() => {
+                setSelectedIdx(i);
+                if (tool.description) toggleDetails(tool);
+              }}
+            >
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
+                  {i === selectedIdx ? '›' : ' '}
+                </span>
+                <span className={dp('resume-picker-item-title')}>
+                  {toolLabel(tool)}
+                </span>
               </div>
-            )}
-          </div>
-        ))}
+              <div className={dp('resume-picker-item-meta')}>
+                <span>
+                  {busyTool === tool.name
+                    ? '...'
+                    : tool.enabled
+                      ? t('tools.status.enabled')
+                      : t('tools.status.disabled')}
+                </span>
+                {!expanded && metaText && (
+                  <span className={dp('resume-picker-item-detail')}>
+                    {metaText}
+                  </span>
+                )}
+              </div>
+              {expanded && desc && (
+                <div className={dp('tools-desc-expanded')}>
+                  <div className={dp('tools-desc-body')}>{desc}</div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <div className={dp('resume-picker-sep')} />

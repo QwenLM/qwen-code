@@ -381,6 +381,25 @@
   border-right: 1px solid var(--border-color);
 }
 
+.tools-desc-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 26px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent-color);
+  background: var(--bg-secondary);
+  border-radius: 0 4px 4px 0;
+}
+
+.tools-desc-body {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
 .dialog-detail {
   padding: 12px;
   overflow-y: auto;
