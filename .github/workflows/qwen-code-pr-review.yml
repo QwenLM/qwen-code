@@ -1,8 +1,6 @@
 name: '🧐 Qwen Pull Request Review'
 
 on:
-  pull_request_target:
-    types: ['opened', 'reopened', 'ready_for_review']
   issue_comment:
     types: ['created']
   pull_request_review_comment:
@@ -33,12 +31,6 @@ jobs:
   review-pr:
     if: |-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_target' &&
-       github.event.pull_request.state == 'open' &&
-       !github.event.pull_request.draft &&
-       (github.event.pull_request.author_association == 'OWNER' ||
-        github.event.pull_request.author_association == 'MEMBER' ||
-        github.event.pull_request.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
@@ -66,7 +58,32 @@ jobs:
          github.event.review.author_association == 'COLLABORATOR'))
     concurrency:
       group: 'qwen-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
-      cancel-in-progress: true
+      cancel-in-progress: >-
+        ${{
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request &&
+           (github.event.comment.body == '@qwen-code /review' ||
+            startsWith(github.event.comment.body, '@qwen-code /review ') ||
+            startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+           (github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR')) ||
+          (github.event_name == 'pull_request_review_comment' &&
+           (github.event.comment.body == '@qwen-code /review' ||
+            startsWith(github.event.comment.body, '@qwen-code /review ') ||
+            startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+           (github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR')) ||
+          (github.event_name == 'pull_request_review' &&
+           (github.event.review.body == '@qwen-code /review' ||
+            startsWith(github.event.review.body, '@qwen-code /review ') ||
+            startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+           (github.event.review.author_association == 'OWNER' ||
+            github.event.review.author_association == 'MEMBER' ||
+            github.event.review.author_association == 'COLLABORATOR'))
+        }}
     timeout-minutes: 60
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
@@ -99,11 +116,9 @@ jobs:
             fi
             PR_NUMBER="${{ github.event.issue.number }}"
             REVIEW_MODE="comment"
-          elif [ "${{ github.event_name }}" = "pull_request_target" ] ||
-               [ "${{ github.event_name }}" = "pull_request_review_comment" ] ||
+          elif [ "${{ github.event_name }}" = "pull_request_review_comment" ] ||
                [ "${{ github.event_name }}" = "pull_request_review" ]; then
-            if [ "${{ github.event_name }}" != "pull_request_target" ] &&
-               ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
+            if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi

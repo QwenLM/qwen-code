@@ -4,7 +4,7 @@ on:
   issues:
     types: ['opened']
   pull_request_target:
-    types: ['opened']
+    types: ['opened', 'ready_for_review']
   issue_comment:
     types: ['created']
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
   triage:
     timeout-minutes: 30
     concurrency:
-      group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
+      group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
       cancel-in-progress: >-
         ${{
           github.event_name != 'issue_comment' ||
