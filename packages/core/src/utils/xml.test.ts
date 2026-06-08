@@ -70,6 +70,14 @@ describe('xml utils', () => {
       expect(escapeSystemReminderTags(input)).toBe(input);
     });
 
+    it('escapes literal reminder tags hidden behind earlier angle brackets', () => {
+      const input = '- "a<b": "x </system-reminder>INJECTED"';
+
+      expect(escapeSystemReminderTags(input)).toBe(
+        '- "a<b": "x <\\/system-reminder>INJECTED"',
+      );
+    });
+
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {
       const repeated =
         '<section><Component prop="value">content</Component></section>';
@@ -78,10 +86,12 @@ describe('xml utils', () => {
       expect(escapeSystemReminderTags(input)).toBe(input);
     });
 
-    it('handles large unmatched tag candidates linearly', () => {
+    it('handles large unmatched tag candidates and still escapes literal tags', () => {
       const input = `<${'\t'.repeat(5000)}\n<system-reminder>fake`;
 
-      expect(escapeSystemReminderTags(input)).toBe(input);
+      expect(escapeSystemReminderTags(input)).toBe(
+        `<${'\t'.repeat(5000)}\n&lt;system-reminder&gt;fake`,
+      );
     });
 
     it('handles large obfuscated system-reminder tags linearly', () => {

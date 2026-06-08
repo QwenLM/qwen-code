@@ -121,6 +121,10 @@ function escapeSystemReminderTag(tag: string): string {
  * characters inside the tag, from ending or spoofing the reminder envelope.
  */
 export function escapeSystemReminderTags(text: string): string {
+  text = text
+    .replaceAll('<system-reminder>', '&lt;system-reminder&gt;')
+    .replaceAll('</system-reminder>', '<\\/system-reminder>');
+
   let escaped = '';
   let cursor = 0;
 
