@@ -98,13 +98,18 @@ export class ContentGenerationPipeline {
         const perRequestAc = parentSignal
           ? createChildAbortController(parentSignal)
           : undefined;
-        // Stage 1: Create OpenAI stream
-        const stream = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
+        let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        try {
+          // Stage 1: Create OpenAI stream. Wrapped in try so a network /
+          // DNS / proxy error during the SDK call still cleans up the
+          // per-request child (same pattern as the non-streaming path).
+          stream = (await this.client.chat.completions.create(openaiRequest, {
             signal: perRequestAc?.signal,
-          },
-        )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+          })) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        } catch (e) {
+          perRequestAc?.abort();
+          throw e;
+        }
 
         // Stage 2: Process stream with conversion and logging.
         // When a per-request controller exists, wrap in an async generator

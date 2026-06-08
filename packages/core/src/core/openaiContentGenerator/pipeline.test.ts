@@ -1615,6 +1615,108 @@ describe('ContentGenerationPipeline', () => {
       expect(sdkSignal).not.toBe(abortController.signal);
     });
 
+    it('should abort child signal after stream is fully consumed', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: 'stop' }],
+          };
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const sdkSignal = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][1]?.signal as AbortSignal;
+      expect(sdkSignal.aborted).toBe(false);
+
+      for await (const _result of resultGenerator) {
+        // Consume stream
+      }
+
+      expect(sdkSignal.aborted).toBe(true);
+    });
+
+    it('should abort child signal when consumer breaks early', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'a' }, finish_reason: null }],
+          };
+          yield {
+            id: 'chunk-2',
+            choices: [{ delta: { content: 'b' }, finish_reason: 'stop' }],
+          };
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      const sdkSignal = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][1]?.signal as AbortSignal;
+
+       
+      for await (const _result of resultGenerator) {
+        break;
+      }
+
+      expect(sdkSignal.aborted).toBe(true);
+    });
+
+    it('should abort child signal when SDK create() throws', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      let capturedSignal: AbortSignal | undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          throw new Error('network failure');
+        },
+      );
+
+      await expect(
+        pipeline.executeStream(request, 'test-id'),
+      ).rejects.toThrow();
+
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+
     it('should merge finishReason and usageMetadata from separate chunks', async () => {
       // Arrange
       const request: GenerateContentParameters = {
