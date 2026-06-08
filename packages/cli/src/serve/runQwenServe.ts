@@ -780,6 +780,12 @@ export async function runQwenServe(
       ...(opts.channelIdleTimeoutMs !== undefined
         ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
         : {}),
+      ...(opts.sessionReapIntervalMs !== undefined
+        ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+        : {}),
+      ...(opts.sessionIdleTimeoutMs !== undefined
+        ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+        : {}),
       boundWorkspace,
       childEnvOverrides,
       channelFactory,

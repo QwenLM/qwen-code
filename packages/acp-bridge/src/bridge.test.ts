@@ -9149,3 +9149,334 @@ describe('preheat', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Session idle reaper
+// ---------------------------------------------------------------------------
+describe('session idle reaper', () => {
+  it('reaps an idle session after the timeout expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 5_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT reap a session with an active prompt and client', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        promptImpl: () => new Promise<never>(() => {}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 2_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const promptPromise = bridge
+        .sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hi' }],
+        })
+        .catch(() => {});
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+      await promptPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT reap a session with a live SSE subscriber', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 2_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.detachClient(session.sessionId, session.clientId);
+      const abort = new AbortController();
+      bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT reap a session with registered clients', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 3_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is disabled when sessionReapIntervalMs is 0', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+        sessionIdleTimeoutMs: 1_000,
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is disabled when sessionIdleTimeoutMs is 0', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 0,
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publishes session_closed with reason idle_timeout via closeSession opts', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+
+    const events: BridgeEvent[] = [];
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const reading = (async () => {
+      for await (const ev of iter) {
+        events.push(ev);
+        if (ev.type === 'session_closed') {
+          abort.abort();
+          break;
+        }
+      }
+    })();
+
+    await bridge.closeSession(session.sessionId, undefined, {
+      reason: 'idle_timeout',
+    });
+    await reading;
+    const closedEv = events.find((e) => e.type === 'session_closed');
+    expect(closedEv).toBeDefined();
+    expect((closedEv!.data as { reason: string }).reason).toBe('idle_timeout');
+
+    await bridge.shutdown();
+  });
+
+  it('closeSession defaults to reason client_close', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+
+    const events: BridgeEvent[] = [];
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const reading = (async () => {
+      for await (const ev of iter) {
+        events.push(ev);
+        if (ev.type === 'session_closed') {
+          abort.abort();
+          break;
+        }
+      }
+    })();
+
+    await bridge.closeSession(session.sessionId);
+    await reading;
+    const closedEv = events.find((e) => e.type === 'session_closed');
+    expect(closedEv).toBeDefined();
+    expect((closedEv!.data as { reason: string }).reason).toBe('client_close');
+
+    await bridge.shutdown();
+  });
+
+  it('reaps multiple idle sessions in one tick', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 3_000,
+      });
+      const s1 = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const s2 = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const s3 = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(bridge.sessionCount).toBe(3);
+
+      await bridge.detachClient(s1.sessionId, s1.clientId);
+      await bridge.detachClient(s2.sessionId, s2.clientId);
+      await bridge.detachClient(s3.sessionId, s3.clientId);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('session with recent heartbeat survives reaper', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 5_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      bridge.recordHeartbeat(session.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(bridge.sessionCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reaper is stopped on shutdown (no post-shutdown errors)', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 1_000,
+        sessionIdleTimeoutMs: 2_000,
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await bridge.shutdown();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -72,6 +72,8 @@ import type {
   BridgeSessionState,
   BridgeRestoredSession,
   BridgeSessionSummary,
+  BridgeClientRequestContext,
+  CloseSessionOpts,
   AcpSessionBridge,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
@@ -660,6 +662,8 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 // the limit being hit. Configurable via
 // `BridgeOptions.maxPendingPermissionsPerSession`.
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
+const DEFAULT_SESSION_REAP_INTERVAL_MS = 60_000;
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
@@ -793,6 +797,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let channelInfo: ChannelInfo | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
+  const sessionReapIntervalMs = resolvePositiveFiniteMs(
+    opts.sessionReapIntervalMs,
+    DEFAULT_SESSION_REAP_INTERVAL_MS,
+  );
+  const sessionIdleTimeoutMs = resolvePositiveFiniteMs(
+    opts.sessionIdleTimeoutMs,
+    DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+  );
+  let sessionReaper: ReturnType<typeof setInterval> | undefined;
+
+  function resolvePositiveFiniteMs(
+    raw: number | undefined,
+    fallback: number,
+  ): number {
+    if (raw === undefined) return fallback;
+    return raw > 0 && Number.isFinite(raw) ? raw : 0;
+  }
+
   function cancelIdleTimer(): void {
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
@@ -839,6 +861,44 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     }, timeoutMs);
     idleTimer.unref();
+  }
+
+  function startSessionReaper(): void {
+    if (sessionReapIntervalMs <= 0 || sessionIdleTimeoutMs <= 0) return;
+    sessionReaper = setInterval(() => {
+      if (shuttingDown) return;
+      const now = Date.now();
+      for (const [id, entry] of byId) {
+        if (entry.activePromptOriginatorClientId !== undefined) continue;
+        if (entry.events.subscriberCount > 0) continue;
+        if (entry.clientIds.size > 0) continue;
+        const lastActive =
+          entry.sessionLastSeenAt ?? Date.parse(entry.createdAt);
+        const idle = now - lastActive;
+        if (idle < sessionIdleTimeoutMs) continue;
+        writeStderrLine(
+          `qwen serve: reaping idle session ${JSON.stringify(id)} ` +
+            `(idle for ${Math.round(idle / 1000)}s, ` +
+            `threshold ${Math.round(sessionIdleTimeoutMs / 1000)}s)`,
+        );
+        void closeSessionImpl(id, undefined, { reason: 'idle_timeout' }).catch(
+          (err) => {
+            writeStderrLine(
+              `qwen serve: session reaper failed to close ` +
+                `${JSON.stringify(id)}: ${String(err)}`,
+            );
+          },
+        );
+      }
+    }, sessionReapIntervalMs);
+    sessionReaper.unref();
+  }
+
+  function stopSessionReaper(): void {
+    if (sessionReaper !== undefined) {
+      clearInterval(sessionReaper);
+      sessionReaper = undefined;
+    }
   }
 
   // BkUyD: superset of `channelInfo` covering channels
@@ -2266,6 +2326,79 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  async function closeSessionImpl(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    closeOpts?: CloseSessionOpts,
+  ): Promise<void> {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    let originatorClientId: string | undefined;
+    if (context?.clientId !== undefined) {
+      originatorClientId = resolveTrustedClientId(entry, context.clientId);
+    }
+    writeStderrLine(
+      `qwen serve: closing session ${JSON.stringify(sessionId)}` +
+        (originatorClientId
+          ? ` by client ${JSON.stringify(originatorClientId)}`
+          : ''),
+    );
+    telemetry.event('session.close', {
+      'qwen-code.daemon.bridge.operation': 'session.close',
+      'session.id': sessionId,
+    });
+    if (defaultEntry === entry) defaultEntry = undefined;
+    const ci = channelInfoForEntry(entry);
+    if (!ci) {
+      writeStderrLine(
+        `qwen serve: closeSession channelInfoForEntry returned undefined ` +
+          `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
+      );
+    }
+    if (ci && ci.channel === entry.channel) {
+      ci.sessionIds.delete(sessionId);
+    }
+    await notifyAgentSessionClose(entry, ci, 'closeSession');
+    permissionMediator.forgetSession(sessionId);
+    entry.pendingPermissionIds.clear();
+    byId.delete(sessionId);
+    telemetry.metrics?.sessionLifecycle('close');
+    ci?.client.markSessionClosed(sessionId);
+    const reason = closeOpts?.reason ?? 'client_close';
+    try {
+      entry.events.publish({
+        type: 'session_closed',
+        data: {
+          sessionId,
+          reason,
+          ...(originatorClientId ? { closedBy: originatorClientId } : {}),
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    } catch {
+      /* bus already closed */
+    }
+    entry.events.close();
+    try {
+      await telemetry.withSpan(
+        'session.close.cancel_active_prompt',
+        {
+          'qwen-code.daemon.bridge.operation':
+            'session.close.cancel_active_prompt',
+          'session.id': sessionId,
+        },
+        async () => await entry.connection.cancel({ sessionId }),
+      );
+    } catch {
+      /* no active prompt or session already torn down */
+    }
+    if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+      await startIdleTimer(ci, `closeSession "${sessionId}"`);
+    }
+  }
+
+  startSessionReaper();
+
   return {
     get sessionCount() {
       return byId.size;
@@ -3021,96 +3154,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return branchResult;
     },
 
-    async closeSession(sessionId, context) {
-      const entry = byId.get(sessionId);
-      if (!entry) throw new SessionNotFoundError(sessionId);
-      let originatorClientId: string | undefined;
-      if (context?.clientId !== undefined) {
-        originatorClientId = resolveTrustedClientId(entry, context.clientId);
-      }
-      writeStderrLine(
-        `qwen serve: closing session ${JSON.stringify(sessionId)}` +
-          (originatorClientId
-            ? ` by client ${JSON.stringify(originatorClientId)}`
-            : ''),
-      );
-      telemetry.event('session.close', {
-        'qwen-code.daemon.bridge.operation': 'session.close',
-        'session.id': sessionId,
-      });
-      if (defaultEntry === entry) defaultEntry = undefined;
-      // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
-      // `aliveChannels` for the entry's actual channel) instead of the
-      // module-scoped `channelInfo` (the CURRENT attach target). The two
-      // diverge during the channel-overlap window — A dying, B freshly
-      // spawned as `channelInfo` — where capturing `channelInfo` would
-      // (1) skip the `sessionIds.delete()` since `B.channel !==
-      // entry.channel`, and (2) call `markSessionClosed` on B's client
-      // instead of A's. The regression test is single-channel smoke only
-      // and WILL NOT fail if this reverts to module-scoped channelInfo.
-      // Keep `channelInfoForEntry(entry)` until a deterministic overlap
-      // test lands.
-      const ci = channelInfoForEntry(entry);
-      if (!ci) {
-        // When the entry's channel has already been torn down out-of-band,
-        // the cleanup branches below all short-circuit silently. Sibling
-        // methods surface this as `SessionNotFoundError`; `closeSession`
-        // is intentionally idempotent so we just log instead of throwing.
-        writeStderrLine(
-          `qwen serve: closeSession channelInfoForEntry returned undefined ` +
-            `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
-        );
-      }
-      if (ci && ci.channel === entry.channel) {
-        ci.sessionIds.delete(sessionId);
-      }
-      await notifyAgentSessionClose(entry, ci, 'closeSession');
-      // Mediator-driven cancel cascade. Each pending settles as
-      // cancelled, SSE permission_resolved emits, audit records.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
-      byId.delete(sessionId);
-      telemetry.metrics?.sessionLifecycle('close');
-      // Tombstone the closed sessionId so any late `extNotification`
-      // from the (now-defunct) child can't seed the early-event buffer
-      // and leak into a future load/resume of the same persisted id.
-      ci?.client.markSessionClosed(sessionId);
-      try {
-        entry.events.publish({
-          type: 'session_closed',
-          data: {
-            sessionId,
-            reason: 'client_close',
-            // `data.closedBy` is kept for back-compat with existing
-            // wire consumers; new code should read envelope-level
-            // `originatorClientId` (matches `session_metadata_updated`,
-            // `model_switched`, `approval_mode_changed`, etc.).
-            ...(originatorClientId ? { closedBy: originatorClientId } : {}),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus already closed */
-      }
-      // `session_closed` is terminal. Close the bus before ACP cancel so any
-      // late cancellation frames from the agent are intentionally dropped.
-      entry.events.close();
-      try {
-        await telemetry.withSpan(
-          'session.close.cancel_active_prompt',
-          {
-            'qwen-code.daemon.bridge.operation':
-              'session.close.cancel_active_prompt',
-            'session.id': sessionId,
-          },
-          async () => await entry.connection.cancel({ sessionId }),
-        );
-      } catch {
-        /* no active prompt or session already torn down */
-      }
-      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        await startIdleTimer(ci, `closeSession "${sessionId}"`);
-      }
+    async closeSession(sessionId, context, closeOpts) {
+      return closeSessionImpl(sessionId, context, closeOpts);
     },
 
     updateSessionMetadata(sessionId, metadata, context) {
@@ -4372,6 +4417,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `channel.exited` hasn't fired yet.
       shuttingDown = true;
       cancelIdleTimer();
+      stopSessionReaper();
       const channels = Array.from(aliveChannels);
       defaultEntry = undefined;
       byId.clear();
@@ -4391,6 +4437,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // spawning a child this teardown won't see.
       shuttingDown = true;
       cancelIdleTimer();
+      stopSessionReaper();
       const entries = Array.from(byId.values());
       // Snapshot every alive channel (typically 1; up to 2 during a
       // `killSession`-then-`spawnOrAttach` overlap) — entries are

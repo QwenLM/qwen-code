@@ -156,6 +156,10 @@ export interface ServeOptions {
   writerIdleTimeoutMs?: number;
   /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
   channelIdleTimeoutMs?: number;
+  /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
+  sessionReapIntervalMs?: number;
+  /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
+  sessionIdleTimeoutMs?: number;
 }
 
 /**
