@@ -33,25 +33,22 @@ Examples:
 If the target is a PR URL (`/pull/`), route to **PR Intake**. If it is an issue
 URL (`/issues/`), route to **Issue Triage**.
 
-If the target is numeric, detect PR vs issue:
-
-```bash
-if gh pr view <number> --repo QwenLM/qwen-code --json number >/dev/null 2>&1; then
-  echo "PR"
-elif gh issue view <number> --repo QwenLM/qwen-code --json number >/dev/null 2>&1; then
-  echo "ISSUE"
-else
-  echo "ERROR: #<number> is neither a PR nor an issue in QwenLM/qwen-code"
-  exit 1
-fi
-```
+If the target is numeric, detect PR vs issue by trying `gh pr view "$NUM"` first
+against the resolved repo, then `gh issue view "$NUM"`.
 
 ## Fetch
+
+Fetch only the resolved target type:
 
 ```bash
 gh issue view "$NUM" --repo "$REPO" --json number,title,body,author,labels,assignees,comments,state,createdAt,url
 gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,files,additions,deletions,changedFiles,baseRefName,headRefName,state,isDraft,reviewDecision,url,reviews,comments
-gh label list --repo "$REPO" --limit 300
+```
+
+Before adding labels, verify proposed labels exist:
+
+```bash
+gh label list --repo "$REPO" --limit 200
 ```
 
 ## Rules
@@ -63,10 +60,9 @@ gh label list --repo "$REPO" --limit 300
   or `gh api -f body=@FILE` — those post the path literally.
 - Drafts: skip
 - Use the resolved `$REPO`; every `gh` command must include `--repo "$REPO"`.
-- Close issues only for the narrow inadmissible cases documented in
-  `references/issue-workflow.md`. Never close PRs, merge, approve outside PR
-  workflow Stage 3, assign, edit titles/bodies, delete comments, or remove
-  labels.
+- Do not close issues unless a maintainer explicitly requested that action.
+  Never close PRs, merge, approve outside PR workflow Stage 3, assign, edit
+  titles/bodies, delete comments, or remove labels.
 
 ## Event Ownership
 
@@ -150,26 +146,13 @@ If the reporter wrote Chinese, respond in Chinese first with English in
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3:
   Final Decision). Key-point bullet format.
 
-### Comment Anti-Patterns
-
-| Avoid                               | Prefer                                                                       |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| "Validation section is empty"       | "Could you add the command output for the new behavior?"                     |
-| "Please provide more information"   | "Could you share `/about` output and whether this started after an upgrade?" |
-| "Duplicate of #123" (weak evidence) | "This looks related to #123 because..."                                      |
-| Posting stage/verdict/route codes   | Distill into one author-facing next step                                     |
-
 ### Public Comment Distillation
 
 Staged reports are for maintainers. GitHub comments are for authors and
 reporters. Do not post the staged report, verdict table, label plan, route name,
-or internal reasoning directly as a public comment.
-
-Before drafting a comment, distill the analysis into:
-
-- What the maintainer understood from this PR or issue.
-- The one or two decisions or missing facts that matter next.
-- The smallest concrete next step for the author, reporter, or maintainer.
+or internal reasoning directly as a public comment. Distill it into one concrete
+next step and use "related" instead of "duplicate" unless the root cause is the
+same or maintainer-confirmed.
 
 ## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
 
@@ -202,13 +185,8 @@ the review is incomplete and useless.
 
 ## Workflow
 
-- Issue → read `references/issue-workflow.md`, then consult
-  `references/issue-triage-rules.md` for detailed classification, priority,
-  completeness checks, version staleness, auto-fix eligibility, and welcome-PR
-  eligibility rules.
-- PR → read `references/pr-workflow.md`, then consult
-  `references/pr-intake-rules.md` for detailed product fit, body completeness,
-  scope & size thresholds, and author validation rules.
+- Issue → read `references/issue-workflow.md`
+- PR → read `references/pr-workflow.md`
 
 ## Staged Report
 

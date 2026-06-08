@@ -2,10 +2,6 @@
 
 Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
-For detailed PR evaluation criteria (product fit verdicts, body completeness
-template checks, scope & size thresholds 800/1500 lines, author validation
-expectations by PR type), consult `pr-intake-rules.md`.
-
 Before posting or labeling, evaluate the tiered comment gate and label gate
 from `SKILL.md`. Record the gate decisions in the staged report. Include the
 `<!-- qwen-maintain:pr-intake -->` marker in all PR comments.
@@ -73,16 +69,30 @@ Ask the hard questions before reading a single line of code:
 - Is it within qwen-code's core mission, or does it pull focus from what matters more?
 - "Can do" ≠ "should do" — technically feasible doesn't mean we should ship it.
 
-CHANGELOG is a reference signal, not the sole criterion:
-
-```bash
-curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
-```
-
-- **Found** → cite version/line as supporting signal.
-- **Not found** → not a rejection. The area may still be relevant.
+External changelogs or competitor behavior are optional context, not required
+gate checks and never rejection by themselves.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
+
+Closed PRs are design history, not automatic negative precedent. Treat them as
+reject signal only when maintainers explicitly rejected the direction.
+
+Judge author validation only from evidence supplied by the PR author; do not run
+tests to manufacture missing evidence. Expected evidence: screenshots or tmux
+logs for TUI changes, command transcript for CLI behavior, reproduction plus
+fixed behavior for bug fixes, test output or usage examples for API/SDK changes,
+before/after numbers for performance, workflow run or actionlint output for CI,
+and relevant checks for refactors. Docs-only PRs may be N/A.
+
+For scope, exclude generated files, lockfiles, snapshots, and schemas. Under 800
+changed lines is normal; 800-1500 lines should be split if concerns are
+separable; over 1500 lines should be split unless the PR is clearly cohesive.
+
+Label hints: `need-discussion` + `status/ready-for-human` for unclear product
+direction, `status/need-information` for incomplete body, and
+`status/waiting-for-feedback` for missing author validation. Move to deep review
+only when product fit, body completeness, validation, and scope are all good
+enough.
 
 **1c. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
 

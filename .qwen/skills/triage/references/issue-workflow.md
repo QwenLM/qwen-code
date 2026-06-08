@@ -2,10 +2,6 @@
 
 Triage a GitHub issue. Shared rules in `SKILL.md` — read those first.
 
-For detailed classification criteria (type, priority P0-P3), completeness
-checks, version staleness, auto-fix eligibility, and welcome-PR eligibility,
-consult `issue-triage-rules.md`.
-
 **Single comment, updated in place.** Stage 1 posts a concise bilingual
 comment; Stage 2 appends results to the same comment via `gh api PATCH`.
 Key points only — no verbose prose.
@@ -41,12 +37,10 @@ Include the appropriate bot-coordination marker in the comment draft alongside
 the stage marker. For example: `<!-- qwen-triage stage=1 -->` plus
 `<!-- qwen-issue-bot:needs-info -->` for unclear issues.
 
-Default stance: issues are admissible. Close only the narrow inadmissible cases
-below.
+Default stance: issues are admissible. Treat only the narrow cases below as
+inadmissible.
 
-Classify the issue from title, body, comments, labels, docs, and source context.
-Use the priority definitions from `issue-triage-rules.md` (P0-P3) and the
-completeness check (version, OS, auth method) to decide next steps:
+Classify the issue from title, body, comments, labels, docs, and source context:
 
 - **Inadmissible**: religious or political flame wars, harassment, abusive
   language, spam, or content unrelated to Qwen Code.
@@ -57,6 +51,20 @@ completeness check (version, OS, auth method) to decide next steps:
 - **Bug**: user-visible broken behavior.
 - **Feature**: new capability, behavior change, or product request.
 
+Priority:
+
+- **P0**: catastrophic failure for most users, data loss, severe security, or
+  release blocker.
+- **P1**: serious regression or core feature failure without an easy workaround.
+  Feature requests are almost never P1.
+- **P2**: moderate issue, smaller subset affected, or easy workaround.
+- **P3**: cosmetic, typo, rare edge case, or nice-to-have.
+
+Completeness for bug reports: prefer full `/about` output. Ask only for missing
+version, OS, auth method, exact command, expected/actual behavior, logs, or
+screenshots. If `status/need-information` or a prior missing-info bot comment
+already exists, do not post another.
+
 Apply labels using existing labels only. Prefer one `type/*`, one `category/*`,
 relevant `scope/*`, one priority label, and status labels as needed. Apply
 labels with `gh issue edit --add-label`.
@@ -64,11 +72,8 @@ labels with `gh issue edit --add-label`.
 Post a single triage comment (bilingual, concise key points — see format
 below). This comment is updated in place by Stage 2; never post a second one.
 
-If inadmissible, close the issue and stop:
-
-```bash
-gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason "not planned"
-```
+If inadmissible, recommend closure in the comment and stop. Do not close the
+issue unless a maintainer explicitly requested that action.
 
 Save the comment ID for Stage 2 to update.
 
@@ -90,7 +95,8 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For docs / usage issues:
 
-1. Search docs and source with `rg` (inside worktree — use `worktreePath` as the search root).
+1. If local docs/source search is needed, create a worktree first, then search
+   with `rg` using `worktreePath` as the root.
 2. Search similar issues (reduce title to safe keywords first):
 
    ```bash
@@ -128,17 +134,21 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For bugs without clear reproduction:
 
-1. Check version staleness using `issue-triage-rules.md` rules: if the reported
-   version is ≥6 stable releases behind current, add `status/need-retesting`
-   and ask the reporter to upgrade and retest.
-2. Check welcome-PR eligibility using `issue-triage-rules.md`: root cause
-   identified, fix is describable, change is modest, test path is known.
-3. Check auto-fix eligibility: root cause is high-confidence, fix is ≤3 files,
-   change is mechanical, existing tests cover the area. If eligible, ask whether
-   to run `/qc bugfix <issue-number>`.
-4. Inspect source and docs inside worktree; state confidence: confirmed /
+1. If the issue explicitly reports an old version, add `status/need-retesting`
+   and ask the reporter to upgrade and retest. Otherwise ask for current
+   `/about` output instead of running a release lookup.
+2. Search related issues using exact error text, command/feature name, stack
+   trace file, or symptom keywords. Say "duplicate" only for same root cause or
+   maintainer-confirmed duplicates; otherwise say "related".
+3. Check welcome-PR eligibility: root cause identified, fix is describable,
+   change is modest, test path is known, and no deep architecture knowledge is
+   needed.
+4. Check auto-fix eligibility: root cause is high-confidence, fix is ≤3 files,
+   change is mechanical, existing tests cover the area, and no product decision
+   is needed. If eligible, ask whether to run `/qc bugfix <issue-number>`.
+5. Inspect source and docs inside worktree; state confidence: confirmed /
    plausible / no clear direction.
-5. Append likely root cause or link similar historical issues.
+6. Append likely root cause or link similar historical issues.
 
 For welcome-PR comments, use dual markers:
 
@@ -149,8 +159,10 @@ For welcome-PR comments, use dual markers:
 
 ### For feature requests:
 
-1. Produce a product direction assessment using `issue-triage-rules.md`:
-   `aligned` / `discuss` / `reject`.
+1. Produce a product direction assessment: `aligned` / `discuss` / `reject`.
+   Consider product fit, smallest useful implementation boundary, overlap with
+   existing commands/skills/roadmap, and whether a contributor can proceed
+   without private maintainer decisions.
 2. For `aligned` or `discuss`, state the recommended implementation boundary:
    skill/prompt, docs, existing command extension, core architecture, or
    roadmap discussion.
