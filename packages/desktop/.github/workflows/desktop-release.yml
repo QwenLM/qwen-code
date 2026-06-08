@@ -1,0 +1,219 @@
+name: Desktop Release
+
+run-name: Desktop release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update, for example v0.1.0"
+        required: true
+        type: string
+      release_name:
+        description: "Release title. Defaults to the tag."
+        required: false
+        type: string
+      qwen_code_version:
+        description: "Optional @qwen-code/qwen-code version to vendor into the desktop app."
+        required: false
+        type: string
+      dry_run:
+        description: "Build installers only. Do not create or update a GitHub Release."
+        required: true
+        default: true
+        type: boolean
+      draft:
+        description: "Create a draft release."
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the release as a prerelease."
+        required: true
+        default: false
+        type: boolean
+      clobber:
+        description: "Replace same-named assets when uploading to an existing release."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: 1.3.9
+  CRAFT_BRAND: openwork
+  QWEN_CODE_VERSION: ${{ inputs.qwen_code_version }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            command: bun run dist:mac
+          - name: Windows
+            os: windows-latest
+            command: bun run dist:win
+          - name: Linux
+            os: ubuntu-22.04
+            command: bun run dist:linux
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build desktop installer
+        run: ${{ matrix.command }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          SENTRY_ELECTRON_INGEST_URL: ${{ secrets.SENTRY_ELECTRON_INGEST_URL }}
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            apps/electron/release/*.AppImage
+            apps/electron/release/*.blockmap
+            apps/electron/release/*.dmg
+            apps/electron/release/*.exe
+            apps/electron/release/*.yml
+            apps/electron/release/*.zip
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    if: ${{ inputs.dry_run == false }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DRAFT: ${{ inputs.draft }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TARGET: ${{ github.sha }}
+          UPLOAD_CLOBBER: ${{ inputs.clobber }}
+        run: |
+          set -euo pipefail
+
+          assets=()
+          while IFS= read -r -d '' file; do
+            assets+=("$file")
+          done < <(find release-assets -type f -print0 | sort -z)
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets were downloaded."
+            exit 1
+          fi
+
+          printf 'Release assets:\n'
+          printf '  %s\n' "${assets[@]}"
+
+          title="${RELEASE_NAME:-$RELEASE_TAG}"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            upload_args=("$RELEASE_TAG" "${assets[@]}")
+            if [ "$UPLOAD_CLOBBER" = "true" ]; then
+              upload_args+=(--clobber)
+            fi
+            gh release upload "${upload_args[@]}"
+          else
+            create_args=(
+              "$RELEASE_TAG"
+              "${assets[@]}"
+              --generate-notes
+              --target "$RELEASE_TARGET"
+              --title "$title"
+            )
+            if [ "$RELEASE_DRAFT" = "true" ]; then
+              create_args+=(--draft)
+            fi
+            if [ "$RELEASE_PRERELEASE" = "true" ]; then
+              create_args+=(--prerelease)
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+  dry-run-summary:
+    name: Dry Run Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    if: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Download installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: |
+          set -euo pipefail
+
+          assets=()
+          while IFS= read -r -d '' file; do
+            assets+=("$file")
+          done < <(find release-assets -type f -print0 | sort -z)
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets were downloaded."
+            exit 1
+          fi
+
+          {
+            echo "## Desktop release dry run"
+            echo
+            echo "Built ${#assets[@]} asset(s). No GitHub Release was created or updated."
+            echo
+            echo "| Asset | Size |"
+            echo "| --- | ---: |"
+            for file in "${assets[@]}"; do
+              size=$(du -h "$file" | cut -f1)
+              echo "| $(basename "$file") | $size |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
