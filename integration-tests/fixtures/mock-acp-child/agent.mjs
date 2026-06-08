@@ -26,11 +26,13 @@ import {
 } from '@agentclientprotocol/sdk';
 import { Writable, Readable } from 'node:stream';
 
-// Protect the stdout NDJSON pipe — stray console.log would corrupt the
-// framing and surface as "unexpected token" parse errors in the daemon.
+// Protect the stdout NDJSON pipe — any console method that writes to
+// stdout would corrupt the framing.
 /* eslint-disable no-undef */
 console.log = console.error;
 console.info = console.error;
+console.debug = console.error;
+console.dir = console.error;
 /* eslint-enable no-undef */
 
 const mode = process.env.MOCK_ACP_MODE ?? 'echo';
