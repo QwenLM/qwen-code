@@ -54,7 +54,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
     auditPath,
     vapid,
     pushStore,
-  });
+  }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -250,6 +250,18 @@ describe('gateway app', () => {
 
     const withoutStores = createGatewayApp({ daemon, store, pairing });
     expect(withoutStores.notifier).toBeUndefined();
+  });
+
+  it('createGatewayApp returns the audit instance', async () => {
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const dir = mkdtempSync(join(tmpdir(), 'rc-srv-'));
+    const store = await TokenStore.open(join(dir, 'tokens.json'));
+    const pairing = new PairingService();
+
+    const built = createGatewayApp({ daemon, store, pairing });
+    expect(built.audit).toBeDefined();
+    expect(typeof built.audit.record).toBe('function');
   });
 
   it('serves the web viewer at /ui/ without auth', async () => {

@@ -16,7 +16,7 @@ import type { PushStore } from './pushStore.js';
 import { bearerResolve, requireScope } from './auth.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
-import { AuditLog } from './auditLog.js';
+import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute } from './routes/prompt.js';
@@ -49,6 +49,8 @@ export interface GatewayApp {
   app: Express;
   /** Present only when both `vapid` and `pushStore` deps are supplied. */
   notifier?: PushNotifier;
+  /** The gateway's audit log — shared with the policy enforcer at boot. */
+  audit: AuditRecorder;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -119,5 +121,5 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  return { app, notifier };
+  return { app, notifier, audit };
 }
