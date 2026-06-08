@@ -1595,10 +1595,9 @@ export class GeminiClient {
         requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
       }
       if (
-        (messageType === SendMessageType.UserQuery ||
-          messageType === SendMessageType.Cron ||
-          messageType === SendMessageType.Retry) &&
-        !hasPendingToolCall
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron ||
+        (messageType === SendMessageType.Retry && !hasPendingToolCall)
       ) {
         const systemReminders = [];
 

@@ -1232,6 +1232,45 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('keeps injecting the reminder on UserQuery turns with pending tool calls', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'Interrupt' }],
+        [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        ],
+      );
+
+      expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
+      const parts = lastCall[1];
+      expect(parts).toContain('<system-reminder>DEFERRED</system-reminder>');
+    });
+
     it('omits already-revealed deferred tools from the reminder', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
