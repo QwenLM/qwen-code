@@ -181,8 +181,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'Connect an LLM provider': 'LLM プロバイダーに接続',
-  'Copy the last result or code snippet to clipboard':
-    '最後の結果またはコードスニペットをクリップボードにコピー',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '最新のAI応答をクリップボードにコピー（/copy N で新しい方からN番目）',
 
   // ============================================================================
   // Commands - Agents
