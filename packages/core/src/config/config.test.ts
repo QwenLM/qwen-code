@@ -2662,11 +2662,20 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getAutoModeSettings()).toEqual({});
     });
 
-    it('returns the provided autoMode hints and environment', () => {
+    it('returns the provided autoMode classifier settings, hints, and environment', () => {
       const config = new Config({
         ...baseParams,
         permissions: {
           autoMode: {
+            classifier: {
+              timeouts: {
+                stage1Ms: 12_345,
+                stage2Ms: 67_890,
+              },
+              thinking: {
+                stage2Enabled: true,
+              },
+            },
             hints: {
               allow: ['Allow xyz commands'],
               deny: ['Block intranet calls'],
@@ -2676,6 +2685,15 @@ describe('setApprovalMode with folder trust', () => {
         },
       });
       expect(config.getAutoModeSettings()).toEqual({
+        classifier: {
+          timeouts: {
+            stage1Ms: 12_345,
+            stage2Ms: 67_890,
+          },
+          thinking: {
+            stage2Enabled: true,
+          },
+        },
         hints: {
           allow: ['Allow xyz commands'],
           deny: ['Block intranet calls'],

@@ -259,10 +259,41 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
  * Use `permissions.allow / ask / deny` for hard rules.
  */
 export interface AutoModeSettings {
+  classifier?: {
+    timeouts?: {
+      /** Stage-1 fast classifier timeout in milliseconds. */
+      stage1Ms?: number;
+      /** Stage-2 review classifier timeout in milliseconds. */
+      stage2Ms?: number;
+    };
+    thinking?: {
+      /** Whether stage 2 may use provider/API-level thinking. */
+      stage2Enabled?: boolean;
+    };
+  };
   hints?: {
     /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
     allow?: string[];
-    /** Natural-language descriptions of actions the user wants AUTO mode to block. */
+    /**
+     * Natural-language descriptions of destructive / irreversible actions the
+     * user wants AUTO mode to soft-block. Soft-block means the classifier
+     * blocks the action unless the user's most recent explicit request
+     * authorised that exact action and scope.
+     */
+    softDeny?: string[];
+    /**
+     * Natural-language descriptions of security-boundary actions the user
+     * wants the AUTO classifier to hard-block. Hard-block applies inside the
+     * classifier even when an autoMode allow hint or recent user request would
+     * normally authorise the action. This does not override
+     * `permissions.allow`; use `permissions.deny` for deterministic hard
+     * permission rules.
+     */
+    hardDeny?: string[];
+    /**
+     * @deprecated Use `softDeny`. Kept as a backward-compatible alias —
+     * entries here are merged into the SOFT BLOCK user section.
+     */
     deny?: string[];
   };
   /** Environment / context lines injected into the classifier's system prompt. */

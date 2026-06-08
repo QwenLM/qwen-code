@@ -123,6 +123,16 @@ export function needsConfirmation(
   return finalPermission === 'ask' || finalPermission === 'default';
 }
 
+export function getEffectivePermissionForConfirmation(
+  finalPermission: PermissionFlowPermission,
+  forceConfirmationForAllow: boolean,
+): PermissionFlowPermission {
+  if (forceConfirmationForAllow && finalPermission === 'allow') {
+    return 'ask';
+  }
+  return finalPermission;
+}
+
 /**
  * Check if plan mode blocks the tool execution.
  *

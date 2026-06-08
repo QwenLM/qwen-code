@@ -63,6 +63,7 @@ import {
 } from './permission-helpers.js';
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -71,6 +72,7 @@ import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
+  shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
@@ -1362,6 +1364,7 @@ export class CoreToolScheduler {
             this.finalizeToolSpan(callId);
           }
           this.callIdToPostToolBatchSignal.delete(callId);
+          this.autoModeFallbackCallIds.delete(callId);
         } catch (e) {
           debugLogger.warn(
             `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -1838,7 +1841,21 @@ export class CoreToolScheduler {
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
 
-          if (finalPermission === 'allow') {
+          const forceAutoReviewForAllow =
+            approvalMode === ApprovalMode.AUTO &&
+            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          const confirmationPermission = getEffectivePermissionForConfirmation(
+            finalPermission,
+            forceAutoReviewForAllow,
+          );
+
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
+            );
+          }
+
+          if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
             // In AUTO mode, also reset denialTracking so an L4 allow-rule
             // match counts as a successful call and clears any in-flight
@@ -1919,15 +1936,21 @@ export class CoreToolScheduler {
               !this.config.getDisableAllHooks() &&
               shouldFirePermissionDeniedForAutoMode(decision, outcome)
             ) {
-              await this.config
-                .getHookSystem?.()
-                ?.firePermissionDeniedEvent(
-                  canonicalName,
-                  toolParams,
-                  reqInfo.callId,
-                  getAutoModePermissionDeniedReason(decision),
-                  signal,
+              try {
+                await this.config
+                  .getHookSystem?.()
+                  ?.firePermissionDeniedEvent(
+                    canonicalName,
+                    toolParams,
+                    reqInfo.callId,
+                    getAutoModePermissionDeniedReason(decision),
+                    signal,
+                  );
+              } catch (hookError) {
+                debugLogger.warn(
+                  `PermissionDenied hook failed for tool ${reqInfo.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
                 );
+              }
             }
             switch (outcome.kind) {
               case 'approved':
@@ -1982,7 +2005,11 @@ export class CoreToolScheduler {
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
           if (
-            !needsConfirmation(finalPermission, approvalMode, canonicalName)
+            !needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              canonicalName,
+            )
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
@@ -3592,7 +3619,119 @@ export class CoreToolScheduler {
           pendingTool.request.name,
           toolParams,
         );
-        const { finalPermission } = flowResult;
+        const { finalPermission, pmForcedAsk, pmCtx } = flowResult;
+
+        const forceAutoReviewForAllow =
+          this.config.getApprovalMode() === ApprovalMode.AUTO &&
+          shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+
+        if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+          debugLogger.info(
+            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+          );
+          const denialState = this.config.getAutoModeDenialState();
+          const fallback = shouldFallback(denialState);
+          const messages =
+            this.config
+              .getGeminiClient?.()
+              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const decision = await evaluateAutoMode({
+            ctx: pmCtx,
+            pmForcedAsk,
+            toolParams,
+            messages,
+            config: this.config,
+            signal,
+            skipClassifierReason: fallback.fallback
+              ? fallback.reason
+              : undefined,
+          });
+
+          const outcome = applyAutoModeDecision(
+            decision,
+            this.config,
+            denialState,
+          );
+          if (
+            !this.config.getDisableAllHooks() &&
+            shouldFirePermissionDeniedForAutoMode(decision, outcome)
+          ) {
+            try {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  pendingTool.request.name,
+                  toolParams,
+                  pendingTool.request.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                );
+            } catch (hookError) {
+              debugLogger.warn(
+                `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+              );
+            }
+          }
+          switch (outcome.kind) {
+            case 'approved':
+              this.setToolCallOutcome(
+                pendingTool.request.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(pendingTool.request.callId, 'scheduled');
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'auto_approved',
+                'auto',
+              );
+              break;
+            case 'blocked': {
+              this.setStatusInternal(
+                pendingTool.request.callId,
+                'error',
+                createErrorResponse(
+                  pendingTool.request,
+                  new Error(outcome.errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'error',
+                'auto',
+              );
+              const toolSpan = this.toolSpans.get(pendingTool.request.callId);
+              if (toolSpan) {
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                  TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                );
+                this.finalizeToolSpan(pendingTool.request.callId);
+              }
+              break;
+            }
+            case 'fallback':
+              if (fallback.fallback) {
+                this.autoModeFallbackCallIds.add(pendingTool.request.callId);
+                debugLogger.warn(
+                  `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              }
+              break;
+            default: {
+              const _exhaustive: never = outcome;
+              void _exhaustive;
+            }
+          }
+          if (
+            outcome.kind === 'approved' ||
+            outcome.kind === 'blocked' ||
+            outcome.kind === 'fallback'
+          ) {
+            continue;
+          }
+        }
 
         if (finalPermission === 'allow') {
           this.setToolCallOutcome(

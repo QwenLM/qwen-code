@@ -711,6 +711,37 @@
           "description": "Settings consumed by the AUTO approval mode classifier.",
           "type": "object",
           "properties": {
+            "classifier": {
+              "description": "Runtime controls for the AUTO approval mode classifier.",
+              "type": "object",
+              "properties": {
+                "timeouts": {
+                  "description": "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                  "type": "object",
+                  "properties": {
+                    "stage1Ms": {
+                      "description": "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                      "type": "number"
+                    },
+                    "stage2Ms": {
+                      "description": "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                      "type": "number"
+                    }
+                  }
+                },
+                "thinking": {
+                  "description": "Provider/API-level thinking controls for the AUTO classifier.",
+                  "type": "object",
+                  "properties": {
+                    "stage2Enabled": {
+                      "description": "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  }
+                }
+              }
+            },
             "hints": {
               "description": "Natural-language hints injected into the classifier system prompt.",
               "type": "object",
@@ -722,8 +753,22 @@
                     "type": "string"
                   }
                 },
+                "softDeny": {
+                  "description": "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hardDeny": {
+                  "description": "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "deny": {
-                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "description": "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
                   "type": "array",
                   "items": {
                     "type": "string"
