@@ -606,7 +606,16 @@ export class SubagentManager {
     }
 
     if (config.runConfig) {
-      frontmatter['runConfig'] = config.runConfig;
+      // When `maxTurns` is promoted to the top level, prune the legacy
+      // `runConfig.max_turns` so the on-disk frontmatter doesn't carry two
+      // sources of truth (the runtime already prefers top-level).
+      const { max_turns: _legacyMaxTurns, ...restRunConfig } =
+        config.runConfig as { max_turns?: number } & Record<string, unknown>;
+      const prunedRunConfig =
+        config.maxTurns !== undefined ? restRunConfig : config.runConfig;
+      if (Object.keys(prunedRunConfig).length > 0) {
+        frontmatter['runConfig'] = prunedRunConfig;
+      }
     }
 
     if (config.color && config.color !== 'auto') {

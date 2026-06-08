@@ -1144,6 +1144,44 @@ You are an agent.
       expect(serialized).toContain('isolation: worktree');
     });
 
+    it('should prune legacy runConfig.max_turns when top-level maxTurns is set', () => {
+      // Avoid emitting two sources of truth: when the runtime already
+      // promotes maxTurns to the top level, the on-disk file should not
+      // also retain the legacy nested value.
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        maxTurns: 42,
+        runConfig: { max_turns: 10, max_time_minutes: 5 },
+      });
+      expect(serialized).toContain('maxTurns: 42');
+      expect(serialized).toContain('max_time_minutes: 5');
+      // The nested max_turns should NOT appear (top-level wins).
+      const runConfigSection = serialized.match(
+        /runConfig:[\s\S]*?(?=\n\w|\n---|$)/,
+      );
+      expect(runConfigSection?.[0]).not.toContain('max_turns:');
+    });
+
+    it('should drop empty runConfig when only max_turns was nested', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        maxTurns: 42,
+        runConfig: { max_turns: 10 },
+      });
+      expect(serialized).toContain('maxTurns: 42');
+      expect(serialized).not.toContain('runConfig:');
+    });
+
+    it('should retain nested max_turns when top-level maxTurns is unset', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        runConfig: { max_turns: 10 },
+      });
+      expect(serialized).not.toContain('maxTurns:');
+      expect(serialized).toContain('runConfig:');
+      expect(serialized).toContain('max_turns: 10');
+    });
+
     it('should not include new fields when undefined', () => {
       const serialized = manager.serializeSubagent(validConfig);
       expect(serialized).not.toContain('permissionMode:');

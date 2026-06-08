@@ -193,12 +193,14 @@ export function convertClaudeAgentConfig(
 
   // Map Claude permissionMode to Qwen ApprovalMode via the shared bridge in
   // agent-frontmatter-schema.ts. The convert path matches the loader's
-  // precedence: when the source file has both `approvalMode` and
-  // `permissionMode`, the explicit qwen-style approvalMode wins (only fall
-  // back to the bridge when approvalMode is unset). Unknown permissionMode
-  // values fall back to the raw string so the user sees an explicit
-  // "invalid approvalMode" downstream rather than silently dropping the field.
-  if (claudeAgent.permissionMode && !claudeAgent.approvalMode) {
+  // precedence: when the source has both `approvalMode` and `permissionMode`,
+  // the explicit qwen-style approvalMode wins (only fall back to the bridge
+  // when approvalMode is unset). Unknown permissionMode values fall back to
+  // the raw string so the user sees an explicit "invalid approvalMode"
+  // downstream rather than silently dropping the field on import.
+  if (claudeAgent.approvalMode) {
+    qwenAgent['approvalMode'] = claudeAgent.approvalMode;
+  } else if (claudeAgent.permissionMode) {
     qwenAgent['approvalMode'] =
       claudePermissionModeToApprovalMode(claudeAgent.permissionMode) ??
       claudeAgent.permissionMode;

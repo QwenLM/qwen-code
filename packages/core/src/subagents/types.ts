@@ -162,13 +162,25 @@ export interface SubagentConfig {
 
   /**
    * Optional MCP-server overrides. Carried verbatim for CC parity; runtime
-   * semantics are deferred to a follow-up PR. Validated lazily at run time.
+   * semantics are deferred to a follow-up PR.
+   *
+   * **Known limitation:** qwen-code's lightweight `yaml-parser.ts` only handles
+   * one level of YAML nesting. Flat forms — array of server names, e.g.
+   * `mcpServers: [filesystem-server, redis-server]` — round-trip cleanly.
+   * Nested CC forms (`mcpServers: - name: { type: stdio, command: node }`)
+   * are read with deeper keys collapsed or leaked. Full nested support lands
+   * when this codebase wires in `js-yaml`.
    */
   mcpServers?: unknown;
 
   /**
    * Optional hooks. Carried verbatim for CC parity; runtime semantics are
-   * deferred to a follow-up PR. Validated lazily at run time.
+   * deferred to a follow-up PR.
+   *
+   * **Known limitation:** hooks fundamentally require nested YAML, which
+   * qwen-code's `yaml-parser.ts` cannot represent (see `mcpServers` above).
+   * In practice the field is shaped correctly only for trivial inputs; full
+   * support lands with `js-yaml`.
    */
   hooks?: unknown;
 

@@ -37,31 +37,13 @@ export {
 // Validation system
 export { SubagentValidator } from './validation.js';
 
-// Declarative-agent frontmatter schema (CC 2.1.168 parity constants + parsers)
-export {
-  EFFORT_VALUES,
-  EFFORT_ALIASES,
-  PERMISSION_MODE_VALUES,
-  MEMORY_VALUES,
-  ISOLATION_VALUES,
-  COLOR_VALUES,
-  claudePermissionModeToApprovalMode,
-  parseStringOrArray,
-  parseBackground,
-  parseMaxTurns,
-  parseEffort,
-  isPermissionMode,
-  isMemory,
-  isIsolation,
-  isColor,
-} from './agent-frontmatter-schema.js';
-export type {
-  EffortValue,
-  PermissionModeValue,
-  MemoryValue,
-  IsolationValue,
-  ColorValue,
-} from './agent-frontmatter-schema.js';
+// NOTE: declarative-agent schema helpers (EFFORT_VALUES, parseEffort,
+// claudePermissionModeToApprovalMode, …) live in `agent-frontmatter-schema.ts`
+// and are intentionally NOT re-exported here — they are internal to the
+// `SubagentManager` / `claude-converter` parse paths and locking their names
+// in the package's public API would constrain follow-up PRs (e.g. when
+// `js-yaml` lands and the schema shape changes). Re-introduce specific
+// exports here when a cross-package caller actually needs them.
 
 // Main management class
 export { SubagentManager } from './subagent-manager.js';

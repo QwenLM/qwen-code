@@ -120,7 +120,21 @@ describe('convertClaudeAgentConfig', () => {
     expect(result['approvalMode']).toBe('mystery-mode');
   });
 
-  it('should NOT override explicit approvalMode with permissionMode bridge (precedence parity with loader)', () => {
+  it('should emit explicit approvalMode when present (direct-caller contract)', () => {
+    // Regression for the round-3 finding that an explicit approvalMode
+    // (without permissionMode) was silently dropped by the converter. The
+    // in-tree convertAgentFiles path recovered via the unowned-key
+    // passthrough, but exported direct-call surface needs to honor the
+    // explicit field on its own.
+    const result = convertClaudeAgentConfig({
+      name: 'a',
+      description: 'd',
+      approvalMode: 'plan',
+    });
+    expect(result['approvalMode']).toBe('plan');
+  });
+
+  it('should prefer explicit approvalMode over the permissionMode bridge (precedence parity with loader)', () => {
     // Self-violated-invariant fix: previously the converter ran the bridge
     // unconditionally, so a hand-edited file with both fields lost the
     // explicit approvalMode in favor of the bridged value. The loader's rule
@@ -131,9 +145,7 @@ describe('convertClaudeAgentConfig', () => {
       permissionMode: 'bypassPermissions', // would bridge to 'yolo'
       approvalMode: 'plan', // explicit — should win
     });
-    expect(result['approvalMode']).toBeUndefined();
-    // (qwenAgent doesn't emit approvalMode in this case; convertAgentFiles
-    // passes the source approvalMode through verbatim via Loop 1.)
+    expect(result['approvalMode']).toBe('plan');
   });
 });
 
