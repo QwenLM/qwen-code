@@ -135,6 +135,32 @@ describe('WorkflowTool', () => {
     expect(llmText).toMatch(/non-JSON-serializable value of type object/);
   });
 
+  // T30 (PR #4732 R3): sibling drift of the R1 T12/T18 fix. llmContent
+  // already degrades per-field on non-serializable result, but the
+  // returnDisplay payload (runId + phases + logs + result) used to be
+  // wrapped in a single JSON.stringify — one bad `result` collapsed the
+  // entire display to "(display payload not JSON-serializable)", losing
+  // the runId, the phases, AND the logs. Pre-sanitize `result` so the
+  // always-serializable metadata survives.
+  it('execute() preserves runId/phases/logs in returnDisplay when result is non-JSON-serializable', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: 'phase("compute"); const a = {}; a.self = a; return a;',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const display = String(result.returnDisplay);
+    // runId, the phase, and a result placeholder must all survive.
+    expect(display).toMatch(/wf_[0-9a-f]{16}/);
+    expect(display).toContain('compute');
+    expect(display).toContain('non-JSON-serializable');
+    // The atomic-failure fallback must NOT appear — that would mean the
+    // whole display payload had thrown.
+    expect(display).not.toContain('display payload not JSON-serializable');
+  });
+
   // TST-C3: llmContent must be the unwrapped script return value (FIX-7).
   it('execute() strips the JSON wrapper from llmContent (script return is verbatim)', async () => {
     const tool = new WorkflowTool(fakeConfig(), {

@@ -119,11 +119,23 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // try/catch with a clear placeholder so a serialization issue
       // degrades gracefully instead of masquerading as a run failure.
       const llmText = safeStringifyResult(outcome.result);
+      // T30 (PR #4732 R3): sibling drift of the R1 T12/T18 fix.
+      // safeStringifyDisplayPayload wraps the entire payload in one
+      // JSON.stringify — without pre-sanitizing, a non-serializable
+      // `result` would collapse the display to "(display payload not
+      // JSON-serializable)" and lose runId / phases / logs (all of which
+      // are always serializable). Pre-sanitize `result` only.
+      let safeResult: unknown = outcome.result;
+      try {
+        JSON.stringify(outcome.result);
+      } catch {
+        safeResult = `(non-JSON-serializable value of type ${typeof outcome.result})`;
+      }
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
         phases: outcome.phases,
         logs: outcome.logs,
-        result: outcome.result,
+        result: safeResult,
       });
 
       return {
