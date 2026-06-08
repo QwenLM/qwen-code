@@ -120,7 +120,10 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -187,6 +190,7 @@ import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
@@ -1061,7 +1065,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { toggleVimEnabled } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
 
   const {
     isSubagentCreateDialogOpen,
@@ -1073,6 +1078,11 @@ export const AppContainer = (props: AppContainerProps) => {
     openAgentsManagerDialog,
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
+  const {
+    isSkillsManagerDialogOpen,
+    openSkillsManagerDialog,
+    closeSkillsManagerDialog,
+  } = useSkillsManagerDialog();
   const {
     isExtensionsManagerDialogOpen,
     openExtensionsManagerDialog,
@@ -1124,6 +1134,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1152,6 +1163,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1175,6 +1187,7 @@ export const AppContainer = (props: AppContainerProps) => {
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    reloadCommands,
   } = useSlashCommandProcessor(
     config,
     settings,
@@ -2310,6 +2323,7 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
+    isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
@@ -2913,6 +2927,14 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
+        // the Esc to switch to NORMAL mode. Without this guard, both handlers
+        // fire on the same keypress — vim switches mode AND AppContainer
+        // shows "Press Esc again to clear" or cancels the stream.
+        if (vimEnabled && vimMode === 'INSERT') {
+          return;
+        }
+
         // Dismiss or cancel btw side-question on Escape,
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
@@ -3134,6 +3156,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
+      vimEnabled,
+      vimMode,
     ],
   );
 
@@ -3313,6 +3337,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3439,6 +3465,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3510,6 +3538,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      setInputBuffer: buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog
@@ -3586,6 +3619,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog

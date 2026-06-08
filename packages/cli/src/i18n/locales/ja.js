@@ -74,7 +74,39 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
-  'List available skills.': '利用可能なスキルを一覧表示する。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'スキルパネルを開く（一覧・検索・有効化/無効化・選択）。',
+  'Manage Skills': 'スキルを管理',
+  'Skills configuration saved.': 'スキル設定を保存しました。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'スキル設定を保存しましたが、更新に失敗しました：{{error}}。再起動して新しい状態が反映されることを確認してください。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'ワークスペースが信頼されていないため、ワークスペース設定はマージ設定で無視されます。先に /trust を実行するか、~/.qwen/settings.json を直接編集してユーザースコープでスキルを管理してください。',
+  'SkillManager not available.': 'SkillManager は利用できません。',
+  'Loading skills…': 'スキルを読み込み中…',
+  'Failed to load skills: {{error}}': 'スキルの読み込みに失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'スキル設定の保存に失敗しました：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'すべての利用可能なスキルが無効化されています。~/.qwen/settings.json または .qwen/settings.json (skills.disabled) を編集して再有効化してください。',
+  'Press esc to close.': 'Esc で閉じる。',
+  '{{count}} skills · ': '{{count}} スキル · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} スキル · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'スペース 切替 · Enter 選択（入力欄に挿入） · Esc 保存して終了 · ワークスペーススコープ',
+  'Search:': '検索：',
+  'type to filter…': 'フィルタを入力…',
+  'No skills are currently available.': '利用可能なスキルはありません。',
+  'All available skills are locked at a higher scope (see below).':
+    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
+  'No skills match the search.': '検索に一致するスキルはありません。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '上位スコープ設定によってロックされています（ここでは切替不可）：',
+  'higher scope': '上位スコープ',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [ロック中：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 移動 · Backspace 検索編集',
+  Bundled: '組み込み',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
@@ -149,8 +181,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'Connect an LLM provider': 'LLM プロバイダーに接続',
-  'Copy the last result or code snippet to clipboard':
-    '最後の結果またはコードスニペットをクリップボードにコピー',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '最新のAI応答をクリップボードにコピー（/copy N で新しい方からN番目）',
 
   // ============================================================================
   // Commands - Agents

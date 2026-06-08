@@ -73,3 +73,10 @@ export const SPAN_TOOL_EXECUTION = 'qwen-code.tool.execution';
 export const SPAN_TOOL_BLOCKED_ON_USER = 'qwen-code.tool.blocked_on_user';
 /** Wraps each pre/post-tool-use hook fire site for per-hook latency / decision tracking. */
 export const SPAN_HOOK = 'qwen-code.hook';
+/**
+ * Wraps a single subagent invocation. Parents the LLM/tool/hook spans the
+ * subagent emits, so concurrent subagents (parallel AGENT tool calls) get
+ * isolated subtrees instead of interleaving under the parent interaction
+ * (#3731 Phase 3).
+ */
+export const SPAN_SUBAGENT = 'qwen-code.subagent';

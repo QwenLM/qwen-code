@@ -40,6 +40,10 @@ describe('SkillCommandLoader', () => {
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getBareMode: vi.fn().mockReturnValue(false),
+      // SkillCommandLoader filters via this. Default to empty so existing
+      // assertions about "all skills surface" stay true; per-test cases
+      // override to verify the filter behavior.
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
   });
 
@@ -330,5 +334,60 @@ describe('SkillCommandLoader', () => {
       'proj-skill',
       'ext-skill',
     ]);
+  });
+
+  describe('skills.disabled filter', () => {
+    it('omits disabled skills (case-insensitive) from the command list', async () => {
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) => {
+          if (level === 'user')
+            return Promise.resolve([
+              makeSkill({ name: 'KeepMe', level: 'user' }),
+              makeSkill({ name: 'HideMe', level: 'user' }),
+            ]);
+          return Promise.resolve([]);
+        },
+      );
+      // Disabled set is lower-case (matches Config.getDisabledSkillNames
+      // contract). Loader compares with `.toLowerCase()`.
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['hideme']));
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['KeepMe']);
+    });
+
+    it('reflects provider mutations on each load (live read)', async () => {
+      // Regression: the provider must be called per-load, not cached, so
+      // CommandService rebuilds (triggered by `reloadCommands`) pick up
+      // the latest `skills.disabled`. A frozen-at-construction snapshot
+      // would be a silent regression.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          level === 'user'
+            ? Promise.resolve([makeSkill({ name: 'foo', level: 'user' })])
+            : Promise.resolve([]),
+      );
+      let disabled = new Set<string>();
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockImplementation(() => disabled);
+
+      const loader = new SkillCommandLoader(mockConfig);
+
+      const first = await loader.loadCommands(signal);
+      expect(first.map((c) => c.name)).toEqual(['foo']);
+
+      disabled = new Set(['foo']);
+      const second = await loader.loadCommands(signal);
+      expect(second).toEqual([]);
+
+      disabled = new Set<string>();
+      const third = await loader.loadCommands(signal);
+      expect(third.map((c) => c.name)).toEqual(['foo']);
+    });
   });
 });

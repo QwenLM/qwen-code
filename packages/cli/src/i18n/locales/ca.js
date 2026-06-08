@@ -109,7 +109,42 @@ export default {
     'Analitza el projecte i crea un fitxer QWEN.md personalitzat.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Llistar les eines disponibles de Qwen Code. Ús: /tools [desc]',
-  'List available skills.': 'Llistar les habilitats disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    "Obrir el panell d'habilitats (explorar, cercar, activar, triar).",
+  'Manage Skills': 'Gestionar habilitats',
+  'Skills configuration saved.': "Configuració d'habilitats desada.",
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    "Configuració d'habilitats desada, però l'actualització ha fallat: {{error}}. Reinicia per assegurar-te que el nou estat s'apliqui.",
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    "L'espai de treball no és de confiança; els paràmetres de l'espai de treball s'ignoren a la configuració fusionada. Executa /trust primer, o edita ~/.qwen/settings.json directament per gestionar habilitats a l'àmbit d'usuari.",
+  'SkillManager not available.': 'SkillManager no disponible.',
+  'Loading skills…': 'Carregant habilitats…',
+  'Failed to load skills: {{error}}':
+    'No s’han pogut carregar les habilitats: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "No s'ha pogut desar la configuració d'habilitats: {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Totes les habilitats disponibles estan desactivades. Edita ~/.qwen/settings.json o .qwen/settings.json (skills.disabled) per tornar-les a activar.',
+  'Press esc to close.': 'Prem Esc per tancar.',
+  '{{count}} skills · ': '{{count}} habilitats · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    "Espai alternar · Enter triar (omple l'entrada) · Esc desar i sortir · àmbit d'espai de treball",
+  'Search:': 'Cerca:',
+  'type to filter…': 'escriu per filtrar…',
+  'No skills are currently available.':
+    'No hi ha habilitats disponibles actualment.',
+  'All available skills are locked at a higher scope (see below).':
+    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
+  'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'higher scope': 'àmbit superior',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [bloquejada: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navega · Retrocés edita la cerca',
+  Bundled: 'Integrada',
   'Available Qwen Code CLI tools:': 'Eines del CLI de Qwen Code disponibles:',
   'No tools available': 'No hi ha eines disponibles',
   'View or change the approval mode for tool usage':
@@ -192,8 +227,8 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last result or code snippet to clipboard':
-    "Copiar l'últim resultat o fragment de codi al porta-retalls",
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
 
   // ============================================================================
   // Ordres - Agents

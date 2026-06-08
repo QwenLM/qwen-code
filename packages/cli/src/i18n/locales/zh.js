@@ -109,7 +109,43 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    '打开技能面板（浏览、搜索、启停、选择）。',
+  // SkillsManagerDialog (`/skills` 弹出的面板)
+  'Manage Skills': '管理技能',
+  'Skills configuration saved.': '技能配置已保存。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    '技能配置已保存，但刷新失败：{{error}}。请重启以确保新状态生效。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    '当前工作区未受信任，工作区设置会被合并配置忽略。请先执行 /trust，或直接编辑 ~/.qwen/settings.json 在用户范围管理技能。',
+  'SkillManager not available.': 'SkillManager 不可用。',
+  'Loading skills…': '正在加载技能…',
+  'Failed to load skills: {{error}}': '加载技能失败：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    '保存技能配置失败：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    '所有可用技能均已禁用。请编辑 ~/.qwen/settings.json 或 .qwen/settings.json（skills.disabled）以重新启用。',
+  'Press esc to close.': '按 Esc 关闭。',
+  '{{count}} skills · ': '{{count}} 个技能 · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} 个技能 · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    '空格 启停 · 回车 选中(填入输入框) · Esc 保存并退出 · 工作区范围',
+  'Search:': '搜索：',
+  'type to filter…': '输入以过滤…',
+  'No skills are currently available.': '当前没有可用的技能。',
+  'All available skills are locked at a higher scope (see below).':
+    '所有可用技能都被更高范围锁定（详见下方）。',
+  'No skills match the search.': '没有匹配搜索的技能。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '被更高范围设置锁定（此处无法切换）：',
+  'higher scope': '更高范围',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [已锁定：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 导航 · 退格 编辑搜索',
+  // Note: Project / User / Extension are already translated elsewhere in
+  // this file. `Bundled` is new — only the SkillsManagerDialog uses it
+  // as a level label so far.
+  Bundled: '内置',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
@@ -185,8 +221,8 @@ export default {
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '连接 LLM 提供商',
-  'Copy the last result or code snippet to clipboard':
-    '将最后的结果或代码片段复制到剪贴板',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '将最近的 AI 回复复制到剪贴板（/copy N 复制倒数第 N 条）',
   'Show working-tree change stats versus HEAD':
     '显示工作区相对 HEAD 的变更统计',
   'Could not determine current working directory.': '无法确定当前工作目录。',

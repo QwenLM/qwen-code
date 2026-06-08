@@ -33,6 +33,11 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
+import { stripShellWrapper } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { splitCompoundCommand } from './rule-parser.js';
+
+const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -59,6 +64,17 @@ export interface ShellOperation {
   filePath?: string;
   /** Domain name without port (for web_fetch operations). */
   domain?: string;
+  /**
+   * True when this operation was extracted after a dynamic `cd` whose target
+   * cannot be statically resolved. Consumers that enforce protected relative
+   * paths should treat this as conservative signal, not as a concrete path.
+   */
+  cwdUnknown?: boolean;
+  /**
+   * True when `cwdUnknown` may affect the extracted file path. Absolute paths
+   * do not depend on cwd; relative redirect/path arguments do.
+   */
+  pathMayDependOnCwd?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,15 +117,37 @@ function tokenize(command: string): string[] {
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (current) {
-        tokens.push(current);
+        pushToken(tokens, current);
         current = '';
       }
       continue;
     }
     current += ch;
   }
-  if (current) tokens.push(current);
+  if (current) pushToken(tokens, current);
   return tokens;
+}
+
+function pushToken(tokens: string[], token: string): void {
+  if (token === '{' || token === '}') return;
+  const normalized = trimShellSyntax(token);
+  if (normalized) tokens.push(normalized);
+}
+
+function trimShellSyntax(token: string): string {
+  let start = 0;
+  let end = token.length;
+
+  while (start < end && token[start] === '(') {
+    start++;
+  }
+  while (end > start) {
+    const ch = token[end - 1];
+    if (ch !== ')' && ch !== '&') break;
+    end--;
+  }
+
+  return token.slice(start, end);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,11 +174,18 @@ function resolvePath(p: string, cwd: string): string {
     // join('C:/Users/foo', '/.ssh/id_rsa') → 'C:/Users/foo/.ssh/id_rsa'
     return rest ? nodePath.posix.join(homeDir, rest) : homeDir;
   }
-  // isAbsolute check: handle both POSIX (/foo) and Windows (C:\foo) absolute paths
-  if (nodePath.isAbsolute(normP) || normP.startsWith('/')) {
+  if (isShellAbsolutePath(normP)) {
     return normP;
   }
   return nodePath.posix.join(normCwd, normP);
+}
+
+function isShellAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
+}
+
+function isEnvAssignmentToken(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
 
 /**
@@ -207,6 +252,12 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         toRemove.add(i + 1);
         i++;
       }
+    } else if (tok === '<<' || tok === '<<-') {
+      toRemove.add(i);
+      if (tokens[i + 1]) {
+        toRemove.add(i + 1);
+        i++;
+      }
     } else if (tok === '<') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
@@ -229,10 +280,14 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
+        if (op.startsWith('<<')) {
+          toRemove.add(i);
+          continue;
+        }
         if (target !== '/dev/null' && looksLikePath(target)) {
           if (op === '<') {
             readFiles.push(resolvePath(target, cwd));
@@ -279,15 +334,103 @@ function getPositionalArgs(
       positional.push(arg);
       continue;
     }
+    const equalsIndex = arg.indexOf('=');
+    if (equalsIndex > 0 && flagsWithValue.has(arg.slice(0, equalsIndex))) {
+      continue;
+    }
     // Flag: check if it consumes the next token
     if (flagsWithValue.has(arg)) {
       skipNext = true;
+      continue;
+    }
+    for (const flag of flagsWithValue) {
+      if (isAttachedShortFlagValue(arg, flag)) {
+        break;
+      }
+      if (
+        flag.startsWith('-') &&
+        !flag.startsWith('--') &&
+        flag.length === 2 &&
+        hasCombinedShortFlag(arg, flag.slice(1))
+      ) {
+        skipNext = true;
+        break;
+      }
     }
     // Flags combined with their value in the same token (`-n10`) are ignored
     // because looksLikePath will filter out anything starting with `-`.
   }
 
   return positional;
+}
+
+function getFlagValue(
+  args: string[],
+  shortName: string,
+  longName: string,
+): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === shortName || arg === longName) {
+      return args[i + 1];
+    }
+    if (arg.startsWith(`${longName}=`)) {
+      return arg.slice(longName.length + 1);
+    }
+    if (isAttachedShortFlagValue(arg, shortName)) {
+      return arg.slice(shortName.length).replace(/^=/, '');
+    }
+    if (hasCombinedShortFlag(arg, shortName.slice(1))) {
+      return args[i + 1];
+    }
+  }
+  return undefined;
+}
+
+function targetDirectoryPath(args: string[], cwd: string): string | undefined {
+  const target = getFlagValue(args, '-t', '--target-directory');
+  if (!target || !looksLikePath(target)) return undefined;
+  return resolvePath(target, cwd);
+}
+
+function targetDirectoryWrites(
+  targetDir: string,
+  sources: string[],
+): ShellOperation[] {
+  return sources.map((source) => ({
+    virtualTool: 'write_file',
+    filePath: nodePath.posix.join(
+      targetDir,
+      nodePath.posix.basename(source.replace(/\\/g, '/')),
+    ),
+  }));
+}
+
+function writeOpForFlag(
+  args: string[],
+  cwd: string,
+  shortName: string,
+  longName: string,
+): ShellOperation | undefined {
+  const target = getFlagValue(args, shortName, longName);
+  if (!target || !looksLikePath(target)) return undefined;
+  return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
+}
+
+function hasCombinedShortFlag(arg: string, flag: string): boolean {
+  return (
+    arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes(flag)
+  );
+}
+
+function isAttachedShortFlagValue(arg: string, flag: string): boolean {
+  return (
+    flag.startsWith('-') &&
+    !flag.startsWith('--') &&
+    flag.length === 2 &&
+    arg.startsWith(flag) &&
+    arg.length > flag.length
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,26 +729,31 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         '--width',
       ]),
     ),
-  sort: (a, d) =>
-    readOps(
-      a,
-      d,
-      new Set([
-        '-k',
-        '-t',
-        '-T',
-        '--output',
-        '-o',
-        '--field-separator',
-        '--key',
-        '--temporary-directory',
-        '--compress-program',
-        '--batch-size',
-        '--parallel',
-        '--random-source',
-        '--sort',
-      ]),
-    ),
+  sort: (a, d) => {
+    const output = writeOpForFlag(a, d, '-o', '--output');
+    return [
+      ...readOps(
+        a,
+        d,
+        new Set([
+          '-k',
+          '-t',
+          '-T',
+          '--output',
+          '-o',
+          '--field-separator',
+          '--key',
+          '--temporary-directory',
+          '--compress-program',
+          '--batch-size',
+          '--parallel',
+          '--random-source',
+          '--sort',
+        ]),
+      ),
+      ...(output ? [output] : []),
+    ];
+  },
   uniq: (a, d) =>
     readOps(
       a,
@@ -948,12 +1096,18 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       if (looksLikePath(arg)) startingPoints.push(resolvePath(arg, cwd));
     }
     if (startingPoints.length === 0) {
-      return [{ virtualTool: 'list_directory', filePath: cwd }];
+      return [
+        { virtualTool: 'list_directory', filePath: cwd },
+        ...extractFindExecOps(args, cwd),
+      ];
     }
-    return startingPoints.map((p) => ({
-      virtualTool: 'list_directory' as const,
-      filePath: p,
-    }));
+    return [
+      ...startingPoints.map((p) => ({
+        virtualTool: 'list_directory' as const,
+        filePath: p,
+      })),
+      ...extractFindExecOps(args, cwd),
+    ];
   },
 
   tree: (args, cwd) =>
@@ -1036,6 +1190,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       })),
 
   cp: (args, cwd) => {
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1053,6 +1208,15 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       looksLikePath,
     );
     if (positional.length === 0) return [];
+    if (targetDir) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        ...targetDirectoryWrites(targetDir, positional),
+      ];
+    }
     if (positional.length === 1) {
       return [
         {
@@ -1073,6 +1237,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   mv: (args, cwd) => {
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1085,6 +1250,15 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'edit' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        ...targetDirectoryWrites(targetDir, positional),
+      ];
+    }
     if (positional.length < 2) return [];
     const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
@@ -1099,6 +1273,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   install: (args, cwd) => {
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-m',
       '--mode',
@@ -1120,9 +1295,25 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        ...targetDirectoryWrites(targetDir, positional),
+      ];
+    }
     if (positional.length < 2) return [];
+    const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
-    return [{ virtualTool: 'write_file', filePath: resolvePath(dst, cwd) }];
+    return [
+      ...srcs.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
+      { virtualTool: 'write_file', filePath: resolvePath(dst, cwd) },
+    ];
   },
 
   dd: (args, cwd) => {
@@ -1147,15 +1338,65 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     return ops;
   },
 
+  rsync: (args, cwd) => {
+    const positional = getPositionalArgs(
+      args,
+      new Set([
+        '-e',
+        '--rsh',
+        '--rsync-path',
+        '--backup-dir',
+        '--suffix',
+        '--files-from',
+        '--include-from',
+        '--exclude-from',
+        '--filter',
+      ]),
+    ).filter(looksLikePath);
+    if (positional.length === 0) return [];
+    if (positional.length === 1) {
+      return [
+        {
+          virtualTool: 'read_file',
+          filePath: resolvePath(positional[0]!, cwd),
+        },
+      ];
+    }
+    const srcs = positional.slice(0, -1);
+    const dst = positional[positional.length - 1]!;
+    return [
+      ...srcs.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
+      { virtualTool: 'write_file' as const, filePath: resolvePath(dst, cwd) },
+    ];
+  },
+
   ln: (args, cwd) => {
     // ln [-s] TARGET LINKNAME — the link being created is a write operation
+    const targetDir = targetDirectoryPath(args, cwd);
     const positional = getPositionalArgs(
       args,
       new Set(['-S', '--suffix', '-t', '--target-directory', '-b', '--backup']),
     ).filter(looksLikePath);
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        ...targetDirectoryWrites(targetDir, positional),
+      ];
+    }
     if (positional.length < 2) return [];
+    const targets = positional.slice(0, -1);
     const linkname = positional[positional.length - 1]!;
     return [
+      ...targets.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
       { virtualTool: 'write_file', filePath: resolvePath(linkname, cwd) },
     ];
   },
@@ -1273,12 +1514,77 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     }));
   },
 
+  patch: (args, cwd) => {
+    const output = getFlagValue(args, '-o', '--output');
+    const outputOps =
+      output && looksLikePath(output)
+        ? [
+            {
+              virtualTool: 'edit' as const,
+              filePath: resolvePath(output, cwd),
+            },
+          ]
+        : [];
+
+    return [
+      ...outputOps,
+      ...getPositionalArgs(
+        args,
+        new Set(['-i', '--input', '-d', '--directory', '-o', '--output']),
+      )
+        .filter(looksLikePath)
+        .map((p) => ({
+          virtualTool: 'edit' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+    ];
+  },
+
+  perl: (args, cwd) => {
+    const hasInPlace = args.some(
+      (a) =>
+        a === '-i' ||
+        a.startsWith('-i') ||
+        a === '--in-place' ||
+        a.startsWith('--in-place=') ||
+        hasCombinedShortFlag(a, 'i'),
+    );
+    const hasExplicitScript = args.some(
+      (a) =>
+        a === '-e' ||
+        a === '-f' ||
+        a.startsWith('-e') ||
+        hasCombinedShortFlag(a, 'e'),
+    );
+    const positional = getPositionalArgs(
+      args,
+      new Set(['-e', '-f', '-I', '-M', '-m', '-0']),
+    ).filter(looksLikePath);
+    const files = hasExplicitScript ? positional : positional.slice(1);
+    const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
+    return files.map((p) => ({
+      virtualTool: tool,
+      filePath: resolvePath(p, cwd),
+    }));
+  },
+
   sed: (args, cwd) => {
     // sed [-i] SCRIPT file... or sed -e SCRIPT file...
     // With -i: in-place edit (virtualTool = 'edit'); otherwise read (virtualTool = 'read_file')
-    const hasInPlace = args.some((a) => a === '-i' || a.startsWith('-i'));
+    const hasInPlace = args.some(
+      (a) =>
+        a === '-i' ||
+        a.startsWith('-i') ||
+        a === '--in-place' ||
+        a.startsWith('--in-place=') ||
+        hasCombinedShortFlag(a, 'i'),
+    );
     const hasExplicitScript = args.some(
-      (a) => a === '-e' || a === '-f' || a.startsWith('-e'),
+      (a) =>
+        a === '-e' ||
+        a === '-f' ||
+        a.startsWith('-e') ||
+        hasCombinedShortFlag(a, 'e'),
     );
     const flagsWithValue = new Set([
       '-e',
@@ -1310,6 +1616,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     // awk [-F sep] [-v var=val] PROGRAM file...
     // The PROGRAM is the first positional — it will contain `{...}` which is
     // filtered out by looksLikePath, so we don't need special handling.
+    const hasInPlace = getFlagValue(args, '-i', '--include') === 'inplace';
     const flagsWithValue = new Set([
       '-F',
       '-f',
@@ -1341,17 +1648,19 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '-t',
       '-V',
     ]);
+    const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
     return getPositionalArgs(args, flagsWithValue)
       .filter(looksLikePath)
       .map((p) => ({
-        virtualTool: 'read_file' as const,
+        virtualTool: tool,
         filePath: resolvePath(p, cwd),
       }));
   },
+  gawk: (a, d) => (COMMANDS['awk'] as CommandHandler)(a, d),
 
   // ── WebFetch commands ─────────────────────────────────────────────────────
 
-  curl: (args) => {
+  curl: (args, cwd) => {
     const flagsWithValue = new Set([
       '-o',
       '-O',
@@ -1412,18 +1721,22 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--cert-type',
       '--key-type',
     ]);
-    return getPositionalArgs(args, flagsWithValue)
-      .filter(
-        (p) =>
-          p.includes('://') || /^https?:\/\//.test(p) || /^ftp:\/\//.test(p),
-      )
-      .flatMap((url) => {
-        const op = webOp(url);
-        return op ? [op] : [];
-      });
+    const output = writeOpForFlag(args, cwd, '-o', '--output');
+    return [
+      ...(output ? [output] : []),
+      ...getPositionalArgs(args, flagsWithValue)
+        .filter(
+          (p) =>
+            p.includes('://') || /^https?:\/\//.test(p) || /^ftp:\/\//.test(p),
+        )
+        .flatMap((url) => {
+          const op = webOp(url);
+          return op ? [op] : [];
+        }),
+    ];
   },
 
-  wget: (args) => {
+  wget: (args, cwd) => {
     const flagsWithValue = new Set([
       '-O',
       '--output-document',
@@ -1475,12 +1788,16 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--certificate',
       '--private-key',
     ]);
-    return getPositionalArgs(args, flagsWithValue)
-      .filter((p) => p.includes('://') || /^https?:\/\//.test(p))
-      .flatMap((url) => {
-        const op = webOp(url);
-        return op ? [op] : [];
-      });
+    const output = writeOpForFlag(args, cwd, '-O', '--output-document');
+    return [
+      ...(output ? [output] : []),
+      ...getPositionalArgs(args, flagsWithValue)
+        .filter((p) => p.includes('://') || /^https?:\/\//.test(p))
+        .flatMap((url) => {
+          const op = webOp(url);
+          return op ? [op] : [];
+        }),
+    ];
   },
 
   fetch: (args) => {
@@ -1598,9 +1915,13 @@ export function extractShellOperations(
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
     extractRedirects(tokens, cwd);
 
+  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
+    tokens.shift();
+  }
+
   const cmdName = tokens[0];
   if (!cmdName) {
-    // Only redirections were present (e.g. `> file` or `< file`)
+    // Only assignments and/or redirections were present.
     return [
       ...redirectReads.map((p) => ({
         virtualTool: 'read_file' as const,
@@ -1612,9 +1933,6 @@ export function extractShellOperations(
       })),
     ];
   }
-
-  // Skip pure environment variable assignments: `FOO=bar`, `FOO=bar BAR=baz`
-  if (cmdName.includes('=')) return [];
 
   const ops: ShellOperation[] = [];
 
@@ -1638,7 +1956,7 @@ export function extractShellOperations(
         ) {
           startIdx++;
         }
-      } else if (t.includes('=')) {
+      } else if (isEnvAssignmentToken(t)) {
         // Environment variable assignment: skip
         startIdx++;
       } else {
@@ -1682,4 +2000,330 @@ export function extractShellOperations(
   );
 
   return ops;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compound-aware extractor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Cap on recursive shell-wrapper unwrapping. A pathological command can wrap
+ * itself many levels deep (`bash -lc "bash -lc \"...\""`) to obscure intent;
+ * after this many unwraps we stop and analyse whatever remains as-is. Four is
+ * enough for every legitimate wrapper combination observed in the wild
+ * (login shells, sandbox shells, tmux send-keys).
+ */
+const MAX_SHELL_UNWRAP_DEPTH = 4;
+
+/**
+ * Classify a literal `cd` command and resolve its target cwd when static.
+ * Dynamic targets (command substitutions, variable expansions, `cd -`) are
+ * reported separately so callers can mark subsequent relative paths as
+ * uncertain instead of trusting a guessed cwd.
+ *
+ * Used by {@link extractShellOperationsAcrossCommand} to track the effective
+ * cwd left-to-right across compound segments, so a segment like
+ * `cd .qwen && echo > settings.json` correctly attributes the write to
+ * `<cwd>/.qwen/settings.json`.
+ */
+type CdResolution =
+  | { kind: 'not-cd' }
+  | { kind: 'dynamic' }
+  | { kind: 'static'; cwd: string; cwdUnknown: boolean };
+
+function isDynamicShellPath(word: string): boolean {
+  return word.includes('$') || word.includes('`');
+}
+
+function resolveCdTargetCwd(
+  command: string,
+  cwd: string,
+  cwdUnknown: boolean,
+): CdResolution {
+  const words = tokenize(command);
+  extractRedirects(words, cwd);
+
+  if (words[0] === 'popd') return { kind: 'dynamic' };
+  if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
+
+  if (words[0] === 'pushd') {
+    if (words.length === 1) return { kind: 'dynamic' };
+    if (/^[+-]\d+$/.test(words[1]!)) return { kind: 'dynamic' };
+    if (words[1] === '-n') return { kind: 'dynamic' };
+  }
+
+  // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
+  // `cd -` (previous directory) which is non-static and should bail out.
+  let targetIndex = 1;
+  while (
+    targetIndex < words.length &&
+    words[targetIndex]!.startsWith('-') &&
+    words[targetIndex] !== '-' &&
+    words[targetIndex] !== '--'
+  ) {
+    targetIndex++;
+  }
+  if (words[targetIndex] === '--') {
+    targetIndex++;
+  }
+
+  const target = words[targetIndex] ?? process.env['HOME'];
+  if (!target || target === '-' || isDynamicShellPath(target)) {
+    return { kind: 'dynamic' };
+  }
+
+  return {
+    kind: 'static',
+    cwd: resolvePath(target, cwd),
+    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
+  };
+}
+
+/**
+ * Compound-aware shell-operation extractor.
+ *
+ * Unlike {@link extractShellOperations} (which only handles ONE simple
+ * command), this walks an arbitrary compound shell string and returns every
+ * virtual file / network operation it can statically resolve, while
+ * tracking effective cwd through literal `cd` segments and recursively
+ * unwrapping shell wrappers (`bash -lc '...'`, `sh -c "..."`).
+ *
+ * Behaviour:
+ *   - `splitCompoundCommand` produces the segment boundaries.
+ *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
+ *     segments and themselves emit no ops.
+ *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
+ *     known cwd for best-effort path extraction and mark subsequent relative
+ *     file operations with `cwdUnknown`.
+ *   - Shell wrappers are unwrapped after the outer command is split, so
+ *     wrapper suffixes remain visible while inner compound operators
+ *     (`&&`, `;`, `|`) are still recursively discovered.
+ *   - Operation order is preserved across segments.
+ *
+ * Single source of truth for compound shell analysis: both the
+ * PermissionManager (matching `Edit/Write` rules against shell writes) and
+ * AUTO mode (force-reviewing protected shell writes) call into this
+ * function so a deny / ask / force-review verdict is consistent regardless
+ * of how the shell call was wrapped.
+ *
+ * @example
+ *   extractShellOperationsAcrossCommand(
+ *     "cd .qwen && bash -lc 'echo {} > settings.json'",
+ *     '/repo',
+ *   )
+ *   // → [{ virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' }]
+ */
+export function extractShellOperationsAcrossCommand(
+  command: string,
+  cwd: string,
+): ShellOperation[] {
+  return walkCompoundCommand(command, cwd, 0, false);
+}
+
+function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
+  const ops: ShellOperation[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const marker = args[i]!;
+    if (
+      marker !== '-exec' &&
+      marker !== '-execdir' &&
+      marker !== '-ok' &&
+      marker !== '-okdir'
+    ) {
+      continue;
+    }
+
+    const inner: string[] = [];
+    i++;
+    while (i < args.length && args[i] !== ';' && args[i] !== '+') {
+      inner.push(args[i]!);
+      i++;
+    }
+    if (inner.length === 0) continue;
+
+    const innerCommand = inner
+      .map((arg) => arg.replaceAll('{}', '__find_exec_path__'))
+      .join(' ');
+    const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
+    ops.push(
+      ...(marker.endsWith('dir')
+        ? markCwdUnknownOps(innerOps, innerCommand, cwd)
+        : innerOps),
+    );
+  }
+  return ops;
+}
+
+function stripHeredocBodies(command: string): string {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  const pendingDelimiters: string[] = [];
+
+  for (const line of lines) {
+    if (pendingDelimiters.length > 0) {
+      if (line.trim() === pendingDelimiters[0]) {
+        pendingDelimiters.shift();
+      }
+      continue;
+    }
+
+    kept.push(line);
+    pendingDelimiters.push(...getHeredocDelimiters(line));
+  }
+
+  return kept.join('\n');
+}
+
+function getHeredocDelimiters(line: string): string[] {
+  const delimiters: string[] = [];
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
+      continue;
+    }
+    if (line[i + 2] === '<') {
+      i += 2;
+      continue;
+    }
+
+    let wordStart = i + 2;
+    if (line[wordStart] === '-') wordStart++;
+    while (line[wordStart] === ' ' || line[wordStart] === '\t') {
+      wordStart++;
+    }
+
+    const quote = line[wordStart];
+    const quoted = quote === "'" || quote === '"';
+    if (quoted) wordStart++;
+
+    let wordEnd = wordStart;
+    while (wordEnd < line.length) {
+      const wordCh = line[wordEnd]!;
+      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
+        break;
+      }
+      wordEnd++;
+    }
+
+    if (wordEnd > wordStart) {
+      delimiters.push(line.slice(wordStart, wordEnd));
+    }
+    i = wordEnd;
+  }
+  return delimiters;
+}
+
+function walkCompoundCommand(
+  command: string,
+  cwd: string,
+  depth: number,
+  initialCwdUnknown: boolean,
+): ShellOperation[] {
+  const subCommands = splitCompoundCommand(stripHeredocBodies(command));
+
+  const ops: ShellOperation[] = [];
+  let effectiveCwd = cwd;
+  let cwdUnknown = initialCwdUnknown;
+
+  for (const sub of subCommands) {
+    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    if (cdTarget.kind === 'static') {
+      effectiveCwd = cdTarget.cwd;
+      cwdUnknown = cdTarget.cwdUnknown;
+      continue;
+    }
+    if (cdTarget.kind === 'dynamic') {
+      cwdUnknown = true;
+      continue;
+    }
+
+    // Unwrap per segment, after the outer split, so wrapper suffixes like
+    // `bash -lc 'safe' && echo > file` are not discarded.
+    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+      const subUnwrapped = stripShellWrapper(sub);
+      if (subUnwrapped !== sub) {
+        ops.push(
+          ...walkCompoundCommand(
+            subUnwrapped,
+            effectiveCwd,
+            depth + 1,
+            cwdUnknown,
+          ),
+        );
+        continue;
+      }
+    } else if (stripShellWrapper(sub) !== sub) {
+      shellSemanticsDebugLogger.warn(
+        `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
+      );
+    }
+
+    const subOps = extractShellOperations(sub, effectiveCwd);
+    if (cwdUnknown) {
+      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
+    } else {
+      ops.push(...subOps);
+    }
+  }
+
+  return ops;
+}
+
+function hasAbsolutePathTokenForOperation(
+  command: string,
+  cwd: string,
+  filePath: string,
+): boolean {
+  for (const token of tokenize(command)) {
+    const redirectTarget = token.match(/^(?:>>|>|2>>|2>|&>>|&>|<)(.+)$/)?.[1];
+    const candidate = redirectTarget ?? token;
+    if (
+      looksLikePath(candidate) &&
+      isShellAbsolutePath(candidate) &&
+      resolvePath(candidate, cwd) === filePath
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function markCwdUnknownOps(
+  ops: ShellOperation[],
+  command: string,
+  cwd: string,
+): ShellOperation[] {
+  return ops.map((op) => {
+    if (!op.filePath) return op;
+    return {
+      ...op,
+      cwdUnknown: true,
+      pathMayDependOnCwd: !hasAbsolutePathTokenForOperation(
+        command,
+        cwd,
+        op.filePath,
+      ),
+    };
+  });
 }
