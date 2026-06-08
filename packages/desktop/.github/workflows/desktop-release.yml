@@ -358,6 +358,7 @@ jobs:
 
       - name: Publish release assets
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_DRAFT: ${{ inputs.draft }}
           RELEASE_NAME: ${{ inputs.release_name }}
