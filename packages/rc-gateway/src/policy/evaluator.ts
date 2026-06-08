@@ -5,7 +5,7 @@
  */
 
 import type { Policy, PolicyAction, PolicyRule } from './loader.js';
-import { globToRegExp, matchesAny } from './glob.js';
+import { globMatch, matchesAny } from './glob.js';
 
 export interface ToolCallContext {
   tool: string;
@@ -78,7 +78,7 @@ function ruleMatches(
 ): boolean {
   const m = rule.match;
   // tool glob (absent → no constraint).
-  if (m.tool !== undefined && !globToRegExp(m.tool).test(ctx.tool)) {
+  if (m.tool !== undefined && !globMatch(m.tool, ctx.tool)) {
     return false;
   }
   // argsGlob (undefined → matchesAny returns true).
@@ -126,11 +126,14 @@ export function evaluate(policy: Policy, ctx: ToolCallContext): PolicyDecision {
     const rule = policy.rules[idx];
     if (!ruleMatches(rule, ctx, argString, paths)) continue;
 
-    const usedDeferred = !!(
-      rule.match.timeOfDay ||
-      rule.maxPerWindow ||
-      rule.expiresAt
-    );
+    // Presence, NOT truthiness: a deferred field set to a falsy/placeholder
+    // value (e.g. `expiresAt: 0` or a bare `expiresAt:` → null) must still
+    // trigger the downgrade. Using `||` here would let such a rule auto-decide
+    // on a constraint we don't evaluate this cycle.
+    const usedDeferred =
+      rule.match.timeOfDay !== undefined ||
+      rule.maxPerWindow !== undefined ||
+      rule.expiresAt !== undefined;
 
     if (usedDeferred && rule.action !== 'prompt') {
       // SAFETY: never auto-allow/deny on an unevaluated time/quota constraint.

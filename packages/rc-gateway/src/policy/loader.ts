@@ -123,7 +123,13 @@ export function loadPolicy(text: string): Policy {
       rule.maxPerWindow = raw['maxPerWindow'];
     if (raw['expiresAt'] !== undefined) rule.expiresAt = raw['expiresAt'];
 
-    if (match['timeOfDay'] || rule.maxPerWindow || rule.expiresAt) {
+    // Presence, not truthiness — mirrors the evaluator's downgrade gate so a
+    // falsy-valued deferred field (e.g. `expiresAt: 0`) is still flagged.
+    if (
+      match['timeOfDay'] !== undefined ||
+      rule.maxPerWindow !== undefined ||
+      rule.expiresAt !== undefined
+    ) {
       if (!warnedDeferred) {
         warnedDeferred = true;
         // eslint-disable-next-line no-console

@@ -163,6 +163,38 @@ rules:
     expect(d.usedDeferredField).toBe(true);
   });
 
+  it('SAFETY: a deferred field with a FALSY value still downgrades (presence, not truthiness)', () => {
+    // Regression: `expiresAt: 0` (and bare `maxPerWindow:` → null) are falsy but
+    // PRESENT — they must still force the allow→prompt downgrade. A `||`-based
+    // truthiness gate would wrongly auto-allow `rm -rf /` here.
+    const policy = loadPolicy(`
+rules:
+  - id: falsy-expiry
+    match:
+      tool: bash
+    action: allow
+    expiresAt: 0
+`);
+    const d = evaluate(policy, { tool: 'bash', args: 'rm -rf /' });
+    expect(d.action).toBe('prompt');
+    expect(d.usedDeferredField).toBe(true);
+    expect(d.ruleId).toBe('falsy-expiry');
+  });
+
+  it('SAFETY: a falsy timeOfDay value still downgrades', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: falsy-time
+    match:
+      tool: bash
+      timeOfDay: ""
+    action: allow
+`);
+    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    expect(d.action).toBe('prompt');
+    expect(d.usedDeferredField).toBe(true);
+  });
+
   it('originScope and sessionTag match exactly', () => {
     const policy = loadPolicy(`
 rules:
