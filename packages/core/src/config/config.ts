@@ -44,7 +44,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
@@ -728,7 +727,6 @@ export interface ConfigParameters {
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
-  checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
@@ -1116,10 +1114,8 @@ export class Config {
     enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
-  private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -1308,7 +1304,6 @@ export class Config {
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
-    this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
       params.fileCheckpointingEnabled ??
       (!params.sdkMode && (params.interactive ?? false));
@@ -1454,9 +1449,6 @@ export class Config {
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
-    if (this.getCheckpointingEnabled()) {
-      await this.getGitService();
-    }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
@@ -3366,10 +3358,6 @@ export class Config {
     return [];
   }
 
-  getCheckpointingEnabled(): boolean {
-    return this.checkpointing;
-  }
-
   getFileCheckpointingEnabled(): boolean {
     return this.fileCheckpointingEnabled;
   }
@@ -3787,14 +3775,6 @@ export class Config {
 
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
-  }
-
-  async getGitService(): Promise<GitService> {
-    if (!this.gitService) {
-      this.gitService = new GitService(this.targetDir, this.storage);
-      await this.gitService.initialize();
-    }
-    return this.gitService;
   }
 
   /**

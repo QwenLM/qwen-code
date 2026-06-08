@@ -8,7 +8,6 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
-  GitService,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -50,7 +49,6 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
   };
   // UI state and history management

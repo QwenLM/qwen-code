@@ -39,7 +39,7 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
-import { GitService } from '../services/gitService.js';
+// GitService import removed — service has been deleted
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
@@ -260,11 +260,7 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/gitService.js', () => {
-  const GitServiceMock = vi.fn();
-  GitServiceMock.prototype.initialize = vi.fn();
-  return { GitService: GitServiceMock };
-});
+// GitService mock removed — service has been deleted
 
 vi.mock('../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
@@ -790,34 +786,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
-    it('should throw an error if checkpointing is enabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: true,
-      });
-
-      await expect(config.initialize()).rejects.toThrow(gitError);
-    });
-
-    it('should not throw an error if checkpointing is disabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: false,
-      });
-
-      await expect(config.initialize()).resolves.toBeUndefined();
-    });
-
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
       });
 
       await expect(config.initialize()).resolves.toBeUndefined();
@@ -833,7 +804,6 @@ describe('Server Config (config.ts)', () => {
 
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         bareMode: true,
       });
 
@@ -857,7 +827,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
 
       // Default path passes `skipDiscovery: true` to createToolRegistry,
@@ -870,7 +840,7 @@ describe('Server Config (config.ts)', () => {
       const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
       try {
-        const config = new Config({ ...baseParams, checkpointing: false });
+        const config = new Config({ ...baseParams });
         await config.initialize();
 
         // Legacy escape hatch must call back into the synchronous discover
@@ -891,7 +861,7 @@ describe('Server Config (config.ts)', () => {
       // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
       // is called but the registry mock returns no manager, so the discovery
       // promise stays undefined and waitForMcpReady is a no-op.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
       await expect(config.waitForMcpReady()).resolves.toBeUndefined();
     });
@@ -901,7 +871,7 @@ describe('Server Config (config.ts)', () => {
       // failed to start" emission. Must be a no-op when there's nothing
       // to warn about, otherwise --prompt runs with no MCP config would
       // emit a spurious warning every time.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
 
@@ -912,7 +882,6 @@ describe('Server Config (config.ts)', () => {
       // `excludedMcpServers` (see `isMcpServerDisabled`).
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         mcpServers: { off: new MCPServerConfig() },
         excludedMcpServers: ['off'],
       } as ConfigParameters);

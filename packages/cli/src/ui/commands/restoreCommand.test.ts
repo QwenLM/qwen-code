@@ -11,13 +11,13 @@ import * as path from 'node:path';
 import { restoreCommand } from './restoreCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { Config, GitService } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
   let mockConfig: Config;
-  let mockGitService: GitService;
   let mockSetHistory: ReturnType<typeof vi.fn>;
+  let mockRewind: ReturnType<typeof vi.fn>;
   let testRootDir: string;
   let geminiTempDir: string;
   let checkpointsDir: string;
@@ -33,12 +33,11 @@ describe('restoreCommand', () => {
     await fs.mkdir(checkpointsDir, { recursive: true });
 
     mockSetHistory = vi.fn().mockResolvedValue(undefined);
-    mockGitService = {
-      restoreProjectFromSnapshot: vi.fn().mockResolvedValue(undefined),
-    } as unknown as GitService;
+    mockRewind = vi.fn().mockResolvedValue({ filesChanged: [], filesFailed: [] });
 
     mockConfig = {
-      getCheckpointingEnabled: vi.fn().mockReturnValue(true),
+      getFileCheckpointingEnabled: vi.fn().mockReturnValue(true),
+      getFileHistoryService: vi.fn().mockReturnValue({ rewind: mockRewind }),
       storage: {
         getProjectTempCheckpointsDir: vi.fn().mockReturnValue(checkpointsDir),
         getProjectTempDir: vi.fn().mockReturnValue(geminiTempDir),
@@ -51,7 +50,6 @@ describe('restoreCommand', () => {
     mockContext = createMockCommandContext({
       services: {
         config: mockConfig,
-        git: mockGitService,
       },
     });
   });
@@ -62,7 +60,7 @@ describe('restoreCommand', () => {
   });
 
   it('should return null if checkpointing is not enabled', () => {
-    vi.mocked(mockConfig.getCheckpointingEnabled).mockReturnValue(false);
+    vi.mocked(mockConfig.getFileCheckpointingEnabled).mockReturnValue(false);
 
     expect(restoreCommand(mockConfig)).toBeNull();
   });
@@ -153,7 +151,7 @@ describe('restoreCommand', () => {
       const toolCallData = {
         history: [{ type: 'user', text: 'do a thing' }],
         clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
-        commitHash: 'abcdef123',
+        promptId: 'prompt-abc123',
         toolCall: { name: 'run_shell_command', args: 'ls' },
       };
       await fs.writeFile(
@@ -171,8 +169,9 @@ describe('restoreCommand', () => {
         toolCallData.history,
       );
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
-      expect(mockGitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
-        toolCallData.commitHash,
+      expect(mockRewind).toHaveBeenCalledWith(
+        toolCallData.promptId,
+        true,
       );
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -202,7 +201,7 @@ describe('restoreCommand', () => {
 
       expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
       expect(mockSetHistory).not.toHaveBeenCalled();
-      expect(mockGitService.restoreProjectFromSnapshot).not.toHaveBeenCalled();
+      expect(mockRewind).not.toHaveBeenCalled();
     });
   });
 
