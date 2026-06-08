@@ -2016,6 +2016,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
+    it('seeds Hook microcompaction checkpoint to now when no API call completed', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = null;
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-no-api-completion',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
     it('falls back to a blanket clear when blanked reads cannot be linked to a path (id-less provider)', async () => {
       // Provider did not populate functionCall.id, so microcompaction
       // cannot recover the blanked reads' file paths. Leaving their
