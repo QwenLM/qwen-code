@@ -17,6 +17,7 @@ import { PushNotifier } from './notifier.js';
 import type { PushPayload } from './payload.js';
 import { SESSION_READ, APPROVE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
+import { WorkingDeviceTracker } from '../routing/workingDevice.js';
 
 let tokens: TokenStore;
 let store: PushStore;
@@ -230,6 +231,107 @@ describe('PushNotifier', () => {
     expect(
       notifierAudit.calls.some((c) => c.action === 'push_suppressed'),
     ).toBe(false);
+  });
+
+  it('suppresses a permission.required push to a working subscription, auditing push_suppressed', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const workingDevice = new WorkingDeviceTracker();
+    workingDevice.touch(approver.id); // this token is actively working
+    const notifierAudit = fakeAudit();
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+      workingDevice,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+
+    expect(sent).toHaveLength(0);
+    const suppressed = notifierAudit.calls.filter(
+      (c) => c.action === 'push_suppressed',
+    );
+    expect(suppressed).toHaveLength(1);
+    expect(suppressed[0].target).toBe('s1');
+    expect(suppressed[0].detail).toMatchObject({
+      kind: 'permission.required',
+      reason: 'working_device',
+      subscriptionId: sub.id,
+    });
+  });
+
+  it('still sends a permission.required push to a non-working subscription', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const workingDevice = new WorkingDeviceTracker();
+    // Not touched → this token is NOT working.
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      workingDevice,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('permission.required');
+  });
+
+  it('still sends a task.completed push to a working subscription (suppression is permission.required-only)', async () => {
+    const reader = await tokens.issue([SESSION_READ], 'reader');
+    await store.add(reader.id, {
+      endpoint: 'https://push.example.com/reader',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const workingDevice = new WorkingDeviceTracker();
+    workingDevice.touch(reader.id); // token is working
+    const payload: PushPayload = {
+      v: 1,
+      kind: 'task.completed',
+      sessionId: 's1',
+      summary: 'Task finished',
+      url: '/ui/?session=s1',
+    };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      workingDevice,
+    );
+    // task.completed only flows via the (ungated) notifyToken path; the
+    // permission.required-only suppression must NOT touch it.
+    await notifier.notifyToken(reader.id, payload);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('task.completed');
   });
 
   it('notifyToken skips a token lacking the required scope (no audit noise)', async () => {

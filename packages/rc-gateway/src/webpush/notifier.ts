@@ -10,6 +10,7 @@ import type { TokenStore } from '../tokenStore.js';
 import type { PushStore } from '../pushStore.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { SnoozeStore } from '../routing/snooze.js';
+import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 
@@ -35,6 +36,7 @@ export class PushNotifier {
     private readonly sender: PushSender,
     private readonly snooze?: SnoozeStore,
     private readonly audit?: AuditRecorder,
+    private readonly workingDevice?: WorkingDeviceTracker,
   ) {}
 
   /** Fan a daemon event out to all scope-eligible subscriptions. */
@@ -65,6 +67,25 @@ export class PushNotifier {
         // a list → only those kinds; [] → nothing. Skip is silent (no audit),
         // matching the cycle-9 scope-skip posture. Runs after scope + snooze.
         if (r.prefs !== undefined && !r.prefs.includes(payload.kind)) return;
+        // Working-device skip (this cycle): a permission.required push to a
+        // subscription whose own token posted recently is redundant — you're
+        // already on that device. permission.required-ONLY (completions et al.
+        // are unaffected). Audited (so "why no push" is visible in the feed).
+        if (
+          payload.kind === 'permission.required' &&
+          this.workingDevice?.isWorking(r.tokenId)
+        ) {
+          void this.audit?.record({
+            action: 'push_suppressed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              reason: 'working_device',
+              subscriptionId: r.id,
+            },
+          });
+          return;
+        }
         await this.sender.send(r, payload);
       }),
     );
