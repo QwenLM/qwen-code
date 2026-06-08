@@ -815,7 +815,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     fallback: number,
   ): number {
     if (raw === undefined) return fallback;
-    return raw > 0 && Number.isFinite(raw) ? raw : 0;
+    // Clamp to 2^31-1: Node.js treats setInterval delays larger than
+    // this as 1ms, which would cause a tight CPU-burning loop.
+    return raw > 0 && Number.isFinite(raw) ? Math.min(raw, 2_147_483_647) : 0;
   }
 
   function cancelIdleTimer(): void {
@@ -867,7 +869,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   function startSessionReaper(): void {
-    if (sessionReapIntervalMs <= 0 || sessionIdleTimeoutMs <= 0) return;
+    if (sessionReapIntervalMs <= 0 || sessionIdleTimeoutMs <= 0) {
+      writeStderrLine('qwen serve: session reaper disabled');
+      return;
+    }
+    writeStderrLine(
+      `qwen serve: session reaper started ` +
+        `(interval ${sessionReapIntervalMs}ms, ` +
+        `idle threshold ${sessionIdleTimeoutMs}ms)`,
+    );
     sessionReaper = setInterval(() => {
       if (shuttingDown) return;
       const now = Date.now();
@@ -892,7 +902,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (err) => {
             writeStderrLine(
               `qwen serve: session reaper failed to close ` +
-                `${JSON.stringify(id)}: ${String(err)}`,
+                `${JSON.stringify(id)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
             );
           },
         );
@@ -2345,19 +2355,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (context?.clientId !== undefined) {
       originatorClientId = resolveTrustedClientId(entry, context.clientId);
     }
+    const reason = closeOpts?.reason ?? 'client_close';
     writeStderrLine(
       `qwen serve: closing session ${JSON.stringify(sessionId)}` +
+        ` (reason: ${reason})` +
         (originatorClientId
           ? ` by client ${JSON.stringify(originatorClientId)}`
           : ''),
     );
-    const reason = closeOpts?.reason ?? 'client_close';
     telemetry.event('session.close', {
       'qwen-code.daemon.bridge.operation': 'session.close',
       'session.id': sessionId,
       'session.close.reason': reason,
     });
     if (defaultEntry === entry) defaultEntry = undefined;
+    // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
+    // `aliveChannels` for the entry's actual channel) instead of the
+    // module-scoped `channelInfo` (the CURRENT attach target). The two
+    // diverge during the channel-overlap window — A dying, B freshly
+    // spawned as `channelInfo` — where capturing `channelInfo` would
+    // (1) skip the `sessionIds.delete()` since `B.channel !==
+    // entry.channel`, and (2) call `markSessionClosed` on B's client
+    // instead of A's. The regression test is single-channel smoke only
+    // and WILL NOT fail if this reverts to module-scoped channelInfo.
+    // Keep `channelInfoForEntry(entry)` until a deterministic overlap
+    // test lands.
     const ci = channelInfoForEntry(entry);
     if (!ci) {
       writeStderrLine(
@@ -2368,11 +2390,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (ci && ci.channel === entry.channel) {
       ci.sessionIds.delete(sessionId);
     }
-    await notifyAgentSessionClose(entry, ci, 'closeSession');
+    // Synchronous teardown block — mirrors `killSession` ordering.
+    // `byId.delete` runs BEFORE `await notifyAgentSessionClose` so any
+    // concurrent caller (reaper tick, detach-close, explicit DELETE)
+    // that does `byId.get(sessionId)` gets `undefined` and throws
+    // `SessionNotFoundError`, preventing duplicate close cascades.
     permissionMediator.forgetSession(sessionId);
     entry.pendingPermissionIds.clear();
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
+    // Tombstone the closed sessionId so any late `extNotification`
+    // from the (now-defunct) child can't seed the early-event buffer
+    // and leak into a future load/resume of the same persisted id.
     ci?.client.markSessionClosed(sessionId);
     try {
       entry.events.publish({
@@ -2380,6 +2409,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         data: {
           sessionId,
           reason,
+          // `data.closedBy` is kept for back-compat with existing
+          // wire consumers; new code should read envelope-level
+          // `originatorClientId` (matches `session_metadata_updated`,
+          // `model_switched`, `approval_mode_changed`, etc.).
           ...(originatorClientId ? { closedBy: originatorClientId } : {}),
         },
         ...(originatorClientId ? { originatorClientId } : {}),
@@ -2387,7 +2420,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     } catch {
       /* bus already closed */
     }
+    // `session_closed` is terminal. Close the bus before ACP cancel so any
+    // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
+    await notifyAgentSessionClose(entry, ci, 'closeSession');
     try {
       await telemetry.withSpan(
         'session.close.cancel_active_prompt',
@@ -4431,7 +4467,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }).catch((err) => {
           writeStderrLine(
             `qwen serve: close-on-last-detach failed for ` +
-              `${JSON.stringify(sessionId)}: ${String(err)}`,
+              `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
           );
         });
       }
