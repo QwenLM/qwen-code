@@ -53,6 +53,25 @@ describe('sleep-interception', () => {
     expect(result.toLowerCase()).not.toContain('blocked');
   }, 30000);
 
+  it('should allow retrying blocked sleep with an intentional sleep comment', async () => {
+    rig = new TestRig();
+    await rig.setup('sleep-intentional-retry');
+
+    const result = await rig.run(
+      'Run this exact shell command first: sleep 5. ' +
+        'If the command is blocked, retry with this exact shell command: ' +
+        'sleep 2 # intentional-sleep: wait for MCP rate limit reset. ' +
+        'Then say "DONE".',
+    );
+
+    validateModelOutput(result, null, 'sleep intentional retry');
+
+    const foundShell = await rig.waitForToolCall('run_shell_command');
+    expect(foundShell).toBeTruthy();
+
+    expect(result.toLowerCase()).toContain('done');
+  }, 30000);
+
   it('should block sleep >= 2s even when followed by a trailing comment', async () => {
     // The `trimTrailingShellComment` state machine strips trailing `#...`
     // comments before matching the sleep pattern, so a model trying to
