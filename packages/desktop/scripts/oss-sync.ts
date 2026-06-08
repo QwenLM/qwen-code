@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 type SyncMode = 'auto' | 'export' | 'import';
+type MigrationMode = Exclude<SyncMode, 'auto'>;
 
 type RunOptions = {
   allowFailure?: boolean;
@@ -58,6 +59,10 @@ function parseMode(value: string): SyncMode {
     return value;
   }
   throw new Error(`Invalid mode: ${value}`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function defaultBranch(mode: Exclude<SyncMode, 'auto'>): string {
@@ -311,6 +316,40 @@ async function findLatestTrailer(
   return result.stdout.match(pattern)?.[1];
 }
 
+async function getCommitBody(cwd: string, commit: string): Promise<string> {
+  const result = await git(cwd, ['log', '-n', '1', '--format=%B', commit], {
+    capture: true,
+  });
+  return result.stdout;
+}
+
+function findTrailer(body: string, trailer: string): string | undefined {
+  const pattern = new RegExp(
+    `^${escapeRegExp(trailer)}:\\s*([^\\s]+)\\s*$`,
+    'im',
+  );
+  return body.match(pattern)?.[1];
+}
+
+async function findTrailerValues(
+  cwd: string,
+  ref: string,
+  trailer: string,
+): Promise<Set<string>> {
+  const result = await git(cwd, ['log', '--format=%B%x00', ref], {
+    capture: true,
+  });
+  const pattern = new RegExp(
+    `^${escapeRegExp(trailer)}:\\s*([^\\s]+)\\s*$`,
+    'gim',
+  );
+  const values = new Set<string>();
+  for (const match of result.stdout.matchAll(pattern)) {
+    values.add(match[1]);
+  }
+  return values;
+}
+
 async function resolveSourceBase(
   sourceRepo: string,
   explicitBase: string | undefined,
@@ -400,6 +439,7 @@ async function getSourceCommits(
     [
       'log',
       '--reverse',
+      '--topo-order',
       '--format=%H',
       `${base}..${source}`,
       '--',
@@ -410,17 +450,127 @@ async function getSourceCommits(
   return result.stdout.split('\n').filter(Boolean);
 }
 
-async function getFirstParent(cwd: string, commit: string): Promise<string> {
+async function getMergeIntroducedCommits(
+  cwd: string,
+  firstParent: string,
+  mergeCommit: string,
+  pathspecs: string[],
+): Promise<string[]> {
+  const result = await git(
+    cwd,
+    [
+      'log',
+      '--reverse',
+      '--topo-order',
+      '--no-merges',
+      '--format=%H',
+      `${firstParent}..${mergeCommit}`,
+      '--',
+      ...pathspecs,
+    ],
+    { capture: true },
+  );
+  return result.stdout.split('\n').filter(Boolean);
+}
+
+async function getParents(cwd: string, commit: string): Promise<string[]> {
   const result = await git(cwd, ['rev-list', '--parents', '-n', '1', commit], {
     capture: true,
   });
-  const [, parent, secondParent] = result.stdout.trim().split(/\s+/);
-  if (!parent || secondParent) {
+  const [, ...parents] = result.stdout.trim().split(/\s+/);
+  return parents;
+}
+
+async function shouldSkipSyncedCommit(
+  cwd: string,
+  commit: string,
+  mode: MigrationMode,
+): Promise<string | undefined> {
+  const body = await getCommitBody(cwd, commit);
+  const syncMode = findTrailer(body, 'OpenWork-Sync-Mode');
+
+  if (
+    mode === 'import' &&
+    (syncMode === 'export' || findTrailer(body, 'Qwen-Code-Commit'))
+  ) {
+    return 'already came from qwen-code';
+  }
+
+  if (
+    mode === 'export' &&
+    (syncMode === 'import' || findTrailer(body, 'OpenWork-Commit'))
+  ) {
+    return 'already came from OpenWork';
+  }
+
+  return undefined;
+}
+
+function targetAlreadySyncedCommit(
+  commit: string,
+  targetTrailer: string,
+  targetSyncedCommits: Set<string>,
+): string | undefined {
+  if (targetSyncedCommits.has(commit)) {
+    return `target already has ${targetTrailer}: ${commit}`;
+  }
+
+  return undefined;
+}
+
+async function ensureSimpleMergeCommit(params: {
+  sourceRepo: string;
+  commit: string;
+  parents: string[];
+  pathspecs: string[];
+  handledCommits: Set<string>;
+}): Promise<void> {
+  const [firstParent, secondParent] = params.parents;
+  if (!firstParent || !secondParent || params.parents.length !== 2) {
+    throw new Error(`Cannot inspect octopus merge commit: ${params.commit}`);
+  }
+
+  const introducedCommits = await getMergeIntroducedCommits(
+    params.sourceRepo,
+    firstParent,
+    params.commit,
+    params.pathspecs,
+  );
+  const missingCommits = introducedCommits.filter(
+    (commit) => !params.handledCommits.has(commit),
+  );
+  if (missingCommits.length > 0) {
     throw new Error(
-      `Cannot migrate merge or root commit as a patch: ${commit}`,
+      `Merge commit introduced unhandled commits: ${params.commit}\n` +
+        missingCommits.map((commit) => `  ${commit}`).join('\n'),
     );
   }
-  return parent;
+
+  const mergeTree = await git(
+    params.sourceRepo,
+    ['merge-tree', '--write-tree', firstParent, secondParent],
+    { allowFailure: true, capture: true },
+  );
+  if (mergeTree.exitCode !== 0) {
+    throw new Error(
+      `Merge commit requires manual resolution: ${params.commit}`,
+    );
+  }
+
+  const tree = mergeTree.stdout.trim().split(/\s+/)[0];
+  const diff = await git(
+    params.sourceRepo,
+    ['diff', '--quiet', tree, params.commit, '--', ...params.pathspecs],
+    { allowFailure: true },
+  );
+  if (diff.exitCode === 0) return;
+  if (diff.exitCode === 1) {
+    throw new Error(
+      `Merge commit has manual resolution changes: ${params.commit}`,
+    );
+  }
+
+  throw new Error(`Unable to inspect merge commit: ${params.commit}`);
 }
 
 async function getCommitSubject(cwd: string, commit: string): Promise<string> {
@@ -464,18 +614,73 @@ async function commitChanges(
 }
 
 async function migrateCommits(params: {
+  mode: MigrationMode;
   sourceRepo: string;
   targetRepo: string;
   commits: string[];
+  pathspecs: string[];
   createPatch: (parent: string, commit: string) => Promise<string>;
   trailers: (parent: string, commit: string) => string[];
 }): Promise<number> {
   let count = 0;
+  const handledCommits = new Set<string>();
+  const targetTrailer =
+    params.mode === 'import' ? 'OpenWork-Commit' : 'Qwen-Code-Commit';
+  const targetSyncedCommits = await findTrailerValues(
+    params.targetRepo,
+    'HEAD',
+    targetTrailer,
+  );
 
   for (const commit of params.commits) {
-    const parent = await getFirstParent(params.sourceRepo, commit);
+    const parents = await getParents(params.sourceRepo, commit);
+    const parent = parents[0];
+    if (!parent) {
+      throw new Error(`Cannot migrate root commit as a patch: ${commit}`);
+    }
+
+    const targetReason = targetAlreadySyncedCommit(
+      commit,
+      targetTrailer,
+      targetSyncedCommits,
+    );
+    if (targetReason) {
+      console.log(`Skipping ${commit.slice(0, 12)}; ${targetReason}.`);
+      handledCommits.add(commit);
+      continue;
+    }
+
+    const skipReason = await shouldSkipSyncedCommit(
+      params.sourceRepo,
+      commit,
+      params.mode,
+    );
+    if (skipReason) {
+      console.log(`Skipping ${commit.slice(0, 12)}; ${skipReason}.`);
+      handledCommits.add(commit);
+      continue;
+    }
+
+    if (parents.length > 1) {
+      await ensureSimpleMergeCommit({
+        sourceRepo: params.sourceRepo,
+        commit,
+        parents,
+        pathspecs: params.pathspecs,
+        handledCommits,
+      });
+      console.log(
+        `Skipping merge ${commit.slice(0, 12)}; regular commits handled.`,
+      );
+      handledCommits.add(commit);
+      continue;
+    }
+
     const patch = await params.createPatch(parent, commit);
-    if (!patch.trim()) continue;
+    if (!patch.trim()) {
+      handledCommits.add(commit);
+      continue;
+    }
 
     console.log(`Applying ${commit.slice(0, 12)}...`);
     await applyPatch(params.targetRepo, patch);
@@ -487,6 +692,7 @@ async function migrateCommits(params: {
     ) {
       count += 1;
     }
+    handledCommits.add(commit);
   }
 
   return count;
@@ -507,12 +713,8 @@ async function runExport(options: Options): Promise<void> {
     options.openworkRef,
     'Qwen-Code-Commit',
   );
-  const commits = await getSourceCommits(
-    repoRoot,
-    base,
-    source,
-    exportPathspecs(options.overlayPaths),
-  );
+  const pathspecs = exportPathspecs(options.overlayPaths);
+  const commits = await getSourceCommits(repoRoot, base, source, pathspecs);
   if (commits.length === 0) {
     console.log('No qwen-code source changes to export.');
     return;
@@ -522,9 +724,11 @@ async function runExport(options: Options): Promise<void> {
   await switchTargetBranch(openworkRoot, branch, options.openworkRef);
   const openworkBase = await revParse(openworkRoot, options.openworkRef);
   const count = await migrateCommits({
+    mode: 'export',
     sourceRepo: repoRoot,
     targetRepo: openworkRoot,
     commits,
+    pathspecs,
     createPatch: (parent, commit) =>
       createExportPatch(parent, commit, options.overlayPaths),
     trailers: (parent, commit) => [
@@ -555,12 +759,8 @@ async function runImport(options: Options): Promise<void> {
     options.qwenBase,
     'OpenWork-Commit',
   );
-  const commits = await getSourceCommits(
-    openworkRoot,
-    base,
-    source,
-    importPathspecs(options.overlayPaths),
-  );
+  const pathspecs = importPathspecs(options.overlayPaths);
+  const commits = await getSourceCommits(openworkRoot, base, source, pathspecs);
   if (commits.length === 0) {
     console.log('No OpenWork source changes to import.');
     return;
@@ -570,9 +770,11 @@ async function runImport(options: Options): Promise<void> {
   await switchTargetBranch(repoRoot, branch, options.qwenBase);
   const qwenBase = await revParse(repoRoot, options.qwenBase);
   const count = await migrateCommits({
+    mode: 'import',
     sourceRepo: openworkRoot,
     targetRepo: repoRoot,
     commits,
+    pathspecs,
     createPatch: (parent, commit) =>
       createImportPatch(openworkRoot, parent, commit, options.overlayPaths),
     trailers: (parent, commit) => [

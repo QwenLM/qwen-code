@@ -27,6 +27,17 @@ walks source commits from `source-base..source-head`, rewrites paths between
 qwen-code `packages/desktop` and the OpenWork repository root, then applies each
 commit with `git apply -3`.
 
+Commits that already came from the receiving repository are skipped by their
+sync trailers. During import, qwen-code-origin export commits are skipped;
+during export, OpenWork-origin import commits are skipped.
+
+Merge commits are not migrated as merge commits. The script migrates the regular
+commits inside the merged branch; when it later sees the merge wrapper, it
+checks that the regular commits were already handled and that the merge tree
+matches Git's automatic merge result. If the merge wrapper contains manual
+resolution changes, the sync stops so the agent can convert that resolution into
+a normal follow-up commit.
+
 Target-side changes are preserved unless a migrated source commit touches the
 same hunk. If that happens, Git leaves a normal conflict for the agent to
 resolve. Do not use `git subtree split` or full tree replacement for normal
@@ -89,3 +100,5 @@ bun run oss:sync --mode import --source-base <openwork-ref>
   `OPENWORK_OVERLAY_PATHS`.
 - OpenWork-specific files not touched by source commits must remain unchanged.
 - Prefer PR branches. The script prints the push command for export branches.
+- Do not manually import PR merge commits. Let the script migrate regular
+  commits and treat merge commits as wrappers.
