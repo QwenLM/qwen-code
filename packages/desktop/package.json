@@ -110,6 +110,7 @@
     "docs:dev": "cd apps/online-docs && npm install && npx mintlify dev",
     "build": "bun run scripts/build.ts",
     "release": "bun run scripts/release.ts",
+    "check-release-version": "bun run scripts/check-release-version.ts",
     "check-version": "bun run scripts/check-version.ts",
     "oss:sync": "bun run scripts/oss-sync.ts",
     "prepare": "husky"

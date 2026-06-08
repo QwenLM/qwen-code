@@ -1,12 +1,12 @@
 name: Desktop Release
 
-run-name: Desktop release ${{ inputs.tag }}
+run-name: Desktop release ${{ inputs.version }}
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag to create or update, for example v0.1.0"
+      version:
+        description: "Desktop app version to release, for example 0.0.2 or v0.0.2"
         required: true
         type: string
       release_name:
@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ inputs.tag }}
+  group: desktop-release-${{ inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -51,10 +51,40 @@ env:
   QWEN_CODE_VERSION: ${{ inputs.qwen_code_version }}
 
 jobs:
+  release_metadata:
+    name: Validate Release Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.release-version.outputs.tag }}
+      version: ${{ steps.release-version.outputs.version }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate release version
+        id: release-version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: bun run check-release-version --version "$INPUT_VERSION"
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    needs: release_metadata
+    env:
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +117,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Confirm release version
+        run: bun run check-release-version --version "$RELEASE_VERSION"
+
       - name: Build desktop installer
         run: ${{ matrix.command }}
         env:
@@ -115,10 +148,15 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: build
+    needs:
+      - build
+      - release_metadata
     if: ${{ inputs.dry_run == false }}
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
 
     steps:
       - name: Download installer artifacts
@@ -133,7 +171,6 @@ jobs:
           RELEASE_DRAFT: ${{ inputs.draft }}
           RELEASE_NAME: ${{ inputs.release_name }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
-          RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_TARGET: ${{ github.sha }}
           UPLOAD_CLOBBER: ${{ inputs.clobber }}
         run: |
@@ -181,8 +218,13 @@ jobs:
     name: Dry Run Summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: build
+    needs:
+      - build
+      - release_metadata
     if: ${{ inputs.dry_run }}
+    env:
+      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
 
     steps:
       - name: Download installer artifacts
@@ -207,6 +249,9 @@ jobs:
 
           {
             echo "## Desktop release dry run"
+            echo
+            echo "Version: $RELEASE_VERSION"
+            echo "Release tag: $RELEASE_TAG"
             echo
             echo "Built ${#assets[@]} asset(s). No GitHub Release was created or updated."
             echo
