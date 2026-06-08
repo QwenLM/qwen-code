@@ -28,6 +28,9 @@ import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const mockSetAgentNotificationCallback = vi.hoisted(() => vi.fn());
+const mockSetMonitorNotificationCallback = vi.hoisted(() => vi.fn());
+const mockSetShellNotificationCallback = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -40,6 +43,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
+    setAgentNotificationCallback: mockSetAgentNotificationCallback,
+    setMonitorNotificationCallback: mockSetMonitorNotificationCallback,
+    setShellNotificationCallback: mockSetShellNotificationCallback,
   };
 });
 
@@ -196,15 +202,6 @@ describe('Session', () => {
     getChat: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
-  let mockBackgroundTaskRegistry: {
-    setNotificationCallback: ReturnType<typeof vi.fn>;
-  };
-  let mockMonitorRegistry: {
-    setNotificationCallback: ReturnType<typeof vi.fn>;
-  };
-  let mockBackgroundShellRegistry: {
-    setNotificationCallback: ReturnType<typeof vi.fn>;
-  };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
@@ -237,15 +234,9 @@ describe('Session', () => {
         compressionStatus: core.CompressionStatus.NOOP,
       }),
     };
-    mockBackgroundTaskRegistry = {
-      setNotificationCallback: vi.fn(),
-    };
-    mockMonitorRegistry = {
-      setNotificationCallback: vi.fn(),
-    };
-    mockBackgroundShellRegistry = {
-      setNotificationCallback: vi.fn(),
-    };
+    mockSetAgentNotificationCallback.mockReset();
+    mockSetMonitorNotificationCallback.mockReset();
+    mockSetShellNotificationCallback.mockReset();
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
@@ -289,13 +280,6 @@ describe('Session', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
-      getBackgroundTaskRegistry: vi
-        .fn()
-        .mockReturnValue(mockBackgroundTaskRegistry),
-      getBackgroundShellRegistry: vi
-        .fn()
-        .mockReturnValue(mockBackgroundShellRegistry),
-      getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
     } as unknown as Config;
 
     mockClient = {
@@ -888,8 +872,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1013,8 +996,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1075,8 +1057,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1108,8 +1089,7 @@ describe('Session', () => {
         }
       ).pendingPrompt = new AbortController();
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1157,8 +1137,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1223,8 +1202,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1250,8 +1228,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start monitor' }],
       });
 
-      const callback = mockMonitorRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetMonitorNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { monitorId: string; status: string; toolUseId?: string },
@@ -1310,8 +1287,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background shell' }],
       });
 
-      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
-        .calls[0][0] as (
+      const callback = mockSetShellNotificationCallback.mock.calls[0][0] as (
         displayText: string,
         modelText: string,
         meta: { shellId: string; status: string },
@@ -4239,15 +4215,15 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.cronQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
-      expect(
-        mockBackgroundTaskRegistry.setNotificationCallback,
-      ).toHaveBeenLastCalledWith(undefined);
-      expect(
-        mockMonitorRegistry.setNotificationCallback,
-      ).toHaveBeenLastCalledWith(undefined);
-      expect(
-        mockBackgroundShellRegistry.setNotificationCallback,
-      ).toHaveBeenLastCalledWith(undefined);
+      expect(mockSetAgentNotificationCallback).toHaveBeenLastCalledWith(
+        undefined,
+      );
+      expect(mockSetMonitorNotificationCallback).toHaveBeenLastCalledWith(
+        undefined,
+      );
+      expect(mockSetShellNotificationCallback).toHaveBeenLastCalledWith(
+        undefined,
+      );
     });
 
     it('aborts an active notificationAbortController and nulls the reference', () => {
@@ -4288,7 +4264,7 @@ describe('Session', () => {
       const internals = session as unknown as SessionInternals;
       session.dispose();
       const callsAfterFirst =
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length;
+        mockSetAgentNotificationCallback.mock.calls.length;
 
       expect(() => session.dispose()).not.toThrow();
       expect(internals.disposed).toBe(true);
@@ -4296,11 +4272,10 @@ describe('Session', () => {
       expect(internals.cronQueue).toHaveLength(0);
       // The second dispose still unregisters (passes undefined again), which
       // is harmless. We only care that no surprise re-registration occurs.
-      const last =
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(-1);
+      const last = mockSetAgentNotificationCallback.mock.calls.at(-1);
       expect(last?.[0]).toBeUndefined();
       expect(
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.length,
+        mockSetAgentNotificationCallback.mock.calls.length,
       ).toBeGreaterThanOrEqual(callsAfterFirst);
     });
 

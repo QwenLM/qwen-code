@@ -20,4 +20,6 @@ export {
   type ShellTaskRegistration,
   type BackgroundShellEntry,
   type BackgroundShellStatus,
+  type ShellNotificationMeta,
+  type BackgroundShellNotificationCallback,
 } from '../tasks/shell-task.js';

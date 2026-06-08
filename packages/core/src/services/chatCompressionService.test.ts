@@ -2598,7 +2598,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
       }),
       getModel: () => 'test-model',
       getApprovalMode: () => opts.approvalMode ?? ApprovalMode.DEFAULT,
-      getBackgroundTaskRegistry: () => ({
+      getTaskRegistry: () => ({
         getAll: () => opts.backgroundTasks ?? [],
       }),
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
@@ -2793,7 +2793,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
       }),
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
-      // getBackgroundTaskRegistry intentionally omitted to simulate older
+      // getTaskRegistry intentionally omitted to simulate older
       // SDK consumers / test harnesses that haven't wired it.
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',

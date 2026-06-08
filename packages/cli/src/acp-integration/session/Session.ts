@@ -76,6 +76,9 @@ import {
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   acquireSleepInhibitor,
+  setAgentNotificationCallback,
+  setMonitorNotificationCallback,
+  setShellNotificationCallback,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -408,9 +411,9 @@ export class Session implements SessionContext {
     this.cronProcessing = false;
     this.cronCompletion = null;
 
-    this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
-    this.config.getMonitorRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    setAgentNotificationCallback(undefined);
+    setMonitorNotificationCallback(undefined);
+    setShellNotificationCallback(undefined);
   }
 
   /**
@@ -1649,22 +1652,18 @@ export class Session implements SessionContext {
   }
 
   #registerBackgroundNotificationCallbacks(): void {
-    const backgroundRegistry = this.config.getBackgroundTaskRegistry();
-    backgroundRegistry.setNotificationCallback(
-      (displayText, modelText, meta) => {
-        this.#enqueueBackgroundNotification({
-          displayText,
-          modelText,
-          taskId: meta.agentId,
-          status: meta.status,
-          kind: 'agent',
-          toolUseId: meta.toolUseId,
-        });
-      },
-    );
+    setAgentNotificationCallback((displayText, modelText, meta) => {
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.agentId,
+        status: meta.status,
+        kind: 'agent',
+        toolUseId: meta.toolUseId,
+      });
+    });
 
-    const monitorRegistry = this.config.getMonitorRegistry();
-    monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
+    setMonitorNotificationCallback((displayText, modelText, meta) => {
       if (meta.status === 'running') {
         return;
       }
@@ -1679,8 +1678,7 @@ export class Session implements SessionContext {
       });
     });
 
-    const shellRegistry = this.config.getBackgroundShellRegistry();
-    shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
+    setShellNotificationCallback((displayText, modelText, meta) => {
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,

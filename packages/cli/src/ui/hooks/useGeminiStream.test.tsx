@@ -92,6 +92,7 @@ const mockGetActiveGoal = vi.hoisted(() => vi.fn());
 const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
+const mockSetShellNotificationCallback = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -107,6 +108,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     activeGoalEquals: mockActiveGoalEquals,
     setActiveGoal: mockSetActiveGoal,
     clearActiveGoal: mockClearActiveGoal,
+    setShellNotificationCallback: mockSetShellNotificationCallback,
   };
 });
 
@@ -165,7 +167,6 @@ describe('useGeminiStream', () => {
   let mockScheduleToolCalls: Mock;
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
-  let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
   let handleAtCommandSpy: MockInstance;
 
   beforeEach(() => {
@@ -193,9 +194,6 @@ describe('useGeminiStream', () => {
       apiKey: 'test-key',
       vertexai: false,
       authType: AuthType.USE_GEMINI,
-    };
-    mockBackgroundShellRegistry = {
-      setNotificationCallback: vi.fn(),
     };
 
     mockConfig = {
@@ -382,13 +380,15 @@ describe('useGeminiStream', () => {
       '<task-notification>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>';
 
     await waitFor(() => {
-      expect(
-        mockBackgroundShellRegistry.setNotificationCallback,
-      ).toHaveBeenCalledWith(expect.any(Function));
+      expect(mockSetShellNotificationCallback).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
     });
 
-    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
-      .calls[0][0] as (displayText: string, modelText: string) => void;
+    const callback = mockSetShellNotificationCallback.mock.calls[0][0] as (
+      displayText: string,
+      modelText: string,
+    ) => void;
 
     act(() => {
       callback(displayText, modelText);

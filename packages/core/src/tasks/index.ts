@@ -21,14 +21,14 @@ export * from './dispatcher.js';
 
 import { _resetAgentTaskModuleStateForTest } from './agent-task.js';
 import { _resetMonitorTaskModuleStateForTest } from './monitor-task.js';
+import { _resetShellTaskModuleStateForTest } from './shell-task.js';
 import type { TaskRegistry } from './registry.js';
 
 /**
  * Test-only: reset everything — `registry._resetForTest()` plus every
  * per-kind module's singletons. Use in `afterEach` of test files that
  * touch any module-level callback/Map (notification, register,
- * owner-routed, cap, etc.) to avoid cross-test leakage. Shell-task has
- * no module-level state today, so it has no sibling reset.
+ * owner-routed, cap, etc.) to avoid cross-test leakage.
  */
 export function _resetTaskKindModuleStateForTest(
   registry?: TaskRegistry,
@@ -36,4 +36,5 @@ export function _resetTaskKindModuleStateForTest(
   registry?._resetForTest();
   _resetAgentTaskModuleStateForTest();
   _resetMonitorTaskModuleStateForTest();
+  _resetShellTaskModuleStateForTest();
 }

@@ -58,6 +58,7 @@ import {
   clearActiveGoal,
   setAgentNotificationCallback,
   setMonitorNotificationCallback,
+  setShellNotificationCallback,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -2575,8 +2576,7 @@ export const useGeminiStream = (
 
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
-    const registry = config.getBackgroundShellRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    setShellNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2585,7 +2585,7 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      registry.setNotificationCallback(undefined);
+      setShellNotificationCallback(undefined);
     };
   }, [config]);
 

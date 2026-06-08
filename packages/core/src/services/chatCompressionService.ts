@@ -218,7 +218,7 @@ export interface CompressOptions {
  * no block, rather than treating `undefined` as a configuration error.
  */
 function collectActiveSubagents(config: Config): SubagentSnapshot[] {
-  const registry = config.getBackgroundTaskRegistry?.();
+  const registry = config.getTaskRegistry?.();
   if (!registry) return [];
   return registry
     .getAll()
