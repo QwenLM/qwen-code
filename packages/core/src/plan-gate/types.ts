@@ -10,17 +10,8 @@
  * a circular dependency.
  */
 
-/** The three fixed gate review roles. */
-export type GateAgentName =
-  | 'request_fit'
-  | 'system_fit'
-  | 'execution_readiness';
-
-export const GATE_AGENT_NAMES: readonly GateAgentName[] = [
-  'request_fit',
-  'system_fit',
-  'execution_readiness',
-];
+/** The gate uses a single comprehensive reviewer. */
+export type GateAgentName = 'plan_reviewer';
 
 /** Per-agent decision. No confidence — uncertainty is `needs_user`/`unavailable`. */
 export type GateAgentDecision =
@@ -43,7 +34,6 @@ export type GateAgentDecision =
 export type GateSeverity = 'P1' | 'P2' | 'P3';
 
 export interface GateFinding {
-  /** Agent-local id, unique only within a single agent result. */
   localId: string;
   severity: GateSeverity;
   issue: string;
@@ -60,21 +50,18 @@ export interface GateAgentResult {
   reviewedEvidence: string[];
 }
 
-/** A finding after the deterministic cross-agent merge, with a stable id. */
+/** A finding with a stable id, e.g. `GF-1`. Referenced by later resolutionSummary. */
 export interface MergedGateFinding {
-  /** Stable merged id, e.g. `GF-1`. Referenced by later resolutionSummary. */
   id: string;
   severity: GateSeverity;
   issue: string;
   rationale: string;
   suggestedFix?: string;
   suggestedQuestion?: string;
-  /** Which agents reported this finding. */
-  reportedBy: GateAgentName[];
 }
 
 /**
- * Minimal necessary context handed to each gate review agent. NOT a full
+ * Minimal necessary context handed to the gate review agent. NOT a full
  * transcript. The original request and the user's later additions outrank the
  * plan text — the plan cannot override user constraints with its own wording.
  */
@@ -100,20 +87,8 @@ export type GateDecision =
 /** Default number of capped review rounds per Plan Mode Entry. */
 export const CAPPED_REVIEW_LIMIT = 5;
 
-/** Max retries for a single failed gate agent before declaring it unavailable. */
+/** Max retries for the gate agent before declaring it unavailable. */
 export const MAX_AGENT_RETRIES = 3;
-
-const SEVERITY_RANK: Record<GateSeverity, number> = { P1: 3, P2: 2, P3: 1 };
-
-/** Returns the higher (more severe) of two severities. */
-export function maxSeverity(a: GateSeverity, b: GateSeverity): GateSeverity {
-  return SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b;
-}
-
-/** True when the severity always blocks during the capped phase. */
-export function isBlockingSeverity(severity: GateSeverity): boolean {
-  return severity === 'P1' || severity === 'P2' || severity === 'P3';
-}
 
 /**
  * Cap-escalation option labels. Shared between the gate orchestrator

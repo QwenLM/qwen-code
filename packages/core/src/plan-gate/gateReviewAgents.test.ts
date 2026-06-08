@@ -11,22 +11,22 @@ import type { EvidenceBundle } from './types.js';
 describe('parseGateAgentResult', () => {
   it('should parse valid JSON', () => {
     const json = JSON.stringify({
-      agent: 'request_fit',
+      agent: 'plan_reviewer',
       decision: 'pass',
       findings: [],
       limitations: [],
       reviewedEvidence: ['plan'],
     });
-    const result = parseGateAgentResult(json, 'request_fit');
-    expect(result.agent).toBe('request_fit');
+    const result = parseGateAgentResult(json);
+    expect(result.agent).toBe('plan_reviewer');
     expect(result.decision).toBe('pass');
     expect(result.findings).toEqual([]);
   });
 
   it('should parse markdown-fenced JSON', () => {
     const raw =
-      '```json\n{"agent":"system_fit","decision":"blocked","findings":[{"localId":"SF-1","severity":"P2","issue":"wrong path","rationale":"moved"}],"limitations":[],"reviewedEvidence":[]}\n```';
-    const result = parseGateAgentResult(raw, 'system_fit');
+      '```json\n{"agent":"plan_reviewer","decision":"blocked","findings":[{"localId":"GF-1","severity":"P2","issue":"wrong path","rationale":"moved"}],"limitations":[],"reviewedEvidence":[]}\n```';
+    const result = parseGateAgentResult(raw);
     expect(result.decision).toBe('blocked');
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]!.severity).toBe('P2');
@@ -34,55 +34,55 @@ describe('parseGateAgentResult', () => {
 
   it('should parse fenced JSON without lang tag', () => {
     const raw =
-      '```\n{"agent":"request_fit","decision":"pass","findings":[],"limitations":[],"reviewedEvidence":[]}\n```';
-    const result = parseGateAgentResult(raw, 'request_fit');
+      '```\n{"agent":"plan_reviewer","decision":"pass","findings":[],"limitations":[],"reviewedEvidence":[]}\n```';
+    const result = parseGateAgentResult(raw);
     expect(result.decision).toBe('pass');
   });
 
   it('should throw on invalid JSON', () => {
-    expect(() =>
-      parseGateAgentResult('not json at all', 'request_fit'),
-    ).toThrow('returned invalid JSON');
+    expect(() => parseGateAgentResult('not json at all')).toThrow(
+      'returned invalid JSON',
+    );
   });
 
   it('should throw on invalid decision value', () => {
     const json = JSON.stringify({
-      agent: 'request_fit',
+      agent: 'plan_reviewer',
       decision: 'maybe',
       findings: [],
     });
-    expect(() => parseGateAgentResult(json, 'request_fit')).toThrow(
+    expect(() => parseGateAgentResult(json)).toThrow(
       'returned invalid decision',
     );
   });
 
   it('should default invalid severity to P2', () => {
     const json = JSON.stringify({
-      agent: 'request_fit',
+      agent: 'plan_reviewer',
       decision: 'blocked',
       findings: [
-        { localId: 'RF-1', severity: 'HIGH', issue: 'x', rationale: 'y' },
+        { localId: 'GF-1', severity: 'HIGH', issue: 'x', rationale: 'y' },
       ],
       limitations: [],
       reviewedEvidence: [],
     });
-    const result = parseGateAgentResult(json, 'request_fit');
+    const result = parseGateAgentResult(json);
     expect(result.findings[0]!.severity).toBe('P2');
   });
 
   it('should assign a fallback localId when missing', () => {
     const json = JSON.stringify({
-      agent: 'execution_readiness',
+      agent: 'plan_reviewer',
       decision: 'blocked',
       findings: [{ severity: 'P1', issue: 'test', rationale: 'why' }],
       limitations: [],
       reviewedEvidence: [],
     });
-    const result = parseGateAgentResult(json, 'execution_readiness');
-    expect(result.findings[0]!.localId).toBe('EXECUTION_READINESS-1');
+    const result = parseGateAgentResult(json);
+    expect(result.findings[0]!.localId).toBe('GF-1');
   });
 
-  it('should use the expected role, not the agent field in the JSON', () => {
+  it('should always use plan_reviewer as agent name', () => {
     const json = JSON.stringify({
       agent: 'wrong_name',
       decision: 'pass',
@@ -90,16 +90,16 @@ describe('parseGateAgentResult', () => {
       limitations: [],
       reviewedEvidence: [],
     });
-    const result = parseGateAgentResult(json, 'system_fit');
-    expect(result.agent).toBe('system_fit');
+    const result = parseGateAgentResult(json);
+    expect(result.agent).toBe('plan_reviewer');
   });
 
   it('should handle missing optional arrays gracefully', () => {
     const json = JSON.stringify({
-      agent: 'request_fit',
+      agent: 'plan_reviewer',
       decision: 'pass',
     });
-    const result = parseGateAgentResult(json, 'request_fit');
+    const result = parseGateAgentResult(json);
     expect(result.findings).toEqual([]);
     expect(result.limitations).toEqual([]);
     expect(result.reviewedEvidence).toEqual([]);
@@ -120,7 +120,6 @@ describe('formatEvidence', () => {
           severity: 'P2',
           issue: 'Missing color prop',
           rationale: 'user asked for blue',
-          reportedBy: ['request_fit'],
         },
       ],
       resolutionSummary: 'GF-1: added color prop',
