@@ -763,6 +763,29 @@ describe('SkillTool', () => {
       );
     });
 
+    it('returns the executor error from the disabled-skill delegation path', async () => {
+      // Disabled skill that shadows a same-named command whose executor fails:
+      // the { error } result must surface as the tool result, not fall through
+      // to the generic "skill is disabled" message.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['blocked']),
+      );
+      const executor = vi
+        .fn()
+        .mockResolvedValue({ error: 'command failed: boom' });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'blocked' });
+      const result = await invocation.execute();
+
+      expect(result.llmContent).toBe('command failed: boom');
+      expect(result.returnDisplay).toBe('command failed: boom');
+    });
+
     it('propagates prompt_id through the not-found branch', async () => {
       // Both loadSkillForRuntime and commandExecutor return null → L399
       // branch in skill.ts logs a failed SkillLaunchEvent.

@@ -931,6 +931,57 @@ describe('Session', () => {
       });
     });
 
+    it('derives availableSkills from skillManager and skill slash commands combined', async () => {
+      // Both sources contribute: a skillManager skill AND a bundled skill
+      // slash-command. The unconditional derivation must list both and keep
+      // availableSkills consistent with availableSkillDetails (the `??=` fix).
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'batch',
+          description: 'Run a batch operation',
+          kind: 'skill',
+          skillDetail: {
+            name: 'batch',
+            description: 'Run a batch operation',
+            body: 'Batch instructions',
+            level: 'bundled',
+          },
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'mgr-skill',
+            description: 'From the skill manager',
+            body: 'Manager instructions',
+            filePath: '/skills/mgr-skill/SKILL.md',
+            level: 'user',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const meta = (
+        vi.mocked(mockClient.sessionUpdate).mock.calls.at(-1)![0] as {
+          update: {
+            _meta: {
+              availableSkills: string[];
+              availableSkillDetails: Array<{ name: string }>;
+            };
+          };
+        }
+      ).update._meta;
+      expect(meta.availableSkills).toEqual(
+        expect.arrayContaining(['mgr-skill', 'batch']),
+      );
+      expect(meta.availableSkills).toHaveLength(2);
+      // Name list stays in lockstep with the details list.
+      expect([...meta.availableSkills].sort()).toEqual(
+        meta.availableSkillDetails.map((detail) => detail.name).sort(),
+      );
+    });
+
     it('swallows errors and does not throw', async () => {
       getAvailableCommandsSpy.mockRejectedValueOnce(
         new Error('Command discovery failed'),

@@ -804,6 +804,15 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('ACP');
   });
 
+  it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    // The `!result['channel']` guard must not override an explicitly provided
+    // channel with the ACP default.
+    expect(argv.channel).toBe('desktop');
+    expect(argv.acp).toBe(true);
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 

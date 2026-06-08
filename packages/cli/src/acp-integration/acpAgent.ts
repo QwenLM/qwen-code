@@ -866,7 +866,7 @@ function isAllowedSkillFetchHost(hostname: string): boolean {
  * endpoint) while still following GitHub's legitimate CDN redirects, which
  * plain `redirect: 'manual'` would surface as a download failure.
  */
-async function fetchAllowedGitHub(
+export async function fetchAllowedGitHub(
   url: string,
   init: RequestInit = {},
   maxRedirects = 5,

@@ -299,6 +299,7 @@ import {
   toHttpServer,
   normalizeCoreSettingValue,
   extractFilesFromTarGz,
+  fetchAllowedGitHub,
 } from './acpAgent.js';
 import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -4611,5 +4612,104 @@ describe('extractFilesFromTarGz', () => {
         maxDecompressedBytes: 16,
       }),
     ).rejects.toThrowError(/Decompressed skill archive exceeds/);
+  });
+});
+
+describe('fetchAllowedGitHub', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function fakeResponse(status: number, location?: string) {
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: {
+        get: (key: string) =>
+          key.toLowerCase() === 'location' && location ? location : null,
+      },
+    };
+  }
+
+  it('returns the response directly when there is no redirect', async () => {
+    const res = fakeResponse(200);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
+    await expect(
+      fetchAllowedGitHub(
+        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
+      ),
+    ).resolves.toBe(res);
+  });
+
+  it('follows a redirect to an allowed GitHub CDN host', async () => {
+    const final = fakeResponse(200);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        fakeResponse(302, 'https://objects.githubusercontent.com/x'),
+      )
+      .mockResolvedValueOnce(final);
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      fetchAllowedGitHub('https://codeload.github.com/a/b/tar.gz/main'),
+    ).resolves.toBe(final);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a redirect to a disallowed host', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(fakeResponse(302, 'https://evil.com/x')),
+    );
+    await expect(
+      fetchAllowedGitHub(
+        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
+      ),
+    ).rejects.toThrow(/disallowed host/);
+  });
+
+  it('rejects a non-https redirect target', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          fakeResponse(302, 'http://raw.githubusercontent.com/x'),
+        ),
+    );
+    await expect(
+      fetchAllowedGitHub(
+        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
+      ),
+    ).rejects.toThrow(/disallowed host/);
+  });
+
+  it('rejects when the redirect limit is exceeded', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          fakeResponse(302, 'https://raw.githubusercontent.com/loop'),
+        ),
+    );
+    await expect(
+      fetchAllowedGitHub('https://raw.githubusercontent.com/a', {}, 2),
+    ).rejects.toThrow(/maximum number of redirects/);
+  });
+
+  it('resolves a relative Location against the current URL', async () => {
+    const final = fakeResponse(200);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResponse(302, '/a/b/SKILL.md'))
+      .mockResolvedValueOnce(final);
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      fetchAllowedGitHub('https://raw.githubusercontent.com/start'),
+    ).resolves.toBe(final);
+    expect(fetchMock.mock.calls[1]![0]).toBe(
+      'https://raw.githubusercontent.com/a/b/SKILL.md',
+    );
   });
 });
