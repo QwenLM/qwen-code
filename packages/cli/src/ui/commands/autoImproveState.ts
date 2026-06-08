@@ -86,6 +86,9 @@ export const AUTO_IMPROVE_LOOP_ID_LINE_PREFIX = '- Loop id: ';
 const LOOP_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const LOOP_STATUSES = new Set(['running', 'stopping', 'stopped', 'stale']);
 const ACTIVE_RUN_STATUSES = new Set(['implementing', 'testing', 'running']);
+const DELIVERY_POLICIES = new Set(['source-aware-local-commit']);
+const DEFAULT_DELIVERY_POLICY: AutoImproveLoopState['deliveryPolicy'] =
+  'source-aware-local-commit';
 const TERMINAL_RUN_STATUSES = new Set([
   'success',
   'failed',
@@ -426,9 +429,21 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
       `Auto-improve loop ${loopId}: unknown status ${JSON.stringify(status)} coerced to 'stale' (older CLI reading a newer state file?).`,
     );
   }
-  // Read deliveryPolicy from the persisted state (validated) instead of
-  // hardcoding, so a future policy value isn't silently dropped on every read.
+  // Read deliveryPolicy from the persisted state, validated against the known
+  // set (mirroring the status handling above) instead of hardcoding, so a future
+  // policy value is carried through — and an unknown one is logged rather than
+  // silently coerced to the default.
   const persistedDeliveryPolicy = value['deliveryPolicy'];
+  const isKnownDeliveryPolicy =
+    typeof persistedDeliveryPolicy === 'string' &&
+    DELIVERY_POLICIES.has(persistedDeliveryPolicy);
+  if (persistedDeliveryPolicy !== undefined && !isKnownDeliveryPolicy) {
+    debugLogger.warn(
+      `Auto-improve loop ${loopId}: unknown deliveryPolicy ${JSON.stringify(
+        persistedDeliveryPolicy,
+      )} coerced to '${DEFAULT_DELIVERY_POLICY}' (older CLI reading a newer state file?).`,
+    );
+  }
   const state: AutoImproveLoopState = {
     version: 1,
     loopId,
@@ -442,10 +457,9 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
     targetBranch:
       typeof value['targetBranch'] === 'string' ? value['targetBranch'] : '',
     repoRoot: typeof value['repoRoot'] === 'string' ? value['repoRoot'] : '',
-    deliveryPolicy:
-      persistedDeliveryPolicy === 'source-aware-local-commit'
-        ? persistedDeliveryPolicy
-        : 'source-aware-local-commit',
+    deliveryPolicy: isKnownDeliveryPolicy
+      ? (persistedDeliveryPolicy as AutoImproveLoopState['deliveryPolicy'])
+      : DEFAULT_DELIVERY_POLICY,
     stopRequested: readBoolean(value['stopRequested']),
     sourceSnapshot: normalizeConfig(value['sourceSnapshot']),
     prompt: typeof value['prompt'] === 'string' ? value['prompt'] : '',
