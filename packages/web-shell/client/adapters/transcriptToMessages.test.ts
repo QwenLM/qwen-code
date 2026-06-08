@@ -674,6 +674,47 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('keeps shell output attached when the tool later completes', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'in_progress', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      shellBlock('sh1', 'output text', 2),
+      toolBlock('t2', 'tc1', 'completed', 3, {
+        toolName: 'bash',
+        toolKind: 'execute',
+        title: 'Shell complete',
+        updatedAt: 4,
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      callId: 'tc1',
+      title: 'Shell complete',
+      status: 'completed',
+      rawOutput: 'output text',
+      endTime: 4,
+    });
+  });
+
+  it('does not stringify structured raw output before shell text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+        rawOutput: { type: 'structured' },
+      }),
+      shellBlock('sh1', 'output text', 2),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.rawOutput).toBe('output text');
+  });
+
   it('concatenates multiple shell blocks after user message', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('u1', 'user', '! find .', 1),
@@ -1227,6 +1268,40 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agent?.subTools?.[0]).toMatchObject({ callId: 'sub-a1' });
   });
 
+  it('keeps existing subagent status after approved permission resolves', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'in_progress', 1, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      {
+        id: 'perm-agent-1',
+        kind: 'permission',
+        requestId: 'req-agent-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:allow',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ]);
+
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent).toMatchObject({
+      callId: 'agent-1',
+      status: 'in_progress',
+    });
+  });
+
   it('uses resolved approved permission as agent placeholder until final update', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -1404,6 +1479,36 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'assistant',
       thinking: 'second thinking',
       content: 'response text',
+    });
+  });
+
+  it('does not treat negative approval words as approved permissions', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Deny', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:not_approved',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent).toMatchObject({
+      callId: 'agent-1',
+      status: 'failed',
+      endTime: 2,
     });
   });
 
@@ -1761,6 +1866,24 @@ describe('transcriptBlocksToDaemonMessages', () => {
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool?.rawOutput).toBe('some detail info');
+  });
+
+  it('does not use content text as generic raw output', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'custom_tool',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'rendered elsewhere' },
+          },
+        ] as DaemonToolTranscriptBlock['content'],
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.rawOutput).toBeUndefined();
   });
 
   it('mergeToolCall updates fields from completion block', () => {

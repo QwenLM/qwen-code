@@ -133,9 +133,11 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
         </button>
       </div>
 
-      {message && (
+      {(message || loading) && (
         <div className={dp('resume-picker-search')}>
-          <span className={dp('resume-picker-search-hint')}>{message}</span>
+          <span className={dp('resume-picker-search-hint')}>
+            {message || t('tools.loading')}
+          </span>
         </div>
       )}
 

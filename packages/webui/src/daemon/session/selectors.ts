@@ -60,6 +60,8 @@ export function selectDaemonActiveTodoList(
   blocks: readonly DaemonTranscriptBlock[],
 ): DaemonTodoList | undefined {
   const latest = selectDaemonLatestTodoList(blocks);
+  // Only the latest list is considered active; earlier active items are stale
+  // once a newer TodoWrite/plan snapshot has arrived.
   return latest && hasDaemonActiveTodos(latest.items) ? latest : undefined;
 }
 

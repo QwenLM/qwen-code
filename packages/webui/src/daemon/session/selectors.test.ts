@@ -130,6 +130,47 @@ describe('daemon selectors', () => {
     expect(selectDaemonActiveTodoList([active, completed])).toBeUndefined();
   });
 
+  it('ignores earlier active todo lists when the latest list is complete', () => {
+    const earlierActive = block({
+      kind: 'tool',
+      id: 'tool-block-1',
+      toolCallId: 'tool-1',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-1',
+            content: 'older active work',
+            status: 'in_progress',
+          },
+        ],
+      },
+    });
+    const latestCompleted = block({
+      kind: 'tool',
+      id: 'tool-block-2',
+      toolCallId: 'tool-2',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-2',
+            content: 'newer finished work',
+            status: 'completed',
+          },
+        ],
+      },
+    });
+
+    expect(
+      selectDaemonActiveTodoList([earlierActive, latestCompleted]),
+    ).toBeUndefined();
+  });
+
   it('identifies sub-agent tool blocks from daemon metadata and raw output', () => {
     const parent = block({
       kind: 'tool',

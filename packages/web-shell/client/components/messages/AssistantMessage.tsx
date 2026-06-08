@@ -25,15 +25,17 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const thinkingExpandedRef = useRef(thinkingExpanded);
 
   const collapsed = compactThinking && !thinkingExpanded;
+  thinkingExpandedRef.current = thinkingExpanded;
 
   useEffect(() => {
     const el = bodyRef.current;
     if (!el || !compactThinking) return;
 
     const check = () => {
-      if (thinkingExpanded) return;
+      if (thinkingExpandedRef.current) return;
       setOverflowing(el.scrollHeight > el.clientHeight);
     };
 
@@ -42,7 +44,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     const observer = new ResizeObserver(check);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [thinking, compactThinking, thinkingExpanded]);
+  }, [compactThinking]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);

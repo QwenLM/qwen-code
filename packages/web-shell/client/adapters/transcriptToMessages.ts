@@ -61,6 +61,8 @@ export function transcriptBlocksToDaemonMessages(
   // so later tool updates, parented children, and permission placeholders
   // merge in O(1)
   // instead of scanning the rendered message list for every block.
+  // Subagent-owned assistant/thought/tool blocks are expected to carry
+  // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
   let currentAssistantIdx: number | null = null;
@@ -242,14 +244,19 @@ export function transcriptBlocksToDaemonMessages(
         if (lastMsg && lastMsg.role === 'tool_group') {
           const lastTool = lastMsg.tools[lastMsg.tools.length - 1];
           if (lastTool) {
+            const previousOutput =
+              typeof lastTool.rawOutput === 'string' ? lastTool.rawOutput : '';
             const nextTool = {
               ...lastTool,
-              rawOutput: String(lastTool.rawOutput ?? '') + shellBlock.text,
+              rawOutput: previousOutput + shellBlock.text,
             };
             messages[messages.length - 1] = {
               ...lastMsg,
               tools: [...lastMsg.tools.slice(0, -1), nextTool],
             };
+            if (toolsByCallId.get(lastTool.callId) === lastTool) {
+              toolsByCallId.set(lastTool.callId, nextTool);
+            }
           }
         } else {
           messages.push({
@@ -292,6 +299,7 @@ export function transcriptBlocksToDaemonMessages(
 
         const existingPermission = toolsByCallId.get(permissionToolCall.callId);
         if (existingPermission) {
+          const previousStatus = existingPermission.status;
           permissionToolCall.toolName = existingPermission.toolName;
           if (permBlock.resolved) {
             if (isApprovedPermissionResolution(permBlock.resolved)) {
@@ -304,6 +312,13 @@ export function transcriptBlocksToDaemonMessages(
             }
           }
           mergeToolCall(existingPermission, permissionToolCall);
+          if (
+            permBlock.resolved &&
+            isSubAgentPermission &&
+            isApprovedPermissionResolution(permBlock.resolved)
+          ) {
+            existingPermission.status = previousStatus;
+          }
           break;
         }
 
@@ -591,10 +606,7 @@ function isApprovedPermissionResolution(resolved: string): boolean {
   const [primary = '', detail = ''] = resolved.toLowerCase().split(':', 2);
   if (isApprovalToken(primary)) return true;
   if (primary !== 'selected') return false;
-  return detail
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean)
-    .some(isApprovalToken);
+  return isApprovalToken(detail.trim());
 }
 
 function isApprovalToken(token: string): boolean {
@@ -608,6 +620,7 @@ function isApprovalToken(token: string): boolean {
     token === 'confirm' ||
     token === 'confirmed' ||
     token === 'proceed' ||
+    token === 'proceed_once' ||
     token === 'success' ||
     token === 'succeeded'
   );
@@ -639,7 +652,7 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
   }
 
   if (!isCancelledStatus(block.status) || !block.details) {
-    return block.rawOutput ?? block.details ?? getToolContentText(block);
+    return block.rawOutput ?? block.details;
   }
 
   if (
@@ -675,7 +688,7 @@ function getToolContentText(
 ): string | undefined {
   if (!Array.isArray(block.content)) return undefined;
   const parts = block.content
-    .map((item) => item.content?.text)
+    .map((item) => item?.content?.text)
     .filter((text): text is string => Boolean(text));
   if (!parts || parts.length === 0) return undefined;
   return parts.join('\n');

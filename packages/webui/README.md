@@ -256,7 +256,7 @@ Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that cre
 | `useStreamingState()`     | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                     |
 | `usePromptStatus()`       | `'idle' \| 'waiting' \| 'streaming'`                                                                    |
 | `usePendingPermissions()` | Unresolved permission blocks                                                                            |
-| `useActiveTodoList()`     | Latest todo list with active items                                                                      |
+| `useActiveTodoList()`     | Latest todo list, only when it still has active items                                                   |
 
 ### Workspace hooks
 
