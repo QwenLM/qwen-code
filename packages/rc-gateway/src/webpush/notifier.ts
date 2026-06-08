@@ -60,9 +60,12 @@ export class PushNotifier {
     await Promise.all(
       this.store.listAll().map(async (r) => {
         const scopes = this.tokens.scopesFor(r.tokenId);
-        if (scopes && scopes.includes(need)) {
-          await this.sender.send(r, payload);
-        }
+        if (!scopes || !scopes.includes(need)) return;
+        // Per-subscription prefs filter (cycle 16): absent prefs → receive all;
+        // a list → only those kinds; [] → nothing. Skip is silent (no audit),
+        // matching the cycle-9 scope-skip posture. Runs after scope + snooze.
+        if (r.prefs !== undefined && !r.prefs.includes(payload.kind)) return;
+        await this.sender.send(r, payload);
       }),
     );
   }
