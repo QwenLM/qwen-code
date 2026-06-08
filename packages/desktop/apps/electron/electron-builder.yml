@@ -136,13 +136,14 @@ win:
     - "!**/vendor/codex/linux-*/**"
     - "!**/resources/bin/darwin-*/**"
     - "!**/resources/bin/linux-*/**"
-    # WORKAROUND: Exclude bun, codex, and uv from regular files on Windows.
+    # WORKAROUND: Exclude bun, codex, uv, and Qwen Code from regular files on Windows.
     # electron-builder's npm node module collector causes EBUSY errors when copying
-    # .exe files because it scans/locks files while simultaneously trying to copy them.
+    # files because it scans/locks files while simultaneously trying to copy them.
     # Moving them to extraResources avoids this by copying before the collector runs.
     # See: https://github.com/electron-userland/electron-builder/issues/8250
     - "!vendor/bun/**/*"
     - "!vendor/codex/**/*"
+    - "!vendor/qwen-code/**/*"
     - "!**/resources/bin/win32-x64/**"
   # Copy executables as extraResources to avoid EBUSY file locking (see comment above)
   extraResources:
@@ -150,6 +151,8 @@ win:
       to: vendor/bun/bun.exe
     - from: vendor/codex/win32-x64
       to: app/vendor/codex/win32-x64
+    - from: vendor/qwen-code
+      to: app/vendor/qwen-code
     - from: resources/bin/win32-x64
       to: app/resources/bin/win32-x64
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
