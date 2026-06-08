@@ -2842,6 +2842,7 @@ export class CoreToolScheduler {
           typeof content === 'string' ? content.length : undefined;
         let postToolUseAdditionalContext: string | undefined;
         let appendedAdditionalContext = false;
+        let toolOutputAlreadyTruncated = false;
 
         // PostToolUse Hook
         if (hooksEnabled && messageBus) {
@@ -2920,6 +2921,7 @@ export class CoreToolScheduler {
           );
           content = truncated.content;
           if (truncated.outputFile && typeof resultDisplay === 'string') {
+            toolOutputAlreadyTruncated = true;
             resultDisplay +=
               (resultDisplay ? '\n' : '') +
               `Output too long and was saved to: ${truncated.outputFile}`;
@@ -3016,7 +3018,11 @@ export class CoreToolScheduler {
           }
         }
 
-        if (appendedAdditionalContext && typeof content === 'string') {
+        if (
+          appendedAdditionalContext &&
+          typeof content === 'string' &&
+          !toolOutputAlreadyTruncated
+        ) {
           const threshold = this.config.getTruncateToolOutputThreshold();
           const lines = this.config.getTruncateToolOutputLines();
           if (threshold > 0 && lines > 0) {

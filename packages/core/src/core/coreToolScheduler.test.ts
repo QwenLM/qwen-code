@@ -7772,6 +7772,60 @@ describe('CoreToolScheduler model-facing output truncation', () => {
     );
   });
 
+  it('does not re-truncate already-truncated output after PostToolUse context is appended', async () => {
+    const rawTruncatedContent =
+      'Tool output was too large and has been truncated.\nbody';
+    const hookContext = 'H'.repeat(250);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const truncateSpy = vi
+      .spyOn(truncation, 'truncateToolOutput')
+      .mockResolvedValue({
+        content: rawTruncatedContent,
+        outputFile: '/tmp/raw.output',
+      });
+    const { scheduler, onAllToolCallsComplete } = createOutputScheduler(
+      'A'.repeat(5000),
+      {
+        messageBus,
+        disableHooks: false,
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'already-truncated-1',
+          name: largeToolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-already-truncated-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = getCompletedSuccessCall(onAllToolCallsComplete);
+    const output = extractFunctionResponseOutput(
+      completedCall.response.responseParts,
+    );
+
+    expect(truncateSpy).toHaveBeenCalledTimes(1);
+    expect(output).toBe(`${rawTruncatedContent}\n\n${hookContext}`);
+    expect(completedCall.response.resultDisplay).toBe(
+      'large output completed\nOutput too long and was saved to: /tmp/raw.output',
+    );
+  });
+
   it('leaves non-string Part output on the existing Part[] path', async () => {
     const partOutput: Part[] = [
       {
