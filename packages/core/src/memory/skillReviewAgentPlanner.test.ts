@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
+  AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
   createSkillScopedAgentConfig,
   listExistingSkillDirNames,
@@ -349,5 +350,16 @@ describe('buildTaskPrompt', () => {
     const prompt = await buildTaskPrompt(projectRoot);
     expect(prompt).toContain(path.join(projectRoot, '.qwen', 'skills'));
     expect(prompt).toContain('real');
+  });
+
+  it('instructs the agent to use the auto-skill- directory prefix (#4837)', async () => {
+    // The `.gitignore` re-ignores `.qwen/skills/auto-skill-*/`, so new
+    // auto-generated skills must land under an `auto-skill-`-prefixed
+    // directory to stay out of version control. The prompt is the soft
+    // guard that steers the agent there.
+    const prompt = await buildTaskPrompt(projectRoot);
+    expect(prompt).toContain(AUTO_SKILL_DIR_PREFIX);
+    expect(prompt).toContain(`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`);
+    expect(prompt).toMatch(/mandatory/i);
   });
 });

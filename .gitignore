@@ -34,6 +34,11 @@ CLAUDE.md
 !.qwen/commands/**
 !.qwen/skills/
 !.qwen/skills/**
+# Re-ignore auto-generated skills (created by the managed-skill-extractor
+# agent with the mandatory `auto-skill-` directory prefix). Git's last-rule-
+# wins semantics keep hand-authored project skills tracked while excluding
+# these transient, session-specific directories.
+.qwen/skills/auto-skill-*/
 !.qwen/agents/
 !.qwen/agents/**
 

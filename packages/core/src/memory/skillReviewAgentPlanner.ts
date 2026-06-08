@@ -27,6 +27,17 @@ export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
 export const DEFAULT_AUTO_SKILL_MAX_TURNS = 8;
 export const DEFAULT_AUTO_SKILL_TIMEOUT_MS = 120_000;
 
+/**
+ * Mandatory directory-name prefix for skills created by the review agent.
+ * The project `.gitignore` re-ignores directories matching
+ * `.qwen/skills/auto-skill-<glob>` so these transient, session-specific
+ * skills stay out of version control while hand-authored project skills
+ * remain tracked. This is a prompt-level convention only — skill discovery
+ * (`SkillManager`) is prefix-agnostic, and the `source: auto-skill`
+ * frontmatter marker remains the file-level signal for edit protection.
+ */
+export const AUTO_SKILL_DIR_PREFIX = 'auto-skill-' as const;
+
 export interface SkillReviewExecutionResult {
   touchedSkillFiles: string[];
   systemMessage?: string;
@@ -239,6 +250,7 @@ const SKILL_REVIEW_SYSTEM_PROMPT = [
   "- You may ONLY modify skill files that contain 'source: auto-skill' in their YAML frontmatter. Always read a skill file before editing it.",
   '- Do NOT touch skills that lack this marker — they were created by the user.',
   "- When creating a new skill, you MUST include 'source: auto-skill' in the frontmatter so future review agents can safely update it.",
+  `- When creating a new skill, its directory MUST use the \`${AUTO_SKILL_DIR_PREFIX}\` prefix (e.g. \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\`) so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` without the prefix.`,
   '- Do NOT delete any skill. Only create or update.',
   '',
   "If nothing is worth saving, just say 'Nothing to save.' and stop.",
@@ -328,7 +340,7 @@ export async function buildTaskPrompt(projectRoot: string): Promise<string> {
     '',
     'Use `ls` and `read_file` to inspect existing skills before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
-    "Each skill lives at .qwen/skills/<name>/SKILL.md. Skills you create MUST include 'source: auto-skill' in the frontmatter:",
+    `New skills you create MUST live at \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\` — the \`${AUTO_SKILL_DIR_PREFIX}\` directory prefix is mandatory so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` (no prefix). The frontmatter MUST include 'source: auto-skill':`,
     '',
     '---',
     'name: <skill-name>',
