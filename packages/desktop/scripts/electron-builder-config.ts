@@ -48,5 +48,15 @@ const linux = section(config, 'linux');
 linux.icon = BRAND.assets.linuxIcon;
 linux.artifactName = artifactName;
 
+if (BRAND.updates) {
+  config.publish = {
+    provider: BRAND.updates.provider,
+    owner: BRAND.updates.owner,
+    repo: BRAND.updates.repo,
+  };
+} else {
+  delete config.publish;
+}
+
 writeFileSync(outputPath, yaml.dump(config, { lineWidth: -1 }));
 console.log(`Generated ${outputPath} for ${BRAND.id}`);

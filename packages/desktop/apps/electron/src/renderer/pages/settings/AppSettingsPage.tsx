@@ -6,6 +6,7 @@
  * Settings:
  * - Notifications
  * - Network (proxy)
+ * - Updates
  * - About (version)
  *
  * Note: AI settings (connections, model, thinking) have been moved to AiSettingsPage.
@@ -19,6 +20,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
+import { useUpdateChecker } from '@/hooks/useUpdateChecker'
 import { Spinner } from '@craft-agent/ui'
 import { APP_VERSION } from '@craft-agent/shared/branding'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
@@ -103,6 +105,15 @@ export default function AppSettingsPage() {
 
   // Tools state
   const [browserToolEnabled, setBrowserToolEnabled] = useState(true)
+  const {
+    updateInfo,
+    isChecking,
+    isDownloading,
+    isReadyToInstall,
+    downloadProgress,
+    checkForUpdates,
+    installUpdate,
+  } = useUpdateChecker()
 
   // Proxy state
   const [proxyForm, setProxyForm] = useState<ProxyFormState>(EMPTY_PROXY_FORM)
@@ -184,6 +195,48 @@ export default function AppSettingsPage() {
     setProxyForm(savedProxyForm)
     setProxyError(undefined)
   }, [savedProxyForm])
+
+  const currentVersion = updateInfo?.currentVersion ?? APP_VERSION
+  const latestVersion = updateInfo?.latestVersion
+  const isInstallingUpdate = updateInfo?.downloadState === 'installing'
+  const updateActionDisabled = isChecking || isDownloading || isInstallingUpdate
+  const updateStatusDescription = (() => {
+    if (updateInfo?.downloadState === 'error') {
+      return updateInfo.error || t("settings.updates.errorDesc")
+    }
+    if (isInstallingUpdate) {
+      return t("settings.updates.installingDesc")
+    }
+    if (isReadyToInstall) {
+      return t("settings.updates.readyDesc", { version: latestVersion ?? '' })
+    }
+    if (isDownloading) {
+      return t("settings.updates.downloadingDesc", { progress: downloadProgress })
+    }
+    if (updateInfo?.available && latestVersion) {
+      return t("settings.updates.availableDesc", { version: latestVersion })
+    }
+    if (latestVersion) {
+      return t("settings.updates.upToDateDesc", { version: currentVersion })
+    }
+    return t("settings.updates.idleDesc")
+  })()
+
+  const handleUpdateAction = useCallback(async () => {
+    if (isReadyToInstall) {
+      await installUpdate()
+      return
+    }
+    await checkForUpdates()
+  }, [checkForUpdates, installUpdate, isReadyToInstall])
+
+  const updateActionLabel = (() => {
+    if (isInstallingUpdate) return t("settings.updates.installing")
+    if (isReadyToInstall) return t("settings.updates.restartToUpdate")
+    if (isDownloading) return t("settings.updates.downloading")
+    if (isChecking) return t("settings.updates.checking")
+    return t("settings.updates.check")
+  })()
 
   return (
     <div className="h-full flex flex-col">
@@ -290,6 +343,56 @@ export default function AppSettingsPage() {
                         )}
                       </Button>
                     </SettingsCardFooter>
+                  )}
+                </SettingsCard>
+              </SettingsSection>
+
+              {/* Updates */}
+              <SettingsSection title={t("settings.updates.title")}>
+                <SettingsCard>
+                  <SettingsRow
+                    label={t("settings.updates.currentVersion")}
+                    description={updateStatusDescription}
+                    action={
+                      <Button
+                        size="sm"
+                        onClick={handleUpdateAction}
+                        disabled={updateActionDisabled}
+                      >
+                        {(isChecking || isDownloading || isInstallingUpdate) && (
+                          <Spinner className="mr-1.5" />
+                        )}
+                        {updateActionLabel}
+                      </Button>
+                    }
+                  >
+                    <span className="text-muted-foreground">{currentVersion}</span>
+                  </SettingsRow>
+                  {latestVersion && latestVersion !== currentVersion && (
+                    <SettingsRow label={t("settings.updates.latestVersion")}>
+                      <span className="text-muted-foreground">{latestVersion}</span>
+                    </SettingsRow>
+                  )}
+                  {isDownloading && (
+                    <SettingsRow label={t("settings.updates.downloadProgress")}>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="h-1.5 w-28 overflow-hidden rounded-full bg-muted"
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={downloadProgress}
+                        >
+                          <div
+                            className="h-full rounded-full bg-primary transition-[width] duration-150"
+                            style={{ width: `${Math.max(0, Math.min(100, downloadProgress))}%` }}
+                          />
+                        </div>
+                        <span className="w-10 text-right text-sm text-muted-foreground">
+                          {downloadProgress}%
+                        </span>
+                      </div>
+                    </SettingsRow>
                   )}
                 </SettingsCard>
               </SettingsSection>

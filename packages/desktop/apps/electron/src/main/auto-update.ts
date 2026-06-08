@@ -1,9 +1,9 @@
 /**
  * Auto-update module using electron-updater
  *
- * Auto-update is disabled for this fork until we have an update server we own.
- * Keep the public API in place so renderer/main callers fail closed instead of
- * accidentally reaching the upstream Craft update feed.
+ * Auto-update is enabled only for packaged builds whose active brand declares
+ * a brand-owned update source. Development builds keep the same public API but
+ * skip network update checks.
  *
  * Platform behavior:
  * - macOS: Downloads zip, extracts and swaps app bundle atomically
@@ -21,6 +21,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { mainLog } from './logger'
 import { getAppVersion } from '@craft-agent/shared/version'
+import { BRAND } from '@craft-agent/shared/branding'
 import {
   getDismissedUpdateVersion,
   clearDismissedUpdateVersion,
@@ -33,7 +34,8 @@ import type { EventSink } from '@craft-agent/server-core/transport'
 const PLATFORM = platform()
 const IS_MAC = PLATFORM === 'darwin'
 const IS_WINDOWS = PLATFORM === 'win32'
-const AUTO_UPDATE_ENABLED = false
+const UPDATE_SOURCE = BRAND.updates
+const AUTO_UPDATE_ENABLED = app.isPackaged && !!UPDATE_SOURCE
 
 // Get the update cache directory path (for file watcher fallback on macOS)
 // electron-updater uses these paths:
@@ -112,11 +114,11 @@ function broadcastDownloadProgress(progress: number): void {
 
 // ─── Configure electron-updater ───────────────────────────────────────────────
 
-// Do not download or install updates until an owned update server is configured.
+// Download updates only for packaged builds with a brand-owned update source.
 autoUpdater.autoDownload = AUTO_UPDATE_ENABLED
 
-// Prevent cached upstream downloads from being applied on quit.
-autoUpdater.autoInstallOnAppQuit = AUTO_UPDATE_ENABLED
+autoUpdater.allowPrerelease = false
+autoUpdater.allowDowngrade = false
 
 // Use the logger for electron-updater internal logging
 autoUpdater.logger = {
@@ -316,6 +318,11 @@ function checkForExistingDownload(): { exists: boolean; version?: string } {
  */
 export async function checkForUpdates(options: CheckOptions = {}): Promise<UpdateInfo> {
   if (!AUTO_UPDATE_ENABLED) {
+    mainLog.info('[auto-update] Skipping update check', {
+      packaged: app.isPackaged,
+      brand: BRAND.id,
+      hasUpdateSource: !!UPDATE_SOURCE,
+    })
     updateInfo = {
       available: false,
       currentVersion: getAppVersion(),
@@ -327,6 +334,13 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
   }
 
   const { autoDownload = true } = options
+  mainLog.info('[auto-update] Checking stable release feed', {
+    brand: BRAND.id,
+    provider: UPDATE_SOURCE.provider,
+    owner: UPDATE_SOURCE.owner,
+    repo: UPDATE_SOURCE.repo,
+    autoDownload,
+  })
 
   // Temporarily override autoDownload for this check if needed
   // (e.g., manual check from settings shouldn't auto-download on metered connections)
@@ -382,7 +396,7 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
  */
 export async function installUpdate(): Promise<void> {
   if (!AUTO_UPDATE_ENABLED) {
-    throw new Error('Auto-update is disabled')
+    throw new Error('Auto-update is not available for this build')
   }
 
   if (updateInfo.downloadState !== 'ready') {
@@ -430,11 +444,20 @@ export interface UpdateOnLaunchResult {
  */
 export async function checkForUpdatesOnLaunch(): Promise<UpdateOnLaunchResult> {
   if (!AUTO_UPDATE_ENABLED) {
-    mainLog.info('[auto-update] Skipping auto-update; disabled until an owned update server is configured')
-    return { action: 'skipped', reason: 'disabled' }
+    mainLog.info('[auto-update] Skipping launch update check', {
+      packaged: app.isPackaged,
+      brand: BRAND.id,
+      hasUpdateSource: !!UPDATE_SOURCE,
+    })
+    return { action: 'skipped', reason: app.isPackaged ? 'unconfigured' : 'development' }
   }
 
-  mainLog.info('[auto-update] Checking for updates on launch...')
+  mainLog.info('[auto-update] Checking for updates on launch...', {
+    brand: BRAND.id,
+    provider: UPDATE_SOURCE.provider,
+    owner: UPDATE_SOURCE.owner,
+    repo: UPDATE_SOURCE.repo,
+  })
 
   const info = await checkForUpdates({ autoDownload: true })
 

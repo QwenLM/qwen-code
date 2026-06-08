@@ -60,7 +60,7 @@ files:
 extraMetadata:
   main: dist/main.cjs
 
-# Auto-update is disabled until we have an owned update server.
+# Auto-update publish metadata is generated from the active brand config.
 
 # Disable ASAR to avoid decompression overhead and click delays
 asar: false

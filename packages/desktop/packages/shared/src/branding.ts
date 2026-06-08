@@ -29,6 +29,13 @@ export interface BrandConfig {
   selfReferName: string;
   /** Session viewer base URL */
   viewerUrl: string;
+  /** Stable desktop auto-update source for packaged app builds. */
+  updates?: {
+    provider: 'github';
+    owner: string;
+    repo: string;
+    releasePageUrl: string;
+  };
   /** Brand-owned external links shown in the Help menu */
   helpMenuLinks: Array<{ labelKey: string; url: string; icon: string }>;
   /** Brand-specific Electron resource paths, relative to apps/electron/ */
@@ -72,6 +79,12 @@ const QWEN_CODE_BRAND: BrandConfig = {
   coAuthorLine: 'Co-Authored-By: Qwen Code <agents-noreply@craft.do>',
   selfReferName: 'Qwen Code',
   viewerUrl: 'https://agents.craft.do',
+  updates: {
+    provider: 'github',
+    owner: 'QwenLM',
+    repo: 'qwen-code',
+    releasePageUrl: 'https://github.com/QwenLM/qwen-code/releases',
+  },
   helpMenuLinks: [
     {
       labelKey: 'menu.homepage',
@@ -106,6 +119,12 @@ const BRANDS: Record<string, BrandConfig> = {
     coAuthorLine: 'Co-Authored-By: OpenWork <noreply@alibaba.com>',
     selfReferName: 'OpenWork',
     viewerUrl: 'https://agents.craft.do',
+    updates: {
+      provider: 'github',
+      owner: 'modelstudioai',
+      repo: 'openwork',
+      releasePageUrl: 'https://github.com/modelstudioai/openwork/releases',
+    },
     helpMenuLinks: [
       {
         labelKey: 'menu.homepage',
