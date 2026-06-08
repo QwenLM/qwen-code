@@ -63,8 +63,6 @@ jobs:
           # first failing package is visible in the job output.
           set -e
           npm -w packages/cli run test -- \
-            --poolOptions.threads.minThreads=1 \
-            --poolOptions.threads.maxThreads=4 \
             --hookTimeout=30000
           npm -w packages/core run test
           npm -w packages/sdk-typescript run test
