@@ -45,6 +45,7 @@ concurrency:
 
 jobs:
   ack-review-request:
+    # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     if: |-
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
@@ -68,6 +69,7 @@ jobs:
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+        github.event.review.state == 'commented' &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
@@ -75,6 +77,7 @@ jobs:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
       pull-requests: 'write'
       issues: 'write'
@@ -86,9 +89,15 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --body "_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+            --body "<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
 
   review-config:
     if: |-
@@ -191,6 +200,7 @@ jobs:
     # - review_requested uses authorize-review-request and skips delay
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately for trusted PR authors
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -229,6 +239,7 @@ jobs:
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+        github.event.review.state == 'commented' &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR')))
