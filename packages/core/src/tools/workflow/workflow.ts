@@ -30,6 +30,7 @@ import {
   createProductionDispatch,
   type WorkflowAgentDispatch,
 } from '../../agents/runtime/workflow-orchestrator.js';
+import { createChildAbortController } from '../../utils/abortController.js';
 
 export interface WorkflowParams {
   /** Inline JavaScript source for the workflow. Required in P1. */
@@ -100,17 +101,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    // T40 (PR #4732 R4): derive a controller that links the wall-clock
-    // timeout, the caller signal, and the dispatch signal. The sandbox
-    // aborts this controller when wall-clock fires; we abort it in the
-    // finally block to clean up any straggler dispatch on normal
-    // completion. The dispatch closure-captures `dispatchController.signal`
-    // so in-flight subagent.execute() calls see the abort and stop
-    // burning tokens.
-    const dispatchController = new AbortController();
-    const onCallerAbort = () => dispatchController.abort();
-    signal.addEventListener('abort', onCallerAbort, { once: true });
-    if (signal.aborted) dispatchController.abort();
+    // T40 (PR #4732 R4): derive a child controller from the caller signal.
+    // `createChildAbortController` handles parent-signal forwarding,
+    // already-aborted fast path, WeakRef on the parent, and auto-removal
+    // of the parent listener when the child fires. The dispatch closure-
+    // captures the child's signal so in-flight subagent.execute() calls
+    // see the abort (caller-driven OR wall-clock-driven, see sandbox.ts
+    // setTimeout handler) and stop burning tokens.
+    const dispatchController = createChildAbortController(signal);
     const dispatch =
       this.toolOptions.dispatch ??
       createProductionDispatch(this.config, dispatchController.signal);
@@ -177,13 +175,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     } finally {
-      // T40 (PR #4732 R4): abort the dispatch controller on natural
-      // completion to cancel any straggler subagent the script may have
-      // left running. Also detach the caller signal listener — without
-      // this, every Workflow invocation leaks a listener on the caller
-      // signal until that signal is GC'd. `removeEventListener` is a
-      // no-op if the listener already fired (timeout / caller abort).
-      signal.removeEventListener('abort', onCallerAbort);
+      // T40 (PR #4732 R4): abort the child controller on natural completion
+      // to cancel any straggler subagent. `createChildAbortController`'s
+      // child-fired listener auto-removes the parent listener, so no manual
+      // signal cleanup needed.
       dispatchController.abort();
     }
   }

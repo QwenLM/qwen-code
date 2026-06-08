@@ -169,8 +169,6 @@ export class WorkflowOrchestrator {
     const sandbox = createWorkflowSandbox({
       args: req.args,
       dispatch: this.dispatch,
-      // T40 (PR #4732 R4): forward the caller's wall-clock-linked controller
-      // so the sandbox can abort it on timeout fire.
       abortOnTimeout: req.abortOnTimeout,
     });
     try {
