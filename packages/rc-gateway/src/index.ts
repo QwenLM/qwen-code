@@ -71,3 +71,8 @@ export {
   type PolicyRuleMatch,
   type PolicyAction,
 } from './policy/loader.js';
+export {
+  evaluate,
+  type PolicyDecision,
+  type ToolCallContext,
+} from './policy/evaluator.js';
