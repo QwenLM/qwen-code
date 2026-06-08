@@ -78,6 +78,7 @@ import {
 
 // Utilities
 import {
+  formatDateForContext,
   buildAddedMcpToolsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -199,6 +200,14 @@ export class GeminiClient {
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
+
+  /**
+   * Tracks the most recently injected date string to prevent injecting
+   * duplicate or conflicting dates when a session spans midnight.
+   * Only UserQuery turns inject dates; Cron/ToolResult turns reuse the
+   * startup-context date which is still current within the same session.
+   */
+  private lastInjectedDate: string | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -855,6 +864,7 @@ export class GeminiClient {
       : SessionStartSource.Startup,
   ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
+    this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -1700,6 +1710,22 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+
+        // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
+        // reuse the same session and the startup-context date is still current.
+        if (messageType === SendMessageType.UserQuery) {
+          const today = formatDateForContext();
+
+          // Only inject if the date has changed since the last injection.
+          // This prevents accumulating conflicting dates when a session
+          // spans midnight.
+          if (today !== this.lastInjectedDate) {
+            systemReminders.push(
+              `<system-reminder>\nThe current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
+            );
+            this.lastInjectedDate = today;
+          }
+        }
 
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
