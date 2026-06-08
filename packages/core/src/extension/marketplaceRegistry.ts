@@ -1,0 +1,234 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { redactUrlCredentials } from './redaction.js';
+import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import type {
+  ClaudeMarketplaceConfig,
+  ClaudeMarketplacePluginConfig,
+} from './claude-converter.js';
+
+const debugLogger = createDebugLogger('MARKETPLACE_REGISTRY');
+
+export type MarketplaceSourceType = 'github' | 'git' | 'http' | 'local';
+
+/**
+ * A persisted marketplace source the user has added (Marketplaces tab).
+ */
+export interface MarketplaceSource {
+  /** Display name (from the marketplace config `name`, or derived). */
+  name: string;
+  /** Original input string used to add the source. */
+  source: string;
+  type: MarketplaceSourceType;
+  /** ISO timestamp recorded when the source was added. */
+  addedAt?: string;
+}
+
+/**
+ * A single installable plugin surfaced by the Discover view.
+ */
+export interface DiscoveredPlugin {
+  /** Name of the marketplace this plugin came from. */
+  marketplaceName: string;
+  name: string;
+  description?: string;
+  version?: string;
+  author?: string;
+  homepage?: string;
+  category?: string;
+  /** Source string suitable for `parseInstallSource`. */
+  installSource: string;
+  /** Whether an extension with this name is already installed. */
+  installed: boolean;
+}
+
+/**
+ * Classifies a marketplace source string into a {@link MarketplaceSourceType}
+ * using format heuristics only (no network / filesystem access required for a
+ * confident answer, beyond an optional existence check the caller may do).
+ */
+export function parseMarketplaceSourceType(
+  source: string,
+): MarketplaceSourceType {
+  const trimmed = source.trim();
+  if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+    return 'git';
+  }
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return isGitHubHost(trimmed) ? 'github' : 'http';
+  }
+  if (isOwnerRepoShorthand(trimmed)) {
+    return 'github';
+  }
+  return 'local';
+}
+
+function isGitHubHost(url: string): boolean {
+  try {
+    return new URL(url).hostname === 'github.com';
+  } catch {
+    return false;
+  }
+}
+
+function isOwnerRepoShorthand(source: string): boolean {
+  return /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(source);
+}
+
+/**
+ * Builds the install-source string fed to `parseInstallSource` for a discovered
+ * plugin. For repo/local marketplaces this is `<marketplace>:<pluginName>`,
+ * which the existing installer resolves against the marketplace's
+ * `marketplace.json`. For direct-JSON (`http`) marketplaces it is derived from
+ * the per-plugin `source` field.
+ */
+function resolveInstallSource(
+  marketplace: MarketplaceSource,
+  plugin: ClaudeMarketplacePluginConfig,
+): string {
+  if (marketplace.type !== 'http') {
+    return `${marketplace.source}:${plugin.name}`;
+  }
+  const src = plugin.source;
+  if (typeof src === 'string') {
+    return src.includes(':') ? src : `${src}:${plugin.name}`;
+  }
+  if (src && src.source === 'github') {
+    return `${src.repo}:${plugin.name}`;
+  }
+  if (src && src.source === 'url') {
+    return src.url;
+  }
+  return plugin.name;
+}
+
+function pluginsFromConfig(
+  marketplace: MarketplaceSource,
+  config: ClaudeMarketplaceConfig,
+  installedNames: ReadonlySet<string>,
+): DiscoveredPlugin[] {
+  return (config.plugins ?? []).map((plugin) => ({
+    marketplaceName: config.name || marketplace.name,
+    name: plugin.name,
+    description: plugin.description,
+    version: plugin.version,
+    author: plugin.author?.name,
+    homepage: plugin.homepage,
+    category: plugin.category,
+    installSource: resolveInstallSource(marketplace, plugin),
+    installed: installedNames.has(plugin.name),
+  }));
+}
+
+/**
+ * Persists the list of marketplace sources the user has added.
+ */
+export class MarketplaceRegistryStore {
+  constructor(private readonly filePath: string) {}
+
+  read(): MarketplaceSource[] {
+    try {
+      const content = fs.readFileSync(this.filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      return Array.isArray(parsed) ? (parsed as MarketplaceSource[]) : [];
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return [];
+      }
+      debugLogger.error('Error reading marketplace registry:', error);
+      return [];
+    }
+  }
+
+  private write(sources: MarketplaceSource[]): void {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    atomicWriteFileSync(this.filePath, JSON.stringify(sources, null, 2));
+  }
+
+  /**
+   * Adds (or replaces, when name/source matches) a marketplace source.
+   */
+  add(source: MarketplaceSource): void {
+    const sources = this.read().filter(
+      (existing) =>
+        existing.name !== source.name && existing.source !== source.source,
+    );
+    sources.push(source);
+    this.write(sources);
+  }
+
+  /** Removes a marketplace by name. Returns true if anything was removed. */
+  remove(name: string): boolean {
+    const sources = this.read();
+    const next = sources.filter((s) => s.name !== name);
+    if (next.length === sources.length) {
+      return false;
+    }
+    this.write(next);
+    return true;
+  }
+}
+
+/**
+ * Loads each configured marketplace and flattens their plugin lists into a
+ * single de-duplicated {@link DiscoveredPlugin} array, tagging which entries are
+ * already installed. Marketplaces that fail to load are skipped (and logged) so
+ * one bad source does not break discovery.
+ */
+export async function discoverPlugins(
+  marketplaces: readonly MarketplaceSource[],
+  installedNames: ReadonlySet<string>,
+): Promise<DiscoveredPlugin[]> {
+  const results = await Promise.all(
+    marketplaces.map(async (marketplace) => {
+      try {
+        const config = await loadMarketplaceConfigFromSource(
+          marketplace.source,
+        );
+        if (!config) {
+          debugLogger.debug(
+            `No marketplace config resolved for ${redactUrlCredentials(
+              marketplace.source,
+            )}`,
+          );
+          return [];
+        }
+        return pluginsFromConfig(marketplace, config, installedNames);
+      } catch (error) {
+        debugLogger.error(
+          `Failed to discover plugins from ${redactUrlCredentials(
+            marketplace.source,
+          )}:`,
+          error,
+        );
+        return [];
+      }
+    }),
+  );
+
+  // De-duplicate by `${marketplaceName}/${pluginName}` to keep distinct plugins
+  // that happen to share a name across different marketplaces.
+  const seen = new Set<string>();
+  const deduped: DiscoveredPlugin[] = [];
+  for (const plugin of results.flat()) {
+    const key = `${plugin.marketplaceName}/${plugin.name}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(plugin);
+  }
+  return deduped;
+}

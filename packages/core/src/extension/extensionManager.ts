@@ -48,6 +48,18 @@ import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
+  ExtensionPreferencesStore,
+  type ExtensionScope,
+} from './extensionPreferences.js';
+import {
+  MarketplaceRegistryStore,
+  discoverPlugins,
+  parseMarketplaceSourceType,
+  type MarketplaceSource,
+  type DiscoveredPlugin,
+} from './marketplaceRegistry.js';
+import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
   isGeminiExtensionConfig,
   convertGeminiExtensionPackage,
 } from './gemini-converter.js';
@@ -304,6 +316,8 @@ export class ExtensionManager {
   private readonly configFilePath: string;
   private readonly enabledExtensionNamesOverride: string[];
   private readonly workspaceDir: string;
+  private readonly preferencesStore: ExtensionPreferencesStore;
+  private readonly marketplaceRegistryStore: MarketplaceRegistryStore;
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
@@ -323,6 +337,12 @@ export class ExtensionManager {
     this.configFilePath = path.join(
       this.configDir,
       'extension-enablement.json',
+    );
+    this.preferencesStore = new ExtensionPreferencesStore(
+      path.join(this.configDir, 'extension-preferences.json'),
+    );
+    this.marketplaceRegistryStore = new MarketplaceRegistryStore(
+      path.join(this.configDir, 'marketplaces.json'),
     );
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
@@ -481,6 +501,89 @@ export class ExtensionManager {
       delete config[extensionName];
       this.writeEnablementConfig(config);
     }
+  }
+
+  // ==========================================================================
+  // Favorites & scope preferences (Installed view grouping)
+  // ==========================================================================
+
+  isFavorite(name: string): boolean {
+    return this.preferencesStore.isFavorite(name);
+  }
+
+  getFavorites(): string[] {
+    return this.preferencesStore.getFavorites();
+  }
+
+  /** Toggles favorite state for an extension/MCP server; returns new state. */
+  toggleFavorite(name: string): boolean {
+    return this.preferencesStore.toggleFavorite(name);
+  }
+
+  getExtensionScope(name: string): ExtensionScope | undefined {
+    return this.preferencesStore.getScope(name);
+  }
+
+  getExtensionScopes(): Record<string, ExtensionScope> {
+    return this.preferencesStore.getScopes();
+  }
+
+  setExtensionScope(name: string, scope: ExtensionScope): void {
+    this.preferencesStore.setScope(name, scope);
+  }
+
+  // ==========================================================================
+  // Marketplace registry & discovery
+  // ==========================================================================
+
+  getMarketplaces(): MarketplaceSource[] {
+    return this.marketplaceRegistryStore.read();
+  }
+
+  /**
+   * Adds a marketplace source. Loads the marketplace config to resolve a
+   * human-readable name (falling back to the raw source). Throws if no
+   * marketplace config can be resolved from the source.
+   */
+  async addMarketplace(source: string): Promise<MarketplaceSource> {
+    const trimmed = source.trim();
+    if (!trimmed) {
+      throw new Error('Marketplace source cannot be empty.');
+    }
+    const config = await loadMarketplaceConfigFromSource(trimmed);
+    if (!config) {
+      throw new Error(
+        `No marketplace found at "${redactUrlCredentials(trimmed)}". ` +
+          `Expected a .claude-plugin/marketplace.json.`,
+      );
+    }
+    const entry: MarketplaceSource = {
+      name: config.name || trimmed,
+      source: trimmed,
+      type: parseMarketplaceSourceType(trimmed),
+      addedAt: new Date().toISOString(),
+    };
+    this.marketplaceRegistryStore.add(entry);
+    return entry;
+  }
+
+  removeMarketplace(name: string): boolean {
+    return this.marketplaceRegistryStore.remove(name);
+  }
+
+  loadMarketplace(source: string): Promise<ClaudeMarketplaceConfig | null> {
+    return loadMarketplaceConfigFromSource(source);
+  }
+
+  /**
+   * Discovers all installable plugins across configured marketplaces, marking
+   * which are already installed.
+   */
+  async discoverPlugins(): Promise<DiscoveredPlugin[]> {
+    const installedNames = new Set(
+      this.getLoadedExtensions().map((ext) => ext.name),
+    );
+    return discoverPlugins(this.getMarketplaces(), installedNames);
   }
 
   private enableByPath(
@@ -1110,7 +1213,10 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
+          await this.enableExtension(
+            newExtensionConfig.name,
+            SettingScope.User,
+          );
         }
       } finally {
         if (tempDir) {
@@ -1212,6 +1318,7 @@ export class ExtensionManager {
     if (isUpdate) return;
 
     this.removeEnablementConfig(extension.name);
+    this.preferencesStore.clear(extension.name);
     await this.refreshTools();
 
     logExtensionUninstall(

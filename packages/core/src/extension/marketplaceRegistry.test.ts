@@ -1,0 +1,200 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  MarketplaceRegistryStore,
+  parseMarketplaceSourceType,
+  discoverPlugins,
+  type MarketplaceSource,
+} from './marketplaceRegistry.js';
+import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import type { ClaudeMarketplaceConfig } from './claude-converter.js';
+
+vi.mock('./marketplace.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./marketplace.js')>();
+  return {
+    ...actual,
+    loadMarketplaceConfigFromSource: vi.fn(),
+  };
+});
+
+describe('parseMarketplaceSourceType', () => {
+  it.each([
+    ['anthropics/skills', 'github'],
+    ['https://github.com/owner/repo', 'github'],
+    ['git@github.com:owner/repo.git', 'git'],
+    ['sso://team/repo', 'git'],
+    ['https://example.com/marketplace.json', 'http'],
+    ['./local/marketplace', 'local'],
+    ['/abs/path/marketplace', 'local'],
+  ] as const)('classifies %s as %s', (input, expected) => {
+    expect(parseMarketplaceSourceType(input)).toBe(expected);
+  });
+});
+
+describe('MarketplaceRegistryStore', () => {
+  let tmpDir: string;
+  let filePath: string;
+  let store: MarketplaceRegistryStore;
+
+  const make = (name: string, source: string): MarketplaceSource => ({
+    name,
+    source,
+    type: 'github',
+  });
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mkt-reg-'));
+    filePath = path.join(tmpDir, 'nested', 'marketplaces.json');
+    store = new MarketplaceRegistryStore(filePath);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns an empty list when no file exists', () => {
+    expect(store.read()).toEqual([]);
+  });
+
+  it('adds and persists sources', () => {
+    store.add(make('Skills', 'anthropics/skills'));
+    expect(store.read()).toHaveLength(1);
+
+    const reopened = new MarketplaceRegistryStore(filePath);
+    expect(reopened.read()[0].name).toBe('Skills');
+  });
+
+  it('replaces an entry with the same name or source instead of duplicating', () => {
+    store.add(make('Skills', 'anthropics/skills'));
+    store.add(make('Skills', 'anthropics/skills-v2'));
+    store.add(make('Other', 'anthropics/skills-v2'));
+    const all = store.read();
+    expect(all).toHaveLength(1);
+    expect(all[0].name).toBe('Other');
+    expect(all[0].source).toBe('anthropics/skills-v2');
+  });
+
+  it('removes by name', () => {
+    store.add(make('A', 'a/a'));
+    store.add(make('B', 'b/b'));
+    expect(store.remove('A')).toBe(true);
+    expect(store.read().map((s) => s.name)).toEqual(['B']);
+    expect(store.remove('missing')).toBe(false);
+  });
+});
+
+describe('discoverPlugins', () => {
+  beforeEach(() => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockReset();
+  });
+
+  const config = (
+    name: string,
+    plugins: ClaudeMarketplaceConfig['plugins'],
+  ): ClaudeMarketplaceConfig => ({
+    name,
+    owner: { name: 'o', email: 'e' },
+    plugins,
+  });
+
+  it('flattens plugins across marketplaces and marks installed ones', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(
+      async (source: string) => {
+        if (source === 'anthropics/skills') {
+          return config('Skills', [
+            {
+              name: 'pdf',
+              version: '1.0.0',
+              description: 'PDF tools',
+              homepage: 'https://example.com/pdf',
+              source: 'anthropics/skills',
+            },
+            {
+              name: 'docx',
+              version: '1.0.0',
+              source: 'anthropics/skills',
+            },
+          ]);
+        }
+        return config('Other', [
+          { name: 'xlsx', version: '2.0.0', source: 'me/other' },
+        ]);
+      },
+    );
+
+    const sources: MarketplaceSource[] = [
+      { name: 'Skills', source: 'anthropics/skills', type: 'github' },
+      { name: 'Other', source: 'me/other', type: 'github' },
+    ];
+
+    const discovered = await discoverPlugins(sources, new Set(['docx']));
+
+    expect(discovered).toHaveLength(3);
+    const pdf = discovered.find((p) => p.name === 'pdf')!;
+    expect(pdf.installed).toBe(false);
+    expect(pdf.homepage).toBe('https://example.com/pdf');
+    expect(pdf.installSource).toBe('anthropics/skills:pdf');
+    expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
+  });
+
+  it('derives install source from per-plugin source for http marketplaces', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'gh-plugin',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/repo' },
+        },
+        {
+          name: 'url-plugin',
+          version: '1.0.0',
+          source: { source: 'url', url: 'https://example.com/p.tgz' },
+        },
+      ]),
+    );
+
+    const discovered = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+
+    expect(discovered.find((p) => p.name === 'gh-plugin')!.installSource).toBe(
+      'someone/repo:gh-plugin',
+    );
+    expect(discovered.find((p) => p.name === 'url-plugin')!.installSource).toBe(
+      'https://example.com/p.tgz',
+    );
+  });
+
+  it('skips marketplaces that fail to load without throwing', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(
+      async (source: string) => {
+        if (source === 'good/repo') {
+          return config('Good', [
+            { name: 'ok', version: '1.0.0', source: 'good/repo' },
+          ]);
+        }
+        throw new Error('network down');
+      },
+    );
+
+    const discovered = await discoverPlugins(
+      [
+        { name: 'Bad', source: 'bad/repo', type: 'github' },
+        { name: 'Good', source: 'good/repo', type: 'github' },
+      ],
+      new Set(),
+    );
+
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0].name).toBe('ok');
+  });
+});

@@ -205,6 +205,84 @@ async function readLocalMarketplaceConfig(
   }
 }
 
+/**
+ * Loads a Claude-format marketplace config (`.claude-plugin/marketplace.json`)
+ * from any supported source string, without installing anything. Used by the
+ * marketplace registry / Discover view to enumerate installable plugins.
+ *
+ * Supported sources:
+ * - Local directory containing `.claude-plugin/marketplace.json`
+ * - Local path directly to a `marketplace.json` file
+ * - `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
+ * - Arbitrary `https://host/.../marketplace.json` returning the JSON document
+ *
+ * Returns `null` when no marketplace config can be resolved.
+ */
+export async function loadMarketplaceConfigFromSource(
+  source: string,
+): Promise<ClaudeMarketplaceConfig | null> {
+  const trimmed = source.trim();
+
+  // Priority 1: local path (directory with .claude-plugin/marketplace.json,
+  // or a direct marketplace.json file).
+  try {
+    const stats = await stat(trimmed);
+    if (stats.isDirectory()) {
+      return await readLocalMarketplaceConfig(trimmed);
+    }
+    if (stats.isFile()) {
+      try {
+        const content = await fs.promises.readFile(trimmed, 'utf-8');
+        return JSON.parse(content) as ClaudeMarketplaceConfig;
+      } catch {
+        return null;
+      }
+    }
+  } catch {
+    // Not a local path; continue.
+  }
+
+  // Priority 2: http(s) URL — try GitHub repo first, then a direct JSON doc.
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      const ghConfig = await fetchGitHubMarketplaceConfig(owner, repo);
+      if (ghConfig) {
+        return ghConfig;
+      }
+    } catch {
+      // Not a github.com repo URL — fall through to direct-JSON fetch.
+    }
+    const content = await fetchUrl(trimmed, { 'User-Agent': 'qwen-code' });
+    if (!content) {
+      return null;
+    }
+    try {
+      return JSON.parse(content) as ClaudeMarketplaceConfig;
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
+  if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+    try {
+      const { owner, repo } = parseGitHubRepoForReleases(trimmed);
+      return await fetchGitHubMarketplaceConfig(owner, repo);
+    } catch {
+      return null;
+    }
+  }
+
+  // Priority 4: owner/repo shorthand.
+  if (isOwnerRepoFormat(trimmed)) {
+    const [owner, repo] = trimmed.split('/');
+    return await fetchGitHubMarketplaceConfig(owner, repo);
+  }
+
+  return null;
+}
+
 export async function parseInstallSource(
   source: string,
 ): Promise<ExtensionInstallMetadata> {
