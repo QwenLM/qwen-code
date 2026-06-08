@@ -251,6 +251,7 @@ export async function runAcpAgent(
 
     // Fire SessionEnd hook for all active sessions (aligned with core path)
     await fireSessionEndOnce(SessionEndReason.Other);
+    agentInstance?.disposeSessions();
 
     try {
       process.stdin.destroy();
@@ -279,6 +280,7 @@ export async function runAcpAgent(
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
   await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+  agentInstance?.disposeSessions();
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -315,6 +317,13 @@ class QwenAgent implements Agent {
 
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  disposeSessions(): void {
+    for (const session of this.sessions.values()) {
+      session.dispose();
+    }
+    this.sessions.clear();
   }
 
   constructor(
@@ -1989,6 +1998,8 @@ class QwenAgent implements Agent {
     if (needsInitialize) {
       await geminiClient.initialize();
     }
+
+    this.sessions.get(sessionId)?.dispose();
 
     const session = new Session(
       sessionId,
