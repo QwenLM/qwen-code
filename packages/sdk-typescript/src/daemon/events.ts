@@ -110,6 +110,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'turn_error',
   'session_rewound',
   'session_branched',
+  // A5 (#4511): synthetic side-channel snapshot yielded after
+  // `replay_complete` when `?snapshot=1` is set on the SSE endpoint.
+  // Carries `currentModelId` and `currentApprovalMode` so reconnecting
+  // clients can seed their reducer without an extra round-trip.
+  'session_snapshot',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -686,6 +691,12 @@ export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
   DaemonMcpServerRemovedData
 >;
 
+export interface DaemonSessionSnapshotData {
+  sessionId: string;
+  currentModelId: string | null;
+  currentApprovalMode: string | null;
+  [key: string]: unknown;
+}
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -825,6 +836,10 @@ export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
   'session_rewound',
   DaemonSessionRewoundData
 >;
+export type DaemonSessionSnapshotEvent = DaemonEventEnvelope<
+  'session_snapshot',
+  DaemonSessionSnapshotData
+>;
 export type DaemonSessionBranchedEvent = DaemonEventEnvelope<
   'session_branched',
   DaemonSessionBranchedData
@@ -909,7 +924,8 @@ export type KnownDaemonEvent =
   | DaemonWorkspaceMutationEvent
   | DaemonAuthEvent
   | DaemonAssistEvent
-  | DaemonTurnEvent;
+  | DaemonTurnEvent
+  | DaemonSessionSnapshotEvent;
 
 export interface DaemonSessionViewState {
   lastEventId?: number;
@@ -1134,6 +1150,11 @@ const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
   'session_closed',
   'client_evicted',
   'stream_error',
+  // A5 (#4511): the snapshot is a full-state authoritative frame, not a
+  // delta, so it is safe to apply during resync — and it is exactly what
+  // lets a client that reconnected past the ring recover currentModelId /
+  // approvalMode without waiting for the next loadSession.
+  'session_snapshot',
 ]);
 
 export function createDaemonSessionViewState(
@@ -1344,7 +1365,10 @@ export function asKnownDaemonEvent(
         : undefined;
     case 'settings_changed':
       return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<'settings_changed', Record<string, unknown>>)
+        ? (event as DaemonEventEnvelope<
+            'settings_changed',
+            Record<string, unknown>
+          >)
         : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
@@ -1381,6 +1405,10 @@ export function asKnownDaemonEvent(
     case 'session_rewound':
       return isSessionRewoundData(event.data)
         ? (event as DaemonSessionRewoundEvent)
+        : undefined;
+    case 'session_snapshot':
+      return isSessionSnapshotData(event.data)
+        ? (event as DaemonSessionSnapshotEvent)
         : undefined;
     case 'session_branched':
       return isSessionBranchedData(event.data)
@@ -1759,6 +1787,17 @@ export function reduceDaemonSessionEvent(
         ...base,
         rewindCount: base.rewindCount + 1,
         lastRewind: mergeOriginator(event.data, event),
+      };
+    case 'session_snapshot':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        ...(event.data.currentModelId != null
+          ? { currentModelId: event.data.currentModelId }
+          : {}),
+        ...(event.data.currentApprovalMode != null
+          ? { approvalMode: event.data.currentApprovalMode }
+          : {}),
       };
     case 'session_branched':
       return {
@@ -2512,6 +2551,23 @@ function isSessionBranchedData(
     isNonEmptyString(value['sourceSessionId']) &&
     isNonEmptyString(value['newSessionId']) &&
     isNonEmptyString(value['displayName'])
+  );
+}
+
+function isSessionSnapshotData(
+  value: unknown,
+): value is DaemonSessionSnapshotData {
+  // `currentModelId` / `currentApprovalMode` are `string | null` on the
+  // wire. Validate the types here, not just `sessionId`: the reducer
+  // propagates these into `state.currentModelId` / `state.approvalMode`
+  // on a `!= null` check alone, so an unchecked non-string (e.g. `42`,
+  // `{}`) would land in state and crash downstream `.trim()`-style calls.
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) return false;
+  const model = value['currentModelId'];
+  const mode = value['currentApprovalMode'];
+  return (
+    (model === null || typeof model === 'string') &&
+    (mode === null || typeof mode === 'string')
   );
 }
 

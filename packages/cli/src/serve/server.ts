@@ -2636,10 +2636,12 @@ export function createServeApp(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
+      const snapshot = req.query['snapshot'] === '1';
       const iterable = bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
         ...(maxQueued !== undefined ? { maxQueued } : {}),
+        ...(snapshot ? { snapshot: true } : {}),
       });
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {

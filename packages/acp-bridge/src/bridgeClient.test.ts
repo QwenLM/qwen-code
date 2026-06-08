@@ -17,12 +17,12 @@
  *      proxy is fully bypassed — no `fs.writeFile` syscall);
  *   2. when `fileSystem` is omitted, the inline proxy runs and
  *      reads / writes real disk (sanity check that the fallback
- *      path the 7-arg constructor's positional slot opt-outs to
+ *      path the 8-arg constructor's positional slot opt-outs to
  *      still works).
  *
- * Regression guard: the constructor takes 7 positional args; the
- * 7th (`fileSystem`) is optional and at the tail. A subtle re-
- * ordering (or dropping the arg from `bridge.ts:773` factory's
+ * Regression guard: the constructor takes 8 positional args; the
+ * 6th (`fileSystem`) is optional. A subtle re-ordering (or
+ * dropping the arg from `bridge.ts`'s factory
  * `new BridgeClient(..., opts.fileSystem)` call) would silently
  * bypass the adapter in production. Test #1 + #2 catch that
  * because the mock fileSystem would never be called.
