@@ -3616,18 +3616,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             typeof response.current !== 'string' ||
             !KNOWN_APPROVAL_MODES.has(response.current)
           ) {
-            writeStderrLine(
-              `setSessionApprovalMode: agent returned unknown mode=${JSON.stringify(response.current)}, dropping`,
+            // Throw so the HTTP caller sees a 500 instead of a misleading
+            // 200 OK with the requested mode echoed back. Without this,
+            // the HTTP client thinks the mode changed while the cache and
+            // SSE bus still show the old value.
+            throw new Error(
+              `Agent returned unknown approval mode: ${JSON.stringify(response.current)}`,
             );
-            // Leave succeeded=false so reconcile is skipped — the cache
-            // was not updated, so a reconcile would compare stale cache
-            // against the same unknown value and re-drop it pointlessly.
-            return {
-              sessionId: entry.sessionId,
-              mode: mode as ApprovalMode,
-              previous: response.previous ?? 'default',
-              persisted: false,
-            };
           }
 
           let persisted = false;
