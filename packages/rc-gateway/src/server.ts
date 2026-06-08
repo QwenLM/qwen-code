@@ -11,6 +11,8 @@ import express, { type Express } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { TokenStore } from './tokenStore.js';
 import type { PairingService } from './pairing.js';
+import type { VapidStore } from './webpush/vapid.js';
+import type { PushStore } from './pushStore.js';
 import { bearerResolve, requireScope } from './auth.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
@@ -25,6 +27,7 @@ import {
   createRevokeTokenRoute,
 } from './routes/tokens.js';
 import { createAuditQueryRoute } from './routes/audit.js';
+import { createPushRouter } from './routes/push.js';
 
 export interface GatewayDeps {
   daemon: DaemonClient;
@@ -34,6 +37,10 @@ export interface GatewayDeps {
   auditPath?: string;
   /** Static web-client root; defaults to the package's public/ dir. */
   webRoot?: string;
+  /** Gateway-owned VAPID keypair. Push routes mount only when both this and pushStore are set. */
+  vapid?: VapidStore;
+  /** Token-bound push subscription store. Push routes mount only when both this and vapid are set. */
+  pushStore?: PushStore;
 }
 
 export function createGatewayApp(deps: GatewayDeps): Express {
@@ -92,6 +99,14 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     requireScope(OWNER, audit),
     createAuditQueryRoute(audit),
   );
+
+  if (deps.vapid && deps.pushStore) {
+    app.use(
+      '/rc/push',
+      requireScope(SESSION_READ, audit),
+      createPushRouter(deps.vapid, deps.pushStore, audit),
+    );
+  }
 
   return app;
 }

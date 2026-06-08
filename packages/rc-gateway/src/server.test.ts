@@ -14,6 +14,8 @@ import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from './testing/stubDaemon.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
+import { VapidStore } from './webpush/vapid.js';
+import { PushStore } from './pushStore.js';
 import { createGatewayApp } from './server.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
@@ -32,6 +34,8 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   pairing: PairingService;
   store: TokenStore;
   auditPath: string;
+  vapid: VapidStore;
+  pushStore: PushStore;
 }> {
   stub = await startStubDaemon(stubOpts);
   const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -39,13 +43,29 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   const auditPath = join(dir, 'audit.log');
   const store = await TokenStore.open(join(dir, 'tokens.json'));
   const pairing = new PairingService();
-  const app = createGatewayApp({ daemon, store, pairing, auditPath });
+  const vapid = await VapidStore.open(join(dir, 'vapid.json'));
+  const pushStore = await PushStore.open(join(dir, 'push.json'));
+  const app = createGatewayApp({
+    daemon,
+    store,
+    pairing,
+    auditPath,
+    vapid,
+    pushStore,
+  });
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   gateway = server;
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}`, pairing, store, auditPath };
+  return {
+    url: `http://127.0.0.1:${port}`,
+    pairing,
+    store,
+    auditPath,
+    vapid,
+    pushStore,
+  };
 }
 
 function readAudit(path: string): Array<Record<string, unknown>> {
@@ -295,6 +315,64 @@ describe('gateway app', () => {
         Authorization: `Bearer ${readToken}`,
       },
       body: JSON.stringify({ prompt: 'hi' }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('serves the push vapid + subscribe round-trip for a session:read token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const vapidRes = await fetch(`${url}/rc/push/vapid`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(vapidRes.status).toBe(200);
+    const vapidBody = (await vapidRes.json()) as {
+      applicationServerKey: string;
+    };
+    expect(vapidBody.applicationServerKey.length).toBeGreaterThan(0);
+
+    const sub = await fetch(`${url}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://push.example.com/1',
+          keys: { p256dh: 'p', auth: 'a' },
+        },
+      }),
+    });
+    expect(sub.status).toBe(201);
+
+    const list = await fetch(`${url}/rc/push/subscriptions`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as { subscriptions: unknown[] };
+    expect(listBody.subscriptions).toHaveLength(1);
+  });
+
+  it('403s the push vapid route for a token lacking session:read', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([OWNER]); // owner lacks session:read
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner-only' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/push/vapid`, {
+      headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
   });
