@@ -62,9 +62,13 @@ interface SettingsResponse {
   settings: SettingDescriptor[];
 }
 
+const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
+
 function getAllowedKeys(): Set<string> {
   return new Set(
-    getDialogSettingKeys().filter((k) => !TUI_ONLY_SETTINGS.has(k)),
+    getDialogSettingKeys().filter(
+      (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
+    ),
   );
 }
 

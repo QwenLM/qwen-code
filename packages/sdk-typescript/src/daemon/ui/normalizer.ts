@@ -989,7 +989,7 @@ function normalizeSettingsChanged(
       type: 'workspace.settings.changed',
       key,
       scope: scope ?? 'workspace',
-      value: (event.data as Record<string, unknown>)?.['value'],
+      value: isRecord(event.data) ? event.data['value'] : undefined,
     },
   ];
 }

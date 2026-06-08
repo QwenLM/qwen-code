@@ -12,11 +12,7 @@ interface SettingsDialogProps {
   onSubDialog: (settingKey: string) => void;
 }
 
-const SUB_DIALOG_KEYS = new Set([
-  'ui.theme',
-  'fastModel',
-  'tools.approvalMode',
-]);
+const SUB_DIALOG_KEYS = new Set(['ui.theme', 'fastModel']);
 
 type Scope = 'user' | 'workspace';
 
@@ -253,7 +249,10 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
       (r) => r.type === 'setting' && r.setting?.key === editMode.key,
     );
     const setting = row?.setting;
-    if (!setting) return;
+    if (!setting) {
+      setEditMode(null);
+      return;
+    }
     let parsed: unknown = editMode.draft;
     if (setting.type === 'number') {
       const trimmed = editMode.draft.trim();
