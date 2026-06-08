@@ -20,7 +20,7 @@ import {
   DaemonSessionProvider,
   useDaemonActions,
   useDaemonConnection,
-  useDaemonPendingPermissionRequest,
+  useDaemonPendingPermissions,
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptState,
@@ -28,7 +28,6 @@ import {
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
   type DaemonSessionActions,
-  type DaemonPendingPermissionRequest,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
 
@@ -611,7 +610,7 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
-  it('exposes pending permission requests in a UI-ready shape', async () => {
+  it('exposes pending permission blocks', async () => {
     const session = createMockSession({
       events: async function* permissionEvents() {
         yield {
@@ -647,10 +646,10 @@ describe('DaemonSessionProvider', () => {
       },
     });
     sdkMocks.sessions.push(session);
-    let request: DaemonPendingPermissionRequest | undefined;
+    let requests: ReturnType<typeof useDaemonPendingPermissions> = [];
 
     function Harness() {
-      request = useDaemonPendingPermissionRequest();
+      requests = useDaemonPendingPermissions();
       return null;
     }
 
@@ -659,19 +658,13 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
-    expect(request).toMatchObject({
-      id: 'permission-1',
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      requestId: 'permission-1',
       sessionId: 'session-1',
-      toolCallId: 'tool-1',
       title: 'Tool permission',
-      rawInput: {
-        questions: [
-          {
-            header: 'Name',
-            question: 'Student name?',
-            options: [{ label: 'Alice' }],
-          },
-        ],
+      toolCall: {
+        toolCallId: 'tool-1',
       },
     });
   });

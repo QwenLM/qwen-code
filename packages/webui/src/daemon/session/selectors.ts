@@ -10,9 +10,8 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonPendingPermissionRequest,
-  DaemonPermissionOptionKind,
   DaemonPromptStatus,
+  DaemonSubAgentRun,
   DaemonTodoItem,
   DaemonTodoList,
 } from './types.js';
@@ -30,36 +29,6 @@ export function selectDaemonPendingPermissions(
     (block): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
       block.kind === 'permission' && block.resolved === undefined,
   );
-}
-
-export function selectDaemonPendingPermissionRequest(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonPendingPermissionRequest | undefined {
-  const [permission] = selectDaemonPendingPermissions(blocks);
-  if (!permission) return undefined;
-  const toolCall = getRecord(permission.toolCall);
-  const toolCallId =
-    getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
-
-  return {
-    id: permission.requestId,
-    ...(permission.sessionId ? { sessionId: permission.sessionId } : {}),
-    ...(toolCallId ? { toolCallId } : {}),
-    title: permission.title,
-    options: permission.options.map((option) => ({
-      id: option.optionId,
-      label: option.label,
-      ...(option.description ? { description: option.description } : {}),
-      ...(getPermissionOptionKind(option.raw)
-        ? { kind: getPermissionOptionKind(option.raw) }
-        : {}),
-      raw: option.raw,
-    })),
-    ...(getPermissionRawInput(permission.toolCall)
-      ? { rawInput: getPermissionRawInput(permission.toolCall) }
-      : {}),
-    raw: permission,
-  };
 }
 
 export function selectDaemonTodoLists(
@@ -91,11 +60,8 @@ export function selectDaemonLatestTodoList(
 export function selectDaemonActiveTodoList(
   blocks: readonly DaemonTranscriptBlock[],
 ): DaemonTodoList | undefined {
-  const lists = selectDaemonTodoLists(blocks);
-  for (let i = lists.length - 1; i >= 0; i--) {
-    if (hasDaemonActiveTodos(lists[i].items)) return lists[i];
-  }
-  return undefined;
+  const latest = selectDaemonLatestTodoList(blocks);
+  return latest && hasDaemonActiveTodos(latest.items) ? latest : undefined;
 }
 
 export function extractDaemonTodosFromToolBlock(
@@ -178,6 +144,72 @@ export function selectDaemonSubAgentToolBlocks(
   );
 }
 
+export function selectDaemonSubAgentRuns(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonSubAgentRun[] {
+  const runsByCallId = new Map<string, DaemonSubAgentRun>();
+  const childToolsByParentId = new Map<
+    string,
+    Map<string, DaemonToolTranscriptBlock>
+  >();
+  const childTextByParentId = new Map<string, string>();
+
+  for (const block of blocks) {
+    if (
+      (block.kind === 'assistant' || block.kind === 'thought') &&
+      block.parentToolCallId
+    ) {
+      childTextByParentId.set(
+        block.parentToolCallId,
+        `${childTextByParentId.get(block.parentToolCallId) ?? ''}${block.text}`,
+      );
+      continue;
+    }
+
+    if (block.kind !== 'tool') continue;
+
+    if (block.parentToolCallId) {
+      const childTools =
+        childToolsByParentId.get(block.parentToolCallId) ?? new Map();
+      childTools.set(block.toolCallId, block);
+      childToolsByParentId.set(block.parentToolCallId, childTools);
+      continue;
+    }
+
+    if (!isDaemonSubAgentToolBlock(block)) continue;
+
+    const existing = runsByCallId.get(block.toolCallId);
+    const subagentType = getSubAgentType(block);
+    runsByCallId.set(block.toolCallId, {
+      blockId: block.id,
+      toolCallId: block.toolCallId,
+      toolName: block.toolName || 'unknown',
+      title: block.title,
+      status: block.status,
+      ...(subagentType ? { subagentType } : {}),
+      createdAt: existing?.createdAt ?? block.createdAt,
+      updatedAt: block.updatedAt,
+      isActive: isDaemonActiveToolStatus(block.status),
+      childText: existing?.childText ?? '',
+      childToolBlocks: existing?.childToolBlocks ?? [],
+      ...(block.rawInput !== undefined ? { rawInput: block.rawInput } : {}),
+      ...(block.rawOutput !== undefined ? { rawOutput: block.rawOutput } : {}),
+      raw: block,
+    });
+  }
+
+  return Array.from(runsByCallId.values()).map((run) => {
+    const childTools = childToolsByParentId.get(run.toolCallId);
+    return {
+      ...run,
+      childText: childTextByParentId.get(run.toolCallId) ?? run.childText,
+      childToolBlocks: childTools
+        ? Array.from(childTools.values())
+        : run.childToolBlocks,
+    };
+  });
+}
+
 export function selectDaemonTranscriptStreamingState(
   blocks: readonly DaemonTranscriptBlock[],
 ): Exclude<DaemonStreamingState, 'waiting'> {
@@ -224,29 +256,23 @@ function isRunningToolBlock(block: DaemonToolTranscriptBlock): boolean {
   return block.status === 'running' || block.status === 'in_progress';
 }
 
-function getPermissionRawInput(
-  toolCall: unknown,
-): Record<string, unknown> | undefined {
-  const record = getRecord(toolCall);
-  if (!record) return undefined;
-  const nested =
-    getRecord(record['rawInput']) ??
-    getRecord(record['input']) ??
-    getRecord(record['args']);
-  return nested ?? record;
+function isDaemonActiveToolStatus(status: string): boolean {
+  return (
+    status === 'pending' ||
+    status === 'confirming' ||
+    status === 'background' ||
+    status === 'running' ||
+    status === 'in_progress'
+  );
 }
 
-function getPermissionOptionKind(
-  raw: unknown,
-): DaemonPermissionOptionKind | undefined {
-  const record = getRecord(raw);
-  const kind = record?.['kind'];
-  return kind === 'allow_once' ||
-    kind === 'allow_always' ||
-    kind === 'reject_once' ||
-    kind === 'reject_always'
-    ? kind
-    : undefined;
+function getSubAgentType(block: DaemonToolTranscriptBlock): string | undefined {
+  if (block.subagentType) return block.subagentType;
+  const rawInput = getRecord(block.rawInput);
+  const inputType = getString(rawInput, 'subagent_type');
+  if (inputType) return inputType;
+  const rawOutput = getRecord(block.rawOutput);
+  return getString(rawOutput, 'subagentName');
 }
 
 function getTodoArray(

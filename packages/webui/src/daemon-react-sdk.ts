@@ -54,9 +54,6 @@ export { useDaemonStreamingState as useStreamingState } from './daemon/index.js'
 
 // ── Permission Hooks ──────────────────────────────────────────────
 
-/** The single pending permission request awaiting user response (or null). */
-export { useDaemonPendingPermissionRequest as usePendingPermissionRequest } from './daemon/index.js';
-
 /** All unresolved permission requests in the current transcript. */
 export { useDaemonPendingPermissions as usePendingPermissions } from './daemon/index.js';
 
@@ -64,12 +61,6 @@ export { useDaemonPendingPermissions as usePendingPermissions } from './daemon/i
 
 /** The currently active (most relevant) todo list. */
 export { useDaemonActiveTodoList as useActiveTodoList } from './daemon/index.js';
-
-/** The most recently updated todo list. */
-export { useDaemonLatestTodoList as useLatestTodoList } from './daemon/index.js';
-
-/** All todo lists extracted from the transcript. */
-export { useDaemonTodoLists as useTodoLists } from './daemon/index.js';
 
 // ── Resource Hooks ────────────────────────────────────────────────
 
@@ -108,6 +99,9 @@ export { useDaemonSkills as useSkills } from './daemon/index.js';
 
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
+
+/** Sub-agent runs extracted from the current session transcript. */
+export { useDaemonSubAgentRuns as useSubAgentRuns } from './daemon/index.js';
 
 // ── Workspace Hooks ───────────────────────────────────────────────
 
@@ -159,6 +153,8 @@ export type {
   DaemonSessionContextValue,
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
+  /** Top-level sub-agent run with parent block, child tool blocks, and child text. */
+  DaemonSubAgentRun,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
@@ -183,17 +179,6 @@ export type {
   DaemonSessionStatsToolByName,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
-} from './daemon/index.js';
-
-// ── Types: Permissions ───────────────────────────────────────────
-
-export type {
-  /** Pending permission request with title, options, and raw block. */
-  DaemonPendingPermissionRequest,
-  /** Option kind: `'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'`. */
-  DaemonPermissionOptionKind,
-  /** Single selectable option within a permission request. */
-  DaemonPermissionRequestOption,
 } from './daemon/index.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────

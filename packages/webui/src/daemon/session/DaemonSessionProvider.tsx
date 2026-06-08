@@ -41,11 +41,9 @@ import {
 } from './mappers.js';
 import {
   selectDaemonActiveTodoList,
-  selectDaemonLatestTodoList,
   selectDaemonPendingPermissions,
-  selectDaemonPendingPermissionRequest,
   selectDaemonStreamingState,
-  selectDaemonTodoLists,
+  selectDaemonSubAgentRuns,
 } from './selectors.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -65,6 +63,7 @@ import type {
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionProviderProps,
+  DaemonSubAgentRun,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
 } from './types.js';
@@ -74,14 +73,12 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
-  DaemonPendingPermissionRequest,
-  DaemonPermissionOptionKind,
-  DaemonPermissionRequestOption,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionProviderProps,
+  DaemonSubAgentRun,
   DaemonTodoItem,
   DaemonTodoList,
   DaemonTodoPriority,
@@ -977,24 +974,14 @@ export function useDaemonPendingPermissions() {
   return useMemo(() => selectDaemonPendingPermissions(blocks), [blocks]);
 }
 
-export function useDaemonPendingPermissionRequest() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonPendingPermissionRequest(blocks), [blocks]);
-}
-
-export function useDaemonTodoLists() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonTodoLists(blocks), [blocks]);
-}
-
-export function useDaemonLatestTodoList() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonLatestTodoList(blocks), [blocks]);
-}
-
 export function useDaemonActiveTodoList() {
   const blocks = useDaemonTranscriptBlocks();
   return useMemo(() => selectDaemonActiveTodoList(blocks), [blocks]);
+}
+
+export function useDaemonSubAgentRuns(): DaemonSubAgentRun[] {
+  const blocks = useDaemonTranscriptBlocks();
+  return useMemo(() => selectDaemonSubAgentRuns(blocks), [blocks]);
 }
 
 export function useDaemonStreamingState() {

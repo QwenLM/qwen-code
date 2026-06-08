@@ -20,6 +20,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonShellCommandResult,
+  DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonWorkspaceProvidersStatus,
@@ -123,30 +124,6 @@ export interface DaemonPromptImage {
   media_type?: string;
 }
 
-export type DaemonPermissionOptionKind =
-  | 'allow_once'
-  | 'allow_always'
-  | 'reject_once'
-  | 'reject_always';
-
-export interface DaemonPermissionRequestOption {
-  id: string;
-  label: string;
-  description?: string;
-  kind?: DaemonPermissionOptionKind;
-  raw: unknown;
-}
-
-export interface DaemonPendingPermissionRequest {
-  id: string;
-  sessionId?: string;
-  toolCallId?: string;
-  title: string;
-  options: DaemonPermissionRequestOption[];
-  rawInput?: Record<string, unknown>;
-  raw: Extract<DaemonTranscriptBlock, { kind: 'permission' }>;
-}
-
 export type DaemonTodoStatus = 'pending' | 'in_progress' | 'completed';
 export type DaemonTodoPriority = 'low' | 'medium' | 'high';
 
@@ -164,6 +141,23 @@ export interface DaemonTodoList {
   status: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
+}
+
+export interface DaemonSubAgentRun {
+  blockId: string;
+  toolCallId: string;
+  toolName: string;
+  title: string;
+  status: string;
+  subagentType?: string;
+  createdAt: number;
+  updatedAt: number;
+  isActive: boolean;
+  childText: string;
+  childToolBlocks: DaemonToolTranscriptBlock[];
+  rawInput?: unknown;
+  rawOutput?: unknown;
+  raw: DaemonToolTranscriptBlock;
 }
 
 export interface DaemonSessionActions {
