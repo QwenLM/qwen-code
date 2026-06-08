@@ -143,9 +143,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     needs: release_metadata
-    defaults:
-      run:
-        shell: bash
     env:
       RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
       RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
@@ -184,12 +181,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Bump desktop version
-        run: bun run bump-desktop-version "$RELEASE_VERSION"
+        run: bun run bump-desktop-version "${{ needs.release_metadata.outputs.version }}"
 
       - name: Confirm release version
-        run: bun run check-release-version --version "$RELEASE_VERSION"
+        run: bun run check-release-version --version "${{ needs.release_metadata.outputs.version }}"
 
       - name: Configure optional signing secrets
+        shell: bash
         env:
           APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
