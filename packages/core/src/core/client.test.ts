@@ -1108,6 +1108,8 @@ describe('Gemini Client (client.ts)', () => {
 
     async function runUserTurn(
       type: SendMessageType = SendMessageType.UserQuery,
+      parts: Part[] = [{ text: 'Hi' }],
+      history: Content[] = [],
     ) {
       vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
         originalTokenCount: 0,
@@ -1121,12 +1123,12 @@ describe('Gemini Client (client.ts)', () => {
       );
       client['chat'] = {
         addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-        getHistoryLength: vi.fn().mockReturnValue(0),
+        getHistory: vi.fn().mockReturnValue(history),
+        getHistoryLength: vi.fn().mockReturnValue(history.length),
         stripOrphanedUserEntriesFromHistory: vi.fn(),
       } as unknown as GeminiChat;
       const stream = client.sendMessageStream(
-        [{ text: 'Hi' }],
+        parts,
         new AbortController().signal,
         'prompt-id-deferred',
         { type },
@@ -1182,6 +1184,52 @@ describe('Gemini Client (client.ts)', () => {
       const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
       const parts = lastCall[1];
       expect(parts).toContain('<system-reminder>DEFERRED</system-reminder>');
+    });
+
+    it('does not prepend the reminder before functionResponse parts on Retry', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn(
+        SendMessageType.Retry,
+        [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+        [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        ],
+      );
+
+      expect(getDeferredToolsSystemReminder).not.toHaveBeenCalled();
+      const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
+      const parts = lastCall[1];
+      expect(parts[0]).toMatchObject({
+        functionResponse: { name: 'read_file' },
+      });
     });
 
     it('omits already-revealed deferred tools from the reminder', async () => {
