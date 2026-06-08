@@ -49,22 +49,27 @@ jobs:
         id: 'resolve'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          INPUT_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
+          INPUT_SKIP_PRODUCT: '${{ github.event.inputs.skip_product_decision }}'
+          PR_TARGET_NUMBER: '${{ github.event.pull_request.number }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER="${{ github.event.inputs.pr_number }}"
-            if [ "${{ github.event.inputs.skip_product_decision }}" = "true" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$INPUT_PR_NUMBER"
+            if [ "$INPUT_SKIP_PRODUCT" = "true" ]; then
               TRIGGER_TYPE="review_only"
             else
               TRIGGER_TYPE="full"
             fi
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            PR_NUMBER="$PR_TARGET_NUMBER"
             TRIGGER_TYPE="full"
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            PR_NUMBER="${{ github.event.issue.number }}"
-            COMMENT_BODY="${{ github.event.comment.body }}"
+          elif [ "$EVENT_NAME" = "issue_comment" ]; then
+            PR_NUMBER="$ISSUE_NUMBER"
             if [[ "$COMMENT_BODY" == @qwen-code\ /review* ]]; then
               TRIGGER_TYPE="review_only"
             else
@@ -169,7 +174,7 @@ jobs:
         uses: 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' # v4.2.3
         with:
           path: 'node_modules'
-          key: 'review-deps-${{ hashFiles("package-lock.json") }}'
+          key: "review-deps-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'review-deps-'
 
       - name: 'Run review'
