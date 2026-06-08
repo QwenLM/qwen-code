@@ -359,11 +359,16 @@ function mergeToolCallEvent(
   }
   // Always use 'tool_call' as the compacted type
   merged['sessionUpdate'] = 'tool_call';
+  const mergedMeta =
+    existing._meta || incoming._meta
+      ? { ...(existing._meta ?? {}), ...(incoming._meta ?? {}) }
+      : undefined;
 
   return {
     id: incoming.id ?? existing.id,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
+    ...(mergedMeta ? { _meta: mergedMeta } : {}),
     data: {
       ...existingData,
       ...incomingData,

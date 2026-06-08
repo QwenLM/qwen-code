@@ -450,31 +450,16 @@ export function DaemonSessionProvider({
               store.dispatch(allUiEvents);
               bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
             }
-            let activePromptSettled = false;
             for (const replayEvent of replayEvents) {
-              activePromptSettled =
-                settleActivePromptFromTurnEvent(
-                  activePromptsRef.current,
-                  activeSession.sessionId,
-                  replayEvent,
-                  store,
-                  setPromptStatus,
-                  passiveAssistantDoneTimerRef,
-                  { requireBoundPromptId: true },
-                ) || activePromptSettled;
-            }
-            const lastReplayEvent = replayEvents[replayEvents.length - 1];
-            if (
-              !activePromptSettled &&
-              lastReplayEvent &&
-              (lastReplayEvent.type === 'turn_complete' ||
-                lastReplayEvent.type === 'turn_error') &&
-              !activePromptsRef.current.has(activeSession.sessionId)
-            ) {
-              store.dispatch({
-                type: 'assistant.done',
-                reason: 'replay_complete',
-              });
+              settleActivePromptFromTurnEvent(
+                activePromptsRef.current,
+                activeSession.sessionId,
+                replayEvent,
+                store,
+                setPromptStatus,
+                passiveAssistantDoneTimerRef,
+                { requireBoundPromptId: true },
+              );
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
