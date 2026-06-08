@@ -282,11 +282,11 @@ can drop a CC agent file into `.qwen/agents/` and have the supported fields
 parse identically. Optional fields with invalid values are silently dropped
 at parse time rather than rejected — the same lenient posture CC uses.
 
-| Field            | Type             | Notes                                                                                                                                                                                                                                                                                                |
-| ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                                               |
-| `maxTurns`       | positive integer | Caps the agent's turn budget. Overrides the legacy nested `runConfig.max_turns` when both are present; the legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                                                                |
-| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is accepted on read and normalised to undefined for round-trip parity with the existing CLI helpers. Other values are silently dropped on parse. |
+| Field            | Type             | Notes                                                                                                                                                                                                                                         |
+| ---------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                        |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins.                                                                                                                       |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is also preserved for backward compatibility. Other values are silently dropped on parse. |
 
 Example:
 
