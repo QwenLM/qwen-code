@@ -1397,6 +1397,18 @@ function textBufferReducerLogic(
             } else if (newVisualRow > 0) {
               newVisualRow--;
               newVisualCol = cpLen(visualLines[newVisualRow] ?? '');
+              const previousMapping = visualToLogicalMap[newVisualRow];
+              if (previousMapping) {
+                const [previousLogRow, previousLogStartCol] = previousMapping;
+                const previousCursorCol = previousLogStartCol + newVisualCol;
+                if (
+                  previousLogRow === cursorRow &&
+                  previousCursorCol === cursorCol &&
+                  newVisualCol > 0
+                ) {
+                  newVisualCol--;
+                }
+              }
             }
             break;
           case 'right':
