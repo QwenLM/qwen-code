@@ -1,0 +1,332 @@
+name: 'Qwen PR Triage Pipeline'
+
+on:
+  pull_request_target:
+    types: ['opened', 'ready_for_review']
+  issue_comment:
+    types: ['created']
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to triage'
+        required: true
+        type: 'number'
+      skip_product_decision:
+        description: 'Skip product-decision (run review only)'
+        required: false
+        default: false
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  # ─── Resolve PR number and determine trigger type ───────────────────
+  resolve:
+    runs-on: 'ubuntu-latest'
+    outputs:
+      pr_number: '${{ steps.resolve.outputs.pr_number }}'
+      trigger_type: '${{ steps.resolve.outputs.trigger_type }}'
+      is_fork: '${{ steps.resolve.outputs.is_fork }}'
+      should_run: '${{ steps.resolve.outputs.should_run }}'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' && (
+        (github.event_name == 'pull_request_target' &&
+         github.event.pull_request.draft == false) ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
+          startsWith(github.event.comment.body, '@qwen-code /review')) &&
+         (github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'))
+      )
+    steps:
+      - name: 'Resolve context'
+        id: 'resolve'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            if [ "${{ github.event.inputs.skip_product_decision }}" = "true" ]; then
+              TRIGGER_TYPE="review_only"
+            else
+              TRIGGER_TYPE="full"
+            fi
+          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            TRIGGER_TYPE="full"
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
+            COMMENT_BODY="${{ github.event.comment.body }}"
+            if [[ "$COMMENT_BODY" == @qwen-code\ /review* ]]; then
+              TRIGGER_TYPE="review_only"
+            else
+              TRIGGER_TYPE="full"
+            fi
+          fi
+
+          # Check if fork
+          IS_FORK=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "trigger_type=$TRIGGER_TYPE"
+            echo "is_fork=$IS_FORK"
+            echo "should_run=true"
+          } >> "$GITHUB_OUTPUT"
+
+  # ─── Stage 1: Product Decision ─────────────────────────────────────
+  product-decision:
+    needs: ['resolve']
+    if: >-
+      needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.trigger_type == 'full'
+    timeout-minutes: 15
+    concurrency:
+      group: 'qwen-pr-triage-product-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: true
+    runs-on: 'ubuntu-latest'
+    outputs:
+      verdict: '${{ steps.run.outputs.verdict }}'
+    steps:
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Run product-decision'
+        id: 'run'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command(gh pr view)",
+                "run_shell_command(gh pr diff)",
+                "run_shell_command(gh api)",
+                "run_shell_command(gh label list)",
+                "run_shell_command(curl)",
+                "read_file",
+                "grep_search",
+                "glob"
+              ],
+              "sandbox": false,
+              "maxSessionTurns": 25
+            }
+          prompt: '/product-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
+
+      - name: 'Capture verdict'
+        if: always()
+        id: 'capture'
+        run: |
+          # Default to pass if the action didn't explicitly fail
+          echo "verdict=${VERDICT:-pass}" >> "$GITHUB_OUTPUT"
+
+  # ─── Stage 2a: Code Review (parallel) ──────────────────────────────
+  # Security: review reads PR diff via API (no code execution). Fork PRs
+  # are safe here because settings_json restricts commands to gh/curl only.
+  review:
+    needs: ['resolve', 'product-decision']
+    if: >-
+      always() && (
+        (needs.product-decision.result == 'success' &&
+         needs.product-decision.outputs.verdict == 'pass') ||
+        needs.resolve.outputs.trigger_type == 'review_only'
+      )
+    timeout-minutes: 45
+    concurrency:
+      group: 'qwen-pr-triage-review-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: true
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+      issues: 'write'
+    outputs:
+      verdict: '${{ steps.run.outputs.verdict }}'
+    steps:
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+
+      # Cache node_modules to avoid repeated npm ci (biggest time sink)
+      - name: 'Cache node_modules'
+        uses: 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' # v4.2.3
+        with:
+          path: 'node_modules'
+          key: 'review-deps-${{ hashFiles("package-lock.json") }}'
+          restore-keys: 'review-deps-'
+
+      - name: 'Run review'
+        id: 'run'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          # CI optimizations: skip deterministic analysis (ci.yml already runs it),
+          # limit reverse audit rounds, reduce timeout pressure
+          QWEN_REVIEW_SKIP_DETERMINISTIC: '1'
+          QWEN_REVIEW_MAX_REVERSE_ROUNDS: '1'
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+
+          timeout --kill-after=10s 35m qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "/review ${REVIEW_URL} --comment" \
+            --output-format stream-json \
+            || true
+
+          # Review skill posts comments directly; verdict defaults to pass
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+
+  # ─── Stage 2b: Tmux Testing (parallel, internal PRs only) ──────────
+  tmux-testing:
+    needs: ['resolve', 'product-decision']
+    if: >-
+      always() &&
+      needs.product-decision.result == 'success' &&
+      needs.product-decision.outputs.verdict == 'pass' &&
+      needs.resolve.outputs.is_fork == 'false'
+    timeout-minutes: 20
+    concurrency:
+      group: 'qwen-pr-triage-tmux-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: true
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    # Minimal permissions — NO write access to repo/PRs
+    permissions:
+      contents: 'read'
+    outputs:
+      verdict: '${{ steps.run.outputs.verdict }}'
+    steps:
+      - name: 'Checkout PR code'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
+          fetch-depth: 1
+
+      - name: 'Run tmux testing'
+        id: 'run'
+        env:
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+        run: |
+          set -euo pipefail
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+
+          # Run tmux testing — output goes to a file for artifact upload
+          mkdir -p /tmp/tmux-results
+          timeout --kill-after=10s 15m qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee /tmp/tmux-results/output.jsonl \
+            || true
+
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+
+      - name: 'Upload tmux results'
+        if: always()
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
+          path: '/tmp/tmux-results/'
+          retention-days: 7
+
+  # ─── Stage 3: Approval Decision ────────────────────────────────────
+  approval-decision:
+    needs: ['resolve', 'product-decision', 'review', 'tmux-testing']
+    if: >-
+      always() &&
+      needs.resolve.outputs.should_run == 'true' &&
+      (needs.product-decision.result == 'success' ||
+       needs.resolve.outputs.trigger_type == 'review_only') &&
+      (needs.review.result == 'success' || needs.review.result == 'skipped') &&
+      (needs.tmux-testing.result == 'success' || needs.tmux-testing.result == 'skipped')
+    timeout-minutes: 10
+    concurrency:
+      group: 'qwen-pr-triage-approval-${{ needs.resolve.outputs.pr_number }}'
+      cancel-in-progress: true
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+
+      - name: 'Download tmux artifact'
+        if: needs.tmux-testing.result == 'success'
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # v4.3.0
+        with:
+          name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
+          path: '/tmp/tmux-results/'
+        continue-on-error: true
+
+      - name: 'Run approval-decision'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          REPOSITORY: '${{ github.repository }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          PRODUCT_VERDICT: '${{ needs.product-decision.outputs.verdict }}'
+          REVIEW_VERDICT: '${{ needs.review.outputs.verdict }}'
+          TMUX_VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command(gh pr view)",
+                "run_shell_command(gh pr review)",
+                "run_shell_command(gh api)",
+                "read_file"
+              ],
+              "sandbox": false,
+              "maxSessionTurns": 15
+            }
+          prompt: '/approval-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
