@@ -18,6 +18,7 @@ import {
   PairingService,
   VapidStore,
   PushStore,
+  SnoozeStore,
   SESSION_READ,
   APPROVE,
   WRITE,
@@ -114,12 +115,14 @@ try {
   const pairing = new PairingService();
   const vapid = await VapidStore.open(join(workspace, 'vapid.json'));
   const pushStore = await PushStore.open(join(workspace, 'push.json'));
+  const snooze = await SnoozeStore.open(join(workspace, 'snooze.state'));
   const { app, notifier } = createGatewayApp({
     daemon: dc,
     store,
     pairing,
     vapid,
     pushStore,
+    snooze,
   });
   gatewayServer = await new Promise((res) => {
     const s = app.listen(GATEWAY_PORT, '127.0.0.1', () => res(s));
@@ -380,6 +383,60 @@ try {
     ntr.status === 403
       ? ok('push test route as non-owner -> 403')
       : bad(`push test non-owner ${ntr.status}`);
+  }
+
+  // Routing snooze (cycle 15): owner-gated POST/GET/DELETE /rc/routing/snooze.
+  // Pure gateway state (no daemon involvement).
+  {
+    const { code: sc } = pairing.mint([SESSION_READ, OWNER]);
+    const srr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: sc, label: 'snooze-owner' }),
+    });
+    const snoozeOwnerToken = (await srr.json()).token;
+
+    const pr = await fetch(`${gw}/rc/routing/snooze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${snoozeOwnerToken}`,
+      },
+      body: JSON.stringify({ durationSec: 1 }),
+    });
+    const pb = await pr.json();
+    pr.status === 200 && pb.scope === 'all' && typeof pb.until === 'number'
+      ? ok('routing snooze POST -> 200 {until,scope:all}')
+      : bad(`routing snooze POST ${pr.status} ${JSON.stringify(pb)}`);
+
+    const gr = await fetch(`${gw}/rc/routing/snooze`, {
+      headers: { Authorization: `Bearer ${snoozeOwnerToken}` },
+    });
+    const gb = await gr.json();
+    gr.status === 200 && gb.active === true
+      ? ok('routing snooze GET -> active:true')
+      : bad(`routing snooze GET ${gr.status} ${JSON.stringify(gb)}`);
+
+    const drr = await fetch(`${gw}/rc/routing/snooze`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${snoozeOwnerToken}` },
+    });
+    drr.status === 204
+      ? ok('routing snooze DELETE -> 204')
+      : bad(`routing snooze DELETE ${drr.status}`);
+
+    // A non-owner (session:read-only) token is rejected at the owner gate.
+    const nsr = await fetch(`${gw}/rc/routing/snooze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({ durationSec: 1 }),
+    });
+    nsr.status === 403
+      ? ok('routing snooze POST as non-owner -> 403')
+      : bad(`routing snooze non-owner ${nsr.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
