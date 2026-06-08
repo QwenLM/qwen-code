@@ -687,7 +687,13 @@ export class ExtensionManager {
 
     for (const subdir of fs.readdirSync(extensionsDir)) {
       const extensionDir = path.join(extensionsDir, subdir);
-      if (!fs.statSync(extensionDir).isDirectory()) {
+      // Skip entries we can't stat (e.g. dangling symlinks) instead of letting
+      // the scan throw — callers may run this after a destructive operation.
+      try {
+        if (!fs.statSync(extensionDir).isDirectory()) {
+          continue;
+        }
+      } catch {
         continue;
       }
       const extension = await this.loadExtension({
@@ -1409,11 +1415,17 @@ export class ExtensionManager {
     );
 
     if (this.extensionCache) {
-      // Only drop the cache entry if it is the copy we just removed, not a
+      // Only touch the cache entry if it is the copy we just removed, not a
       // same-named copy at another scope that was shadowing it.
       const cached = this.extensionCache.get(extension.name);
       if (!cached || cached.scope === targetScope) {
-        this.extensionCache.delete(extension.name);
+        if (survivingAtOtherScope) {
+          // The other-scope copy is no longer shadowed; promote it so it
+          // becomes the active extension without waiting for a refresh.
+          this.extensionCache.set(extension.name, survivingAtOtherScope);
+        } else {
+          this.extensionCache.delete(extension.name);
+        }
       }
     }
 

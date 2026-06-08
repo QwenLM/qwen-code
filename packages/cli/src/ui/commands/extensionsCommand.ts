@@ -177,9 +177,14 @@ async function installAction(context: CommandContext, args: string) {
     context.ui.addItem(
       {
         type: MessageType.INFO,
-        text: t('Extension "{{name}}" installed successfully.', {
-          name: extension.name,
-        }),
+        text:
+          scope === ExtensionScope.Project
+            ? t('Extension "{{name}}" installed successfully for this project.', {
+                name: extension.name,
+              })
+            : t('Extension "{{name}}" installed successfully.', {
+                name: extension.name,
+              }),
       },
       Date.now(),
     );

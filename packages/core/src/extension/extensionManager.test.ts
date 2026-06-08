@@ -585,6 +585,73 @@ describe('extension tests', () => {
         untrusted.getLoadedExtensions().find((e) => e.name === 'named-proj'),
       ).toBeUndefined();
     });
+
+    it('promotes the surviving project copy into the cache when the shadowing user copy is uninstalled', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'shared',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'shared',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+      // User copy shadows the project copy.
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'shared')?.scope,
+      ).toBe(ExtensionScope.User);
+
+      await manager.uninstallExtension(
+        'shared',
+        false,
+        undefined,
+        ExtensionScope.User,
+      );
+
+      // The project copy is now un-shadowed and active without a refresh.
+      expect(fs.existsSync(path.join(userExtensionsDir, 'shared'))).toBe(false);
+      const active = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'shared');
+      expect(active?.scope).toBe(ExtensionScope.Project);
+      expect(active?.version).toBe('2.0.0');
+    });
+
+    it('completes uninstall even if the other scope dir has a dangling symlink', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'solo',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      // A dangling symlink in the project extensions dir must not abort the
+      // post-delete survivor scan.
+      fs.symlinkSync(
+        path.join(tempHomeDir, 'does-not-exist-target'),
+        path.join(projectExtensionsDir, 'broken-link'),
+      );
+
+      await expect(
+        manager.uninstallExtension(
+          'solo',
+          false,
+          undefined,
+          ExtensionScope.User,
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(fs.existsSync(path.join(userExtensionsDir, 'solo'))).toBe(false);
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'solo'),
+      ).toBeUndefined();
+    });
   });
 
   describe('enableExtension / disableExtension', () => {

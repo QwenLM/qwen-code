@@ -508,6 +508,8 @@ export default {
     '擴展 "{{name}}" 安裝成功並已啟用。',
   'Extension "{{name}}" installed successfully and enabled for this project.':
     '擴展 "{{name}}" 安裝成功並已為目前專案啟用。',
+  'Extension "{{name}}" installed successfully for this project.':
+    '擴展 "{{name}}" 已成功為目前專案安裝。',
   'Extension "{{name}}" linked successfully and enabled for this project.':
     '擴展 "{{name}}" 連結成功並已為目前專案啟用。',
   'Scope:': '作用域：',

@@ -549,6 +549,8 @@ export default {
     '扩展 "{{name}}" 安装成功并已启用。',
   'Extension "{{name}}" installed successfully and enabled for this project.':
     '扩展 "{{name}}" 安装成功并已为当前项目启用。',
+  'Extension "{{name}}" installed successfully for this project.':
+    '扩展 "{{name}}" 已成功为当前项目安装。',
   'Extension "{{name}}" linked successfully and enabled for this project.':
     '扩展 "{{name}}" 链接成功并已为当前项目启用。',
   'Scope:': '作用域：',

@@ -575,6 +575,8 @@ export default {
     'Extension "{{name}}" installed successfully and enabled.',
   'Extension "{{name}}" installed successfully and enabled for this project.':
     'Extension "{{name}}" installed successfully and enabled for this project.',
+  'Extension "{{name}}" installed successfully for this project.':
+    'Extension "{{name}}" installed successfully for this project.',
   'Extension "{{name}}" linked successfully and enabled for this project.':
     'Extension "{{name}}" linked successfully and enabled for this project.',
   'Scope:': 'Scope:',
