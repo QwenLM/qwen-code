@@ -16,6 +16,11 @@ export interface PushSubscriptionRecord {
   endpoint: string;
   keys: { p256dh: string; auth: string };
   createdAt: number;
+  /**
+   * Allowlist of notification kinds this subscription wants. Absent/undefined
+   * → receive ALL kinds (back-compat); empty array → receive NOTHING.
+   */
+  prefs?: string[];
 }
 
 interface PersistShape {
@@ -84,6 +89,23 @@ export class PushStore {
 
   get(id: string): PushSubscriptionRecord | undefined {
     return this.records.find((r) => r.id === id);
+  }
+
+  /**
+   * Set (or clear) a subscription's notification prefs; persists. Returns false
+   * if the id is absent. `prefs === undefined` removes the field so the record
+   * reads "receive all"; otherwise a copy of the array is stored.
+   */
+  async setPrefs(id: string, prefs: string[] | undefined): Promise<boolean> {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return false;
+    if (prefs === undefined) {
+      delete rec.prefs;
+    } else {
+      rec.prefs = [...prefs];
+    }
+    await this.persist();
+    return true;
   }
 
   /** Remove by id; persists. Returns false if absent. */

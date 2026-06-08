@@ -57,6 +57,41 @@ describe('PushStore', () => {
     expect(reopened.listAll()).toHaveLength(0);
   });
 
+  it('setPrefs sets, clears (removes the field), reports missing, and persists', async () => {
+    const path = tempPath();
+    const store = await PushStore.open(path);
+    const rec = await store.add('tokA', SUB_A);
+
+    expect(await store.setPrefs(rec.id, ['task.completed'])).toBe(true);
+    expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
+
+    // Persists across reopen.
+    const reopened = await PushStore.open(path);
+    expect(reopened.get(rec.id)!.prefs).toEqual(['task.completed']);
+
+    // undefined removes the field (record reads "receive all").
+    expect(await store.setPrefs(rec.id, undefined)).toBe(true);
+    expect('prefs' in store.get(rec.id)!).toBe(false);
+    const reopened2 = await PushStore.open(path);
+    expect('prefs' in reopened2.get(rec.id)!).toBe(false);
+
+    // Empty array is preserved (explicit "receive nothing").
+    expect(await store.setPrefs(rec.id, [])).toBe(true);
+    expect(store.get(rec.id)!.prefs).toEqual([]);
+
+    // Missing id → false.
+    expect(await store.setPrefs('missing', ['x'])).toBe(false);
+  });
+
+  it('setPrefs stores a copy, not the caller reference', async () => {
+    const store = await PushStore.open(tempPath());
+    const rec = await store.add('tokA', SUB_A);
+    const input = ['task.completed'];
+    await store.setPrefs(rec.id, input);
+    input.push('mutated');
+    expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
+  });
+
   it('persists the file at mode 0600', async () => {
     const path = tempPath();
     const store = await PushStore.open(path);
