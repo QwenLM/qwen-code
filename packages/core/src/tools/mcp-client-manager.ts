@@ -2085,10 +2085,9 @@ export class McpClientManager {
         // see it reconnected by the incremental path. Without this, the
         // PR-A background path silently re-registers tools the user has
         // told us to ignore.
-        // A project server (`.mcp.json`) that is pending approval — or that
-        // became pending mid-session because its config changed (#4615) — is
-        // treated exactly like a disabled server here: never reconnected, and
-        // torn down if a prior pass had connected it.
+        // A project server (`.mcp.json`) that was pending approval at startup
+        // is treated exactly like a disabled server here: never reconnected,
+        // and torn down if a prior pass had connected it.
         if (
           cliConfig.isMcpServerDisabled(name) ||
           cliConfig.isMcpServerPendingApproval?.(name)
