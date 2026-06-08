@@ -23,7 +23,9 @@ export type AuditAction =
   | 'session_attached'
   | 'session_detached'
   | 'permission_voted'
-  | 'prompt_sent';
+  | 'prompt_sent'
+  | 'push_subscribed'
+  | 'push_unsubscribed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -36,6 +38,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_detached',
   'permission_voted',
   'prompt_sent',
+  'push_subscribed',
+  'push_unsubscribed',
 ];
 
 export interface AuditEntry {
