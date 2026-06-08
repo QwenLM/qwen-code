@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { parseInstallSource } from './marketplace.js';
+import {
+  parseInstallSource,
+  loadMarketplaceConfigFromSource,
+} from './marketplace.js';
 import * as fs from 'node:fs/promises';
 import * as https from 'node:https';
 
@@ -321,6 +324,40 @@ describe('parseInstallSource', () => {
 
       expect(result.type).toBe('git');
       expect(result.marketplaceConfig).toBeUndefined();
+    });
+  });
+
+  describe('loadMarketplaceConfigFromSource', () => {
+    it('resolves a marketplace from a git@ SSH source', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+      const cfg = {
+        name: 'ssh-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [{ name: 'p1' }],
+      };
+      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+        const mockRes = {
+          statusCode: 200,
+          resume: vi.fn(),
+          on: vi.fn((event, handler) => {
+            if (event === 'data') {
+              handler(Buffer.from(JSON.stringify(cfg)));
+            }
+            if (event === 'end') {
+              handler();
+            }
+          }),
+        };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn(), setTimeout: vi.fn(), destroy: vi.fn() } as never;
+      });
+
+      const result = await loadMarketplaceConfigFromSource(
+        'git@github.com:owner/repo.git',
+      );
+      expect(result).toEqual(cfg);
     });
   });
 });

@@ -279,6 +279,14 @@ export async function loadMarketplaceConfigFromSource(
 
   // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
   if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
+    // `git@github.com:owner/repo(.git)` isn't a parseable URL, so extract
+    // owner/repo directly before falling back to the URL-based parser.
+    const sshMatch = trimmed.match(
+      /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/,
+    );
+    if (sshMatch) {
+      return fetchGitHubMarketplaceConfig(sshMatch[1], sshMatch[2]);
+    }
     try {
       const { owner, repo } = parseGitHubRepoForReleases(trimmed);
       return await fetchGitHubMarketplaceConfig(owner, repo);
