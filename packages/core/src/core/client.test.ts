@@ -166,62 +166,46 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
     getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
       {
         role: 'user',
-        parts: [{ text: 'Mocked env context' }],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'Got it. Thanks for the context!' }],
+        parts: [
+          {
+            text: '<system-reminder>\nMocked env context\n</system-reminder>',
+          },
+        ],
       },
       ...(extraHistory ?? []),
     ]),
+    buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
+      tools.length === 0
+        ? null
+        : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
+    ),
+    getStartupContextLength: vi.fn((history) => {
+      const first = history?.[0];
+      if (first?.role !== 'user') return 0;
+      const text = first.parts?.[0]?.text;
+      if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
+        return 1;
+      }
+      if (
+        history?.[1]?.role === 'model' &&
+        history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
+      ) {
+        return 2;
+      }
+      return 0;
+    }),
+    isSystemReminderContent: vi.fn((content) => {
+      const parts = content?.parts;
+      if (!parts || parts.length === 0) return false;
+      return parts.every(
+        (part: { text?: string }) =>
+          typeof part.text === 'string' &&
+          part.text.startsWith('<system-reminder>') &&
+          part.text.includes('</system-reminder>'),
+      );
+    }),
   };
 });
-vi.mock('../utils/environmentContext', () => ({
-  SYSTEM_REMINDER_OPEN: '<system-reminder>',
-  getEnvironmentContext: vi
-    .fn()
-    .mockResolvedValue([{ text: 'Mocked env context' }]),
-  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [
-        { text: '<system-reminder>\nMocked env context\n</system-reminder>' },
-      ],
-    },
-    ...(extraHistory ?? []),
-  ]),
-  buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
-    tools.length === 0
-      ? null
-      : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
-  ),
-  getStartupContextLength: vi.fn((history) => {
-    const first = history?.[0];
-    if (first?.role !== 'user') return 0;
-    const text = first.parts?.[0]?.text;
-    if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
-      return 1;
-    }
-    // Legacy format: [user(env), model("Got it. Thanks for the context!")].
-    if (
-      history?.[1]?.role === 'model' &&
-      history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
-    ) {
-      return 2;
-    }
-    return 0;
-  }),
-  isSystemReminderContent: vi.fn((content) => {
-    const parts = content?.parts;
-    if (!parts || parts.length === 0) return false;
-    return parts.every(
-      (part: { text?: string }) =>
-        typeof part.text === 'string' &&
-        part.text.startsWith('<system-reminder>') &&
-        part.text.includes('</system-reminder>'),
-    );
-  }),
-}));
 vi.mock('../utils/generateContentResponseUtilities', () => ({
   getResponseText: (result: GenerateContentResponse) =>
     result.candidates?.[0]?.content?.parts?.map((part) => part.text).join('') ||
