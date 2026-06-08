@@ -39,7 +39,11 @@ const pressKey = (overrides: Partial<Key>) => {
   });
 };
 
-const flushEffects = async () => {
+// Two microtask yields are intentional: Ink 7 + React 19 split a render
+// pass across two ticks (one to flush state updates into the reconciler,
+// a second for the resulting effects to settle). A single Promise.resolve
+// drains only the first tick and produces flaky assertions on slow CI.
+const flush = async () => {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -112,7 +116,7 @@ describe('RewindSelector', () => {
     );
 
     pressKey({ name: 'return' });
-    await flushEffects();
+    await flush();
 
     expect(fileHistoryService.getDiffStats).toHaveBeenCalledWith('prompt-2');
     expect(lastFrame()).toContain('Restore code and conversation');
@@ -142,7 +146,7 @@ describe('RewindSelector', () => {
     );
 
     pressKey({ name: 'return' });
-    await flushEffects();
+    await flush();
     expect(lastFrame()).toContain('Restore conversation only');
 
     pressKey({ name: 'escape' });
