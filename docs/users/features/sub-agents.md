@@ -275,6 +275,47 @@ disallowedTools:
 ---
 ```
 
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the full set of frontmatter fields that Claude Code's
+`.claude/agents/*.md` schema uses, so you can drop a Claude Code agent file
+into `.qwen/agents/` and it will parse identically. Optional fields with
+invalid values are silently dropped at parse time rather than rejected — the
+same lenient posture Claude Code uses.
+
+| Field            | Type             | Notes                                                                                                                                                                             |
+| ---------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | string           | Enum: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time. When both are set, `approvalMode` wins.                   |
+| `effort`         | string \| number | Thinking effort: `low`, `medium`, `high`, `xhigh`, `max`, or a positive integer. The alias `med` resolves to `medium`.                                                            |
+| `maxTurns`       | number           | Positive integer. Caps the agent's turn budget. Overrides the legacy nested `runConfig.max_turns` when both are present.                                                          |
+| `skills`         | string \| array  | List of skill names. Accepts a comma-separated string (`"lint, format"`) or a YAML array. Carried through to the runtime; per-skill semantics land in a follow-up.                |
+| `initialPrompt`  | string           | Initial message auto-submitted when the agent runs as the main-session agent (e.g. via a future `--agent` flag). Has no effect when the agent runs as a subagent.                 |
+| `memory`         | string           | Enum: `user`, `project`, `local`. Memory scope tag. Carried verbatim; runtime semantics land in a follow-up.                                                                      |
+| `isolation`      | string           | Currently only `worktree` is valid. Used as the per-agent default; when a workflow specifies its own isolation per-call, the workflow value wins.                                 |
+| `mcpServers`     | array            | Per-agent MCP-server overrides. Carried verbatim; runtime semantics land in a follow-up.                                                                                          |
+| `hooks`          | object           | Per-agent hook overrides. Carried verbatim; runtime semantics land in a follow-up.                                                                                                |
+| `color`          | string           | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan`. Values outside the allowlist (other than the legacy `auto`) are silently dropped. |
+
+Example combining several fields:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with high thinking effort and a turn cap
+effort: high
+maxTurns: 50
+permissionMode: plan
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
 #### Example Usage
 
 ```
