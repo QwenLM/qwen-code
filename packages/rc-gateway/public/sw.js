@@ -1,4 +1,5 @@
-self.addEventListener('install', (e) => self.skipWaiting());
+/* global self */
+self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('push', (event) => {
