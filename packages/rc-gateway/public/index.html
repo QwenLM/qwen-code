@@ -58,6 +58,15 @@
     </section>
     <div id="status"></div>
     <div id="cards"></div>
+    <section id="composer" style="display: none">
+      <textarea
+        id="prompt"
+        rows="3"
+        style="width: 100%"
+        placeholder="type a prompt to send to the watched session"
+      ></textarea>
+      <button id="send">Send</button>
+    </section>
     <pre id="log"></pre>
     <script>
       const $ = (id) => document.getElementById(id);
@@ -171,14 +180,54 @@
       }
 
       let controller = null;
+      let watchedSessionId = null;
       $('stop').onclick = () => {
         if (controller) controller.abort();
+      };
+
+      $('send').onclick = async () => {
+        const prompt = $('prompt').value.trim();
+        if (!prompt) return setStatus('empty prompt');
+        if (!watchedSessionId) return setStatus('watch a session first');
+        $('send').disabled = true;
+        setStatus('sending…');
+        try {
+          const res = await fetch(
+            '/rc/session/' +
+              encodeURIComponent(watchedSessionId) +
+              '/prompt',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ prompt }),
+            },
+          );
+          if (res.status === 200) {
+            const json = await res.json().catch(() => ({}));
+            $('prompt').value = '';
+            setStatus('sent: ' + (json.stopReason || 'ok'));
+          } else if (res.status === 400) {
+            setStatus('empty prompt');
+          } else if (res.status === 401 || res.status === 403) {
+            setStatus('not authorized');
+          } else {
+            setStatus('send failed (' + res.status + ')');
+          }
+        } catch (e) {
+          setStatus('send failed: ' + e);
+        } finally {
+          $('send').disabled = false;
+        }
       };
 
       $('watch').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const id = $('session').value.trim();
         if (!id) return setStatus('enter a session id');
+        watchedSessionId = id;
         controller = new AbortController();
         $('watch').disabled = true;
         $('stop').disabled = false;
@@ -196,6 +245,7 @@
             return;
           }
           setStatus('streaming');
+          $('composer').style.display = '';
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
