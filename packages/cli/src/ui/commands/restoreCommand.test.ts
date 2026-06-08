@@ -175,7 +175,7 @@ describe('restoreCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: 'info',
-          text: 'Restored project to the state before the tool call.',
+          text: 'Restored project to the state at the start of this turn.',
         },
         expect.any(Number),
       );

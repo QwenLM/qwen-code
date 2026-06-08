@@ -111,7 +111,7 @@ async function restoreAction(
         addItem(
           {
             type: 'info',
-            text: 'Restored project to the state before the tool call.',
+            text: 'Restored project to the state at the start of this turn.',
           },
           Date.now(),
         );
