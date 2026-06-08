@@ -39,7 +39,6 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
-// GitService import removed — service has been deleted
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
@@ -259,8 +258,6 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
     logRipgrepFallback: vi.fn(),
   };
 });
-
-// GitService mock removed — service has been deleted
 
 vi.mock('../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
@@ -3553,9 +3550,8 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -3602,9 +3598,8 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       setInstanceFields(
         config,

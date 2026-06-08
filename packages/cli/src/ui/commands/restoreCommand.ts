@@ -81,7 +81,8 @@ async function restoreAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: 'This checkpoint uses a legacy format that is no longer supported. Please create a new checkpoint.',
+        content:
+          'This checkpoint uses a legacy format that is no longer supported. Please create a new checkpoint.',
       };
     }
 
@@ -94,12 +95,14 @@ async function restoreAction(
         };
       }
       try {
-        const result = await config.getFileHistoryService().rewind(toolCallData.promptId, true);
+        const result = await config
+          .getFileHistoryService()
+          .rewind(toolCallData.promptId, true);
         if (result.filesFailed.length > 0) {
           addItem(
             {
               type: 'warning',
-              text: `Failed to restore ${result.filesFailed.length} file(s). Aborting restore.`,
+              text: `Partially restored: ${result.filesChanged.length} file(s) reverted, ${result.filesFailed.length} file(s) failed. Aborting tool replay.`,
             },
             Date.now(),
           );

@@ -33,7 +33,9 @@ describe('restoreCommand', () => {
     await fs.mkdir(checkpointsDir, { recursive: true });
 
     mockSetHistory = vi.fn().mockResolvedValue(undefined);
-    mockRewind = vi.fn().mockResolvedValue({ filesChanged: [], filesFailed: [] });
+    mockRewind = vi
+      .fn()
+      .mockResolvedValue({ filesChanged: [], filesFailed: [] });
 
     mockConfig = {
       getFileCheckpointingEnabled: vi.fn().mockReturnValue(true),
@@ -169,10 +171,7 @@ describe('restoreCommand', () => {
         toolCallData.history,
       );
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
-      expect(mockRewind).toHaveBeenCalledWith(
-        toolCallData.promptId,
-        true,
-      );
+      expect(mockRewind).toHaveBeenCalledWith(toolCallData.promptId, true);
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: 'info',
@@ -203,6 +202,79 @@ describe('restoreCommand', () => {
       expect(mockSetHistory).not.toHaveBeenCalled();
       expect(mockRewind).not.toHaveBeenCalled();
     });
+  });
+
+  it('should reject legacy checkpoint format with commitHash', async () => {
+    const toolCallData = {
+      commitHash: 'abc123',
+      toolCall: { name: 'run_shell_command', args: 'ls' },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'legacy.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    expect(await command?.action?.(mockContext, 'legacy')).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('legacy format'),
+    });
+    expect(mockRewind).not.toHaveBeenCalled();
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('should abort tool replay when rewind has partial failures', async () => {
+    mockRewind.mockResolvedValue({
+      filesChanged: ['a.ts'],
+      filesFailed: ['b.ts'],
+    });
+    const toolCallData = {
+      promptId: 'prompt-abc',
+      toolCall: { name: 'edit', args: { file_path: 'a.ts' } },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'partial.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    const result = await command?.action?.(mockContext, 'partial');
+    expect(result).toBeUndefined();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'warning',
+        text: expect.stringContaining('Partially restored'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('should abort tool replay when rewind throws', async () => {
+    mockRewind.mockRejectedValue(
+      new Error('The selected snapshot was not found'),
+    );
+    const toolCallData = {
+      promptId: 'prompt-missing',
+      toolCall: { name: 'edit', args: { file_path: 'a.ts' } },
+    };
+    await fs.writeFile(
+      path.join(checkpointsDir, 'missing-snapshot.json'),
+      JSON.stringify(toolCallData),
+    );
+    const command = restoreCommand(mockConfig);
+
+    const result = await command?.action?.(mockContext, 'missing-snapshot');
+    expect(result).toBeUndefined();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'warning',
+        text: expect.stringContaining('Could not restore files'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
   });
 
   it('should return an error for a checkpoint file missing the toolCall property', async () => {
