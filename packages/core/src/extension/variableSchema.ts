@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ExtensionScope } from './types.js';
+
 export interface VariableDefinition {
   type: 'string';
   description: string;
@@ -18,6 +20,8 @@ export interface VariableSchema {
 export interface LoadExtensionContext {
   extensionDir: string;
   workspaceDir?: string;
+  /** The scope the extension is loaded from. Defaults to user scope. */
+  scope?: ExtensionScope;
 }
 
 const PATH_SEPARATOR_DEFINITION = {

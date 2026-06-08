@@ -16,6 +16,8 @@ vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
     installExtension: mockInstallExtension,
   }),
+  EXTENSION_SCOPE_CHOICES: ['user', 'project'],
+  parseExtensionScope: vi.fn(() => 'user'),
 }));
 
 vi.mock('./consent.js', () => ({
@@ -72,6 +74,10 @@ describe('handleLink', () => {
         type: 'link',
       },
       expect.any(Function),
+      undefined,
+      undefined,
+      undefined,
+      'user',
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "linked-extension" linked successfully and enabled.',

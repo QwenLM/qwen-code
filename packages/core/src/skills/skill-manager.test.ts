@@ -16,6 +16,7 @@ import {
   WATCHER_MAX_DEPTH,
 } from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
+import { ExtensionScope } from '../extension/extensionManager.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
@@ -795,6 +796,7 @@ Body`);
           name: 'test-extension',
           version: '1.0.0',
           isActive: true,
+          scope: ExtensionScope.User,
           path: '/extension',
           config: { name: 'test-extension', version: '1.0.0' },
           contextFiles: [],

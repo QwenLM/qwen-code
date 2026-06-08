@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import * as tar from 'tar';
 import * as archiver from 'archiver';
 import {
+  ExtensionScope,
   ExtensionUpdateState,
   type Extension,
   type ExtensionManager,
@@ -273,6 +274,7 @@ describe('git extension helpers', () => {
         path: '/ext',
         version: '1.0.0',
         isActive: true,
+        scope: ExtensionScope.User,
         config: { name: 'test', version: '1.0.0' },
         contextFiles: [],
         ...overrides,

@@ -15,6 +15,7 @@ import {
 import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
+  ExtensionScope,
   SettingScope,
   type ExtensionManagerOptions,
   validateName,
@@ -330,6 +331,163 @@ describe('extension tests', () => {
 
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
+    });
+  });
+
+  describe('project-level extensions', () => {
+    let projectExtensionsDir: string;
+
+    beforeEach(() => {
+      projectExtensionsDir = path.join(
+        tempWorkspaceDir,
+        EXTENSIONS_DIRECTORY_NAME,
+      );
+      fs.mkdirSync(projectExtensionsDir, { recursive: true });
+    });
+
+    it('loads project-level extensions and tags them with project scope', async () => {
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'proj-ext',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      const projExt = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'proj-ext');
+      expect(projExt).toBeDefined();
+      expect(projExt?.scope).toBe(ExtensionScope.Project);
+      expect(projExt?.path).toBe(path.join(projectExtensionsDir, 'proj-ext'));
+    });
+
+    it('tags user-level extensions with user scope', async () => {
+      createExtension({ extensionsDir: userExtensionsDir, name: 'user-ext' });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      expect(manager.getLoadedExtensions()[0].scope).toBe(ExtensionScope.User);
+    });
+
+    it('does not load project-level extensions from an untrusted workspace', async () => {
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'proj-ext',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: false });
+      await manager.refreshCache();
+
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'proj-ext'),
+      ).toBeUndefined();
+    });
+
+    it('prefers the user-level extension when a project extension shares its name', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'shared',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'shared',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      const loaded = manager
+        .getLoadedExtensions()
+        .filter((e) => e.name === 'shared');
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0].scope).toBe(ExtensionScope.User);
+      expect(loaded[0].version).toBe('1.0.0');
+    });
+
+    it('installs an extension into the project extensions directory at project scope', async () => {
+      const sourceDir = path.join(tempHomeDir, 'source-ext');
+      fs.mkdirSync(sourceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'installed-proj', version: '1.0.0' }),
+      );
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+      const extension = await manager.installExtension(
+        { source: sourceDir, type: 'local', originSource: 'QwenCode' },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ExtensionScope.Project,
+      );
+
+      expect(extension.scope).toBe(ExtensionScope.Project);
+      expect(
+        fs.existsSync(
+          path.join(
+            projectExtensionsDir,
+            'installed-proj',
+            EXTENSIONS_CONFIG_FILENAME,
+          ),
+        ),
+      ).toBe(true);
+      // Must not leak into the user-level extensions directory.
+      expect(
+        fs.existsSync(path.join(userExtensionsDir, 'installed-proj')),
+      ).toBe(false);
+    });
+
+    it('rejects a project-scoped install when the target directory does not exist', async () => {
+      const sourceDir = path.join(tempHomeDir, 'source-ext-2');
+      fs.mkdirSync(sourceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'whatever', version: '1.0.0' }),
+      );
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          { source: sourceDir, type: 'local', originSource: 'QwenCode' },
+          undefined,
+          undefined,
+          path.join(tempHomeDir, 'does-not-exist'),
+          undefined,
+          ExtensionScope.Project,
+        ),
+      ).rejects.toThrow(/not an accessible directory/);
+    });
+
+    it('uninstalls a project-scoped extension from the project directory', async () => {
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'proj-ext',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'proj-ext'),
+      ).toBeDefined();
+
+      await manager.uninstallExtension('proj-ext', false);
+
+      expect(fs.existsSync(path.join(projectExtensionsDir, 'proj-ext'))).toBe(
+        false,
+      );
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'proj-ext'),
+      ).toBeUndefined();
     });
   });
 

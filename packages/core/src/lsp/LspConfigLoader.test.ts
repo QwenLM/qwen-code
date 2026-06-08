@@ -7,7 +7,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import mock from 'mock-fs';
 import { LspConfigLoader } from './LspConfigLoader.js';
-import type { Extension } from '../extension/extensionManager.js';
+import {
+  ExtensionScope,
+  type Extension,
+} from '../extension/extensionManager.js';
 
 describe('LspConfigLoader config-driven behavior', () => {
   const workspaceRoot = '/workspace';
@@ -122,6 +125,7 @@ describe('LspConfigLoader extension configs', () => {
       name: 'ts-plugin',
       version: '1.0.0',
       isActive: true,
+      scope: ExtensionScope.User,
       path: extensionPath,
       contextFiles: [],
       config: {
@@ -171,6 +175,7 @@ describe('LspConfigLoader extension configs', () => {
       name: 'ts-plugin',
       version: '1.0.0',
       isActive: true,
+      scope: ExtensionScope.User,
       path: extensionPath,
       contextFiles: [],
       config: {

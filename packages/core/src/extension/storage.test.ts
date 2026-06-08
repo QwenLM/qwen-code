@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ExtensionStorage } from './storage.js';
+import { ExtensionScope } from './types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -36,9 +37,9 @@ describe('ExtensionStorage', () => {
   beforeEach(() => {
     vi.mocked(os.homedir).mockReturnValue(mockHomeDir);
     vi.mocked(Storage).mockImplementation(
-      () =>
+      (targetDir: string) =>
         ({
-          getExtensionsDir: () => path.join(mockHomeDir, '.qwen', 'extensions'),
+          getExtensionsDir: () => path.join(targetDir, '.qwen', 'extensions'),
         }) as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     );
     vi.mocked(Storage.getUserExtensionsDir).mockReturnValue(
@@ -86,6 +87,28 @@ describe('ExtensionStorage', () => {
   it('should return the correct user extensions directory', () => {
     const expectedDir = path.join(mockHomeDir, '.qwen', 'extensions');
     expect(ExtensionStorage.getUserExtensionsDir()).toBe(expectedDir);
+  });
+
+  it('should resolve a project-scoped extension directory under the workspace', () => {
+    const workspaceDir = '/mock/project';
+    const projectStorage = new ExtensionStorage(
+      extensionName,
+      ExtensionScope.Project,
+      workspaceDir,
+    );
+    expect(projectStorage.getExtensionDir()).toBe(
+      path.join(workspaceDir, '.qwen', 'extensions', extensionName),
+    );
+  });
+
+  it('should throw for project scope without a workspace directory', () => {
+    const projectStorage = new ExtensionStorage(
+      extensionName,
+      ExtensionScope.Project,
+    );
+    expect(() => projectStorage.getExtensionDir()).toThrow(
+      /workspace directory is required/,
+    );
   });
 
   it('should create a temporary directory', async () => {

@@ -6,6 +6,7 @@
 
 import {
   ExtensionManager,
+  ExtensionScope,
   redactUrlCredentials,
   type Extension,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +20,23 @@ import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import * as os from 'node:os';
 import chalk from 'chalk';
 import { t } from '../../i18n/index.js';
+
+/** The `--scope` choices accepted by extension install/uninstall/link. */
+export const EXTENSION_SCOPE_CHOICES = [
+  ExtensionScope.User,
+  ExtensionScope.Project,
+] as const;
+
+/**
+ * Parses a `--scope` CLI value into an {@link ExtensionScope}, defaulting to
+ * user scope. Yargs already restricts the value via `choices`, so this is a
+ * straightforward, case-insensitive mapping.
+ */
+export function parseExtensionScope(scope?: string): ExtensionScope {
+  return scope?.toLowerCase() === ExtensionScope.Project
+    ? ExtensionScope.Project
+    : ExtensionScope.User;
+}
 
 export async function getExtensionManager(): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
@@ -53,6 +71,7 @@ export function extensionToOutputString(
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
+  output += `\n ${t('Scope:')} ${extension.scope}`;
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;

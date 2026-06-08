@@ -9,6 +9,7 @@ import * as fsSync from 'node:fs';
 import * as dotenv from 'dotenv';
 import * as path from 'node:path';
 import { ExtensionStorage } from './storage.js';
+import { ExtensionScope } from './types.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import prompts from 'prompts';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
@@ -59,11 +60,19 @@ const getKeychainStorageName = (
 const getEnvFilePath = (
   extensionName: string,
   scope: ExtensionSettingScope,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): string => {
   if (scope === ExtensionSettingScope.WORKSPACE) {
     return path.join(process.cwd(), EXTENSION_SETTINGS_FILENAME);
   }
-  return new ExtensionStorage(extensionName).getEnvFilePath();
+  // The user-scope env file is co-located with the extension's install
+  // directory, which differs for project-scoped extensions.
+  return new ExtensionStorage(
+    extensionName,
+    extensionScope,
+    workspaceDir,
+  ).getEnvFilePath();
 };
 
 export async function maybePromptForSettings(
@@ -72,6 +81,8 @@ export async function maybePromptForSettings(
   requestSetting: (setting: ExtensionSetting) => Promise<string>,
   previousExtensionConfig?: ExtensionConfig,
   previousSettings?: Record<string, string>,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (
@@ -84,7 +95,12 @@ export async function maybePromptForSettings(
   // We assume user scope here because we don't have a way to ask the user for scope during the initial setup.
   // The user can change the scope later using the `settings set` command.
   const scope = ExtensionSettingScope.USER;
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(
+    extensionName,
+    scope,
+    extensionScope,
+    workspaceDir,
+  );
   const keychain = new KeychainTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
@@ -158,12 +174,19 @@ export async function getScopedEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
   scope: ExtensionSettingScope,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): Promise<Record<string, string>> {
   const { name: extensionName } = extensionConfig;
   const keychain = new KeychainTokenStorage(
     getKeychainStorageName(extensionName, extensionId, scope),
   );
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(
+    extensionName,
+    scope,
+    extensionScope,
+    workspaceDir,
+  );
   let customEnv: Record<string, string> = {};
   if (fsSync.existsSync(envFilePath)) {
     const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
@@ -186,6 +209,8 @@ export async function getScopedEnvContents(
 export async function getEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): Promise<Record<string, string>> {
   if (!extensionConfig.settings || extensionConfig.settings.length === 0) {
     return Promise.resolve({});
@@ -195,11 +220,15 @@ export async function getEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.USER,
+    extensionScope,
+    workspaceDir,
   );
   const workspaceSettings = await getScopedEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.WORKSPACE,
+    extensionScope,
+    workspaceDir,
   );
 
   return { ...userSettings, ...workspaceSettings };
@@ -211,6 +240,8 @@ export async function updateSetting(
   settingKey: string,
   requestSetting: (setting: ExtensionSetting) => Promise<string>,
   scope: ExtensionSettingScope,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (!settings || settings.length === 0) {
@@ -243,7 +274,12 @@ export async function updateSetting(
 
   // For non-sensitive settings, we need to read the existing .env file,
   // update the value, and write it back, preserving any other values.
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(
+    extensionName,
+    scope,
+    extensionScope,
+    workspaceDir,
+  );
   let envContent = '';
   if (fsSync.existsSync(envFilePath)) {
     envContent = await fs.readFile(envFilePath, 'utf-8');

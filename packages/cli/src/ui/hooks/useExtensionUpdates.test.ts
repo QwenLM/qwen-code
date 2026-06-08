@@ -17,6 +17,7 @@ import {
 } from './useExtensionUpdates.js';
 import {
   QWEN_DIR,
+  ExtensionScope,
   type ExtensionManager,
   type Extension,
   type ExtensionUpdateInfo,
@@ -40,6 +41,7 @@ function createMockExtension(overrides: Partial<Extension> = {}): Extension {
     version: '1.0.0',
     path: '/some/path',
     isActive: true,
+    scope: ExtensionScope.User,
     config: {
       name: 'test-extension',
       version: '1.0.0',

@@ -14,10 +14,12 @@ import {
 } from './consent.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { loadSettings } from '../../config/settings.js';
+import { EXTENSION_SCOPE_CHOICES, parseExtensionScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface UninstallArgs {
   name: string; // can be extension name or source URL.
+  scope?: string;
 }
 
 export async function handleUninstall(args: UninstallArgs) {
@@ -34,7 +36,15 @@ export async function handleUninstall(args: UninstallArgs) {
       ),
     });
     await extensionManager.refreshCache();
-    await extensionManager.uninstallExtension(args.name, false);
+    // Only disambiguate by scope when the flag is explicitly provided;
+    // otherwise the manager removes the loaded extension at its own scope.
+    const scope = args.scope ? parseExtensionScope(args.scope) : undefined;
+    await extensionManager.uninstallExtension(
+      args.name,
+      false,
+      workspaceDir,
+      scope,
+    );
     writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
@@ -53,6 +63,13 @@ export const uninstallCommand: CommandModule = {
         describe: t('The name or source path of the extension to uninstall.'),
         type: 'string',
       })
+      .option('scope', {
+        describe: t(
+          'Scope to uninstall from when an extension exists at both user and project scope.',
+        ),
+        type: 'string',
+        choices: EXTENSION_SCOPE_CHOICES,
+      })
       .check((argv) => {
         if (!argv.name) {
           throw new Error(
@@ -66,6 +83,7 @@ export const uninstallCommand: CommandModule = {
   handler: async (argv) => {
     await handleUninstall({
       name: argv['name'] as string,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

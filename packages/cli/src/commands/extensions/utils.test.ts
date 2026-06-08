@@ -6,7 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getExtensionManager, extensionToOutputString } from './utils.js';
-import type { Extension, ExtensionManager } from '@qwen-code/qwen-code-core';
+import {
+  ExtensionScope,
+  type Extension,
+  type ExtensionManager,
+} from '@qwen-code/qwen-code-core';
 
 const mockRefreshCache = vi.fn();
 const mockExtensionManagerInstance = {
@@ -83,6 +87,7 @@ describe('extensionToOutputString', () => {
     name: 'test-extension',
     version: '1.0.0',
     isActive: true,
+    scope: ExtensionScope.User,
     path: '/path/to/extension',
     contextFiles: [],
     config: { name: 'test-extension', version: '1.0.0' },
@@ -142,7 +147,7 @@ describe('extensionToOutputString', () => {
     const extension = createMockExtension({
       installMetadata: {
         type: 'git',
-        source: 'https://user:token@example.com/owner/repo.git',
+        source: 'https://alice:p4ssw0rd@example.com/owner/repo.git',
       },
     });
 
@@ -156,7 +161,7 @@ describe('extensionToOutputString', () => {
     expect(result).toContain(
       'https://***REDACTED***@example.com/owner/repo.git',
     );
-    expect(result).not.toContain('user');
-    expect(result).not.toContain('token');
+    expect(result).not.toContain('alice');
+    expect(result).not.toContain('p4ssw0rd');
   });
 });

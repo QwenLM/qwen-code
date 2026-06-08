@@ -133,6 +133,31 @@ qwen extensions install /path/to/your/extension
 
 Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
 
+### Install scope: user vs. project
+
+Extensions can be installed at two scopes, controlled by the `--scope` flag:
+
+- `--scope user` (the default) installs to `~/.qwen/extensions/` and makes the
+  extension available in every workspace.
+- `--scope project` installs to `<project>/.qwen/extensions/` so the extension
+  is scoped to the current project and only loaded when that workspace is
+  trusted.
+
+```bash
+# Install only for the current project
+qwen extensions install <source> --scope project
+```
+
+`install`, `link`, and the `/extensions install` slash command all accept
+`--scope`. Project-level extensions are subject to the same trust model as
+workspace settings and project hooks: they are skipped entirely in an untrusted
+workspace. When a user-level and a project-level extension share the same name,
+the user-level one takes precedence.
+
+You can decide whether to commit `.qwen/extensions/` to version control:
+gitignore it for personal dev extensions, or commit it to ship team-standard
+tooling alongside the project.
+
 ### Uninstalling an extension
 
 To uninstall, run `qwen extensions uninstall extension-name`, so, in the case of the install example:
@@ -140,6 +165,9 @@ To uninstall, run `qwen extensions uninstall extension-name`, so, in the case of
 ```
 qwen extensions uninstall qwen-cli-security
 ```
+
+If an extension exists at both user and project scope, pass `--scope` to choose
+which copy to remove (e.g. `qwen extensions uninstall my-ext --scope project`).
 
 ### Disabling an extension
 

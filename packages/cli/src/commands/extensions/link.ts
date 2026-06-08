@@ -5,18 +5,26 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { type ExtensionInstallMetadata } from '@qwen-code/qwen-code-core';
+import {
+  ExtensionScope,
+  type ExtensionInstallMetadata,
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   requestConsentNonInteractive,
   requestConsentOrFail,
 } from './consent.js';
-import { getExtensionManager } from './utils.js';
+import {
+  EXTENSION_SCOPE_CHOICES,
+  getExtensionManager,
+  parseExtensionScope,
+} from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface InstallArgs {
   path: string;
+  scope?: string;
 }
 
 export async function handleLink(args: InstallArgs) {
@@ -27,18 +35,28 @@ export async function handleLink(args: InstallArgs) {
     };
     const extensionManager = await getExtensionManager();
 
+    const scope = parseExtensionScope(args.scope);
     const extension = await extensionManager.installExtension(
       installMetadata,
       requestConsentOrFail.bind(null, requestConsentNonInteractive),
+      undefined,
+      undefined,
+      undefined,
+      scope,
     );
     if (!extension) {
       writeStdoutLine(t('Link extension failed to install.'));
       return;
     }
     writeStdoutLine(
-      t('Extension "{{name}}" linked successfully and enabled.', {
-        name: extension.name,
-      }),
+      scope === ExtensionScope.Project
+        ? t(
+            'Extension "{{name}}" linked successfully and enabled for this project.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" linked successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
@@ -57,10 +75,19 @@ export const linkCommand: CommandModule = {
         describe: t('The name of the extension to link.'),
         type: 'string',
       })
+      .option('scope', {
+        describe: t(
+          'Install scope: "user" (global, default) or "project" (only the current project).',
+        ),
+        type: 'string',
+        choices: EXTENSION_SCOPE_CHOICES,
+        default: 'user',
+      })
       .check((_) => true),
   handler: async (argv) => {
     await handleLink({
       path: argv['path'] as string,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

@@ -55,6 +55,7 @@ import { convertClaudePluginPackage } from './claude-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
+import { ExtensionScope } from './types.js';
 import {
   getEnvContents,
   maybePromptForSettings,
@@ -93,6 +94,9 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+// Re-exported so callers importing from this module also get the scope enum.
+export { ExtensionScope } from './types.js';
+
 export interface ExtensionChannelConfig {
   /** Relative path to JS entry point (must export `plugin: ChannelPlugin`) */
   entry: string;
@@ -108,6 +112,8 @@ export interface Extension {
   version: string;
   isActive: boolean;
   path: string;
+  /** Whether this extension is installed at user or project scope. */
+  scope: ExtensionScope;
   config: ExtensionConfig;
   installMetadata?: ExtensionInstallMetadata;
 
@@ -290,6 +296,28 @@ async function convertGeminiOrClaudeExtension(
   }
   // Claude plugin conversion not yet implemented
   return { extensionDir: newExtensionDir, originSource };
+}
+
+/**
+ * Validates that a directory is a sensible target for a project-scoped install,
+ * guarding against installing into a non-existent or stray path (e.g. a random
+ * temp folder). The trust check in `installExtension` already prevents installs
+ * from untrusted folders; this adds a basic existence/type check on top.
+ */
+function assertValidProjectDir(dir: string): void {
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(dir);
+  } catch {
+    throw new Error(
+      `Cannot install a project-scoped extension: "${dir}" is not an accessible directory.`,
+    );
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(
+      `Cannot install a project-scoped extension: "${dir}" is not a directory.`,
+    );
+  }
 }
 
 // ============================================================================
@@ -546,17 +574,53 @@ export class ExtensionManager {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     let extensions: Extension[];
     if (requestedNames.length > 0) {
+      // loadExtensionByName already falls back to project scope when the
+      // workspace is trusted, so name-targeted loads need no extra handling.
       extensions = (
         await Promise.all(
           requestedNames.map((name) => this.loadExtensionByName(name)),
         )
       ).filter((extension): extension is Extension => extension !== null);
     } else {
-      // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-      extensions = await this.loadExtensionsFromExtensionsDir(
+      // Always load user-level extensions from the QWEN_HOME-aware dir.
+      const userExtensions = await this.loadExtensionsFromExtensionsDir(
         ExtensionStorage.getUserExtensionsDir(),
         this.workspaceDir,
+        ExtensionScope.User,
       );
+      extensions = [...userExtensions];
+
+      // Load project-level extensions only from a trusted workspace, matching
+      // the trust model used for workspace settings and project hooks. The
+      // architecture assumes a single project directory per session, so there
+      // is one project-level source to merge.
+      if (this.isWorkspaceTrusted && this.workspaceDir) {
+        const projectExtensionsDir = new Storage(
+          this.workspaceDir,
+        ).getExtensionsDir();
+        const projectExtensions = await this.loadExtensionsFromExtensionsDir(
+          projectExtensionsDir,
+          this.workspaceDir,
+          ExtensionScope.Project,
+        );
+
+        const userExtensionsByName = new Map(
+          userExtensions.map((ext) => [ext.name, ext]),
+        );
+        for (const projectExtension of projectExtensions) {
+          const shadowing = userExtensionsByName.get(projectExtension.name);
+          if (shadowing) {
+            // User scope wins on conflict (matching MCP server precedence).
+            // Surface the version difference so the ignored project version is
+            // explainable.
+            debugLogger.debug(
+              `Project extension "${projectExtension.name}" (v${projectExtension.version}) is shadowed by the user-level extension of the same name (v${shadowing.version}); using the user version.`,
+            );
+            continue;
+          }
+          extensions.push(projectExtension);
+        }
+      }
     }
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
@@ -582,19 +646,54 @@ export class ExtensionManager {
     workspaceDir?: string,
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
-    const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
-    if (!fs.existsSync(userExtensionsDir)) {
+
+    // User scope takes precedence, so search it first.
+    const userMatch = await this.findExtensionByNameInDir(
+      ExtensionStorage.getUserExtensionsDir(),
+      name,
+      cwd,
+      ExtensionScope.User,
+    );
+    if (userMatch) {
+      return userMatch;
+    }
+
+    // Fall back to project scope only from a trusted workspace.
+    if (this.isWorkspaceTrusted && cwd) {
+      const projectExtensionsDir = new Storage(cwd).getExtensionsDir();
+      const projectMatch = await this.findExtensionByNameInDir(
+        projectExtensionsDir,
+        name,
+        cwd,
+        ExtensionScope.Project,
+      );
+      if (projectMatch) {
+        return projectMatch;
+      }
+    }
+
+    return null;
+  }
+
+  private async findExtensionByNameInDir(
+    extensionsDir: string,
+    name: string,
+    workspaceDir: string,
+    scope: ExtensionScope,
+  ): Promise<Extension | null> {
+    if (!fs.existsSync(extensionsDir)) {
       return null;
     }
 
-    for (const subdir of fs.readdirSync(userExtensionsDir)) {
-      const extensionDir = path.join(userExtensionsDir, subdir);
+    for (const subdir of fs.readdirSync(extensionsDir)) {
+      const extensionDir = path.join(extensionsDir, subdir);
       if (!fs.statSync(extensionDir).isDirectory()) {
         continue;
       }
       const extension = await this.loadExtension({
         extensionDir,
-        workspaceDir: cwd,
+        workspaceDir,
+        scope,
       });
       if (
         extension &&
@@ -612,12 +711,14 @@ export class ExtensionManager {
     return this.loadExtensionsFromExtensionsDir(
       storage.getExtensionsDir(),
       dir,
+      ExtensionScope.Project,
     );
   }
 
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
+    scope: ExtensionScope = ExtensionScope.User,
   ): Promise<Extension[]> {
     let subdirs: string[];
     try {
@@ -632,6 +733,7 @@ export class ExtensionManager {
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir,
+        scope,
       });
       if (extension != null) {
         extensions.push(extension);
@@ -643,7 +745,7 @@ export class ExtensionManager {
   async loadExtension(
     context: LoadExtensionContext,
   ): Promise<Extension | null> {
-    const { extensionDir, workspaceDir } = context;
+    const { extensionDir, workspaceDir, scope = ExtensionScope.User } = context;
     if (!fs.statSync(extensionDir).isDirectory()) {
       return null;
     }
@@ -671,6 +773,7 @@ export class ExtensionManager {
           installMetadata?.marketplaceConfig?.metadata?.version ||
           '1.0.0',
         path: effectiveExtensionPath,
+        scope,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
         config,
@@ -845,8 +948,10 @@ export class ExtensionManager {
     requestSetting?: (setting: ExtensionSetting) => Promise<string>,
     cwd?: string,
     previousExtensionConfig?: ExtensionConfig,
+    scope?: ExtensionScope,
   ): Promise<Extension> {
     const currentDir = cwd ?? this.workspaceDir;
+    const installScope = scope ?? ExtensionScope.User;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
       this.telemetrySettings,
@@ -865,7 +970,14 @@ export class ExtensionManager {
         );
       }
 
-      const extensionsDir = ExtensionStorage.getUserExtensionsDir();
+      if (installScope === ExtensionScope.Project) {
+        assertValidProjectDir(currentDir);
+      }
+
+      const extensionsDir =
+        installScope === ExtensionScope.Project
+          ? new Storage(currentDir).getExtensionsDir()
+          : ExtensionStorage.getUserExtensionsDir();
       await fs.promises.mkdir(extensionsDir, { recursive: true });
 
       if (
@@ -1016,16 +1128,29 @@ export class ExtensionManager {
           });
         }
 
-        const extensionStorage = new ExtensionStorage(newExtensionName);
+        const extensionStorage = new ExtensionStorage(
+          newExtensionName,
+          installScope,
+          currentDir,
+        );
         const destinationPath = extensionStorage.getExtensionDir();
+        // Isolation guard: a malicious extension name must never escape its
+        // scope's extensions directory (e.g. via "..").
+        Storage.assertPathWithinDirectory(
+          destinationPath,
+          extensionsDir,
+          `Extension "${newExtensionName}" resolves outside the extensions directory.`,
+        );
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);
         let previousSettings: Record<string, string> | undefined;
         if (isUpdate) {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
             extensionId,
+            installScope,
+            currentDir,
           );
-          await this.uninstallExtension(newExtensionName, isUpdate);
+          await this.uninstallExtension(newExtensionName, isUpdate, currentDir);
         }
         await fs.promises.mkdir(destinationPath, { recursive: true });
 
@@ -1036,12 +1161,18 @@ export class ExtensionManager {
             requestSetting || this.requestSetting || promptForSetting,
             previousExtensionConfig,
             previousSettings,
+            installScope,
+            currentDir,
           );
         } else {
           await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
+            undefined,
+            undefined,
+            installScope,
+            currentDir,
           );
         }
 
@@ -1078,7 +1209,11 @@ export class ExtensionManager {
         );
         await atomicWriteFile(metadataPath, metadataString);
 
-        extension = await this.loadExtension({ extensionDir: destinationPath });
+        extension = await this.loadExtension({
+          extensionDir: destinationPath,
+          workspaceDir: currentDir,
+          scope: installScope,
+        });
         if (!extension) {
           throw new Error(`Extension not found`);
         }
@@ -1110,7 +1245,16 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
+          // Project-scoped installs are enabled at the workspace level so the
+          // extension is only active within this project; user-scoped installs
+          // are enabled globally.
+          this.enableExtension(
+            newExtensionConfig.name,
+            installScope === ExtensionScope.Project
+              ? SettingScope.Workspace
+              : SettingScope.User,
+            currentDir,
+          );
         }
       } finally {
         if (tempDir) {
@@ -1177,6 +1321,7 @@ export class ExtensionManager {
     extensionIdentifier: string,
     isUpdate: boolean,
     cwd?: string,
+    scope?: ExtensionScope,
   ): Promise<void> {
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
@@ -1184,20 +1329,43 @@ export class ExtensionManager {
       this.telemetrySettings,
     );
     const installedExtensions = this.getLoadedExtensions();
-    const extension = installedExtensions.find(
+    let extension = installedExtensions.find(
       (installed) =>
         installed.config.name.toLowerCase() ===
           extensionIdentifier.toLowerCase() ||
         installed.installMetadata?.source.toLowerCase() ===
           extensionIdentifier.toLowerCase(),
     );
+
+    // When a scope is explicitly requested and the loaded extension is not at
+    // that scope (e.g. removing a project copy that is shadowed by a user-level
+    // extension of the same name), resolve the on-disk extension at that scope.
+    if (scope && extension?.scope !== scope) {
+      const scopedDir =
+        scope === ExtensionScope.Project
+          ? new Storage(currentDir).getExtensionsDir()
+          : ExtensionStorage.getUserExtensionsDir();
+      const scopedMatch = await this.findExtensionByNameInDir(
+        scopedDir,
+        extensionIdentifier,
+        currentDir,
+        scope,
+      );
+      if (scopedMatch) {
+        extension = scopedMatch;
+      }
+    }
+
     if (!extension) {
       throw new Error(`Extension not found.`);
     }
+    const targetScope = scope ?? extension.scope;
     const storage = new ExtensionStorage(
       extension.installMetadata?.type === 'link'
         ? extension.name
         : path.basename(extension.path),
+      targetScope,
+      currentDir,
     );
 
     await fs.promises.rm(storage.getExtensionDir(), {
@@ -1303,6 +1471,8 @@ export class ExtensionManager {
           undefined,
           undefined,
           previousExtensionConfig,
+          // Reinstall to the same scope the extension currently lives at.
+          extension.scope,
         );
       } catch (e) {
         callback(extension.name, ExtensionUpdateState.ERROR);

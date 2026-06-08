@@ -61,6 +61,13 @@ export const ExtensionDetailStep = ({
 
         <Box>
           <Box width={LABEL_WIDTH} flexShrink={0}>
+            <Text color={theme.text.primary}>{t('Scope:')}</Text>
+          </Box>
+          <Text>{ext.scope}</Text>
+        </Box>
+
+        <Box>
+          <Box width={LABEL_WIDTH} flexShrink={0}>
             <Text color={theme.text.primary}>{t('Path:')}</Text>
           </Box>
           <Text>{ext.path}</Text>

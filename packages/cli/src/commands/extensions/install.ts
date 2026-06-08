@@ -8,6 +8,7 @@ import type { CommandModule } from 'yargs';
 
 import {
   ExtensionManager,
+  ExtensionScope,
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
@@ -19,6 +20,7 @@ import {
   requestConsentNonInteractive,
   requestChoicePluginNonInteractive,
 } from './consent.js';
+import { EXTENSION_SCOPE_CHOICES, parseExtensionScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface InstallArgs {
@@ -28,6 +30,7 @@ interface InstallArgs {
   allowPreRelease?: boolean;
   consent?: boolean;
   registry?: string;
+  scope?: string;
 }
 
 export async function handleInstall(args: InstallArgs) {
@@ -78,6 +81,7 @@ export async function handleInstall(args: InstallArgs) {
     });
     await extensionManager.refreshCache();
 
+    const scope = parseExtensionScope(args.scope);
     const extension = await extensionManager.installExtension(
       {
         ...installMetadata,
@@ -86,11 +90,20 @@ export async function handleInstall(args: InstallArgs) {
         allowPreRelease: args.allowPreRelease,
       },
       requestConsent,
+      undefined,
+      undefined,
+      undefined,
+      scope,
     );
     writeStdoutLine(
-      t('Extension "{{name}}" installed successfully and enabled.', {
-        name: extension.name,
-      }),
+      scope === ExtensionScope.Project
+        ? t(
+            'Extension "{{name}}" installed successfully and enabled for this project.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" installed successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
@@ -135,6 +148,14 @@ export const installCommand: CommandModule = {
         type: 'boolean',
         default: false,
       })
+      .option('scope', {
+        describe: t(
+          'Install scope: "user" (global, default) or "project" (only the current project).',
+        ),
+        type: 'string',
+        choices: EXTENSION_SCOPE_CHOICES,
+        default: 'user',
+      })
       .check((argv) => {
         if (!argv.source) {
           throw new Error(t('The source argument must be provided.'));
@@ -149,6 +170,7 @@ export const installCommand: CommandModule = {
       allowPreRelease: argv['pre-release'] as boolean | undefined,
       consent: argv['consent'] as boolean | undefined,
       registry: argv['registry'] as string | undefined,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

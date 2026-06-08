@@ -159,7 +159,7 @@ describe('extensionsCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: MessageType.ERROR,
-          text: 'Usage: /extensions install <source>',
+          text: 'Usage: /extensions install <source> [--scope user|project]',
         },
         expect.any(Number),
       );

@@ -130,6 +130,7 @@ describe('settings set handler', () => {
     const mockExtension = {
       name: 'my-extension',
       id: 'ext-id-123',
+      scope: 'user',
       config: { name: 'my-extension', settings: [] },
     };
     mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
@@ -143,6 +144,8 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'user',
+      mockExtension.scope,
+      process.cwd(),
     );
   });
 
@@ -150,6 +153,7 @@ describe('settings set handler', () => {
     const mockExtension = {
       name: 'my-extension',
       id: 'ext-id-123',
+      scope: 'user',
       config: { name: 'my-extension', settings: [] },
     };
     mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
@@ -165,6 +169,8 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'workspace',
+      mockExtension.scope,
+      process.cwd(),
     );
   });
 });

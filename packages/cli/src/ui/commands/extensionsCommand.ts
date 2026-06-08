@@ -14,6 +14,7 @@ import {
 import { t } from '../../i18n/index.js';
 import {
   ExtensionManager,
+  ExtensionScope,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
@@ -100,6 +101,38 @@ async function listAction(_context: CommandContext, _args: string) {
   };
 }
 
+/**
+ * Extracts a `--scope <user|project>` (or `--scope=...`) flag from the raw
+ * slash-command argument string, returning the remaining source plus the
+ * parsed scope. Keeps `/extensions install` aligned with the `extensions
+ * install --scope` CLI command.
+ */
+function parseInstallArgs(args: string): {
+  source: string;
+  scope: ExtensionScope;
+} {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const rest: string[] = [];
+  let scope = ExtensionScope.User;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    let value: string | undefined;
+    if (token === '--scope') {
+      value = tokens[++i];
+    } else if (token.startsWith('--scope=')) {
+      value = token.slice('--scope='.length);
+    } else {
+      rest.push(token);
+      continue;
+    }
+    scope =
+      value?.toLowerCase() === ExtensionScope.Project
+        ? ExtensionScope.Project
+        : ExtensionScope.User;
+  }
+  return { source: rest.join(' '), scope };
+}
+
 async function installAction(context: CommandContext, args: string) {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
@@ -109,12 +142,12 @@ async function installAction(context: CommandContext, args: string) {
     return;
   }
 
-  const source = args.trim();
+  const { source, scope } = parseInstallArgs(args);
   if (!source) {
     context.ui.addItem(
       {
         type: MessageType.ERROR,
-        text: t('Usage: /extensions install <source>'),
+        text: t('Usage: /extensions install <source> [--scope user|project]'),
       },
       Date.now(),
     );
@@ -133,7 +166,14 @@ async function installAction(context: CommandContext, args: string) {
       },
       Date.now(),
     );
-    const extension = await extensionManager.installExtension(installMetadata);
+    const extension = await extensionManager.installExtension(
+      installMetadata,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      scope,
+    );
     context.ui.addItem(
       {
         type: MessageType.INFO,

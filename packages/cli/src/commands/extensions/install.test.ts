@@ -23,6 +23,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     installExtension: mockInstallExtension,
     refreshCache: mockRefreshCache,
   })),
+  ExtensionScope: { User: 'user', Project: 'project' },
+  redactUrlCredentials: vi.fn((s: string) => s),
   parseInstallSource: mockParseInstallSource,
 }));
 
@@ -112,6 +114,38 @@ describe('handleInstall', () => {
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "https-extension" installed successfully and enabled.',
+    );
+
+    processSpy.mockRestore();
+  });
+
+  it('should install at project scope and report project-specific success', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockParseInstallSource.mockResolvedValue({
+      type: 'local',
+      source: '/local/ext',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'proj-extension' });
+
+    await handleInstall({
+      source: '/local/ext',
+      scope: 'project',
+    });
+
+    // scope is passed as the 6th argument to installExtension.
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Function),
+      undefined,
+      undefined,
+      undefined,
+      'project',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "proj-extension" installed successfully and enabled for this project.',
     );
 
     processSpy.mockRestore();
