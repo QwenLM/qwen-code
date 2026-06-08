@@ -88,7 +88,10 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
-export { buildSkillLlmContent } from './tools/skill-utils.js';
+export {
+  buildSkillLlmContent,
+  applySkillAllowedTools,
+} from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
