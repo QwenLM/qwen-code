@@ -1275,9 +1275,10 @@ export class GeminiChat {
    * Number of failed hard-tier rescue attempts for this chat. Hard rescue is
    * forced and therefore bypasses the cheap-gate breaker, so it needs its own
    * bound to avoid spending one compression side-query on every send when
-   * history repeatedly cannot shrink. NOOP is refunded because a too-small
-   * history slice is not a broken rescue mechanism; COMPRESSED resets this
-   * unless the post-compression hard-limit guard still rejects the send.
+   * history repeatedly cannot shrink. NOOP counts toward this bound because
+   * it leaves the prompt oversized and would otherwise spend one compression
+   * side-query on every send. COMPRESSED resets this unless the
+   * post-compression hard-limit guard still rejects the send.
    */
   private hardRescueFailureCount = 0;
 
@@ -1574,7 +1575,7 @@ export class GeminiChat {
         );
       } else if (isHardTier) {
         debugLogger.warn(
-          `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. effectiveTokens=${effectiveTokens}, hard=${hard}.`,
+          `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
@@ -1602,12 +1603,6 @@ export class GeminiChat {
             trigger: shouldForceFromHard ? 'auto' : undefined,
           },
         );
-        if (
-          shouldForceFromHard &&
-          isCompressionFailureStatus(compressionInfo.compressionStatus)
-        ) {
-          this.hardRescueFailureCount += 1;
-        }
       }
       const localPromptTokensAfterCompression = shouldForceFromHard
         ? estimatePromptTokens(
