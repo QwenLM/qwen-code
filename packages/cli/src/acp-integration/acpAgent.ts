@@ -2860,17 +2860,19 @@ class QwenAgent implements Agent {
             debugLogger.warn('Failed to write output-language.md:', err);
           }
 
-          try {
-            this.settings.setValue(
-              SettingScope.User,
-              'general.outputLanguage',
-              settingValue,
-            );
-          } catch (err) {
-            debugLogger.warn('Failed to persist output language setting:', err);
-          }
-
           if (fileWriteOk) {
+            try {
+              this.settings.setValue(
+                SettingScope.User,
+                'general.outputLanguage',
+                settingValue,
+              );
+            } catch (err) {
+              debugLogger.warn(
+                'Failed to persist output language setting:',
+                err,
+              );
+            }
             const allSessions = [...this.sessions.values()];
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
