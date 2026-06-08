@@ -76,3 +76,4 @@ export {
   type PolicyDecision,
   type ToolCallContext,
 } from './policy/evaluator.js';
+export { PolicyEnforcer } from './policy/enforcer.js';
