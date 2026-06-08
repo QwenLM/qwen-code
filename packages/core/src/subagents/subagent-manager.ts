@@ -46,6 +46,17 @@ import {
 } from '../utils/modelId.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
+import {
+  COLOR_VALUES,
+  isColor,
+  isIsolation,
+  isMemory,
+  isPermissionMode,
+  parseEffort,
+  parseMaxTurns,
+  parseStringOrArray,
+  permissionModeToApprovalMode,
+} from './agent-frontmatter-schema.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
@@ -612,6 +623,43 @@ export class SubagentManager {
       frontmatter['background'] = true;
     }
 
+    // CC 2.1.168 declarative-agent fields (round-trip parity).
+    if (config.permissionMode) {
+      frontmatter['permissionMode'] = config.permissionMode;
+    }
+
+    if (config.effort !== undefined) {
+      frontmatter['effort'] = config.effort;
+    }
+
+    if (config.maxTurns !== undefined) {
+      frontmatter['maxTurns'] = config.maxTurns;
+    }
+
+    if (config.skills && config.skills.length > 0) {
+      frontmatter['skills'] = config.skills;
+    }
+
+    if (config.initialPrompt) {
+      frontmatter['initialPrompt'] = config.initialPrompt;
+    }
+
+    if (config.memory) {
+      frontmatter['memory'] = config.memory;
+    }
+
+    if (config.isolation) {
+      frontmatter['isolation'] = config.isolation;
+    }
+
+    if (config.mcpServers !== undefined) {
+      frontmatter['mcpServers'] = config.mcpServers;
+    }
+
+    if (config.hooks !== undefined) {
+      frontmatter['hooks'] = config.hooks;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -1134,7 +1182,24 @@ function parseSubagentContent(
     const runConfig = frontmatter['runConfig'] as
       | Record<string, unknown>
       | undefined;
-    const color = frontmatter['color'] as string | undefined;
+    const colorRaw = frontmatter['color'];
+    // CC silently drops colors outside the allowlist (_Y). qwen-code also
+    // retains the legacy `auto` sentinel so existing .qwen/agents/*.md
+    // files with `color: auto` keep their semantics through the serializer's
+    // omit-when-auto branch.
+    const color =
+      typeof colorRaw === 'string' && (isColor(colorRaw) || colorRaw === 'auto')
+        ? colorRaw
+        : undefined;
+    if (
+      colorRaw !== undefined &&
+      color === undefined &&
+      typeof colorRaw === 'string'
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid color '${colorRaw}'. Valid options: ${COLOR_VALUES.join(', ')}, auto. Dropping field.`,
+      );
+    }
     const approvalModeRaw = frontmatter['approvalMode'];
     if (
       approvalModeRaw !== undefined &&
@@ -1179,12 +1244,88 @@ function parseSubagentContent(
     const background =
       backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
 
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    // permissionMode: CC enum carried verbatim. Bridges to approvalMode only
+    // when approvalMode is unset.
+    const permissionModeRaw = frontmatter['permissionMode'];
+    const permissionMode = isPermissionMode(permissionModeRaw)
+      ? permissionModeRaw
+      : undefined;
+    if (
+      permissionModeRaw !== undefined &&
+      permissionModeRaw !== null &&
+      permissionMode === undefined
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid permissionMode '${permissionModeRaw}'. Dropping field.`,
+      );
+    }
+    const bridgedApprovalMode =
+      approvalMode === undefined && permissionMode !== undefined
+        ? permissionModeToApprovalMode(permissionMode)
+        : undefined;
+    const effectiveApprovalMode = approvalMode ?? bridgedApprovalMode;
+
+    // effort: DL7 GN enum or integer; `med` alias normalises to `medium`.
+    const effort = parseEffort(frontmatter['effort']);
+    if (frontmatter['effort'] !== undefined && effort === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid effort '${frontmatter['effort']}'. Dropping field.`,
+      );
+    }
+
+    // maxTurns: positive integer (or numeric string).
+    const maxTurns = parseMaxTurns(frontmatter['maxTurns']);
+    if (frontmatter['maxTurns'] !== undefined && maxTurns === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid maxTurns '${frontmatter['maxTurns']}'. Dropping field.`,
+      );
+    }
+
+    // skills: comma-separated string or YAML array.
+    const skills = parseStringOrArray(frontmatter['skills']);
+
+    // initialPrompt: any non-empty-after-trim string.
+    const initialPromptRaw = frontmatter['initialPrompt'];
+    const initialPrompt =
+      typeof initialPromptRaw === 'string' && initialPromptRaw.trim().length > 0
+        ? initialPromptRaw
+        : undefined;
+
+    // memory: CC enum.
+    const memoryRaw = frontmatter['memory'];
+    const memory = isMemory(memoryRaw) ? memoryRaw : undefined;
+    if (memoryRaw !== undefined && memoryRaw !== null && memory === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid memory '${memoryRaw}'. Dropping field.`,
+      );
+    }
+
+    // isolation: CC enum (currently "worktree" only).
+    const isolationRaw = frontmatter['isolation'];
+    const isolation = isIsolation(isolationRaw) ? isolationRaw : undefined;
+    if (
+      isolationRaw !== undefined &&
+      isolationRaw !== null &&
+      isolation === undefined
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid isolation '${isolationRaw}'. Dropping field.`,
+      );
+    }
+
+    // mcpServers / hooks: loose validation per CC Ig5 (z.unknown()). Carried
+    // verbatim; runtime semantics deferred to follow-up PRs.
+    const mcpServers = frontmatter['mcpServers'];
+    const hooks = frontmatter['hooks'];
+
     const config: SubagentConfig = {
       name,
       description,
       tools,
       disallowedTools,
-      approvalMode,
+      approvalMode: effectiveApprovalMode,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
@@ -1192,6 +1333,15 @@ function parseSubagentContent(
       color,
       level,
       ...(background ? { background } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(skills !== undefined ? { skills } : {}),
+      ...(initialPrompt !== undefined ? { initialPrompt } : {}),
+      ...(memory !== undefined ? { memory } : {}),
+      ...(isolation !== undefined ? { isolation } : {}),
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
     };
 
     // Validate the parsed configuration

@@ -207,6 +207,8 @@ describe('SubagentManager', () => {
           yaml += `disallowedTools:\n${value.map((t) => `  - ${t}`).join('\n')}\n`;
         } else if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
+        } else if (key === 'skills' && Array.isArray(value)) {
+          yaml += `skills:\n${value.map((s) => `  - ${s}`).join('\n')}\n`;
         } else if (key === 'model') {
           yaml += `model: ${value}\n`;
         } else if (key === 'runConfig' && typeof value === 'object' && value) {
@@ -593,6 +595,339 @@ You are an agent.
 
       expect(config.background).toBeUndefined();
     });
+
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    it('should parse valid permissionMode and bridge to approvalMode', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBe('bypassPermissions');
+      expect(config.approvalMode).toBe('yolo');
+    });
+
+    it('should prefer explicit approvalMode over permissionMode bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'plan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\napprovalMode: plan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.approvalMode).toBe('plan');
+      expect(config.permissionMode).toBe('bypassPermissions');
+    });
+
+    it('should drop invalid permissionMode and not bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'not-a-mode',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: not-a-mode\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBeUndefined();
+      expect(config.approvalMode).toBeUndefined();
+    });
+
+    it('should parse valid effort string', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        effort: 'high',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\neffort: high\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.effort).toBe('high');
+    });
+
+    it('should normalise effort alias med → medium', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        effort: 'med',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\neffort: med\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.effort).toBe('medium');
+    });
+
+    it('should accept integer effort', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        effort: 7,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\neffort: 7\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.effort).toBe(7);
+    });
+
+    it('should drop invalid effort', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        effort: 'extreme',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\neffort: extreme\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.effort).toBeUndefined();
+    });
+
+    it('should parse maxTurns as number', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: 42,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: 42\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should parse maxTurns from numeric string', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: '42',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: "42"\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should drop negative or zero maxTurns', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: -1,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: -1\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBeUndefined();
+    });
+
+    it('should parse skills from comma-separated string', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        skills: 'lint, format',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nskills: "lint, format"\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.skills).toEqual(['lint', 'format']);
+    });
+
+    it('should parse skills from YAML array', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        skills: ['lint', 'format'],
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nskills:\n  - lint\n  - format\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.skills).toEqual(['lint', 'format']);
+    });
+
+    it('should parse initialPrompt verbatim', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        initialPrompt: 'Start by reading README.md',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ninitialPrompt: Start by reading README.md\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.initialPrompt).toBe('Start by reading README.md');
+    });
+
+    it('should drop whitespace-only initialPrompt', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        initialPrompt: '   ',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ninitialPrompt: "   "\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.initialPrompt).toBeUndefined();
+    });
+
+    it('should parse valid memory value', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        memory: 'project',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmemory: project\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.memory).toBe('project');
+    });
+
+    it('should drop invalid memory value', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        memory: 'cloud',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmemory: cloud\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.memory).toBeUndefined();
+    });
+
+    it('should parse isolation: worktree', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        isolation: 'worktree',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nisolation: worktree\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.isolation).toBe('worktree');
+    });
+
+    it('should drop invalid isolation value', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        isolation: 'docker',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nisolation: docker\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.isolation).toBeUndefined();
+    });
+
+    it('should carry mcpServers verbatim (loose validation)', () => {
+      const mcpServers = [{ filesystem: { type: 'stdio' } }];
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers: [...]\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should carry hooks verbatim (loose validation)', () => {
+      const hooks = { PreToolUse: [] };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks: {...}\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toEqual(hooks);
+    });
+
+    it('should preserve color from allowlist', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'cyan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: cyan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBe('cyan');
+    });
+
+    it('should drop color not in allowlist (matches CC _Y silent drop)', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'magenta',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: magenta\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBeUndefined();
+    });
+
+    it('should preserve auto color (qwen-code legacy sentinel)', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'auto',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: auto\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      // 'auto' is the legacy sentinel kept for backward compat with existing
+      // .qwen/agents/*.md files; it is not in COLOR_VALUES but the parser
+      // preserves it for the serializer's omit-when-auto path.
+      expect(config.color).toBe('auto');
+    });
   });
 
   describe('serializeSubagent', () => {
@@ -701,6 +1036,88 @@ You are an agent.
       );
 
       expect(parsed.background).toBe(true);
+    });
+
+    // --- CC 2.1.168 declarative-agent fields serialization ---
+
+    it('should serialize permissionMode when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+      });
+      expect(serialized).toContain('permissionMode: bypassPermissions');
+    });
+
+    it('should serialize effort when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        effort: 'high',
+      });
+      expect(serialized).toContain('effort: high');
+    });
+
+    it('should serialize maxTurns when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        maxTurns: 25,
+      });
+      expect(serialized).toContain('maxTurns: 25');
+    });
+
+    it('should serialize skills array when non-empty', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        skills: ['lint', 'format'],
+      });
+      expect(serialized).toContain('skills:');
+      expect(serialized).toContain('- lint');
+      expect(serialized).toContain('- format');
+    });
+
+    it('should not serialize empty skills array', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        skills: [],
+      });
+      expect(serialized).not.toContain('skills:');
+    });
+
+    it('should serialize initialPrompt when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        initialPrompt: 'Begin reading README',
+      });
+      expect(serialized).toContain('initialPrompt:');
+      expect(serialized).toContain('Begin reading README');
+    });
+
+    it('should serialize memory when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        memory: 'project',
+      });
+      expect(serialized).toContain('memory: project');
+    });
+
+    it('should serialize isolation when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        isolation: 'worktree',
+      });
+      expect(serialized).toContain('isolation: worktree');
+    });
+
+    it('should not include new fields when undefined', () => {
+      const serialized = manager.serializeSubagent(validConfig);
+      expect(serialized).not.toContain('permissionMode:');
+      expect(serialized).not.toContain('effort:');
+      expect(serialized).not.toContain('maxTurns:');
+      expect(serialized).not.toContain('skills:');
+      expect(serialized).not.toContain('initialPrompt:');
+      expect(serialized).not.toContain('memory:');
+      expect(serialized).not.toContain('isolation:');
+      expect(serialized).not.toContain('mcpServers:');
+      expect(serialized).not.toContain('hooks:');
     });
   });
 
