@@ -2,13 +2,13 @@
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a security vulnerability in Qwen Code, please report it responsibly.
+We take security seriously. If you discover a security vulnerability in OpenWork, please report it responsibly.
 
 ### How to Report
 
-**Please do NOT report security vulnerabilities through public GitHub issues.**
+Please do not publish exploit details in public GitHub issues.
 
-Instead, please send an email to: **security@craft.do**
+OpenWork does not currently maintain a dedicated security email address. If GitHub private vulnerability reporting is available for this repository, use that channel. Otherwise, open a minimal public issue that requests maintainer contact without including exploit details, secrets, or proof-of-concept code.
 
 Include the following information:
 
@@ -19,17 +19,15 @@ Include the following information:
 
 ### What to Expect
 
-- **Acknowledgment**: We will acknowledge receipt within 48 hours
-- **Initial Assessment**: We will provide an initial assessment within 7 days
-- **Resolution Timeline**: We aim to resolve critical issues within 30 days
+Maintainers will review reports on a best-effort basis. Response and resolution timelines depend on maintainer availability and the severity of the issue.
 
 ### Scope
 
 This policy applies to:
 
-- The Qwen Code desktop application
-- The `@craft-agent/*` npm packages
-- Official Qwen Code repositories
+- The OpenWork desktop application
+- OpenWork server and shared packages
+- Official OpenWork repositories
 
 ### Out of Scope
 
@@ -44,11 +42,11 @@ This policy applies to:
 | Latest   | :white_check_mark: |
 | < Latest | :x:                |
 
-We only provide security updates for the latest version. Please keep your installation up to date.
+We currently provide security updates for the latest version only. Please keep your installation up to date.
 
 ## Security Best Practices
 
-When using Qwen Code:
+When using OpenWork:
 
 1. **Keep credentials secure**: Never commit `.env` files or credentials
 2. **Use environment variables**: Store secrets in environment variables
