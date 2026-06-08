@@ -7,6 +7,7 @@
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import type { DaemonSessionSummary } from '@qwen-code/sdk';
 
 export interface StubDaemon {
   baseUrl: string;
@@ -34,6 +35,16 @@ export interface StubDaemonOptions {
   promptStatus?: number;
   /** stopReason returned by POST /session/:id/prompt on success (default 'end_turn'). */
   promptStopReason?: string;
+  /** workspaceCwd reported by GET /capabilities (default '/stub/workspace'). */
+  workspaceCwd?: string;
+  /**
+   * Sessions returned by GET /workspace/:cwd/sessions (default []). Read live
+   * per-request, so a test can mutate the passed array (e.g. `sessions.length=0`)
+   * and have the next poll tick observe the change.
+   */
+  sessions?: DaemonSessionSummary[];
+  /** Status for GET /capabilities (default 200). Non-200 → { error }. */
+  capabilitiesStatus?: number;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -52,6 +63,25 @@ export async function startStubDaemon(
   app.use(express.json());
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+  app.get('/capabilities', (_req, res) => {
+    const status = opts.capabilitiesStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    res.json({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: opts.workspaceCwd ?? '/stub/workspace',
+    });
+  });
+
+  app.get('/workspace/:cwd/sessions', (_req, res) => {
+    res.json({ sessions: opts.sessions ?? [] });
+  });
 
   app.get('/session/:id/events', (req, res) => {
     state.lastEventIdHeader = req.headers['last-event-id'] as
