@@ -354,6 +354,30 @@ describe('gateway app', () => {
     expect((await res.json()).stopReason).toBe('end_turn');
   });
 
+  it('records activity on a prompt POST without breaking the route (working-device middleware wired)', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, APPROVE, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'worker' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prompt: 'hi' }),
+    });
+    // The recordActivity middleware runs after requireScope and must not alter
+    // the route's normal 200 response.
+    expect(res.status).toBe(200);
+    expect((await res.json()).stopReason).toBe('end_turn');
+  });
+
   it('403s a prompt from a session:read-only token', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]);

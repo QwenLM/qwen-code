@@ -32,6 +32,10 @@ import { createRoutingRouter } from './routes/routing.js';
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import type { SnoozeStore } from './routing/snooze.js';
+import {
+  WorkingDeviceTracker,
+  recordActivity,
+} from './routing/workingDevice.js';
 
 export interface GatewayDeps {
   daemon: DaemonClient;
@@ -65,6 +69,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const audit = new AuditLog(
     deps.auditPath ?? join(homedir(), '.qwen', 'rc', 'audit.log'),
   );
+  // Process-local activity tracker: feeds the notifier's working-device
+  // suppression and is touched by recordActivity on the human-action POSTs.
+  const workingDevice = new WorkingDeviceTracker();
 
   app.get('/rc/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -86,11 +93,13 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.post(
     '/rc/session/:id/permission/:requestId',
     requireScope(APPROVE, audit),
+    recordActivity(workingDevice),
     createPermissionVoteRoute(deps.daemon, audit),
   );
   app.post(
     '/rc/session/:id/prompt',
     requireScope(WRITE, audit),
+    recordActivity(workingDevice),
     createPromptRoute(deps.daemon, audit),
   );
   app.get(
@@ -123,6 +132,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       sender,
       deps.snooze,
       audit,
+      workingDevice,
     );
     app.use(
       '/rc/push',
