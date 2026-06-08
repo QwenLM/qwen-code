@@ -24,6 +24,7 @@ import {
   getStartupContextLength,
   isSystemReminderContent,
   stripStartupContext,
+  formatDateForContext,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
@@ -121,7 +122,6 @@ describe('getEnvironmentContext', () => {
     const context = parts[0].text;
 
     expect(context).toContain("Today's date is");
-    expect(context).toContain("(formatted according to the user's locale)");
     expect(context).toContain(`My operating system is: ${process.platform}`);
     expect(context).toContain(
       "I'm currently working in the directory: /test/dir",
@@ -385,6 +385,20 @@ describe('stripStartupContext', () => {
   });
 });
 
+describe('formatDateForContext', () => {
+  it('should format date in en-US locale regardless of system timezone', () => {
+    expect(formatDateForContext(new Date('2026-06-05T12:00:00Z'))).toBe(
+      'Friday, June 5, 2026',
+    );
+    expect(formatDateForContext(new Date('2026-01-01T12:00:00Z'))).toBe(
+      'Thursday, January 1, 2026',
+    );
+  });
+
+  it('should use current date when no date provided', () => {
+    const result = formatDateForContext();
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
 describe('startup reminder builders', () => {
   function registry(overrides: Partial<ToolRegistry>): ToolRegistry {
     return {
