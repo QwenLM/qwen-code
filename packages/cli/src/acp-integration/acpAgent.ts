@@ -2602,14 +2602,22 @@ class QwenAgent implements Agent {
           }
 
           const allSessions = [...this.sessions.values()];
-          await Promise.allSettled(
+          const results = await Promise.allSettled(
             allSessions.map(async (s) => {
               const cfg = s.getConfig();
               await cfg.refreshHierarchicalMemory();
               await cfg.getGeminiClient()?.refreshSystemInstruction();
             }),
           );
-          refreshed = true;
+          const failedCount = results.filter(
+            (r) => r.status === 'rejected',
+          ).length;
+          if (failedCount > 0) {
+            debugLogger.warn(
+              `Language refresh failed for ${failedCount}/${results.length} session(s)`,
+            );
+          }
+          refreshed = failedCount < results.length;
           outputLanguage = resolved;
         }
 
