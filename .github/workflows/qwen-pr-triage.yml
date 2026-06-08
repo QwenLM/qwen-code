@@ -215,13 +215,12 @@ jobs:
           # Review skill posts comments directly; verdict defaults to pass
           echo "verdict=pass" >> "$GITHUB_OUTPUT"
 
-  # ─── Stage 2b: Tmux Testing (parallel, internal PRs only) ──────────
+  # ─── Stage 2b: Tmux Testing (after review, internal PRs only) ───────
+  # Runs AFTER review — no point testing if code has critical issues.
   tmux-testing:
-    needs: ['resolve', 'product-decision']
+    needs: ['resolve', 'product-decision', 'review']
     if: >-
-      always() &&
-      needs.product-decision.result == 'success' &&
-      needs.product-decision.outputs.verdict == 'pass' &&
+      needs.review.result == 'success' &&
       needs.resolve.outputs.is_fork == 'false'
     timeout-minutes: 20
     concurrency:

@@ -22,7 +22,7 @@ This evaluates:
 
 If verdict is `fail` or `needs_human` → stop here. Do not proceed to review.
 
-### Stage 2: Code Review (parallel in CI)
+### Stage 2: Code Review
 
 Invoke the `/review` skill:
 
@@ -32,7 +32,7 @@ Invoke the `/review` skill:
 
 This runs the full multi-agent code review and posts inline comments.
 
-### Stage 3: Real-Scenario Testing (parallel in CI, internal PRs only)
+### Stage 3: Real-Scenario Testing (internal PRs only)
 
 Invoke the `tmux-real-user-testing` skill to drive the real product in tmux.
 
@@ -57,15 +57,36 @@ This reads all prior stage comments (by `<!-- qwen-triage:* -->` markers), refle
 - `request_changes` → `gh pr review --request-changes`
 - `escalate` → don't approve or reject, tag maintainer
 
-## Sequential Execution (Local)
+## Execution Flow (Local)
 
-When running locally via `/triage <N>`:
+When running locally via `/triage <N>`, follow this dependency chain:
 
-1. Run Stage 1. If it fails → stop.
-2. Run Stage 2 and Stage 3 (sequentially, since we're single-threaded locally).
-3. Run Stage 4.
+```
+/product-decision
+    │
+    ├─ verdict=fail → STOP (post comment, do not continue)
+    ├─ verdict=needs_human → STOP (escalate to maintainer)
+    │
+    ▼ verdict=pass
+/review --comment
+    │
+    ├─ failed or has critical blockers → skip tmux, go to /approval-decision
+    │
+    ▼ passed
+tmux-real-user-testing (skip for fork PRs)
+    │
+    ▼
+/approval-decision (reads all prior comments, decides final verdict)
+```
 
-Each stage posts its own comment with a unique marker. Re-runs update comments in place.
+This is a **serial pipeline** — each stage gates the next:
+
+- **product-decision fails** → nothing else runs
+- **review fails or finds critical issues** → tmux skipped, approval still runs
+- **tmux fails** → approval still runs (with whatever info is available)
+- **approval-decision always runs** as long as product-decision passed
+
+Each stage posts its own comment with a unique marker. Re-runs update in place.
 
 ## Comment Markers
 
