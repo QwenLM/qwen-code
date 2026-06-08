@@ -210,6 +210,42 @@ vi.mock('../telemetry/loggers.js', () => ({
   logApiRequest: vi.fn(),
 }));
 
+const { mockClientDebugLogger } = vi.hoisted(() => ({
+  mockClientDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'CLIENT'
+        ? mockClientDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
+
+vi.mock(
+  '../services/microcompaction/microcompact.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/microcompaction/microcompact.js')
+      >();
+    return {
+      ...actual,
+      microcompactHistory: vi.fn(actual.microcompactHistory),
+    };
+  },
+);
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+
 // Mock RequestTokenizer to use simple character-based estimation
 vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
   RequestTokenizer: class {
@@ -2004,6 +2040,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('continues sendMessage when microcompactHistory throws', async () => {
+      mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      vi.mocked(microcompactHistory).mockImplementationOnce(() => {
+        throw new Error('compaction boom');
+      });
+      mockClientDebugLogger.error.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-mc-error-test',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('microcompactHistory failed: compaction boom'),
+      );
+      expect(setHistory).not.toHaveBeenCalled();
     });
   });
 

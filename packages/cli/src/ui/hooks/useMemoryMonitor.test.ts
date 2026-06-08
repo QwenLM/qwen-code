@@ -6,6 +6,20 @@
 
 import { renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
+
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import {
   useMemoryMonitor,
   MEMORY_CHECK_INTERVAL,
@@ -140,5 +154,34 @@ describe('useMemoryMonitor', () => {
     } as NodeJS.MemoryUsage);
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues interval when compactOldItems throws', () => {
+    const compactOldItems = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('compact boom');
+      })
+      .mockImplementation(() => {});
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
+    } as NodeJS.MemoryUsage);
+    mockDebugLogger.error.mockClear();
+
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+
+    // First tick — compactOldItems throws, error is caught
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
+    expect(mockDebugLogger.error).toHaveBeenCalledTimes(1);
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      expect.stringContaining('compactOldItems failed: compact boom'),
+    );
+
+    // Advance past cooldown + one more interval tick — compactOldItems is called again and succeeds
+    vi.advanceTimersByTime(UI_COMPACT_COOLDOWN_MS + MEMORY_DEBUG_INTERVAL);
+    expect(compactOldItems).toHaveBeenCalledTimes(2);
   });
 });
