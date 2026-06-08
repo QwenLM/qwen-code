@@ -599,6 +599,11 @@ export async function markActiveAutoImproveRunCancelled(
   cwd: string,
   loopId: string,
 ): Promise<boolean> {
+  // Exported and callable with an arbitrary loopId; self-protect with an early
+  // return so an invalid id can never reach assertValidLoopId (which throws)
+  // via readAutoImproveLoopState below, regardless of the caller's error
+  // handling or the active-pointer state.
+  if (!isValidAutoImproveLoopId(loopId)) return false;
   const repoRoot = await resolveRepoRoot(cwd);
   const active = await readActiveAutoImproveLoop(repoRoot);
   // A cleared active pointer (active === null) is expected when cancelling a

@@ -25,6 +25,7 @@ import {
   isActiveAutoImproveRunRef,
   isRecord,
   isTerminalAutoImproveRunStatus,
+  isValidAutoImproveLoopId,
   listAutoImproveLoopStates,
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
@@ -50,7 +51,17 @@ const HOURLY_CRON_MINUTE_OFFSET = 7;
 
 // The repo root is constant for a session, but getRepoRoot() is called on every
 // tick/status/start/stop. Memoize per cwd to avoid re-spawning `git rev-parse`.
+// Entries are keyed by cwd, so distinct working directories resolve correctly;
+// the only accepted limitation is a `.git` move under a stable cwd within one
+// long-lived process (session-scoped, as with other CLI caches). The map is
+// bounded to avoid unbounded growth in a hypothetical multi-project daemon, and
+// clearRepoRootCache() is exported for lifecycle hooks that need a reset.
+const REPO_ROOT_CACHE_MAX = 16;
 const repoRootCache = new Map<string, Promise<string>>();
+
+export function clearRepoRootCache(): void {
+  repoRootCache.clear();
+}
 
 type IntervalParseResult =
   | { ok: true; cron: string; cadence: string }
@@ -175,6 +186,12 @@ async function getRepoRoot(config: Config): Promise<string> {
       return cwd;
     }
   })();
+  // Bound the cache: evict the oldest entry (Map preserves insertion order)
+  // once we hit the cap, before inserting the new one.
+  if (repoRootCache.size >= REPO_ROOT_CACHE_MAX) {
+    const oldest = repoRootCache.keys().next().value;
+    if (oldest !== undefined) repoRootCache.delete(oldest);
+  }
   repoRootCache.set(cwd, resolved);
   return resolved;
 }
@@ -772,6 +789,12 @@ async function tickAutoImprove(
   config: Config,
   loopId: string,
 ): Promise<SlashCommandActionReturn> {
+  // Defense-in-depth: validate the user-supplied loopId at entry rather than
+  // relying on the active-pointer check below staying in position. Fails
+  // gracefully instead of letting assertValidLoopId throw deeper in the chain.
+  if (!isValidAutoImproveLoopId(loopId)) {
+    return message('info', t('Auto-improve tick skipped: loop is not active.'));
+  }
   let repoRoot: string;
   try {
     repoRoot = await getRepoRoot(config);
