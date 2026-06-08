@@ -30,6 +30,7 @@ export {
   SESSION_READ,
   OWNER,
   APPROVE,
+  WRITE,
   KNOWN_SCOPES,
   type RcScope,
 } from './scopes.js';

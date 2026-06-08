@@ -16,5 +16,13 @@ export const OWNER: RcScope = 'owner';
 /** Vote on a session's pending permission requests. */
 export const APPROVE: RcScope = 'approve';
 
+/** Send a prompt to a session (start a turn). */
+export const WRITE: RcScope = 'write';
+
 /** All scopes the gateway recognizes (used to reject unknown mint scopes). */
-export const KNOWN_SCOPES: readonly RcScope[] = [OWNER, SESSION_READ, APPROVE];
+export const KNOWN_SCOPES: readonly RcScope[] = [
+  OWNER,
+  SESSION_READ,
+  APPROVE,
+  WRITE,
+];
