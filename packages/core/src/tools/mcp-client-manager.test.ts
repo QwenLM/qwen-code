@@ -2507,6 +2507,26 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(createdCount).toBe(0);
   });
 
+  it('discoverMcpToolsForServerInternal rejects pending-approval servers', async () => {
+    let createdCount = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      createdCount += 1;
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        isMcpServerPendingApproval: ((name: string) =>
+          name === 'a') as Config['isMcpServerPendingApproval'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+
+    await manager.discoverMcpToolsForServer('a', config);
+
+    expect(createdCount).toBe(0);
+  });
+
   it('discoverMcpToolsForServerInternal disconnects on discover() failure (wenshao R7 #3 line 634)', async () => {
     // Pre-fix: `connect()` succeeds + `discover()` throws → catch
     // deletes the client from the map without calling
@@ -2583,6 +2603,49 @@ describe('McpClientManager — PR 14 guardrails', () => {
     await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
       /'a' is disabled/,
     );
+  });
+
+  it('readResource rejects existing-but-now-pending servers', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    let pending = false;
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        isMcpServerPendingApproval: ((name: string) =>
+          name === 'a' && pending) as Config['isMcpServerPendingApproval'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(config);
+
+    pending = true;
+
+    await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
+      /'a' is pending approval/,
+    );
+  });
+
+  it('readResource lazy spawn rejects pending-approval servers', async () => {
+    let createdCount = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      createdCount += 1;
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        isMcpServerPendingApproval: ((name: string) =>
+          name === 'a') as Config['isMcpServerPendingApproval'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+
+    await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
+      /'a' is pending approval/,
+    );
+    expect(createdCount).toBe(0);
   });
 
   it('readResource lazy spawn disconnects on connect() failure (wenshao R9 #2 line 1534)', async () => {
