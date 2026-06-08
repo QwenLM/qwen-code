@@ -225,6 +225,34 @@ describe('extensionsCommand', () => {
       );
     });
 
+    it('parses the --scope=project form', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+      });
+
+      await installAction(
+        mockContext,
+        '--scope=project https://github.com/test/extension',
+      );
+
+      expect(mockParseInstallSource).toHaveBeenCalledWith(
+        'https://github.com/test/extension',
+      );
+      expect(mockInstallExtension).toHaveBeenCalledWith(
+        expect.any(Object),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ExtensionScope.Project,
+      );
+    });
+
     it('defaults to user scope when no --scope flag is given', async () => {
       mockParseInstallSource.mockResolvedValue({
         type: 'git',

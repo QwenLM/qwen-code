@@ -652,6 +652,105 @@ describe('extension tests', () => {
         manager.getLoadedExtensions().find((e) => e.name === 'solo'),
       ).toBeUndefined();
     });
+
+    it('allows installing a project copy when a user copy of the same name is loaded, without displacing it', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'shared',
+        version: '1.0.0',
+      });
+      const sourceDir = path.join(tempHomeDir, 'shared-src');
+      fs.mkdirSync(sourceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'shared', version: '2.0.0' }),
+      );
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      // Installing a project copy must not be blocked by the user copy.
+      await expect(
+        manager.installExtension(
+          { source: sourceDir, type: 'local', originSource: 'QwenCode' },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          ExtensionScope.Project,
+        ),
+      ).resolves.toBeDefined();
+
+      // Project copy is on disk, but the user copy still wins in the cache.
+      expect(
+        fs.existsSync(
+          path.join(projectExtensionsDir, 'shared', EXTENSIONS_CONFIG_FILENAME),
+        ),
+      ).toBe(true);
+      const active = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'shared');
+      expect(active?.scope).toBe(ExtensionScope.User);
+      expect(active?.version).toBe('1.0.0');
+    });
+
+    it('removes only the target scope enablement override on uninstall', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'dual',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'dual',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+      // Disable at workspace scope -> override anchored at the project dir.
+      await manager.disableExtension(
+        'dual',
+        SettingScope.Workspace,
+        tempWorkspaceDir,
+      );
+      expect(manager.isEnabled('dual', tempWorkspaceDir)).toBe(false);
+
+      // Uninstalling the project copy should drop the workspace-anchored
+      // override (and leave the user copy enabled).
+      await manager.uninstallExtension(
+        'dual',
+        false,
+        undefined,
+        ExtensionScope.Project,
+      );
+
+      expect(fs.existsSync(path.join(userExtensionsDir, 'dual'))).toBe(true);
+      expect(manager.isEnabled('dual', tempWorkspaceDir)).toBe(true);
+    });
+
+    it('rejects installing an extension whose name escapes the extensions directory', async () => {
+      const sourceDir = path.join(tempHomeDir, 'evil-src');
+      fs.mkdirSync(sourceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: '..', version: '1.0.0' }),
+      );
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          { source: sourceDir, type: 'local', originSource: 'QwenCode' },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          ExtensionScope.Project,
+        ),
+      ).rejects.toThrow();
+    });
   });
 
   describe('enableExtension / disableExtension', () => {

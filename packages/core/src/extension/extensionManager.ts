@@ -511,6 +511,35 @@ export class ExtensionManager {
     }
   }
 
+  /**
+   * Removes only the enablement override(s) anchored at a specific scope path
+   * (a user uninstall targets the home dir; a project uninstall targets the
+   * project dir). The enablement config is keyed by name and shared across
+   * scopes, so a blanket removal would wipe a same-named extension's overrides
+   * at the other scope. The whole entry is deleted only once no overrides
+   * remain.
+   */
+  private removeEnablementConfigForScopePath(
+    extensionName: string,
+    scopePath: string,
+  ): void {
+    const config = this.readEnablementConfig();
+    const entry = config[extensionName];
+    if (!entry) {
+      return;
+    }
+    const target = ensureLeadingAndTrailingSlash(scopePath);
+    const remaining = entry.overrides.filter(
+      (rule) => Override.fromFileRule(rule).baseRule !== target,
+    );
+    if (remaining.length === 0) {
+      delete config[extensionName];
+    } else {
+      config[extensionName] = { overrides: remaining };
+    }
+    this.writeEnablementConfig(config);
+  }
+
   private enableByPath(
     extensionName: string,
     includeSubdirs: boolean,
@@ -1082,8 +1111,13 @@ export class ExtensionManager {
         }
 
         const newExtensionName = newExtensionConfig.name;
+        // Match within the target scope only: a user-scoped and a project-scoped
+        // extension may legitimately share a name (user scope wins on load), so
+        // installing one must not be blocked by the other.
         const previous = this.getLoadedExtensions().find(
-          (installed) => installed.name === newExtensionName,
+          (installed) =>
+            installed.name === newExtensionName &&
+            installed.scope === installScope,
         );
         if (isUpdate && !previous) {
           throw new Error(
@@ -1230,7 +1264,16 @@ export class ExtensionManager {
         }
 
         if (this.extensionCache) {
-          this.extensionCache.set(extension.name, extension);
+          // Respect user-over-project precedence: a freshly installed
+          // project-scoped copy must not displace an already-loaded
+          // user-scoped extension of the same name in the cache.
+          const existing = this.extensionCache.get(extension.name);
+          const shadowedByUser =
+            extension.scope === ExtensionScope.Project &&
+            existing?.scope === ExtensionScope.User;
+          if (!shadowedByUser) {
+            this.extensionCache.set(extension.name, extension);
+          }
         }
 
         if (isUpdate) {
@@ -1436,9 +1479,11 @@ export class ExtensionManager {
 
     if (isUpdate) return;
 
-    if (!survivingAtOtherScope) {
-      this.removeEnablementConfig(extension.name);
-    }
+    // Remove only this scope's enablement override(s) so a same-named copy at
+    // the other scope keeps its own enablement state.
+    const scopePath =
+      targetScope === ExtensionScope.Project ? currentDir : os.homedir();
+    this.removeEnablementConfigForScopePath(extension.name, scopePath);
     await this.refreshTools();
 
     logExtensionUninstall(
