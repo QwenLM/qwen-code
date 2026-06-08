@@ -104,6 +104,15 @@ export interface BridgeRestoredSession extends BridgeSession {
   lastEventId?: number;
 }
 
+export interface BridgeBranchSessionRequest {
+  name?: string;
+}
+
+export interface BridgeBranchedSession extends BridgeRestoredSession {
+  title: string;
+  forkedFrom: { sessionId: string; title: string };
+}
+
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
 export interface BridgeSessionSummary {
   sessionId: string;
@@ -191,6 +200,16 @@ export interface AcpSessionBridge {
   resumeSession(
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession>;
+
+  /**
+   * Fork a live session's JSONL transcript and load the fork via resume
+   * semantics (no history replay). Source must be idle (no active prompt).
+   */
+  branchSession(
+    sessionId: string,
+    req: BridgeBranchSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeBranchedSession>;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same

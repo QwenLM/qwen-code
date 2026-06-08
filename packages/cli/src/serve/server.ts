@@ -53,6 +53,7 @@ import { mountAcpHttp } from './acpHttp/index.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
+  BranchWhilePromptActiveError,
   createAcpSessionBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -1468,6 +1469,49 @@ export function createServeApp(
 
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  app.post('/session/:id/branch', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const body = safeBody(req);
+    let name = typeof body?.['name'] === 'string' ? body['name'] : undefined;
+    if (name) {
+      // eslint-disable-next-line no-control-regex
+      name = name.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+      if (name.length > 200) {
+        name = name.slice(0, 200);
+      }
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.branchSession(
+        sessionId,
+        { name },
+        { clientId },
+      );
+      if (!res.writable) {
+        if (!result.attached) {
+          bridge
+            .killSession(result.sessionId, { requireZeroAttaches: true })
+            .catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
+        } else {
+          bridge.detachClient(result.sessionId, result.clientId).catch(() => {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          });
+        }
+        return;
+      }
+      res.status(201).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/branch',
+        sessionId,
+      });
+    }
+  });
 
   app.get('/session/:id/context', async (req, res) => {
     const sessionId = requireSessionId(req, res);
@@ -3593,6 +3637,14 @@ function sendBridgeErrorImpl(
       errorKind: 'protocol_error',
       serverName: err.serverName,
       mcpStatus: err.mcpStatus,
+    });
+    return;
+  }
+  if (err instanceof BranchWhilePromptActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'branch_while_prompt_active',
+      sessionId: err.sessionId,
     });
     return;
   }

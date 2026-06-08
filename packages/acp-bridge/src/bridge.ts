@@ -40,6 +40,7 @@ import {
   type ServeSessionTasksStatus,
 } from './status.js';
 import {
+  BranchWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,
@@ -270,6 +271,7 @@ interface SessionEntry {
    * inline session updates / permission requests can safely inherit this id.
    */
   activePromptOriginatorClientId?: string;
+  promptActive: boolean;
   /**
    * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
    * `cancelSession` route and the `sendPrompt` abort path (originator SSE
@@ -1698,6 +1700,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       clientLastSeenAt: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
+      promptActive: false,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -2283,30 +2286,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 } else {
                   entry.activePromptOriginatorClientId = originatorClientId;
                 }
-                // Echo the user prompt to the session bus so other SSE-subscribed
-                // clients see the input alongside the agent response.
-                //
-                // The interactive prompt path was the only one not emitting
-                // `user_message_chunk` — `Session#executePrompt` (the agent
-                // side) forwards the prompt directly to the LLM; the cron path
-                // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
-                // explicitly. Without this echo, multi-client UIs only saw
-                // assistant text from peer prompts — no record of who said what.
-                //
-                // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
-                // `suppressOwnUserEcho: true` filters the echo when
-                // `event.originatorClientId === opts.clientId`. So the
-                // originator's local UI doesn't double-render its own input.
-                //
-                // Multi-modal: one envelope per content block. Non-text blocks
-                // pass through verbatim (the agent's Core multimodal echo is a
-                // for now the common text path is the immediate fix.
-                entry.cancelBroadcast = false;
-                echoPromptToSessionBus(entry, normalized, originatorClientId);
+                entry.promptActive = true;
+                try {
+                  // Echo the user prompt to the session bus so other SSE-subscribed
+                  // clients see the input alongside the agent response.
+                  //
+                  // The interactive prompt path was the only one not emitting
+                  // `user_message_chunk` — `Session#executePrompt` (the agent
+                  // side) forwards the prompt directly to the LLM; the cron path
+                  // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
+                  // explicitly. Without this echo, multi-client UIs only saw
+                  // assistant text from peer prompts — no record of who said what.
+                  //
+                  // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
+                  // `suppressOwnUserEcho: true` filters the echo when
+                  // `event.originatorClientId === opts.clientId`. So the
+                  // originator's local UI doesn't double-render its own input.
+                  //
+                  // Multi-modal: one envelope per content block. Non-text blocks
+                  // pass through verbatim (the agent's Core multimodal echo is a
+                  // for now the common text path is the immediate fix.
+                  entry.cancelBroadcast = false;
+                  echoPromptToSessionBus(entry, normalized, originatorClientId);
+                } catch (echoErr) {
+                  entry.promptActive = false;
+                  delete entry.activePromptOriginatorClientId;
+                  throw echoErr;
+                }
                 const promptPromise = entry.connection
                   .prompt(normalized)
                   .finally(() => {
                     delete entry.activePromptOriginatorClientId;
+                    entry.promptActive = false;
                   });
 
                 // Race against channel termination: if the underlying transport
@@ -2632,6 +2643,106 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    async branchSession(sessionId, req, context) {
+      if (shuttingDown) throw new Error('AcpSessionBridge is shutting down');
+
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined) {
+        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+      }
+
+      const branchResult = entry.promptQueue.then(async () => {
+        if (entry.promptActive) {
+          throw new BranchWhilePromptActiveError(sessionId);
+        }
+
+        if (
+          byId.size + inFlightSpawns.size + inFlightRestores.size >=
+          maxSessions
+        ) {
+          throw new SessionLimitExceededError(maxSessions);
+        }
+
+        const ci = await ensureChannel();
+        const result = (await withTimeout(
+          ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+            sessionId,
+            cwd: boundWorkspace,
+            name: req.name,
+          }),
+          initTimeoutMs,
+          'branchSession',
+        )) as { newSessionId: string; title: string };
+
+        if (
+          !result ||
+          typeof result.newSessionId !== 'string' ||
+          typeof result.title !== 'string'
+        ) {
+          throw new Error(
+            `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
+          );
+        }
+
+        let restored;
+        try {
+          restored = await restoreSession('resume', {
+            sessionId: result.newSessionId,
+            workspaceCwd: boundWorkspace,
+            clientId: context?.clientId,
+          });
+        } catch (restoreErr) {
+          writeStderrLine(
+            `qwen serve: branchSession resume failed for ${result.newSessionId}, attempting cleanup...`,
+          );
+          try {
+            await ci.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionClose,
+              { sessionId: result.newSessionId, cwd: boundWorkspace },
+            );
+          } catch (cleanupErr) {
+            writeStderrLine(
+              `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+            );
+          }
+          throw restoreErr;
+        }
+
+        const newEntry = byId.get(result.newSessionId);
+        if (newEntry) newEntry.displayName = result.title;
+
+        const eventData = {
+          sourceSessionId: sessionId,
+          newSessionId: result.newSessionId,
+          displayName: result.title,
+        };
+        const branchEnvelope = {
+          type: 'session_branched' as const,
+          data: eventData,
+          ...(originatorClientId ? { originatorClientId } : {}),
+        };
+        entry.events.publish(branchEnvelope);
+        broadcastWorkspaceEvent(branchEnvelope, sessionId);
+
+        return {
+          ...restored,
+          title: result.title,
+          forkedFrom: {
+            sessionId,
+            title: entry.displayName ?? sessionId.slice(0, 8),
+          },
+        };
+      });
+      entry.promptQueue = branchResult.then(
+        () => undefined,
+        () => undefined,
+      );
+      return branchResult;
+    },
+
     async closeSession(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -2795,7 +2906,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             createdAt: entry.createdAt,
             displayName: entry.displayName,
             clientCount: entry.clientIds.size,
-            hasActivePrompt: entry.activePromptOriginatorClientId !== undefined,
+            hasActivePrompt: entry.promptActive,
           });
         }
       }

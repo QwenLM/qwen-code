@@ -77,6 +77,7 @@ export type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {
+  BranchWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,

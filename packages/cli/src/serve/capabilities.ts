@@ -219,6 +219,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
+  session_branch: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

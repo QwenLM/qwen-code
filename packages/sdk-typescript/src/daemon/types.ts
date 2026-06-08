@@ -165,6 +165,15 @@ export interface DaemonRestoredSession extends DaemonSession {
   lastEventId?: number;
 }
 
+export interface BranchSessionRequest {
+  name?: string;
+}
+
+export interface DaemonBranchedSession extends DaemonRestoredSession {
+  title: string;
+  forkedFrom: { sessionId: string; title: string };
+}
+
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
 export interface DaemonSessionSummary {
   sessionId: string;

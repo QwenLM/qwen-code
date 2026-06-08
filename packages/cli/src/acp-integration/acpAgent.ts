@@ -40,7 +40,9 @@ import {
   MCPOAuthTokenStorage,
   subagentGenerator,
   redactUrlCredentials,
+  computeUniqueBranchTitle,
 } from '@qwen-code/qwen-code-core';
+import { randomUUID } from 'node:crypto';
 import type {
   ApprovalMode,
   Config,
@@ -3313,6 +3315,80 @@ class QwenAgent implements Agent {
           baseUrl: cfg?.baseUrl ?? null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBranch: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const name = params['name'];
+
+        const sourceSession = this.sessions.get(sessionId);
+        if (!sourceSession) {
+          throw new RequestError(-32004, `Session not found: ${sessionId}`, {
+            errorKind: 'session_not_found',
+            sessionId,
+          });
+        }
+
+        const recording = sourceSession.getConfig().getChatRecordingService();
+        if (recording) {
+          await recording.flush();
+        }
+
+        const newSessionId = randomUUID();
+        return await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            await sessionService.forkSession(sessionId, newSessionId);
+
+            let title: string;
+            try {
+              let baseName: string;
+              if (typeof name === 'string' && name.trim().length > 0) {
+                baseName = name.trim();
+              } else {
+                const existingTitle = recording?.getCurrentCustomTitle();
+                const stripped = existingTitle
+                  ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+                  .trim();
+                if (stripped && stripped.length > 0) {
+                  baseName = stripped;
+                } else {
+                  baseName = sessionId.slice(0, 8);
+                }
+              }
+
+              title = await computeUniqueBranchTitle(baseName, sessionService);
+              const renamed = await sessionService.renameSession(
+                newSessionId,
+                title,
+                'manual',
+              );
+              if (!renamed) {
+                throw new RequestError(
+                  -32603,
+                  `Failed to set title on forked session ${newSessionId}`,
+                  { errorKind: 'internal', sessionId: newSessionId },
+                );
+              }
+            } catch (err) {
+              sessionService.removeSession(newSessionId).catch((rmErr) => {
+                process.stderr.write(
+                  `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
+                );
+              });
+              throw err;
+            }
+
+            return { newSessionId, title };
+          },
+        );
       }
       default:
         throw RequestError.methodNotFound(method);
