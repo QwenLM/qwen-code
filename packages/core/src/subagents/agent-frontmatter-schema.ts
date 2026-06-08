@@ -156,6 +156,12 @@ export function parseEffort(value: unknown): EffortValue | number | undefined {
     if ((EFFORT_VALUES as readonly string[]).includes(trimmed)) {
       return trimmed as EffortValue;
     }
+    // CC parity: DL7 falls back to parseInt for non-enum strings so that
+    // `effort: "5"` (quoted YAML number) round-trips like `effort: 5`.
+    const asInt = Number.parseInt(trimmed, 10);
+    if (!Number.isNaN(asInt) && String(asInt) === trimmed) {
+      return asInt;
+    }
     return undefined;
   }
   if (typeof value === 'number') {

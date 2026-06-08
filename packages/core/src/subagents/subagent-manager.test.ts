@@ -629,6 +629,42 @@ You are an agent.
       expect(config.permissionMode).toBe('bypassPermissions');
     });
 
+    it('should drop invalid approvalMode (lenient) AND still bridge from valid permissionMode', () => {
+      // Self-violated-invariant fix: approvalMode used to throw on invalid
+      // values, killing the whole file. Now it warns and drops, symmetric
+      // with all the other CC-compatible fields, so a valid permissionMode
+      // can still bridge into approvalMode when the user-typed approvalMode
+      // is invalid.
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        approvalMode: 'tpyo',
+        permissionMode: 'bypassPermissions',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\napprovalMode: tpyo\npermissionMode: bypassPermissions\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.approvalMode).toBe('yolo');
+    });
+
+    it('should not throw on invalid approvalMode without permissionMode', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        approvalMode: 'tpyo',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\napprovalMode: tpyo\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.approvalMode).toBeUndefined();
+      // File still loads — only the invalid field is dropped.
+      expect(config.name).toBe('a');
+    });
+
     it('should drop invalid permissionMode and not bridge', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
@@ -1117,6 +1153,26 @@ You are an agent.
       expect(serialized).not.toContain('memory:');
       expect(serialized).not.toContain('isolation:');
       expect(serialized).not.toContain('mcpServers:');
+      expect(serialized).not.toContain('hooks:');
+    });
+
+    it('should NOT serialize mcpServers (nested-object round-trip not safe yet)', () => {
+      // The local yaml-parser only formats one level of nesting and would
+      // mangle nested mcpServers into "[object Object]" on emit. We carry the
+      // field through in memory but drop it on serialize until a real YAML
+      // library is wired in.
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        mcpServers: [{ filesystem: { type: 'stdio', command: 'node' } }],
+      });
+      expect(serialized).not.toContain('mcpServers:');
+    });
+
+    it('should NOT serialize hooks (nested-object round-trip not safe yet)', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        hooks: { PreToolUse: [{ matcher: 'x' }] },
+      });
       expect(serialized).not.toContain('hooks:');
     });
   });

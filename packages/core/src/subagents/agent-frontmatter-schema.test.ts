@@ -207,6 +207,19 @@ describe('agent-frontmatter-schema', () => {
       expect(parseEffort(100)).toBe(100);
     });
 
+    it('accepts numeric string effort (CC DL7 parity)', () => {
+      // CC's effort parser falls back to parseInt for non-enum strings so a
+      // quoted YAML number round-trips like an unquoted one.
+      expect(parseEffort('5')).toBe(5);
+      expect(parseEffort('100')).toBe(100);
+    });
+
+    it('rejects floats and partial numeric strings', () => {
+      expect(parseEffort('5.5')).toBeUndefined();
+      expect(parseEffort('5abc')).toBeUndefined();
+      expect(parseEffort('1e2')).toBeUndefined();
+    });
+
     it('returns undefined for invalid string', () => {
       expect(parseEffort('extreme')).toBeUndefined();
       expect(parseEffort('')).toBeUndefined();

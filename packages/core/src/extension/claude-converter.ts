@@ -136,6 +136,23 @@ const claudeBuildInToolsTransform = (tools: string[]): string[] => {
 };
 
 /**
+ * Frontmatter keys that {@link convertClaudeAgentConfig} owns end-to-end. Any
+ * key NOT in this set is passed through verbatim when converting CC agent
+ * files so that future CC additions survive install without code changes.
+ */
+const CONVERTER_OWNED_KEYS = new Set([
+  'name',
+  'description',
+  'tools',
+  'disallowedTools',
+  'model',
+  'permissionMode',
+  'skills',
+  'hooks',
+  'color',
+]);
+
+/**
  * Converts a Claude agent config to Qwen Code subagent format.
  * @param claudeAgent Claude agent configuration
  * @returns Converted agent config compatible with Qwen Code SubagentConfig
@@ -241,8 +258,23 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
       // Convert to Qwen format
       const qwenAgent = convertClaudeAgentConfig(claudeAgent);
 
-      // Build new frontmatter (excluding systemPrompt as it goes in body)
+      // Build new frontmatter (excluding systemPrompt as it goes in body).
+      // Step 1 passes through any CC frontmatter key that the converter does
+      // NOT own (effort, maxTurns, initialPrompt, memory, isolation,
+      // mcpServers, background, …). This keeps drop-in compatibility for
+      // upstream CC fields that the converter has not been taught about yet —
+      // when CC adds a 17th field, it survives plugin install instead of
+      // being silently stripped.
       const newFrontmatter: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(frontmatter)) {
+        if (
+          !CONVERTER_OWNED_KEYS.has(key) &&
+          key !== 'systemPrompt' &&
+          value !== undefined
+        ) {
+          newFrontmatter[key] = value;
+        }
+      }
       for (const [key, value] of Object.entries(qwenAgent)) {
         if (key !== 'systemPrompt' && value !== undefined) {
           newFrontmatter[key] = value;

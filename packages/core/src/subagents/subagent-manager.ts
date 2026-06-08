@@ -653,13 +653,13 @@ export class SubagentManager {
       frontmatter['isolation'] = config.isolation;
     }
 
-    if (config.mcpServers !== undefined) {
-      frontmatter['mcpServers'] = config.mcpServers;
-    }
-
-    if (config.hooks !== undefined) {
-      frontmatter['hooks'] = config.hooks;
-    }
+    // NOTE: mcpServers and hooks are intentionally NOT serialised. They are
+    // carried verbatim from the file into in-memory config, but the local
+    // yaml-parser only formats one level of nesting and would mangle their
+    // shape on emit. Until a real YAML library is wired in, the
+    // `updateSubagent` write path will drop these fields rather than corrupt
+    // them. Users who edit them manually retain their values through reads;
+    // see docs/users/features/sub-agents.md for the limitation.
 
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
@@ -1206,25 +1206,24 @@ function parseSubagentContent(
       );
     }
     const approvalModeRaw = frontmatter['approvalMode'];
-    if (
-      approvalModeRaw !== undefined &&
-      approvalModeRaw !== null &&
-      typeof approvalModeRaw !== 'string'
-    ) {
-      throw new Error(
-        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${APPROVAL_MODES.join(', ')}`,
-      );
-    }
+    // approvalMode follows the same DL7-parity lenient posture as the rest of
+    // the CC declarative-agent fields: warn-and-drop on invalid rather than
+    // throw. This keeps a typo in `approvalMode` from killing the entire file
+    // and lets a valid `permissionMode` still bridge into approvalMode below.
     const approvalMode =
-      typeof approvalModeRaw === 'string' && approvalModeRaw !== ''
+      typeof approvalModeRaw === 'string' &&
+      approvalModeRaw !== '' &&
+      APPROVAL_MODES.includes(approvalModeRaw as never)
         ? approvalModeRaw
         : undefined;
     if (
-      approvalMode !== undefined &&
-      !APPROVAL_MODES.includes(approvalMode as never)
+      approvalModeRaw !== undefined &&
+      approvalModeRaw !== null &&
+      approvalModeRaw !== '' &&
+      approvalMode === undefined
     ) {
-      throw new Error(
-        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${APPROVAL_MODES.join(', ')}`,
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid approvalMode '${approvalModeRaw}'. Valid values: ${APPROVAL_MODES.join(', ')}. Dropping field.`,
       );
     }
     const model =

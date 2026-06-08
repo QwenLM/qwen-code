@@ -121,6 +121,33 @@ describe('convertClaudeAgentConfig', () => {
   });
 });
 
+describe('convertClaudeAgentConfig — non-owned keys are not emitted', () => {
+  // Regression for the passthrough mechanism in convertAgentFiles. The
+  // converter only EMITS the keys it owns; convertAgentFiles passes the rest
+  // through verbatim from the source frontmatter. This test pins that the
+  // converter doesn't accidentally start emitting one of the passthrough
+  // fields (which would silently override the passthrough copy).
+  const PASSTHROUGH_FIELDS = [
+    'effort',
+    'maxTurns',
+    'initialPrompt',
+    'memory',
+    'isolation',
+    'mcpServers',
+    'background',
+  ] as const;
+
+  for (const field of PASSTHROUGH_FIELDS) {
+    it(`should not emit "${field}" in convertClaudeAgentConfig output`, () => {
+      const result = convertClaudeAgentConfig({
+        name: 'a',
+        description: 'd',
+      });
+      expect(result[field]).toBeUndefined();
+    });
+  }
+});
+
 describe('mergeClaudeConfigs', () => {
   it('should merge marketplace and plugin configs', () => {
     const marketplacePlugin: ClaudeMarketplacePluginConfig = {
