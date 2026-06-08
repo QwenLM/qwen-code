@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { logSkillLaunch } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay } from './tools.js';
@@ -25,6 +26,7 @@ type SkillToolWithProtectedMethods = SkillTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
+    setPromptId: (promptId: string) => void;
   };
 };
 
@@ -36,6 +38,7 @@ vi.mock('../telemetry/index.js', () => ({
     constructor(
       public skill_name: string,
       public success: boolean,
+      public prompt_id: string = '',
     ) {}
   },
 }));
@@ -47,6 +50,7 @@ describe('SkillTool', () => {
   let skillTool: SkillTool;
   let mockSkillManager: SkillManager;
   let changeListeners: Array<() => void>;
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   const mockSkills: SkillConfig[] = [
     {
@@ -70,6 +74,8 @@ describe('SkillTool', () => {
     // Setup fake timers
     vi.useFakeTimers();
 
+    mockAddSessionAllowRule = vi.fn();
+
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
@@ -78,6 +84,14 @@ describe('SkillTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
       getModelInvocableCommandsExecutor: vi.fn().mockReturnValue(null),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
+      // SkillTool reads this in `refreshSkills`, `validateToolParams`, and
+      // `SkillToolInvocation.execute` to apply the user-controlled
+      // `skills.disabled` filter. Default empty so existing tests are
+      // unaffected; per-test cases override.
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
 
     changeListeners = [];
@@ -272,11 +286,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -295,11 +317,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -314,6 +344,14 @@ describe('SkillTool', () => {
     it('should reject empty skill', () => {
       const result = skillTool.validateToolParams({ skill: '' });
       expect(result).toBe('Parameter "skill" must be a non-empty string.');
+    });
+
+    it('should reject non-string args', () => {
+      const result = skillTool.validateToolParams({
+        skill: 'code-review',
+        args: 123 as unknown as string,
+      });
+      expect(result).toBe('Parameter "args" must be a string when provided.');
     });
 
     it('should reject non-existent skill', () => {
@@ -362,6 +400,54 @@ describe('SkillTool', () => {
       const result = gatedTool.validateToolParams({ skill: 'tsx-helper' });
       expect(result).toMatch(/gated by path-based activation/);
       expect(result).toMatch(/paths: frontmatter/);
+    });
+
+    it('returns the disabled-specific error when no command alternative exists', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['testing']),
+      );
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      const result = tool.validateToolParams({ skill: 'testing' });
+      expect(result).toMatch(/is disabled/);
+      expect(result).toMatch(/skills manage|skills\.disabled/);
+      // Sanity: not the generic "not found" or "gated" branches.
+      expect(result).not.toMatch(/not found/);
+      expect(result).not.toMatch(/gated by path-based activation/);
+    });
+
+    it('passes validation when a same-named MCP prompt exists for a disabled skill', async () => {
+      // Regression: validateToolParams must place the disabled-branch
+      // AFTER the modelInvocableCommands check. Otherwise the model
+      // invoking the same name (intending the MCP prompt) would be told
+      // "skill disabled" — but the prompt is legitimately available
+      // because §3c excludes disabled skills from `fileBasedSkillNames`.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'mytool',
+          description: 'Skill body',
+          level: 'project',
+          filePath: '/p/.qwen/skills/mytool/SKILL.md',
+          body: 'skill body',
+        },
+      ]);
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [
+          { name: 'mytool', description: 'Same-named MCP prompt' },
+          { name: 'other-cmd', description: 'Unrelated' },
+        ],
+      );
+
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // commandExists branch returns null (passes through to MCP prompt
+      // execution, NOT the disabled-skill error message).
+      expect(tool.validateToolParams({ skill: 'mytool' })).toBeNull();
     });
 
     it('does not allow a pending conditional skill to be invoked via the model-invocable command path', async () => {
@@ -519,6 +605,36 @@ describe('SkillTool', () => {
       expect(result.returnDisplay).toBe('Skill for writing and running tests');
     });
 
+    it('grants allowedTools as session allow rules on invocation', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...mockSkills[1],
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not add allow rules when the skill declares no allowedTools', async () => {
+      // code-review (mockSkills[0]) has no allowedTools field.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
     it('should handle skill not found error', async () => {
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
 
@@ -607,6 +723,129 @@ describe('SkillTool', () => {
         'Specialized skill for reviewing code quality',
       );
     });
+
+    it('propagates prompt_id to SkillLaunchEvent when setPromptId is called', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      // setPromptId is intentionally a scheduler-only hook (duck-typed by
+      // CoreToolScheduler.buildInvocation; not on the public ToolInvocation
+      // interface). Tests cast through `unknown` to exercise it directly.
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-abc-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: 'prompt-abc-123',
+        }),
+      );
+    });
+
+    it('records empty prompt_id when setPromptId is never called (direct invocation)', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: '',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the commandExecutor-success branch', async () => {
+      // skill not on disk → loadSkillForRuntime returns null → falls through
+      // to commandExecutor (the L386 branch in skill.ts).
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+      const executor = vi.fn().mockResolvedValue('content from executor');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-via-executor');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: true,
+          prompt_id: 'prompt-via-executor',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the not-found branch', async () => {
+      // Both loadSkillForRuntime and commandExecutor return null → L399
+      // branch in skill.ts logs a failed SkillLaunchEvent.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'nonexistent' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-on-miss');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'nonexistent',
+          success: false,
+          prompt_id: 'prompt-on-miss',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the thrown-exception branch', async () => {
+      // loadSkillForRuntime throws → caught by L482 branch in skill.ts.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockRejectedValue(
+        new Error('synthetic load failure'),
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-on-throw');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: false,
+          prompt_id: 'prompt-on-throw',
+        }),
+      );
+    });
   });
 
   describe('modelInvocableCommands integration', () => {
@@ -628,6 +867,58 @@ describe('SkillTool', () => {
       expect(tool.description).toContain('<available_skills>');
       expect(tool.description).toContain('review');
       expect(tool.description).toContain('mcp-prompt-a');
+    });
+
+    it('includes command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: 'dangerous input',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "dangerous input"',
+      );
+    });
+
+    it('includes empty command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: ""',
+      );
+    });
+
+    it('truncates markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: `${'x'.repeat(121)} **bold** [link](https://example.com)`,
+      });
+
+      expect(invocation.getDescription()).toBe(
+        `Use skill: "mcp-prompt-a" with args: "${'x'.repeat(117)}..."`,
+      );
+    });
+
+    it('escapes markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '**bold** [link](https://example.com)',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "\\*\\*bold\\*\\* \\[link\\]\\(https://example\\.com\\)"',
+      );
     });
 
     it('should not duplicate commands already present as file-based skills', async () => {
@@ -739,10 +1030,10 @@ describe('SkillTool', () => {
 
       const invocation = (
         skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'mcp-prompt-a' });
+      ).createInvocation({ skill: 'mcp-prompt-a', args: 'with args' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mcp-prompt-a');
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', 'with args');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Prompt content from MCP');
       expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
@@ -762,6 +1053,52 @@ describe('SkillTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('"mcp-prompt-a" not found');
+    });
+
+    it('should return executor errors without treating them as prompt content', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('UserPromptExpansion blocked: Blocked by policy');
+      expect(result.returnDisplay).toBe(
+        'UserPromptExpansion blocked: Blocked by policy',
+      );
+    });
+
+    it('logs prompt attribution when executor returns an error', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      invocation.setPromptId('prompt-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: false,
+          prompt_id: 'prompt-123',
+        }),
+      );
     });
 
     it('should skip commandExecutor when no executor is registered', async () => {
@@ -792,6 +1129,196 @@ describe('SkillTool', () => {
       await invocation.execute();
 
       expect(executor).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('disabled-skill execute guard', () => {
+    it('runs the same-named MCP prompt instead of loading a disabled skill', async () => {
+      // Regression: without the execute-side guard,
+      // `loadSkillForRuntime` resolves the disabled skill from disk and
+      // its body runs even though `validateToolParams` was supposed to
+      // route the call through to the MCP prompt path.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi.fn().mockResolvedValue('MCP prompt body');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      // loadSkillForRuntime would HAPPILY return the disabled skill if we
+      // ever called it — the guard's job is to skip this call entirely.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        name: 'mytool',
+        description: 'Disabled skill body',
+        level: 'project',
+        filePath: '/p/.qwen/skills/mytool/SKILL.md',
+        body: 'DISABLED skill body — must NOT execute',
+      } as SkillConfig);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool' });
+      const result = await invocation.execute();
+
+      // The guard skipped loadSkillForRuntime entirely.
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      expect(executor).toHaveBeenCalledWith('mytool');
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('MCP prompt body');
+      // "Delegated to" rather than "Executed" so telemetry/UX can
+      // distinguish a disabled-skill→command pass-through from a real
+      // skill execution. See comment in skill.ts execute().
+      expect(result.returnDisplay).toBe('Delegated to command: mytool');
+    });
+
+    it('returns the disabled-specific error when no command alternative exists', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['testing']),
+      );
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      const result = await invocation.execute();
+
+      // loadSkillForRuntime is bypassed entirely — no disk read, no body
+      // execution. The error message hints how to recover.
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toMatch(/is disabled/);
+      expect(llmText).toMatch(/skills manage|skills\.disabled/);
+    });
+
+    it('returns the disabled-specific error when the executor returns null', async () => {
+      // Executor exists but doesn't recognize the name (no matching MCP
+      // prompt or file command). Same outcome as the no-executor case.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['testing']),
+      );
+      const executor = vi.fn().mockResolvedValue(null);
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('testing');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toMatch(/is disabled/);
+    });
+
+    it('falls through to disabled-error when commandExecutor throws', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi.fn().mockRejectedValue(new Error('MCP timeout'));
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toMatch(/is disabled/);
+    });
+
+    it('does not affect a skill that is not disabled', async () => {
+      // Sanity check: with skills.disabled empty, the original
+      // loadSkillForRuntime → executor fallback ordering still applies.
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set<string>(),
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(mockSkillManager.loadSkillForRuntime).toHaveBeenCalledWith(
+        'code-review',
+      );
+    });
+  });
+
+  describe('disabled-skill refreshSkills filter', () => {
+    it('drops disabled skills from <available_skills>', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['testing']),
+      );
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // `code-review` (project) still surfaces; `testing` (disabled) is gone.
+      expect(tool.description).toContain('code-review');
+      expect(tool.description).not.toMatch(/<name>\s*testing\s*<\/name>/);
+    });
+
+    it('lets a same-named MCP prompt surface in <available_skills> when its skill is disabled', async () => {
+      // Regression for §3c: `fileBasedSkillNames` must EXCLUDE disabled
+      // skills, otherwise a same-named MCP prompt is silently shadowed
+      // and never surfaces to the model.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        {
+          name: 'mytool',
+          description: 'A skill body',
+          level: 'project',
+          filePath: '/p/.qwen/skills/mytool/SKILL.md',
+          body: 'skill body',
+        },
+      ]);
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'mytool', description: 'MCP prompt for mytool' }],
+      );
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // The MCP prompt's description appears (would have been blocked by
+      // fileBasedSkillNames before §3c excluded disabled skills from the
+      // dedup set).
+      expect(tool.description).toContain('MCP prompt for mytool');
+      // The skill-form description (with level project) does NOT.
+      expect(tool.description).not.toContain('A skill body');
+    });
+
+    it('does not block a non-skill command sharing a name with a disabled skill', async () => {
+      // Sister regression to §3c: the SkillTool must NOT additionally
+      // filter `modelInvocableCommands` by name against
+      // `getDisabledSkillNames`. The loaders already strip disabled
+      // skills; any name still in the provider's list is necessarily
+      // a non-skill command (file command, MCP prompt) and must keep its
+      // entry. A blanket name filter would re-shadow the very command we
+      // freed up via `fileBasedSkillNames`.
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [
+          { name: 'mytool', description: 'External (MCP) tool' },
+          { name: 'unrelated', description: 'Unrelated command' },
+        ],
+      );
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain('External (MCP) tool');
+      expect(tool.description).toContain('Unrelated command');
     });
   });
 

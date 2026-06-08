@@ -103,15 +103,24 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
 }) => {
+  const { compactMode } = useCompactMode();
+
+  const isHiddenInCompact =
+    compactMode &&
+    (item.type === 'gemini_thought' ||
+      item.type === 'gemini_thought_content' ||
+      (item.type === 'tool_use_summary' && summaryAbsorbed));
+
+  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
+  const contentWidth = terminalWidth - 4;
+  const boxWidth = mainAreaWidth || contentWidth;
+
+  if (isHiddenInCompact) return null;
+
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
       ? 0
       : 1;
-
-  const { compactMode } = useCompactMode();
-  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
-  const contentWidth = terminalWidth - 4;
-  const boxWidth = mainAreaWidth || contentWidth;
 
   return (
     <Box

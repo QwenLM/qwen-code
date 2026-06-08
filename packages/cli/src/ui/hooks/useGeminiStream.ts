@@ -1248,11 +1248,15 @@ export const useGeminiStream = (
           'Response stopped due to malformed function call.',
         [FinishReason.IMAGE_SAFETY]:
           'Response stopped due to image safety violations.',
-        [FinishReason.UNEXPECTED_TOOL_CALL]:
-          'Response stopped due to unexpected tool call.',
         [FinishReason.IMAGE_PROHIBITED_CONTENT]:
           'Response stopped due to image prohibited content.',
+        [FinishReason.IMAGE_RECITATION]:
+          'Response stopped due to image recitation policy.',
+        [FinishReason.IMAGE_OTHER]:
+          'Response stopped due to other image-related reasons.',
         [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
+        [FinishReason.UNEXPECTED_TOOL_CALL]:
+          'Response stopped due to unexpected tool call.',
       };
 
       const message = finishReasonMessages[finishReason];
@@ -1282,11 +1286,15 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const reasonClause =
+        eventValue?.triggerReason === 'image_overflow'
+          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
+          : `approached the input token limit for ${config.getModel()}`;
       return addItem(
         {
           type: 'info',
           text:
-            `IMPORTANT: This conversation approached the input token limit for ${config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
             `${eventValue?.newTokenCount ?? 'unknown'} tokens).`,
@@ -1938,6 +1946,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1970,8 +1979,8 @@ export const useGeminiStream = (
             // onComplete performs a read-modify-write on state.json; swallow
             // and log any rejection so an I/O error can't crash the process
             // via an unhandled rejection.
-            void onComplete().catch((err: unknown) => {
-              debugLogger.warn('submitPrompt onComplete threw:', err);
+            void onComplete().catch((err) => {
+              debugLogger.error('onComplete callback failed:', err);
             });
           }
 
@@ -2022,6 +2031,7 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          submitPromptOnCompleteRef.current = null;
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
         }
@@ -2455,8 +2465,7 @@ export const useGeminiStream = (
           config
             .getChatRecordingService()
             ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          // Record in UI history so the transcript stays complete.
-          addItem({ type: MessageType.USER, text: msg }, Date.now());
+          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
       }
 
@@ -2567,7 +2576,7 @@ export const useGeminiStream = (
             const toolName = toolCall.request.name;
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = await geminiClient?.getHistory();
+            const clientHistory = geminiClient?.getHistoryShallow();
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -2656,6 +2665,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register background shell terminal notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundShellRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,

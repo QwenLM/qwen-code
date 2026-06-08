@@ -109,6 +109,7 @@ export interface UIState {
   currentModel: string;
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
+  useTerminalBuffer: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;
@@ -158,6 +159,8 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skills manager dialog (`/skills`)
+  isSkillsManagerDialogOpen: boolean;
   // Extensions manager dialog
   isExtensionsManagerDialogOpen: boolean;
   // MCP dialog

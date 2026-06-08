@@ -62,6 +62,127 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
 
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
+const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+
+async function readResponseBodyExcerpt(
+  response: Response,
+): Promise<string | undefined> {
+  const reader = response.clone().body?.getReader();
+  if (!reader) {
+    return undefined;
+  }
+
+  const decoder = new TextDecoder();
+  let body = '';
+  let bytesRead = 0;
+  let truncated = false;
+  try {
+    while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) {
+        body += decoder.decode();
+        break;
+      }
+
+      const remaining = STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT - bytesRead;
+      if (value.byteLength > remaining) {
+        body += decoder.decode(value.subarray(0, remaining), {
+          stream: true,
+        });
+        bytesRead += remaining;
+        truncated = true;
+        reader.cancel().catch(() => {
+          // Best-effort cleanup after collecting the bounded excerpt.
+        });
+        break;
+      }
+
+      body += decoder.decode(value, { stream: true });
+      bytesRead += value.byteLength;
+    }
+
+    if (bytesRead >= STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT && !truncated) {
+      const { done } = await reader.read();
+      if (!done) {
+        truncated = true;
+        reader.cancel().catch(() => {
+          // Best-effort cleanup after collecting the bounded excerpt.
+        });
+      }
+    }
+
+    body += decoder.decode();
+    const excerpt = body.trim();
+    if (!excerpt) {
+      return undefined;
+    }
+    return truncated ||
+      excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
+      ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
+      : excerpt;
+  } catch {
+    return undefined;
+  }
+}
+
+function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') {
+    return false;
+  }
+
+  const headers = new Headers(init?.headers);
+  if (headers.has('last-event-id')) {
+    return false;
+  }
+
+  const accept = headers.get('accept') ?? '';
+  return accept
+    .split(',')
+    .map((value) => value.split(';')[0].trim().toLowerCase())
+    .some((type) => type === 'text/event-stream');
+}
+
+/**
+ * Wraps fetch to normalize Spring AI-style 400 responses to the SDK's
+ * unsupported sentinel for the optional Streamable HTTP GET SSE request.
+ *
+ * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
+ * 405 response as "GET SSE unsupported" and continues in POST-only mode.
+ * If the SDK changes that non-OK handling, update this wrapper in lockstep.
+ */
+export function createStreamableHttpCompatibilityFetch(
+  mcpServerName: string,
+  fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+): typeof fetch {
+  return async (input, init) => {
+    const response = await fetchFn(input, init);
+    if (
+      !isStreamableHttpGetSseRequest(init) ||
+      !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
+    ) {
+      return response;
+    }
+
+    const responseBody = await readResponseBodyExcerpt(response);
+    await response.body?.cancel().catch(() => {
+      // Best-effort body cleanup before returning a synthetic 405.
+    });
+    debugLogger.warn(
+      `MCP server '${mcpServerName}' rejected the optional Streamable HTTP ` +
+        `GET SSE stream with HTTP ${response.status}; continuing without ` +
+        `the standalone GET stream. POST request streams remain enabled.` +
+        (responseBody ? ` Response body: ${JSON.stringify(responseBody)}` : ''),
+    );
+
+    return new Response(null, {
+      status: 405,
+      statusText: 'Method Not Allowed',
+    });
+  };
+}
+
 export type DiscoveredMCPPrompt = Prompt & {
   serverName: string;
   invoke: (params: Record<string, unknown>) => Promise<GetPromptResult>;
@@ -102,6 +223,7 @@ export class McpClient {
   private transport: Transport | undefined;
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
+  private instructions: string | undefined;
 
   constructor(
     private readonly serverName: string,
@@ -155,9 +277,11 @@ export class McpClient {
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
       });
+      this.instructions = this.client.getInstructions();
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
+      this.instructions = undefined;
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       throw error;
     }
@@ -221,6 +345,7 @@ export class McpClient {
       await this.transport.close();
     }
     this.client.close();
+    this.instructions = undefined;
   }
 
   /**
@@ -228,6 +353,10 @@ export class McpClient {
    */
   getStatus(): MCPServerStatus {
     return this.status;
+  }
+
+  getInstructions(): string | undefined {
+    return this.instructions;
   }
 
   async readResource(
@@ -498,6 +627,7 @@ async function createTransportWithOAuth(
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
+        fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
         requestInit: {
           headers: {
             ...mcpServerConfig.headers,
@@ -1332,6 +1462,8 @@ export async function createTransport(
     };
 
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createStreamableHttpCompatibilityFetch(mcpServerName);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1358,6 +1490,8 @@ export async function createTransport(
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createStreamableHttpCompatibilityFetch(mcpServerName);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1414,7 +1548,9 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.httpUrl) {
-    const transportOptions: StreamableHTTPClientTransportOptions = {};
+    const transportOptions: StreamableHTTPClientTransportOptions = {
+      fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+    };
 
     // Set up headers with OAuth token if available
     if (hasOAuthConfig && accessToken) {

@@ -421,27 +421,42 @@ export async function runNonInteractive(
         initialPartList = [{ text: input }];
       }
 
-      // Phase C: when --resume restored a session with an active worktree,
-      // prepend a system-reminder block to the user prompt so the model
-      // knows to keep using the worktree path. Stale sidecars (worktree
-      // dir deleted between sessions) are cleaned up inside the helper.
-      // TUI does this via historyManager.addItem(INFO); headless does it
-      // here because there is no UI history to write into.
-      if (config.getResumedSessionData()) {
+      // Inject a worktree context notice into the model's first prompt.
+      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // before loadCliConfig) takes precedence over the Phase C resume
+      // restore. TUI does this via historyManager.addItem(INFO); here in
+      // headless we prepend a `<system-reminder>` block since there is
+      // no UI history to write into.
+      const withReminder = (
+        existing: PartListUnion,
+        text: string,
+      ): PartListUnion => {
+        const reminderPart: Part = {
+          text: `<system-reminder>\n${text}\n</system-reminder>\n\n`,
+        };
+        return Array.isArray(existing)
+          ? [reminderPart, ...existing]
+          : [reminderPart, existing];
+      };
+
+      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      if (startupNotice) {
+        initialPartList = withReminder(initialPartList, startupNotice);
+        adapter.emitSystemMessage('worktree_started', {
+          notice: startupNotice,
+        });
+      } else if (config.getResumedSessionData()) {
         try {
           const sessionPath = config
             .getSessionService()
             .getWorktreeSessionPath(sessionId);
           const restored = await restoreWorktreeContext(sessionPath);
           if (restored.contextMessage) {
-            const reminderPart: Part = {
-              text: `<system-reminder>\n${restored.contextMessage}\n</system-reminder>\n\n`,
-            };
-            const partsArr = Array.isArray(initialPartList)
-              ? initialPartList
-              : [initialPartList];
-            initialPartList = [reminderPart, ...partsArr];
-            // Also surface the notice in the JSON stream so SDK consumers
+            initialPartList = withReminder(
+              initialPartList,
+              restored.contextMessage,
+            );
+            // Surface the notice in the JSON stream so SDK consumers
             // can react to it (logging, UI hints, etc.).
             adapter.emitSystemMessage('worktree_restored', {
               slug: restored.session?.slug,

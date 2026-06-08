@@ -594,7 +594,7 @@ describe('<ToolGroupMessage />', () => {
     const renderCompact = (component: React.ReactElement, compactMode = true) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode }}>
+          <CompactModeProvider value={{ compactMode, compactInline: false }}>
             {component}
           </CompactModeProvider>
         </ConfigContext.Provider>,

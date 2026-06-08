@@ -5,19 +5,22 @@
  */
 
 import { useState, useRef, useCallback, useMemo } from 'react';
-import type { HistoryItem } from '../types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 // Type for the updater function passed to updateHistoryItem
 type HistoryItemUpdater = (
   prevItem: HistoryItem,
-) => Partial<Omit<HistoryItem, 'id'>>;
+) => Partial<HistoryItemWithoutId>;
+
+const debugLogger = createDebugLogger('HISTORY_MANAGER');
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
-  addItem: (itemData: Omit<HistoryItem, 'id'>, baseTimestamp: number) => number; // Returns the generated ID
+  addItem: (itemData: HistoryItemWithoutId, baseTimestamp: number) => number; // Returns the generated ID
   updateItem: (
     id: number,
-    updates: Partial<Omit<HistoryItem, 'id'>> | HistoryItemUpdater,
+    updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
   ) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
@@ -46,7 +49,7 @@ export function useHistory(): UseHistoryManagerReturn {
 
   // Adds a new item to the history state with a unique ID.
   const addItem = useCallback(
-    (itemData: Omit<HistoryItem, 'id'>, baseTimestamp: number): number => {
+    (itemData: HistoryItemWithoutId, baseTimestamp: number): number => {
       const id = getNextMessageId(baseTimestamp);
       const newItem: HistoryItem = { ...itemData, id } as HistoryItem;
 
@@ -79,19 +82,28 @@ export function useHistory(): UseHistoryManagerReturn {
   const updateItem = useCallback(
     (
       id: number,
-      updates: Partial<Omit<HistoryItem, 'id'>> | HistoryItemUpdater,
+      updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
     ) => {
-      setHistory((prevHistory) =>
-        prevHistory.map((item) => {
+      setHistory((prevHistory) => {
+        let updated = false;
+        const nextHistory = prevHistory.map((item) => {
           if (item.id === id) {
+            updated = true;
             // Apply updates based on whether it's an object or a function
             const newUpdates =
               typeof updates === 'function' ? updates(item) : updates;
             return { ...item, ...newUpdates } as HistoryItem;
           }
           return item;
-        }),
-      );
+        });
+        if (!updated) {
+          debugLogger.debug(
+            `Skipped history update; item ${id} was not found.`,
+          );
+          return prevHistory;
+        }
+        return nextHistory;
+      });
     },
     [],
   );

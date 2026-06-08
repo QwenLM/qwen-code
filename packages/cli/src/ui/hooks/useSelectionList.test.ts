@@ -1027,4 +1027,61 @@ describe('useSelectionList', () => {
       expect(mockOnSelect).not.toHaveBeenCalled();
     });
   });
+
+  describe('disableVimNav', () => {
+    it('bare j does NOT dispatch MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('j');
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('bare k does NOT dispatch MOVE_UP when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          initialIndex: 2,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('k');
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('Ctrl+N still dispatches MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('n', 'n', { ctrl: true });
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('arrow keys still work when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('down');
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('up');
+      expect(result.current.activeIndex).toBe(0);
+    });
+  });
 });

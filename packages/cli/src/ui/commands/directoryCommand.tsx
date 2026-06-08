@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand, CommandContext, CommandCompletionItem } from './types.js';
+import type {
+  SlashCommand,
+  CommandContext,
+  CommandCompletionItem,
+} from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import * as fs from 'node:fs';
@@ -13,6 +17,7 @@ import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
+  createInstructionsLoadedCallback,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
@@ -58,7 +63,9 @@ function findExistingWorkspaceDirectory(
  * Returns directory path completions for the given partial argument.
  * Supports comma-separated paths by completing only the last segment.
  */
-export function getDirPathCompletions(partialArg: string): CommandCompletionItem[] {
+export function getDirPathCompletions(
+  partialArg: string,
+): CommandCompletionItem[] {
   const lastComma = partialArg.lastIndexOf(',');
   const prefix = lastComma >= 0 ? partialArg.substring(0, lastComma + 1) : '';
   const partial =
@@ -235,6 +242,12 @@ export const directoryCommand: SlashCommand = {
                 context.services.settings.merged.context?.importFormat ||
                   'tree', // Use setting or default to 'tree'
                 config.getContextRuleExcludes(),
+                {
+                  loadReason: 'refresh',
+                  onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+                    config.getHookSystem(),
+                  ),
+                },
               );
               config.setUserMemory(memoryContent);
               config.setGeminiMdFileCount(fileCount);

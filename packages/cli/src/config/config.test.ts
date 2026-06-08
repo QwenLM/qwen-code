@@ -927,6 +927,29 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should enable runtime sleep prevention by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('should propagate runtime sleep prevention setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        general: {
+          preventSystemSleep: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
@@ -2070,7 +2093,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers();
+    const mcpServers = config.getMcpServers()!;
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2089,7 +2112,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()['direct-server']).toEqual({
+    expect(config.getMcpServers()!['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2103,7 +2126,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()['settings-server']).toEqual({
+    expect(config.getMcpServers()!['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });
@@ -2354,6 +2377,16 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
+  it('should default managed-memory toggles to enabled when not in bare mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+    expect(config.getManagedAutoDreamEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(true);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2393,6 +2426,8 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
     expect(config.getDisableAllHooks()).toBe(true);
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getManagedAutoDreamEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});

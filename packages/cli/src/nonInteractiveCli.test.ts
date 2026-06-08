@@ -199,6 +199,7 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
       setModelInvocableCommandsProvider: vi.fn(),
@@ -213,6 +214,12 @@ describe('runNonInteractive', () => {
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      // Phase D-1: nonInteractiveCli calls this on every prompt to pick
+      // up the one-shot startup-worktree notice (set by gemini.tsx
+      // when --worktree was passed). These tests don't exercise the
+      // --worktree flag, so return null to short-circuit injection
+      // and let the resume-restore branch run.
+      consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {

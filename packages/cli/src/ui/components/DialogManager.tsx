@@ -43,6 +43,7 @@ import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { SkillsManagerDialog } from './skills/SkillsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
@@ -428,6 +429,22 @@ export const DialogManager = ({
       <AgentsManagerDialog
         onClose={uiActions.closeAgentsManagerDialog}
         config={config}
+      />
+    );
+  }
+
+  if (uiState.isSkillsManagerDialogOpen) {
+    return (
+      <SkillsManagerDialog
+        settings={settings}
+        config={config}
+        addItem={addItem}
+        onClose={uiActions.closeSkillsManagerDialog}
+        reloadCommands={uiActions.reloadCommands}
+        setInputBuffer={uiActions.setInputBuffer}
+        availableTerminalHeight={
+          constrainHeight ? terminalHeight - staticExtraHeight : undefined
+        }
       />
     );
   }

@@ -40,9 +40,10 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Alibaba / Qwen
   // -------------------
-  // Qwen3.5-Plus, Qwen3.6-Plus: image + video support
+  // Qwen Plus models: image + video support (Max models are text-only)
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
+  [/^qwen3\.7-plus/, { image: true, video: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
@@ -68,8 +69,9 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^glm-/, {}],
 
   // -------------------
-  // MiniMax — text-only
+  // MiniMax — M3 supports image + video input; older models default to text-only
   // -------------------
+  [/^minimax-m3/i, { image: true, video: true }],
   [/^minimax-/, {}],
 
   // -------------------

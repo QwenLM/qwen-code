@@ -40,6 +40,11 @@ const loggingSpanRecords = vi.hoisted(
       success?: boolean;
       inputTokens?: number;
       outputTokens?: number;
+      cachedInputTokens?: number;
+      ttftMs?: number;
+      requestSetupMs?: number;
+      attempt?: number;
+      retryTotalDelayMs?: number;
       durationMs?: number;
       error?: string;
     };
@@ -2039,4 +2044,266 @@ describe('LoggingContentGenerator', () => {
       expect(options).toBe(promptId);
     },
   );
+});
+
+// =========================================================================
+// Phase 4b — retryContext ALS propagation into LoggingContentGenerator.
+// Asserts the contract: when the LLM call runs inside a retryContext.run()
+// frame, endLLMRequestSpan receives the frame's values. When no frame is
+// present (warmup, side-query, direct call), `attempt` defaults to 1 and
+// requestSetupMs/retryTotalDelayMs stay undefined.
+// =========================================================================
+describe('LoggingContentGenerator — Phase 4b retry context propagation', () => {
+  beforeEach(() => {
+    loggingSpanRecords.length = 0;
+    vi.mocked(logApiRequest).mockClear();
+    vi.mocked(logApiResponse).mockClear();
+    vi.mocked(logApiError).mockClear();
+  });
+
+  it('non-stream: forwards retryContext.attempt/requestSetupMs/retryTotalDelayMs to endLLMRequestSpan', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-1', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Simulate being invoked from within `retryWithBackoff`'s ALS frame —
+    // the LoggingContentGenerator must read these values and forward them.
+    await retryContext.run(
+      { attempt: 3, requestSetupMs: 1200, retryTotalDelayMs: 1000 },
+      async () => {
+        await generator.generateContent(request, 'prompt-retry');
+      },
+    );
+
+    const record = getGenerateContentSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 3,
+      requestSetupMs: 1200,
+      retryTotalDelayMs: 1000,
+    });
+  });
+
+  it('non-stream: defaults attempt=1 and leaves setup/delay undefined when no retry context (direct call / warmup)', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-2', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // No retryContext.run() — direct invocation.
+    await generator.generateContent(request, 'prompt-direct');
+
+    const record = getGenerateContentSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
+
+  it('stream: snapshots retry context in synchronous prelude and forwards through stream wrapper finally block', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s1', 'test-model', [{ text: 'a' }]);
+        yield createResponse('r-s2', 'test-model', [{ text: 'b' }], {
+          promptTokenCount: 50,
+          candidatesTokenCount: 20,
+          totalTokenCount: 70,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Critical: the stream wrapper is iterated AFTER retryContext.run resolves
+    // its synchronous body. The closure-captured snapshot must carry values
+    // through to the finally block's endLLMRequestSpan call.
+    await retryContext.run(
+      { attempt: 2, requestSetupMs: 500, retryTotalDelayMs: 400 },
+      async () => {
+        const stream = await generator.generateContentStream(
+          request,
+          'prompt-retry-stream',
+        );
+        for await (const _ of stream) {
+          // consume
+        }
+      },
+    );
+
+    const record = getStreamSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 2,
+      requestSetupMs: 500,
+      retryTotalDelayMs: 400,
+      inputTokens: 50,
+      outputTokens: 20,
+    });
+  });
+
+  it('stream: defaults attempt=1 when iterated outside any retry frame', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s3', 'test-model', [{ text: 'a' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-direct',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const record = getStreamSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
+
+  it('stream idle-timeout path: retrySnapshot propagates to the setTimeout-fired endLLMRequestSpan (R2 #8)', async () => {
+    // Review comment R2 #8: the idle-timeout `setTimeout` fires in a separate
+    // macrotask. Verify the closure-captured retrySnapshot reaches its
+    // endLLMRequestSpan call with correct retry context values.
+    //
+    // Must use fake timers from the START so the 5-min setTimeout created
+    // inside loggingStreamWrapper uses the fake clock and can be advanced.
+    vi.useFakeTimers();
+
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    // Stream that resolves its first .next() only after we've advanced
+    // timers past the idle timeout. We use a deferred promise to hold
+    // iteration without actually hanging the test runner.
+    let releaseStream: () => void;
+    const streamBlocker = new Promise<void>((r) => {
+      releaseStream = r;
+    });
+    const neverYieldStream = (async function* () {
+      await streamBlocker; // holds until we release after timer advance
+      yield createResponse('never', 'test-model', [{ text: 'x' }]);
+    })();
+
+    const streamFn = vi.fn().mockResolvedValue(neverYieldStream);
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Start the stream inside a retry context. The generator creation
+    // (generateContentStream) runs synchronously enough to capture the
+    // retrySnapshot. The consumer's first .next() call starts the for-await
+    // which immediately awaits the streamBlocker — at that point the idle
+    // timeout setTimeout(5min) is already scheduled.
+    await retryContext.run(
+      { attempt: 4, requestSetupMs: 3000, retryTotalDelayMs: 2500 },
+      async () => {
+        const stream = await generator.generateContentStream(
+          request,
+          'prompt-idle-timeout',
+        );
+        const iter = stream[Symbol.asyncIterator]();
+        // Start iteration — this enters for-await, resets the idle timer,
+        // then blocks on streamBlocker.
+        void iter.next();
+      },
+    );
+
+    // Advance past the 5-minute idle timeout (STREAM_IDLE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    // Release the stream so the generator can clean up
+    releaseStream!();
+    await vi.advanceTimersByTimeAsync(100);
+
+    vi.useRealTimers();
+
+    // Find the span that was ended by the idle timeout
+    const records = loggingSpanRecords.filter(
+      (r) => r.name === 'qwen-code.llm_request' && r.endMetadata !== undefined,
+    );
+    const timeoutRecord = records.find(
+      (r) => r.endMetadata?.error === 'Stream span timed out (idle)',
+    );
+    expect(timeoutRecord).toBeDefined();
+    const meta = timeoutRecord!.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+      error?: string;
+    };
+    expect(meta.attempt).toBe(4);
+    expect(meta.requestSetupMs).toBe(3000);
+    expect(meta.retryTotalDelayMs).toBe(2500);
+    expect(meta.error).toBe('Stream span timed out (idle)');
+  });
 });

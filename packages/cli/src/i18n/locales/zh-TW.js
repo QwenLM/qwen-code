@@ -20,6 +20,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
@@ -97,7 +98,39 @@ export default {
     '分析項目並創建定製的 QWEN.md 檔案',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
-  'List available skills.': '列出可用技能。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
+  'Manage Skills': '管理技能',
+  'Skills configuration saved.': '技能設定已儲存。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    '技能設定已儲存，但重新整理失敗：{{error}}。請重新啟動以確保新狀態生效。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    '目前工作區未受信任，工作區設定會被合併設定忽略。請先執行 /trust，或直接編輯 ~/.qwen/settings.json 在使用者範圍管理技能。',
+  'SkillManager not available.': 'SkillManager 不可用。',
+  'Loading skills…': '正在載入技能…',
+  'Failed to load skills: {{error}}': '載入技能失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    '儲存技能設定失敗：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    '所有可用技能皆已停用。請編輯 ~/.qwen/settings.json 或 .qwen/settings.json（skills.disabled）以重新啟用。',
+  'Press esc to close.': '按 Esc 關閉。',
+  '{{count}} skills · ': '{{count}} 個技能 · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} 個技能 · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    '空白鍵 啟停 · 回車 選取(填入輸入框) · Esc 儲存並離開 · 工作區範圍',
+  'Search:': '搜尋：',
+  'type to filter…': '輸入以篩選…',
+  'No skills are currently available.': '目前沒有可用的技能。',
+  'All available skills are locked at a higher scope (see below).':
+    '所有可用技能都被更高範圍鎖定（詳見下方）。',
+  'No skills match the search.': '沒有符合搜尋條件的技能。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '被更高範圍設定鎖定（此處無法切換）：',
+  'higher scope': '更高範圍',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [已鎖定：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 導覽 · 倒退 編輯搜尋',
+  Bundled: '內建',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '沒有可用工具',
   'View or change the approval mode for tool usage':
@@ -277,8 +310,8 @@ export default {
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last result or code snippet to clipboard':
-    '將最後的結果或代碼片段複製到剪貼板',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',
@@ -518,7 +551,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '規劃',
-  Default: '默認',
+  'Ask permissions': '請求授權',
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
@@ -755,6 +788,7 @@ export default {
   'After tool execution fails': '工具執行失敗後',
   'When notifications are sent': '發送通知時',
   'When the user submits a prompt': '用戶提交提示時',
+  'When a slash command expands into a prompt': '斜線命令展開為提示時',
   'When a new session is started': '新會話開始時',
   'Right before Qwen Code concludes its response': 'Qwen Code 結束響應之前',
   'When a subagent (Agent tool call) is started':
@@ -773,6 +807,8 @@ export default {
     '命令輸入為包含通知消息和類型的 JSON。',
   'Input to command is JSON with original user prompt text.':
     '命令輸入為包含原始用戶提示文本的 JSON。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
     '命令輸入為包含會話啟動來源的 JSON。',
   'Input to command is JSON with session end reason.':
@@ -795,6 +831,8 @@ export default {
     '僅向用戶顯示 stderr 但繼續工具調用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止處理，擦除原始提示，僅向用戶顯示 stderr',
+  'block expanded prompt submission and show stderr to user only':
+    '阻止提交展開後的提示，並僅向用戶顯示 stderr',
   'stdout shown to Qwen': '向 Qwen 顯示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '僅向用戶顯示 stderr（忽略阻塞錯誤）',
@@ -822,6 +860,24 @@ export default {
     '根據你的聊天記錄生成個性化編程洞察',
   'Resume a previous session': '恢復先前會話',
   'Fork the current conversation into a new session': '將目前對話分支到新會話',
+  'Spawn a background agent that inherits the full conversation':
+    '啟動繼承完整對話的背景智能體',
+  'Please provide a directive. Usage: /fork <directive>':
+    '請提供指令。用法：/fork <指令>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
+  'Cannot fork before the first conversation turn.':
+    '首次對話輪次前無法分支。',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    '/fork 命令需要啟用 fork 功能開關。設定 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以啟用。',
+  'The agent tool is unavailable; cannot fork.':
+    'Agent 工具不可用；無法分支。',
+  'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
+  'the background agent could not be started.': '背景智能體無法啟動。',
+  'User launched a background fork via /fork: {{directive}}':
+    '使用者透過 /fork 啟動了背景分支：{{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    '已分支到背景智能體。它會繼承此對話並以非阻塞方式執行，可在背景任務面板中追蹤；完成後會回報結果。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'No conversation to branch.': '沒有可分支的對話。',
@@ -857,12 +913,13 @@ export default {
   'Available options:': '可用選項：',
   'Set UI language to {{name}}': '將 UI 語言設置為 {{name}}',
   'Tool Approval Mode': '工具審批模式',
-  '{{mode}} mode': '{{mode}} 模式',
   'Analyze only, do not modify files or execute commands':
     '僅分析，不修改檔案或執行命令',
   'Require approval for file edits or shell commands':
     '需要批准檔案編輯或 shell 命令',
   'Automatically approve file edits': '自動批准檔案編輯',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分類器自動批准安全的工具調用',
   'Automatically approve all tools': '自動批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作區審批模式已存在並具有優先級。用戶級別的更改將無效。',
@@ -872,6 +929,7 @@ export default {
   'Auto-memory: {{status}}': '自動記憶：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動整理：{{status}} · {{lastDream}} · /dream 立即運行',
+  'Auto-skill: {{status}}': '自動技能：{{status}}',
   never: '從未',
   on: '開',
   off: '關',
@@ -1588,6 +1646,18 @@ export default {
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '將獨立安裝回滾到上一個版本',
+  'Rollback is not available in ACP mode.': '回滾在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滾僅適用於獨立安裝。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滾成功。請重啟終端以使用上一個版本。',
+  'Rollback failed:': '回滾失敗：',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滾需要手動操作。請將安裝目錄中的 qwen-code.old 重新命名為 qwen-code。',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
