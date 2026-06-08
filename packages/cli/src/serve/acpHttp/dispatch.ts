@@ -256,7 +256,11 @@ function toRpcError(err: unknown): {
     case 'SessionLimitExceededError':
       return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
     default:
-      return { code: RPC.INTERNAL_ERROR, message: 'Internal error' };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: 'Internal error',
+        data: { errorKind: 'internal' },
+      };
   }
 }
 
@@ -1166,23 +1170,28 @@ export class AcpDispatcher {
             content,
             projectRoot: this.boundWorkspace,
           });
-          if (wr.changed)
-            this.bridge.publishWorkspaceEvent({
-              type: 'memory_changed',
-              data: {
-                scope,
-                filePath: wr.filePath,
-                mode,
-                bytesWritten: wr.bytesWritten,
-              },
-              originatorClientId: conn.clientId,
-            });
           this.replyConn(conn, id, {
             ok: true,
             filePath: wr.filePath,
             bytesWritten: wr.bytesWritten,
             changed: wr.changed,
           });
+          if (wr.changed) {
+            try {
+              this.bridge.publishWorkspaceEvent({
+                type: 'memory_changed',
+                data: {
+                  scope,
+                  filePath: wr.filePath,
+                  mode,
+                  bytesWritten: wr.bytesWritten,
+                },
+                originatorClientId: conn.clientId,
+              });
+            } catch {
+              /* best-effort */
+            }
+          }
           return;
         }
 
@@ -1333,7 +1342,10 @@ export class AcpDispatcher {
           const MAX_GLOB = 5000;
           const maxResults =
             typeof params['maxResults'] === 'number'
-              ? Math.max(1, Math.min(params['maxResults'], 50000))
+              ? Math.max(
+                  1,
+                  Math.min(Number(params['maxResults']) || 5000, 50000),
+                )
               : MAX_GLOB;
           const matches = await fs.glob(pattern, {
             maxResults: maxResults + 1,
@@ -1531,6 +1543,22 @@ export class AcpDispatcher {
           if (!flowId) {
             if (id !== undefined)
               conn.sendConn(error(id, RPC.INVALID_PARAMS, '`id` required'));
+            return;
+          }
+          const flowView = this.deviceFlowRegistry.get(flowId);
+          if (
+            flowView &&
+            flowView.initiatorClientId &&
+            flowView.initiatorClientId !== conn.clientId
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Only the flow initiator can cancel',
+                ),
+              );
             return;
           }
           const cancelResult = this.deviceFlowRegistry.cancel(
@@ -1788,15 +1816,19 @@ export class AcpDispatcher {
             { level },
           );
           const created = await this.agentManager.loadSubagent(name, level);
-          this.bridge.publishWorkspaceEvent({
-            type: 'agent_changed',
-            data: { change: 'created', name, level },
-            originatorClientId: conn.clientId,
-          });
           this.replyConn(conn, id, {
             ok: true,
             agent: created ? agentToDetail(created) : null,
           } as unknown);
+          try {
+            this.bridge.publishWorkspaceEvent({
+              type: 'agent_changed',
+              data: { change: 'created', name, level },
+              originatorClientId: conn.clientId,
+            });
+          } catch {
+            /* best-effort */
+          }
           return;
         }
 
@@ -1817,15 +1849,84 @@ export class AcpDispatcher {
               );
             return;
           }
+          const MAX_FIELD_BYTES = 256 * 1024;
           const updates: Record<string, unknown> = {};
-          if (typeof params['description'] === 'string')
+          if (typeof params['description'] === 'string') {
+            if (
+              Buffer.byteLength(params['description'], 'utf8') > MAX_FIELD_BYTES
+            ) {
+              if (id !== undefined)
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`description` exceeds 256KB limit',
+                  ),
+                );
+              return;
+            }
             updates['description'] = params['description'];
-          if (typeof params['systemPrompt'] === 'string')
+          }
+          if (typeof params['systemPrompt'] === 'string') {
+            if (
+              Buffer.byteLength(params['systemPrompt'], 'utf8') >
+              MAX_FIELD_BYTES
+            ) {
+              if (id !== undefined)
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`systemPrompt` exceeds 256KB limit',
+                  ),
+                );
+              return;
+            }
             updates['systemPrompt'] = params['systemPrompt'];
-          if (Array.isArray(params['tools']))
+          }
+          if (Array.isArray(params['tools'])) {
+            if (params['tools'].length > 256) {
+              if (id !== undefined)
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`tools` exceeds 256-entry limit',
+                  ),
+                );
+              return;
+            }
+            if (
+              !params['tools'].every(
+                (t: unknown) =>
+                  typeof t === 'string' && (t as string).length <= 256,
+              )
+            ) {
+              if (id !== undefined)
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`tools` elements must be strings ≤256 chars',
+                  ),
+                );
+              return;
+            }
             updates['tools'] = params['tools'];
+          }
           if (typeof params['model'] === 'string')
             updates['model'] = params['model'];
+          if (Object.keys(updates).length === 0) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'at least one updatable field required',
+                ),
+              );
+            return;
+          }
           await this.agentManager.updateSubagent(
             agentType,
             updates,
@@ -1835,15 +1936,23 @@ export class AcpDispatcher {
             agentType,
             existing.level,
           );
-          this.bridge.publishWorkspaceEvent({
-            type: 'agent_changed',
-            data: { change: 'updated', name: agentType, level: existing.level },
-            originatorClientId: conn.clientId,
-          });
           this.replyConn(conn, id, {
             ok: true,
             agent: updated ? agentToDetail(updated) : null,
           } as unknown);
+          try {
+            this.bridge.publishWorkspaceEvent({
+              type: 'agent_changed',
+              data: {
+                change: 'updated',
+                name: agentType,
+                level: existing.level,
+              },
+              originatorClientId: conn.clientId,
+            });
+          } catch {
+            /* best-effort */
+          }
           return;
         }
 
@@ -1876,12 +1985,20 @@ export class AcpDispatcher {
             return;
           }
           await this.agentManager.deleteSubagent(agentType, existing.level);
-          this.bridge.publishWorkspaceEvent({
-            type: 'agent_changed',
-            data: { change: 'deleted', name: agentType, level: existing.level },
-            originatorClientId: conn.clientId,
-          });
           this.replyConn(conn, id, { ok: true });
+          try {
+            this.bridge.publishWorkspaceEvent({
+              type: 'agent_changed',
+              data: {
+                change: 'deleted',
+                name: agentType,
+                level: existing.level,
+              },
+              originatorClientId: conn.clientId,
+            });
+          } catch {
+            /* best-effort */
+          }
           return;
         }
 
