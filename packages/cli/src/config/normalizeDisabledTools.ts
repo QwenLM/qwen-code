@@ -16,15 +16,8 @@
  * exact-match check silently re-registers tools whose disabled-name
  * carries whitespace (e.g., `' Foo '` typed in settings.json by hand).
  *
- * Lifted from the two inline implementations in #4175 F1 (#4319)
- * — extraction closes wenshao review thread + #4329. Behavior is
- * byte-identical to both pre-extraction loops; tests cover the
- * scenarios the inline code was specifically written to handle
- * (typeof string filter, trim, drop empty, dedupe) plus the
- * non-array short-circuit (acpAgent.ts had it via `Array.isArray`
- * gate; config.ts didn't because settings type already constrains
- * the field — but exposing it as a defensive guard makes the
- * helper safe to call with any user-controlled value).
+ * Lifted from inline implementations so boot path and MCP restart
+ * refresh path share a single implementation.
  *
  * Behavior contract:
  *

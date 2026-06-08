@@ -151,7 +151,20 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
+vi.mock('./authMethods.js', () => {
+  const buildAuthMethods = vi.fn();
+  return {
+    buildAuthMethods,
+    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
+      const authMethods = buildAuthMethods();
+      if (!selectedType) return authMethods;
+      const matched = authMethods.filter(
+        (method: { id: string }) => method.id === selectedType,
+      );
+      return matched.length ? matched : authMethods;
+    }),
+  };
+});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));

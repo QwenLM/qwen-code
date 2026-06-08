@@ -31,7 +31,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createStderrForwarder, scrubChildEnv } from './spawnChannel.js';
+import {
+  createStderrForwarder,
+  getAcpMemoryArgs,
+  scrubChildEnv,
+} from './spawnChannel.js';
 
 describe('createStderrForwarder', () => {
   it('calls onDiagnosticLine for each complete line', () => {
@@ -239,5 +243,28 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
     expect(result).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(result).not.toHaveProperty('OPENAI_API_KEY');
     expect(result['PATH']).toBe('/usr/bin');
+  });
+});
+
+describe('getAcpMemoryArgs', () => {
+  it('returns a valid --max-old-space-size flag or empty array', () => {
+    const args = getAcpMemoryArgs();
+    if (args.length > 0) {
+      expect(args).toHaveLength(1);
+      expect(args[0]).toMatch(/^--max-old-space-size=\d+$/);
+      const sizeMB = Number(args[0]!.split('=')[1]);
+      expect(sizeMB).toBeGreaterThan(0);
+      expect(sizeMB).toBeLessThanOrEqual(16_384);
+    } else {
+      expect(args).toEqual([]);
+    }
+  });
+
+  it('respects the 16GB cap', () => {
+    const args = getAcpMemoryArgs();
+    if (args.length > 0) {
+      const sizeMB = Number(args[0]!.split('=')[1]);
+      expect(sizeMB).toBeLessThanOrEqual(16_384);
+    }
   });
 });

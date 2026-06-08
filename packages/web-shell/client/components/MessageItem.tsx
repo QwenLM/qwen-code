@@ -10,6 +10,10 @@ import { AssistantMessage } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
+import { BtwMessage } from './messages/BtwMessage';
+import { UserShellMessage } from './messages/UserShellMessage';
+import { InsightProgress } from './InsightProgress';
+import { InsightReady } from './InsightReady';
 
 interface MessageItemProps {
   message: Message;
@@ -53,6 +57,36 @@ export const MessageItem = memo(function MessageItem({
       return (
         <SystemMessage content={message.content} variant={message.variant} />
       );
+    case 'user_shell':
+      return (
+        <UserShellMessage command={message.command} output={message.output} />
+      );
+    case 'btw':
+      return (
+        <BtwMessage
+          question={message.question}
+          answer={message.answer}
+          isPending={message.isPending}
+        />
+      );
+    case 'insight_progress':
+      return (
+        <InsightProgress
+          progress={{
+            stage: message.stage,
+            progress: message.progress,
+            detail: message.detail,
+          }}
+        />
+      );
+    case 'insight_ready':
+      return <InsightReady path={message.path} />;
+    case 'insight_error':
+      return (
+        <div style={{ color: 'var(--error-color, #e06c75)' }}>
+          {message.error}
+        </div>
+      );
     default:
       return null;
   }
@@ -87,6 +121,31 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         prev.content === next.content &&
         prev.variant === next.variant
       );
+    case 'user_shell':
+      return (
+        next.role === 'user_shell' &&
+        prev.command === next.command &&
+        prev.output === next.output &&
+        prev.cwd === next.cwd
+      );
+    case 'btw':
+      return (
+        next.role === 'btw' &&
+        prev.question === next.question &&
+        prev.answer === next.answer &&
+        prev.isPending === next.isPending
+      );
+    case 'insight_progress':
+      return (
+        next.role === 'insight_progress' &&
+        prev.stage === next.stage &&
+        prev.progress === next.progress &&
+        prev.detail === next.detail
+      );
+    case 'insight_ready':
+      return next.role === 'insight_ready' && prev.path === next.path;
+    case 'insight_error':
+      return next.role === 'insight_error' && prev.error === next.error;
     case 'plan':
       return next.role === 'plan' && areTodosEqual(prev.todos, next.todos);
     case 'tool_group':

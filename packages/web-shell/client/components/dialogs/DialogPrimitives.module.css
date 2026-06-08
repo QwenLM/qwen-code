@@ -98,8 +98,17 @@
 }
 
 .resume-picker-item {
-  padding: 6px 12px;
+  display: flex;
+  align-items: baseline;
+  padding: 0px 12px;
   cursor: pointer;
+}
+
+.resume-picker-session-item {
+  align-items: stretch;
+  flex-direction: column;
+  padding-top: 2px;
+  padding-bottom: 6px;
 }
 
 .resume-picker-item.selected {
@@ -126,7 +135,10 @@
 .resume-picker-item-row {
   display: flex;
   align-items: baseline;
+  flex: 1;
   gap: 4px;
+  min-width: 0;
+  width: 100%;
 }
 
 .resume-picker-item-prefix {
@@ -134,20 +146,38 @@
   flex-shrink: 0;
   color: var(--accent-color);
   font-weight: 700;
-  font-size: 15px;
+  font-size: 20px;
+  margin-right: 8px;
   white-space: pre;
 }
 
 .resume-picker-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-primary);
+  flex: 1 1 auto;
   font-size: 13px;
   font-weight: 500;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.resume-picker-item-checkbox {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  font-size: 13px;
+  white-space: pre;
+}
+
+.resume-picker-item.selected .resume-picker-item-checkbox {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
 .resume-picker-item-number {
+  flex-shrink: 0;
   min-width: 28px;
   color: var(--text-secondary);
   font-size: 13px;
@@ -155,6 +185,7 @@
 }
 
 .resume-picker-item-provider {
+  flex-shrink: 0;
   color: var(--accent-color);
   font-size: 13px;
   font-weight: 700;
@@ -170,7 +201,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 16px;
+  padding-left: 26px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -192,10 +223,33 @@
 }
 
 .resume-picker-item-badge {
+  flex-shrink: 0;
   margin-left: 8px;
   font-size: 11px;
   color: var(--accent-color, #4a9eff);
   opacity: 0.8;
+  white-space: nowrap;
+}
+
+.mcp-status {
+  font-weight: 700;
+}
+
+.mcp-status-connected {
+  color: var(--success-color);
+}
+
+.mcp-status-connecting {
+  color: var(--warning-color);
+}
+
+.mcp-status-disconnected {
+  color: var(--error-color);
+}
+
+.mcp-status-disabled,
+.mcp-status-unknown {
+  color: var(--text-dimmed);
 }
 
 .resume-picker-item-current {

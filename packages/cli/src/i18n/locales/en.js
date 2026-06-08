@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
+  'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -473,7 +474,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Default',
+  'Ask permissions': 'Ask permissions',
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
@@ -901,6 +902,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  'Auto-skill: {{status}}': 'Auto-skill: {{status}}',
   never: 'never',
   on: 'on',
   off: 'off',
@@ -1897,6 +1899,8 @@ export default {
   'Open the memory manager.': 'Open the memory manager.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Record a CPU profile for Chrome DevTools analysis',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

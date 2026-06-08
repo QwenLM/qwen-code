@@ -262,6 +262,99 @@ and logs still carry `session.id`, and trace / log backends (Jaeger, Tempo,
 Loki, Aliyun SLS / ARMS Tracing) handle per-session slicing natively without
 cardinality pressure.
 
+### Client-side HTTP span on outbound fetch
+
+When telemetry is enabled, Qwen Code registers `UndiciInstrumentation`
+which creates a client-side HTTP span for every outbound `fetch()`
+request originated by the process — including the LLM SDKs (`openai`,
+`@google/genai`, `@anthropic-ai/sdk`), the MCP StreamableHTTP client, the
+`WebFetch` tool, and any IDE-extension out-of-process calls. The span
+lets you see network latency (TTFB / response body transfer) separately
+from upstream model processing time, which the existing
+`api.generateContent` span alone can't distinguish.
+
+These spans go to your **own** OTLP collector (or file outfile) just like
+the rest of the telemetry — they do not affect what is written onto the
+outbound HTTP request itself. Whether the W3C `traceparent` header is
+also written into the outgoing request stream is controlled by a
+**separate, security-relevant setting** documented in
+[outbound correlation](#outbound-correlation-security-relevant) below.
+
+**Feedback-loop avoidance.** OTel SDK uses `fetch` internally to upload OTLP
+data. Without protection, instrumenting `fetch` would trace those uploads,
+which would themselves be uploaded, causing an infinite loop. Qwen Code's
+undici instrumentation is configured with an `ignoreRequestHook` that skips
+URLs matching the configured `telemetry.otlpEndpoint` /
+`telemetry.otlpTracesEndpoint` / `telemetry.otlpLogsEndpoint` /
+`telemetry.otlpMetricsEndpoint` prefixes. In file-outfile mode there are no
+outbound HTTP uploads, so the hook is a no-op.
+
+## Outbound correlation (SECURITY-RELEVANT)
+
+These settings live in a **separate top-level namespace** from `telemetry.*`
+on purpose: telemetry controls data flow into the operator's own
+observability backend, while `outboundCorrelation.*` controls what
+client-side correlation data qwen-code writes **into outbound LLM API
+request streams** that reach third-party LLM provider endpoints
+(DashScope, OpenAI, Anthropic, etc.). Different recipients, different
+consent decision. **All values default to off.** See PR #4390 review
+discussion for the framing rationale.
+
+### `outboundCorrelation.propagateTraceContext`
+
+```jsonc
+"outboundCorrelation": {
+  "propagateTraceContext": false // default
+}
+```
+
+When `false` (default), Qwen Code installs a no-op `TextMapPropagator` on
+the OTel SDK. UndiciInstrumentation still creates client HTTP spans for
+your OTLP collector, but `propagation.inject()` is a no-op so **no
+`traceparent` is written onto outbound requests**. Trace IDs stay
+internal to the operator's collector.
+
+When `true`, the SDK's default W3C composite propagator
+(`tracecontext` + `baggage`) is installed and the standard `traceparent`
+header is written on every outbound `fetch`:
+
+```
+traceparent: 00-<32-hex traceId>-<16-hex parentSpanId>-<01-sampled | 00-not-sampled>
+```
+
+Opt in only when the LLM provider also reports into your OTel collector
+for cross-process trace stitching — e.g. ARMS Tracing serving DashScope.
+For most operators the value is `false`; cross-vendor trace continuation
+is niche.
+
+**Depends on `telemetry.enabled: true`.** The OTel SDK only initializes
+when telemetry is enabled, so `propagateTraceContext` only takes effect
+in that state. Setting it to `true` while telemetry is disabled is a
+silent no-op — no SDK, no propagator, no `traceparent` on the wire.
+Verify both flags when wiring an ARMS+DashScope correlation setup:
+
+```jsonc
+{
+  "telemetry": {
+    "enabled": true,
+    "otlpTracesEndpoint": "http://tracing-analysis-...",
+  },
+  "outboundCorrelation": {
+    "propagateTraceContext": true,
+  },
+}
+```
+
+### Other outbound correlation headers
+
+`X-Qwen-Code-Session-Id` and `X-Qwen-Code-Request-Id` are **not part of
+this PR**. They will be designed and proposed in their own follow-up
+PR(s) under the same `outboundCorrelation.*` namespace, each with its
+own threat model and operator-consent flow. PR #4390 review (LaZzyMan)
+established the principle: "telemetry's scope of work doesn't include
+sending identifiers to LLM providers"; correlation-header work moves to
+its own design discussion rather than landing under telemetry.
+
 ## Aliyun Telemetry
 
 ### Manual OTLP Export

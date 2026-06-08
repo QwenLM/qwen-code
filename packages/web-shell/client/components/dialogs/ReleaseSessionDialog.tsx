@@ -178,7 +178,9 @@ export function ReleaseSessionDialog({
   );
 
   return (
-    <div className={dp('resume-picker')}>
+    // Hover selection is intentionally disabled here: otherwise a stationary
+    // mouse can override the row selected by keyboard ↑↓ navigation.
+    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('release.title')}</span>
         {searchQuery && (
@@ -257,6 +259,7 @@ export function ReleaseSessionDialog({
                 key={s.sessionId}
                 className={dp(
                   'resume-picker-item',
+                  'resume-picker-session-item',
                   i === selectedIdx && !searchMode ? 'selected' : undefined,
                   isDisabled ? 'resume-picker-item-current' : undefined,
                   isDisabled ? 'disabled' : undefined,
@@ -265,7 +268,6 @@ export function ReleaseSessionDialog({
                   setSelectedIdx(i);
                   if (!isDisabled) handleRelease(s);
                 }}
-                onMouseEnter={() => setSelectedIdx(i)}
               >
                 <div className={dp('resume-picker-item-row')}>
                   <span className={dp('resume-picker-item-prefix')}>

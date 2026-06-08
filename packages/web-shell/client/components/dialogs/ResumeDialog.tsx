@@ -124,6 +124,8 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   );
 
   return (
+    // Hover selection is intentionally disabled here: otherwise a stationary
+    // mouse can override the row selected by keyboard ↑↓ navigation.
     <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
       {/* Header */}
       <div className={dp('resume-picker-header')}>
@@ -204,6 +206,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
                 key={s.sessionId}
                 className={dp(
                   'resume-picker-item',
+                  'resume-picker-session-item',
                   i === selectedIdx && !searchMode ? 'selected' : undefined,
                   isCurrent ? 'resume-picker-item-current' : undefined,
                 )}

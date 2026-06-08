@@ -154,7 +154,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    // Construct the permission rule for this specific MCP tool.
     const permissionRule = `mcp__${this.serverName}__${this.serverToolName}`;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
@@ -174,8 +173,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  // Determine if the response contains tool errors
-  // This is needed because CallToolResults should return errors inside the response.
+  // MCP spec: errors are returned inside the CallToolResult, not as exceptions.
   // ref: https://modelcontextprotocol.io/specification/2025-06-18/schema#calltoolresult
   isMCPToolError(rawResponseParts: Part[]): boolean {
     const functionResponse = rawResponseParts?.[0]?.functionResponse;
@@ -318,7 +316,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         callToolResult,
       );
 
-      // Ensure the response is not an error
       if (this.isMCPToolError(rawResponseParts)) {
         const errorMessage = `MCP tool '${
           this.serverToolName
@@ -394,7 +391,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           });
       });
 
-      // Ensure the response is not an error
       if (this.isMCPToolError(rawResponseParts)) {
         const errorMessage = `MCP tool '${
           this.serverToolName
@@ -509,7 +505,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * keeping every other field (including the shared underlying
    * `CallableTool` / MCP transport) identical.
    *
-   * F2 (#4175) pool path: a single shared pool entry produces one
+   * pool path: a single shared pool entry produces one
    * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
    * its own per-session trust before registering into its session's
    * `ToolRegistry`. Without this clone, mutating `trust` on the shared

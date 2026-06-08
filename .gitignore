@@ -67,6 +67,7 @@ packages/web-templates/src/generated/
 packages/vscode-ide-companion/*.vsix
 
 logs/
+.repro-runs/
 # GHA credentials
 gha-creds-*.json
 

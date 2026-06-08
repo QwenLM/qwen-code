@@ -1,6 +1,6 @@
 .panel {
   display: flex;
-  width: min(100%, 660px);
+  width: min(100%, 720px);
   flex-direction: column;
   gap: 2px;
   padding: 12px 16px;
@@ -44,7 +44,6 @@
 .subDetailRow {
   display: grid;
   width: 100%;
-  max-width: 56ch;
   align-items: baseline;
   column-gap: 0;
 }

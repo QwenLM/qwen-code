@@ -42,9 +42,11 @@ export {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleWorkspaceHooksStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
+  IDLE_HOOK_EVENTS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeEnvCell,
@@ -77,6 +79,13 @@ export {
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
+  type ServeHookConfig,
+  type ServeHookEntry,
+  type ServeHookEventMeta,
+  type ServeHookMatcherKind,
+  type ServeHookSource,
+  type ServeSessionHooksStatus,
+  type ServeWorkspaceHooksStatus,
 } from './status.js';
 export {
   ENV_NONSECRET_VARS,
@@ -93,6 +102,7 @@ export {
   type MutationGateOptions,
 } from './auth.js';
 export {
+  createAcpSessionBridge,
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
   // #4297 fold-in 1 (16:32:44-round S2): export every typed error
@@ -100,7 +110,7 @@ export {
   // embeds that want to recognize these errors (parallel to how
   // they already match `WorkspaceInitConflictError` /
   // `SessionNotFoundError`) need them on the public barrel; without
-  // this they have to deep-import `./httpAcpBridge.js`.
+  // this they have to deep-import `./acpSessionBridge.js`.
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
@@ -109,12 +119,13 @@ export {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   type AcpChannel,
+  type AcpSessionBridge,
   type BridgeOptions,
   type BridgeSession,
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './httpAcpBridge.js';
+} from './acpSessionBridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,

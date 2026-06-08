@@ -149,6 +149,7 @@
   display: block;
   width: 100%;
   padding: 3px 10px;
+  margin-top: 10px;
   font-size: 11px;
   font-family: var(--font-mono);
   background: var(--subtle-bg);

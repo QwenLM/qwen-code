@@ -63,6 +63,9 @@ export { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
 export type {
   DaemonMessage,
   DaemonAssistantMessage,
+  DaemonInsightErrorMessage,
+  DaemonInsightProgressMessage,
+  DaemonInsightReadyMessage,
   DaemonMessageToolCall,
   DaemonMessageToolCallContent,
   DaemonMessageToolCallStatus,
@@ -73,4 +76,5 @@ export type {
   DaemonSystemMessage,
   DaemonToolGroupMessage,
   DaemonUserMessage,
+  DaemonUserShellMessage,
 } from './messageTypes.js';

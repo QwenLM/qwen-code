@@ -8,6 +8,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
+  DaemonSessionBtwResult,
   DaemonSessionRecapResult,
   DaemonTranscriptStore,
   PermissionResponse,
@@ -157,7 +158,9 @@ export function createDaemonSessionActions({
         if (sessionRef.current?.sessionId === sessionId) {
           store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
-        throw dispatchActionError(store, 'Prompt failed', error);
+        const msg = error instanceof Error ? error.message : String(error);
+        store.dispatch({ type: 'error', text: msg, recoverable: true });
+        throw error instanceof Error ? error : new Error(msg);
       } finally {
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
@@ -427,6 +430,28 @@ export function createDaemonSessionActions({
       }
     },
 
+    async btwSession(
+      question: string,
+      opts?: { signal?: AbortSignal },
+    ): Promise<DaemonSessionBtwResult> {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Side question failed',
+      );
+      try {
+        return await withActionTimeout(
+          session.btw(question, opts),
+          'Side question timed out',
+        );
+      } catch (error) {
+        if (opts?.signal?.aborted || isAbortError(error)) {
+          throw error;
+        }
+        throw dispatchActionError(store, 'Side question failed', error);
+      }
+    },
+
     async sendShellCommand(command: string) {
       const session = requireSessionForAction(
         store,
@@ -461,6 +486,19 @@ export function createDaemonSessionActions({
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
         throw dispatchActionError(store, 'Get tasks failed', error);
+      }
+    },
+
+    async getStats() {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Load stats failed',
+      );
+      try {
+        return await withActionTimeout(session.stats(), 'Load stats timed out');
+      } catch (error) {
+        throw dispatchActionError(store, 'Load stats failed', error);
       }
     },
 

@@ -20,7 +20,7 @@ import esbuild from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 105 * 1024;
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 108 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });

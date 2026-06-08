@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
+import type { Config } from '../../config/config.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
+
+export function isForkSubagentEnabled(config: Config): boolean {
+  return config.isForkSubagentEnabled() && config.isInteractive();
+}
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';

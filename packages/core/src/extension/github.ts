@@ -22,6 +22,7 @@ import {
 } from './extensionManager.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { checkNpmUpdate } from './npm.js';
+import { redactUrlCredentials } from './redaction.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 
@@ -42,6 +43,20 @@ export interface GitHubDownloadResult {
   type: 'git' | 'github-release';
 }
 
+function createRedactedErrorCause(error: unknown, message: string): Error {
+  if (!(error instanceof Error)) {
+    return new Error(message);
+  }
+  const cause = Object.create(Object.getPrototypeOf(error)) as Error;
+  Object.defineProperties(cause, Object.getOwnPropertyDescriptors(error));
+  Object.defineProperty(cause, 'message', {
+    value: message,
+    configurable: true,
+    writable: true,
+  });
+  return cause;
+}
+
 function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
@@ -55,6 +70,7 @@ export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
 ): Promise<void> {
+  const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
     const git = simpleGit(destination);
     let sourceUrl = installMetadata.source;
@@ -88,23 +104,21 @@ export async function cloneFromGit(
 
     const remotes = await git.getRemotes(true);
     if (remotes.length === 0) {
-      throw new Error(
-        `Unable to find any remotes for repo ${installMetadata.source}`,
-      );
+      throw new Error(`Unable to find any remotes for repo ${redactedSource}`);
     }
 
     const refToFetch = installMetadata.ref || 'HEAD';
 
     await git.fetch(remotes[0].name, refToFetch);
 
-    // After fetching, checkout FETCH_HEAD to get the content of the fetched ref.
-    // This results in a detached HEAD state, which is fine for this purpose.
+    // Detached HEAD is expected here — we only need the fetched content.
     await git.checkout('FETCH_HEAD');
   } catch (error) {
+    const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
     throw new Error(
-      `Failed to clone Git repository from ${installMetadata.source} ${getErrorMessage(error)}`,
+      `Failed to clone Git repository from ${redactedSource} ${redactedErrorMessage}`,
       {
-        cause: error,
+        cause: createRedactedErrorCause(error, redactedErrorMessage),
       },
     );
   }
@@ -120,7 +134,7 @@ export function parseGitHubRepoForReleases(source: string): {
   const parts = parsedUrl?.pathname.substring(1).split('/');
   if (parts?.length !== 2 || parsedUrl?.host !== 'github.com') {
     throw new Error(
-      `Invalid GitHub repository source: ${source}. Expected "owner/repo" or a github repo uri.`,
+      `Invalid GitHub repository source: ${redactUrlCredentials(source)}. Expected "owner/repo" or a github repo uri.`,
     );
   }
   const owner = parts[0];
@@ -158,14 +172,14 @@ export async function checkForExtensionUpdate(
       });
     } catch (e) {
       debugLogger.error(
-        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${installMetadata.source}. Error: ${getErrorMessage(e)}`,
+        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}. Error: ${redactUrlCredentials(getErrorMessage(e))}`,
       );
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
 
     if (!latestConfig) {
       debugLogger.error(
-        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${installMetadata.source}`,
+        `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}`,
       );
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
@@ -201,7 +215,6 @@ export async function checkForExtensionUpdate(
         return ExtensionUpdateState.ERROR;
       }
 
-      // Determine the ref to check on the remote.
       const refToCheck = installMetadata.ref || 'HEAD';
 
       const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);
@@ -244,7 +257,7 @@ export async function checkForExtensionUpdate(
     }
   } catch (error) {
     debugLogger.error(
-      `Failed to check for updates for extension "${installMetadata.source}": ${getErrorMessage(error)}`,
+      `Failed to check for updates for extension "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(getErrorMessage(error))}`,
     );
     return ExtensionUpdateState.ERROR;
   }
@@ -353,7 +366,7 @@ export async function downloadFromGitHubRelease(
     };
   } catch (error) {
     throw new Error(
-      `Failed to download release from ${installMetadata.source}: ${getErrorMessage(error)}`,
+      `Failed to download release from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
     );
   }
 }

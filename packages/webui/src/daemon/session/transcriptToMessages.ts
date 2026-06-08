@@ -10,6 +10,7 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { parseDaemonTodoItemsFromEntries } from './selectors.js';
 import type {
@@ -38,6 +39,10 @@ export function transcriptBlocksToDaemonMessages(
   // by callId so later tool updates and permission placeholders merge in O(1)
   // instead of scanning the rendered message list for every block.
   const topLevelToolsByCallId = new Map<string, DaemonMessageToolCall>();
+  // Explicit parentToolCallId can arrive after a subAgent has completed and
+  // left the active stack, especially in compacted replay. Keep a stable
+  // index so parented text/tools still attach to the rendered agent card.
+  const subAgentsByCallId = new Map<string, DaemonMessageToolCall>();
   const subAgentStack: ActiveSubAgent[] = [];
   let currentAssistantIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -63,15 +68,75 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
+
+        const parentSubAgent = textBlock.parentToolCallId
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
+          : undefined;
+        if (parentSubAgent) {
+          appendSubContent(parentSubAgent, textBlock.text);
+          break;
+        }
+
         const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
         if (activeSubAgent) {
-          activeSubAgent.subContent =
-            (activeSubAgent.subContent || '') + textBlock.text;
+          appendSubContent(activeSubAgent, textBlock.text);
           break;
         }
         if (subAgentStack.length > 0) {
           break;
         }
+
+        const insightSegments = splitInsightSegments(textBlock.text);
+        if (insightSegments) {
+          let lastProgress: ParsedInsight | null = null;
+          let hasTerminal = false;
+          let readyCount = 0;
+          let errorCount = 0;
+          for (const seg of insightSegments) {
+            if (seg.kind === 'insight') {
+              if (seg.data.type === 'insight_progress') {
+                lastProgress = seg.data;
+              } else if (seg.data.type === 'insight_ready') {
+                hasTerminal = true;
+                messages.push({
+                  id: `${block.id}-ir-${readyCount++}`,
+                  role: 'insight_ready',
+                  path: seg.data.path,
+                });
+              } else if (seg.data.type === 'insight_error') {
+                hasTerminal = true;
+                messages.push({
+                  id: `${block.id}-ie-${errorCount++}`,
+                  role: 'insight_error',
+                  error: seg.data.error,
+                });
+              }
+            } else {
+              messages.push({
+                id: `${block.id}-t-${messages.length}`,
+                role: 'assistant',
+                content: seg.text,
+              });
+              currentAssistantIdx = messages.length - 1;
+            }
+          }
+          if (lastProgress && !hasTerminal) {
+            messages.push({
+              id: `${block.id}-ip`,
+              role: 'insight_progress',
+              stage: lastProgress.stage,
+              progress: lastProgress.progress,
+              detail: lastProgress.detail,
+            });
+          }
+          needsNewContentMessage = true;
+          break;
+        }
+
         const target =
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
@@ -98,10 +163,21 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
+        const parentSubAgent = textBlock.parentToolCallId
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
+          : undefined;
+        if (parentSubAgent) {
+          appendSubContent(parentSubAgent, textBlock.text);
+          break;
+        }
+
         const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
         if (activeSubAgent) {
-          activeSubAgent.subContent =
-            (activeSubAgent.subContent || '') + textBlock.text;
+          appendSubContent(activeSubAgent, textBlock.text);
           break;
         }
         if (subAgentStack.length > 0) {
@@ -141,7 +217,11 @@ export function transcriptBlocksToDaemonMessages(
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
         const parentSubAgent = toolCall.parentToolCallId
-          ? findSubAgent(subAgentStack, toolCall.parentToolCallId)
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              toolCall.parentToolCallId,
+            )
           : undefined;
         const existingTopLevelTool = topLevelToolsByCallId.get(toolCall.callId);
 
@@ -164,12 +244,19 @@ export function transcriptBlocksToDaemonMessages(
 
         if (existingTopLevelTool) {
           mergeToolCall(existingTopLevelTool, toolCall);
+          if (isSubAgentToolCall(existingTopLevelTool)) {
+            subAgentsByCallId.set(
+              existingTopLevelTool.callId,
+              existingTopLevelTool,
+            );
+          }
           break;
         }
 
         if (parentSubAgent) {
           appendSubTool(parentSubAgent, toolCall);
           if (isSubAgentToolCall(toolCall) && !isAgentCompletion(toolCall)) {
+            subAgentsByCallId.set(toolCall.callId, toolCall);
             subAgentStack.push({ tool: toolCall });
           }
           break;
@@ -188,6 +275,9 @@ export function transcriptBlocksToDaemonMessages(
 
         appendToolCallMessage(messages, block.id, toolCall);
         topLevelToolsByCallId.set(toolCall.callId, toolCall);
+        if (isSubAgentToolCall(toolCall)) {
+          subAgentsByCallId.set(toolCall.callId, toolCall);
+        }
         needsNewContentMessage = true;
 
         if (isSubAgentToolCall(toolCall) && !isBackgroundSubAgent(toolCall)) {
@@ -250,6 +340,19 @@ export function transcriptBlocksToDaemonMessages(
         break;
       }
 
+      case 'user_shell': {
+        const shellBlock = block as DaemonUserShellTranscriptBlock;
+        messages.push({
+          id: block.id,
+          role: 'user_shell',
+          command: shellBlock.command,
+          output: shellBlock.text,
+          ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
+        });
+        needsNewContentMessage = true;
+        break;
+      }
+
       case 'permission': {
         const permBlock = block as DaemonPermissionTranscriptBlock;
         const permissionToolCall = permissionBlockToToolCall(permBlock);
@@ -300,6 +403,12 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.callId,
               permissionToolCall,
             );
+            if (isSubAgentPermission) {
+              subAgentsByCallId.set(
+                permissionToolCall.callId,
+                permissionToolCall,
+              );
+            }
             needsNewContentMessage = true;
             if (isSubAgentPermission) {
               subAgentStack.push({ tool: permissionToolCall });
@@ -323,6 +432,9 @@ export function transcriptBlocksToDaemonMessages(
           permissionToolCall.callId,
           permissionToolCall,
         );
+        if (isSubAgentPermission) {
+          subAgentsByCallId.set(permissionToolCall.callId, permissionToolCall);
+        }
         needsNewContentMessage = true;
         if (isSubAgentPermission) {
           subAgentStack.push({ tool: permissionToolCall });
@@ -408,12 +520,24 @@ function findSubAgent(
   return index >= 0 ? stack[index]?.tool : undefined;
 }
 
+function findIndexedSubAgent(
+  index: Map<string, DaemonMessageToolCall>,
+  stack: ActiveSubAgent[],
+  toolCallId: string,
+): DaemonMessageToolCall | undefined {
+  return index.get(toolCallId) ?? findSubAgent(stack, toolCallId);
+}
+
 function appendSubTool(
   parent: DaemonMessageToolCall,
   toolCall: DaemonMessageToolCall,
 ): void {
   parent.subTools ||= [];
   parent.subTools.push(toolCall);
+}
+
+function appendSubContent(parent: DaemonMessageToolCall, text: string): void {
+  parent.subContent = (parent.subContent || '') + text;
 }
 
 function closeCompletedSubAgentsBefore(
@@ -682,6 +806,139 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
 
 function isCancelledStatus(status: string): boolean {
   return status === 'cancelled' || status === 'canceled';
+}
+
+type ParsedInsight =
+  | {
+      type: 'insight_progress';
+      stage: string;
+      progress: number;
+      detail?: string;
+    }
+  | { type: 'insight_ready'; path: string }
+  | { type: 'insight_error'; error: string };
+
+type InsightSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'insight'; data: ParsedInsight };
+
+const INSIGHT_PREFIXES = [
+  '"insight_progress":',
+  '"insight_ready":',
+  '"insight_error":',
+];
+
+function parseInsightJson(json: string): ParsedInsight | null {
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const prog = getRecord(parsed['insight_progress']);
+    if (
+      prog &&
+      typeof prog['stage'] === 'string' &&
+      typeof prog['progress'] === 'number'
+    ) {
+      return {
+        type: 'insight_progress',
+        stage: prog['stage'] as string,
+        progress: prog['progress'] as number,
+        detail:
+          typeof prog['detail'] === 'string'
+            ? (prog['detail'] as string)
+            : undefined,
+      };
+    }
+    const ready = getRecord(parsed['insight_ready']);
+    if (ready && typeof ready['path'] === 'string') {
+      return { type: 'insight_ready', path: ready['path'] as string };
+    }
+    const insightError = getRecord(parsed['insight_error']);
+    if (insightError && typeof insightError['error'] === 'string') {
+      return { type: 'insight_error', error: insightError['error'] as string };
+    }
+  } catch {
+    // not valid JSON
+  }
+  return null;
+}
+
+// Balanced-braces JSON extractor. Handles string escapes but not standalone
+// arrays — sufficient for the insight protocol's object-only payloads.
+function extractJsonObject(text: string, start: number): string | null {
+  if (text[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function splitInsightSegments(text: string): InsightSegment[] | null {
+  const segments: InsightSegment[] = [];
+  let lastIndex = 0;
+  let pos = 0;
+  let hasInsight = false;
+
+  while (pos < text.length) {
+    const braceIdx = text.indexOf('{', pos);
+    if (braceIdx === -1) break;
+
+    const afterBrace = text.slice(braceIdx + 1).trimStart();
+    const isInsight = INSIGHT_PREFIXES.some((p) => afterBrace.startsWith(p));
+    if (!isInsight) {
+      pos = braceIdx + 1;
+      continue;
+    }
+
+    const json = extractJsonObject(text, braceIdx);
+    if (!json) {
+      pos = braceIdx + 1;
+      continue;
+    }
+
+    const insight = parseInsightJson(json);
+    if (!insight) {
+      pos = braceIdx + 1;
+      continue;
+    }
+
+    hasInsight = true;
+    const before = text.slice(lastIndex, braceIdx).trim();
+    if (before) {
+      segments.push({ kind: 'text', text: before });
+    }
+    segments.push({ kind: 'insight', data: insight });
+    lastIndex = braceIdx + json.length;
+    pos = lastIndex;
+  }
+
+  if (!hasInsight) return null;
+
+  const after = text.slice(lastIndex).trim();
+  if (after) {
+    segments.push({ kind: 'text', text: after });
+  }
+
+  return segments.length > 0 ? segments : null;
 }
 
 function inferToolKind(

@@ -7,9 +7,9 @@
 /**
  * Shared `writeStderrLine` helper for `bridge.ts` + `bridgeClient.ts`.
  *
- * Originally inlined per-file in #4175 F1 steps 1-3 to keep the lifted
+ * Originally inlined per-file to keep the
  * modules free of any reverse import on `cli/src/utils/stdioHelpers.ts`.
- * Wenshao review (#4319) noted that both consumers now live in the
+ * Both consumers now live in the
  * **same** `@qwen-code/acp-bridge` package — the cross-package
  * justification no longer applies, and a future behavior change
  * (timestamp prefix, log level, structured field) would require

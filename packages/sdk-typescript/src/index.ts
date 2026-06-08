@@ -3,7 +3,7 @@ export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
 
-// Daemon HTTP client (talks to `qwen serve`; see GitHub issue #3803)
+// Daemon HTTP client (talks to `qwen serve`)
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
@@ -55,7 +55,7 @@ export {
   type DaemonErrorKind,
   type DaemonClientEvictedData,
   type DaemonClientEvictedEvent,
-  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
   type DaemonStateResyncRequiredEvent,
@@ -65,7 +65,7 @@ export {
   type DaemonEvent,
   type DaemonEventEnvelope,
   type DaemonKnownEventType,
-  // PR 14b — MCP guardrail push-event types.
+  // MCP guardrail push-event types.
   type DaemonMcpBudgetWarningData,
   type DaemonMcpBudgetWarningEvent,
   type DaemonMcpChildRefusedBatchData,
@@ -170,7 +170,7 @@ export {
   type SubscribeOptions,
 } from './daemon/index.js';
 
-// PR #4255 fold-in 9 review thread #11 — Issue #4175 PR 21 auth
+// Auth
 // surface. These were re-exported from `./daemon/index.js` but the
 // public SDK entry (this file) never re-exported them, so an
 // `import { DaemonAuthFlow } from '@qwen-code/sdk'` resolved to

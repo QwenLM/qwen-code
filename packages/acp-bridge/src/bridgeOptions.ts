@@ -6,12 +6,15 @@
 
 /**
  * `BridgeOptions` and the daemon-host injection seam (`DaemonStatusProvider`)
- * for the ACP bridge factory. Lifted to `@qwen-code/acp-bridge` in #4175 PR
- * 22b/2 so the bridge package owns the construction contract independently
- * of `cli/src/serve/`. The factory implementation itself moves in PR 22b/3.
+ * for the ACP bridge factory. Lifted to `@qwen-code/acp-bridge` so the
+ * bridge package owns the construction contract independently of
+ * `cli/src/serve/`.
  */
 
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  DaemonBridgeTelemetryMetrics,
+} from '@qwen-code/qwen-code-core';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
@@ -97,6 +100,8 @@ export type BridgeTelemetryAttributes = Record<
   string | number | boolean
 >;
 
+export type BridgeTelemetryMetrics = DaemonBridgeTelemetryMetrics;
+
 export interface BridgeTelemetry {
   captureContext(): unknown;
   runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
@@ -107,16 +112,17 @@ export interface BridgeTelemetry {
   ): Promise<T>;
   event(name: string, attributes: BridgeTelemetryAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
+  metrics?: BridgeTelemetryMetrics;
 }
 
 /**
- * Construction options for `createHttpAcpBridge`. Most fields are
+ * Construction options for `createAcpSessionBridge`. Most fields are
  * tuning knobs with sensible defaults; `boundWorkspace` is the only
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
   /**
-   * §03 decision §1. `single` shares one session per workspace across HTTP
+   * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
    *
@@ -145,7 +151,7 @@ export interface BridgeOptions {
    * Per-session SSE replay ring depth. Sets `ringSize` on every
    * `new EventBus(...)` the bridge constructs (both fresh sessions
    * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
-   * #3803 §02 target). Must be a positive finite integer; `0` /
+   * the daemon design target). Must be a positive finite integer; `0` /
    * `NaN` / negative throw at boot (fail-CLOSED — same posture as
    * `maxSessions`, where silently disabling a backpressure knob on a
    * config typo is worse than failing to start).
@@ -175,7 +181,7 @@ export interface BridgeOptions {
   maxPendingPermissionsPerSession?: number;
   /**
    * Absolute, **already-canonical** path this daemon is bound to (per
-   * #3803 §02: 1 daemon = 1 workspace). `spawnOrAttach` calls whose
+   * 1 daemon = 1 workspace). `spawnOrAttach` calls whose
    * `workspaceCwd` doesn't canonicalize to this same value throw
    * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
    *
@@ -190,7 +196,7 @@ export interface BridgeOptions {
    * theoretically diverge from the runQwenServe canonicalize on
    * NFS-transient / mid-rename filesystems, landing the bridge with
    * one canonical form while `/capabilities` advertises another).
-   * Direct embeds / tests calling `createHttpAcpBridge` themselves
+   * Direct embeds / tests calling `createAcpSessionBridge` themselves
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;
@@ -217,7 +223,7 @@ export interface BridgeOptions {
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
   /**
-   * #4175 Wave 4 PR 17 — optional callback for persisting `tools.
+   * -- optional callback for persisting `tools.
    * approvalMode` to the workspace settings file. Invoked by
    * `setSessionApprovalMode` ONLY when the route caller passes
    * `{persist: true}`. The default `runQwenServe` wires this to
@@ -232,35 +238,6 @@ export interface BridgeOptions {
     mode: ApprovalMode,
   ) => Promise<void>;
   /**
-   * #4175 Wave 4 PR 17 — optional callback for mutating
-   * `tools.disabled` in workspace settings. Invoked by
-   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
-   * (`enabled: true`) `toolName` from the persisted disabled set.
-   * The default `runQwenServe` wires this to a fresh
-   * `loadSettings(boundWorkspace)` per call so concurrent edits from
-   * other writers (CLI, another daemon, an editor) are picked up.
-   * Bridge tests / embedded callers may omit it; without the hook
-   * `setWorkspaceToolEnabled` throws a clear error rather than
-   * silently dropping the write.
-   */
-  persistDisabledTools?: (
-    boundWorkspace: string,
-    toolName: string,
-    enabled: boolean,
-  ) => Promise<void>;
-  /**
-   * #4282 fold-in 5 (Codex P2-1). Optional override for the basename
-   * (or single relative path) of the workspace context file written
-   * by `POST /workspace/init`. When omitted, falls back to
-   * `getCurrentGeminiMdFilename()` — the process-global value, which
-   * the daemon parent never updates because it doesn't go through
-   * `loadCliConfig`. Production callers (`runQwenServe`) snapshot the
-   * resolved filename from the workspace's merged settings at boot
-   * and pass it here so init writes the same file the ACP child
-   * reads. Bridge tests can pass any literal.
-   */
-  contextFilename?: string;
-  /**
    * #4175 Wave 5 PR 22b/2 — optional injection seam for daemon-host
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides
@@ -272,7 +249,7 @@ export interface BridgeOptions {
    * and `acpChannelLive` from bridge state) and an empty array for
    * the daemon half of `getWorkspacePreflightStatus` (the ACP-level
    * cells are still fetched normally when a child is live). This
-   * matches the "idle status is queryable" pattern PR 12 / 13
+   * matches the "idle status is queryable" pattern previous work
    * established for diagnostic routes — direct embeds and tests
    * that don't need daemon-host cells can omit the provider
    * without crashing those routes.
@@ -287,19 +264,18 @@ export interface BridgeOptions {
   telemetry?: BridgeTelemetry;
 
   /**
-   * Optional fs injection seam (#4175 PR F1 step 5, originally the
-   * 22b' scope). When provided, `BridgeClient.readTextFile` and
+   * Optional fs injection seam. When provided, `BridgeClient.readTextFile` and
    * `BridgeClient.writeTextFile` delegate every ACP fs call to this
    * implementation instead of using BridgeClient's inline
    * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
    *
    * The immediate F1 follow-up will land a serve-side adapter that
-   * wraps PR 18's `WorkspaceFileSystem` and a `runQwenServe` wiring
+   * wraps its `WorkspaceFileSystem` and a `runQwenServe` wiring
    * patch so production `qwen serve` writes pick up its TOCTOU +
    * symlink-substitution + trust-gate + `.gitignore` + audit
-   * machinery — closing the post-PR-18 follow-up thread about
+   * machinery — closing the follow-up thread about
    * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
-   * (originally raised in #4250 review). Until that lands, BridgeClient's inline
+   * (originally raised in code review). Until that lands, BridgeClient's inline
    * proxy continues to handle writes (current behavior preserved).
    *
    * When omitted (tests, Mode A in-process consumers, channels /
@@ -310,7 +286,7 @@ export interface BridgeOptions {
    */
   fileSystem?: BridgeFileSystem;
   /**
-   * #4175 F3 Commit 2 — active permission mediation policy for the
+   * -- active permission mediation policy for the
    * `MultiClientPermissionMediator`. When omitted, defaults to
    * `'first-responder'` (the pre-F3 behavior — any validated voter
    * wins immediately). The bridge captures this once at construction
@@ -321,7 +297,7 @@ export interface BridgeOptions {
    */
   permissionPolicy?: PermissionPolicy;
   /**
-   * #4175 F3 Commit 2 — optional fixed quorum for `consensus` policy.
+   * -- optional fixed quorum for `consensus` policy.
    * MUST be a positive integer if provided; the F3 settings layer
    * validates this and fails startup on non-integer / non-positive
    * values. Capped at `M = votersAtIssue.size` at request time to
@@ -330,7 +306,7 @@ export interface BridgeOptions {
    */
   permissionConsensusQuorum?: number;
   /**
-   * #4175 F3 Commit 2 — injection seam for the permission audit
+   * -- injection seam for the permission audit
    * publisher.
    *
    * **When omitted**: the bridge falls back to
@@ -356,4 +332,12 @@ export interface BridgeOptions {
    * No-op when omitted. Set by cli `runQwenServe` from the daemon logger.
    */
   onDiagnosticLine?: DiagnosticLineSink;
+  /**
+   * Milliseconds to keep the ACP child alive after the last session
+   * closes. When a new session arrives during the idle window, the
+   * warm channel is reused without a cold start. `0` (default) kills
+   * the channel immediately (current behavior). The timer is `.unref()`'d
+   * so it does not prevent daemon exit.
+   */
+  channelIdleTimeoutMs?: number;
 }

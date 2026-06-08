@@ -10,7 +10,7 @@
 
 .line {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   padding: 6px 0;
 }
 
@@ -204,6 +204,18 @@
   min-width: 0;
   padding: 4px 8px !important;
   overflow: hidden;
+}
+
+:global(.cm-tooltip-autocomplete completion-section) {
+  display: block !important;
+  height: 0;
+  margin: 6px 10px 3px;
+  padding: 0 !important;
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+:global(.cm-tooltip-autocomplete completion-section:first-of-type) {
+  display: none !important;
 }
 
 :global(.cm-tooltip-autocomplete .cm-completionLabel) {

@@ -48,6 +48,12 @@ import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
+import {
+  MemoryPressureMonitor,
+  DEFAULT_PRESSURE_CONFIG,
+  validateMemoryPressureConfig,
+  type MemoryPressureConfig,
+} from '../services/memoryPressureMonitor.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -109,9 +115,11 @@ import {
 import {
   PermissionMode,
   NotificationType,
+  type PermissionDeniedReason,
   type PermissionSuggestion,
   type HookEventName,
   type HookDefinition,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -155,6 +163,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
+const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 import {
   ModelsConfig,
@@ -268,15 +277,41 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
-  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
-   * apportioning chars across history in `findCompressSplitPoint`.
+   * apportioning chars across history during compression size estimation.
    * Also used as the placeholder budget when stripping inline media
    * out of the side-query compaction prompt. Default 1600.
    * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
    */
   imageTokenEstimate?: number;
+  /**
+   * Number of most-recently-touched files whose current content is
+   * restored (embedded or referenced) after auto-compaction. Default 5.
+   * Env override: `QWEN_COMPACT_MAX_RECENT_FILES`.
+   */
+  maxRecentFilesToRetain?: number;
+  /**
+   * Number of most-recent images (tool screenshots / user pastes)
+   * restored after auto-compaction. Default 3.
+   * Env override: `QWEN_COMPACT_MAX_RECENT_IMAGES`.
+   */
+  maxRecentImagesToRetain?: number;
+  /**
+   * When true, auto-compaction also fires once the number of
+   * tool-returned images accumulated in history reaches
+   * `screenshotTriggerThreshold`, independent of token usage. Aimed at
+   * computer-use sessions where frequent screenshots dilute model
+   * attention without necessarily exceeding the token budget. Default true.
+   * Env override: `QWEN_COMPACT_SCREENSHOT_TRIGGER` (`1`/`true`/`0`/`false`).
+   */
+  enableScreenshotTrigger?: boolean;
+  /**
+   * Tool-returned image count at or above which the screenshot trigger
+   * fires (only when `enableScreenshotTrigger`). Default 50.
+   * Env override: `QWEN_COMPACT_SCREENSHOT_THRESHOLD`.
+   */
+  screenshotTriggerThreshold?: number;
 }
 
 /**
@@ -335,6 +370,41 @@ export interface TelemetryMetricsSettings {
    * short-term debugging — spans and logs still carry session.id.
    */
   includeSessionId?: boolean;
+}
+
+/**
+ * Security-relevant settings controlling what client-side correlation
+ * data qwen-code writes into outbound LLM API requests.
+ *
+ * **Why this is a separate namespace from `telemetry.*`:** telemetry
+ * controls data flow into the user's OWN observability backend (OTLP
+ * collector / file outfile). The settings here control data flow OUT of
+ * the qwen-code process and INTO third-party LLM provider request
+ * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
+ * different consent decision, so a different settings tree.
+ *
+ * All values default to off / no propagation. Operators who want to
+ * propagate trace context for server-side trace stitching (e.g. ARMS
+ * Tracing + DashScope) opt in explicitly.
+ */
+export interface OutboundCorrelationSettings {
+  /**
+   * Inject W3C `traceparent` header on outbound HTTP requests
+   * originated by undici / global `fetch` (LLM SDK calls, MCP
+   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
+   *
+   * When `false`, the SDK is configured with a no-op
+   * `TextMapPropagator` so trace context stays internal to the user's
+   * OTLP collector (operator still gets client HTTP spans, but the
+   * trace id is not written onto third-party request streams).
+   *
+   * When `true`, the OTel default W3C composite propagator
+   * (`tracecontext` + `baggage`) is installed and `traceparent` is
+   * written on every outbound `fetch`. Useful when the LLM provider
+   * also reports into the operator's OTel collector — e.g. ARMS
+   * Tracing + DashScope — for cross-process trace stitching.
+   */
+  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -493,6 +563,27 @@ export interface SandboxConfig {
  * Settings shared across multi-agent collaboration features
  * (Arena, Team, Swarm).
  */
+/**
+ * General-purpose worktree settings (Phase D-2). Distinct from
+ * {@link AgentsCollabSettings.arena.worktreeBaseDir}, which only governs
+ * Arena multi-model worktrees.
+ */
+export interface WorktreeSettings {
+  /**
+   * Directories under the main repository to symlink into every
+   * general-purpose worktree on creation (the `enter_worktree` tool,
+   * `agent isolation: "worktree"`, and the `--worktree` startup flag).
+   *
+   * Paths must be relative to the repo root; absolute paths and any
+   * entry containing `..` are rejected by the service. Entries that
+   * resolve to git-internal paths (`.git`, `.qwen`) are also rejected
+   * — symlinking those would either break git inside the worktree or
+   * create a worktrees-inside-worktrees loop. Missing source dirs and
+   * pre-existing destinations are silently skipped.
+   */
+  symlinkDirectories?: readonly string[];
+}
+
 export interface AgentsCollabSettings {
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
@@ -537,8 +628,7 @@ export interface ConfigParameters {
    * invocation), tools listed here are not registered at all and never
    * appear in `/tools`, `getAllTools()`, or function-call discovery.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
-   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
-   * 17). Active sessions retain already-registered tools — the disabled
+   * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
@@ -565,6 +655,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
+  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -593,10 +684,25 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
+   * means no limit. Enforced by the CLI's non-interactive run loop
+   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
+   * Issue: QwenLM/qwen-code#4103.
+   */
+  maxWallTimeSeconds?: number;
+  /**
+   * Cumulative tool-call budget across the entire run. `-1` means no
+   * limit. Counts every `executeToolCall` invocation (incl. failed
+   * tools, since the model is still consuming tokens reading the error).
+   */
+  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  forkSubagentEnabled?: boolean;
+  computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -669,6 +775,8 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** General-purpose worktree settings (Phase D-2). */
+  worktree?: WorktreeSettings;
   /** Enable managed auto-memory background extraction and dream. Defaults to true. */
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
@@ -748,6 +856,53 @@ function normalizeConfigOutputFormat(
   }
 }
 
+function loadMemoryPressureConfig(): MemoryPressureConfig {
+  const config: MemoryPressureConfig = { ...DEFAULT_PRESSURE_CONFIG };
+
+  try {
+    config.softPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_SOFT',
+      config.softPressureRatio,
+    );
+    config.hardPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_HARD',
+      config.hardPressureRatio,
+    );
+    config.criticalRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_CRITICAL',
+      config.criticalRatio,
+    );
+
+    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
+      config.enableExplicitGC = true;
+    }
+
+    validateMemoryPressureConfig(config);
+  } catch (err) {
+    const fallbackMsg =
+      '[QWEN] WARNING: Invalid memory pressure config; using defaults. ' +
+      `Error: ${getErrorMessage(err)}`;
+    process.stderr.write(`${fallbackMsg}\n`);
+    memoryPressureConfigLogger.warn(fallbackMsg);
+    return { ...DEFAULT_PRESSURE_CONFIG };
+  }
+
+  return config;
+}
+
+function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
+  const raw = process.env[envName];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${envName} must be a finite number`);
+  }
+  return parsed;
+}
+
 /**
  * Options for Config.initialize()
  */
@@ -763,7 +918,7 @@ export interface ConfigInitializeOptions {
    */
   skipGeminiInitialization?: boolean;
   /**
-   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+   * skip MCP
    * discovery entirely (both inline tool-registry-time discovery AND
    * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
    * The bootstrap config in ACP daemon mode uses this to AVOID spawning
@@ -787,13 +942,33 @@ const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.SHELL,
 ];
 
+// Tracks whether the first Config in this process has claimed the global
+// QWEN_CODE_SESSION_ID env var. Prevents throwaway Config instances from
+// overwriting the real session's ID while still allowing nested qwen-code
+// processes to claim their own (they start with a fresh module scope).
+let sessionEnvClaimed = false;
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  /**
+   * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
+   * CLI was launched with `--worktree`. The active entry point (TUI XOR
+   * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
+   * the model's first prompt and skips Phase C's `restoreWorktreeContext`
+   * for that turn — startup wins over the resumed-session sidecar. ACP is
+   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * never reaches this slot.
+   *
+   * @invariant At most one consumer per process. If a future entry path
+   * sets this slot without ever consuming, the string persists until
+   * process exit (which dies with the process — no leak).
+   */
+  private pendingStartupWorktreeNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
-   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * callback stashed BEFORE
    * `initialize()` runs and applied as soon as `toolRegistry` is up,
    * so the manager's `setOnBudgetEvent` is wired before
    * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
@@ -805,6 +980,8 @@ export class Config {
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private memoryPressureConfig?: MemoryPressureConfig;
+  private memoryPressureMonitor?: MemoryPressureMonitor;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
@@ -845,7 +1022,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
   // `discoverMcpToolsForServer` sees the latest disabled set instead
@@ -879,6 +1056,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
+  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -909,6 +1087,8 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxWallTimeSeconds: number;
+  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -918,6 +1098,8 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly forkSubagentEnabled: boolean = false;
+  private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -936,6 +1118,7 @@ export class Config {
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private readonly agentsSettings: AgentsCollabSettings;
+  private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
@@ -979,6 +1162,16 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
+    // Only set the global env marker once per process lifetime, so
+    // throwaway Config instances (e.g. telemetry-only) don't clobber
+    // the real interactive session's ID. Uses a module-level flag
+    // rather than checking env existence — otherwise a nested qwen-code
+    // launched from within a session would inherit the parent's ID and
+    // never claim its own.
+    if (!sessionEnvClaimed && process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+      sessionEnvClaimed = true;
+    }
     this.sessionData = params.sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1047,6 +1240,10 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.outboundCorrelationSettings = {
+      propagateTraceContext:
+        params.outboundCorrelation?.propagateTraceContext ?? false,
+    };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
@@ -1072,6 +1269,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
+    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1082,6 +1281,8 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1137,6 +1338,7 @@ export class Config {
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
+    this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -1175,8 +1377,8 @@ export class Config {
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
-    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
-    this.enableAutoSkill = params.enableAutoSkill ?? false;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -1310,6 +1512,13 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'PostToolBatch':
+                result = await hookSystem.firePostToolBatchEvent(
+                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
               case 'Notification':
                 result = await hookSystem.fireNotificationEvent(
                   (input['message'] as string) || '',
@@ -1328,6 +1537,16 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionDenied':
+                result = await hookSystem.firePermissionDeniedEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['reason'] as PermissionDeniedReason) ||
+                    'classifier_blocked',
                   signal,
                 );
                 break;
@@ -1394,6 +1613,12 @@ export class Config {
     }
     this.debugLogger.debug('Skill manager initialized');
 
+    this.memoryPressureConfig = loadMemoryPressureConfig();
+    this.memoryPressureMonitor = new MemoryPressureMonitor(
+      this,
+      this.memoryPressureConfig,
+    );
+
     this.permissionManager = new PermissionManager(this);
     this.permissionManager.initialize();
     this.debugLogger.debug('Permission manager initialized');
@@ -1419,7 +1644,7 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    // W119: also force the inline-discovery skip when the caller opts
+    // Also force the inline-discovery skip when the caller opts
     // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
     // blocking mode would still spawn MCP servers via the tool-registry
     // construction path.
@@ -1460,7 +1685,7 @@ export class Config {
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
     //
-    // W119: also gated on `!options?.skipMcpDiscovery` — the ACP
+    // Also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
     if (
@@ -1888,6 +2113,12 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
+    // Unconditional: startNewSession is only called on the canonical Config
+    // instance (the one that already claimed via sessionEnvClaimed), so this
+    // correctly updates the env var to reflect the new active session.
+    if (process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    }
     this.sessionData = sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1904,6 +2135,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
@@ -1926,8 +2158,8 @@ export class Config {
     // Only refresh when THIS process established its own sidecar at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id —
-    // mirrors kimi-cli PR #2082's "write only when a session is
+    // sidecar that happens to share the outgoing session id
+    // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
     if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
@@ -2204,6 +2436,14 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getMaxWallTimeSeconds(): number {
+    return this.maxWallTimeSeconds;
+  }
+
+  getMaxToolCalls(): number {
+    return this.maxToolCalls;
+  }
+
   getClearContextOnIdle(): ClearContextOnIdleSettings {
     return this.clearContextOnIdle;
   }
@@ -2233,6 +2473,29 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  /**
+   * Stashes a one-shot context message that the next user prompt will
+   * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
+   * from `gemini.tsx` right after `loadCliConfig` when `--worktree` produced
+   * a valid worktree. Pass `null` to clear (rarely needed).
+   */
+  setPendingStartupWorktreeNotice(notice: string | null): void {
+    this.pendingStartupWorktreeNotice = notice;
+  }
+
+  /**
+   * Reads and clears the pending startup-worktree notice. Returns `null`
+   * when nothing is stashed (the common case). Each entry point (TUI /
+   * headless / ACP) calls this on the model's first prompt; a non-null
+   * return means the entry point should NOT additionally call
+   * `restoreWorktreeContext()` for that prompt — startup overrides resume.
+   */
+  consumePendingStartupWorktreeNotice(): string | null {
+    const v = this.pendingStartupWorktreeNotice;
+    this.pendingStartupWorktreeNotice = null;
+    return v;
   }
 
   getProjectRoot(): string {
@@ -2326,8 +2589,8 @@ export class Config {
    *
    * This merges all sources so that PermissionManager receives a single,
    * authoritative list:
-   *   - settings.permissions.allow  (persistent rules from all scopes)
-   *   - allowedTools param  (SDK / argv auto-approve list)
+   *   - settings.permissions.allow (persistent rules from all scopes)
+   *   - allowedTools param (SDK / argv auto-approve list)
    *
    * Note: coreTools is intentionally excluded here — it has whitelist semantics
    * (only listed tools are registered), not auto-approve semantics. It is
@@ -2356,8 +2619,8 @@ export class Config {
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
-   *   - settings.permissions.deny  (persistent rules from all scopes)
-   *   - excludeTools param  (SDK / argv blocklist)
+   *   - settings.permissions.deny (persistent rules from all scopes)
+   *   - excludeTools param (SDK / argv blocklist)
    *
    * CLI callers pre-merge argv.excludeTools into permissionsDeny.
    */
@@ -2390,7 +2653,7 @@ export class Config {
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
    * `ToolRegistry.registerFactory` to skip registration.
    *
-   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * Mutability semantics: the snapshot is
    * mutable via `setDisabledTools()` so the daemon's
    * `setWorkspaceToolEnabled` route can re-sync the set after a
    * `tools.disabled` settings write — without that sync, the
@@ -2412,7 +2675,7 @@ export class Config {
   }
 
   /**
-   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
    * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
@@ -2420,7 +2683,7 @@ export class Config {
    * in-memory Config in sync so a subsequent MCP rediscovery / next
    * tool registration honors the just-toggled value.
    *
-   * Already-registered tools are NOT retroactively unregistered —
+   * Already-registered tools are NOT retroactively unregistered
    * `ToolRegistry` consults the set at registration time only, which
    * matches the documented "toggling does not unregister live tools"
    * contract.
@@ -2438,14 +2701,14 @@ export class Config {
   }
 
   /**
-   * F2 (#4175 commit 4): optional workspace-shared MCP transport pool
+   * optional workspace-shared MCP transport pool
    * injected by the daemon-mode `QwenAgent`. When set, the wrapping
    * `ToolRegistry` threads it into `McpClientManager`, which delegates
    * non-SDK MCP server discovery to the pool instead of spawning its
    * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
-   * this `undefined` and the manager keeps its pre-F2 behavior.
+   * this `undefined` and the manager keeps its previous behavior.
    *
-   * Eagerly instantiated by `QwenAgent` (per V21-13 Q6 resolved); the
+   * Eagerly instantiated by `QwenAgent` (per Q6 resolved); the
    * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
    * until the first `acquire()` from a session.
    */
@@ -2465,7 +2728,7 @@ export class Config {
 
   /**
    * T2.8: return the raw settings-layer MCP servers map (without the
-   * runtime overlay or extension contributions).  Used by
+   * runtime overlay or extension contributions). Used by
    * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
    * settings (a runtime entry whose name collides with a pre-existing
    * settings entry).
@@ -2532,7 +2795,7 @@ export class Config {
    * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
    * touch `this.mcpServers` (settings layer) and does not enforce the
    * `initialized` guard — the whole point is post-init mutation from the
-   * daemon surface.  `getMcpServers()` will overlay these entries on top
+   * daemon surface. `getMcpServers()` will overlay these entries on top
    * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
@@ -2541,7 +2804,7 @@ export class Config {
 
   /**
    * Remove a runtime-only MCP server previously added via
-   * `addRuntimeMcpServer`.  Returns `true` if the entry existed and was
+   * `addRuntimeMcpServer`. Returns `true` if the entry existed and was
    * removed, `false` otherwise.
    */
   removeRuntimeMcpServer(name: string): boolean {
@@ -2641,6 +2904,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getOutputLanguageFilePath(): string | undefined {
+    return this.outputLanguageFilePath;
+  }
+
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
   }
@@ -2678,6 +2945,18 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  /**
+   * Convenience accessor for `worktree.symlinkDirectories` — returns an
+   * empty array when the setting is unset, so callers can pass the
+   * result directly into the GitWorktreeService loop without nullchecks.
+   *
+   * (No general `getWorktreeSettings()` getter yet — add one when a
+   * second field on `WorktreeSettings` justifies the broader API.)
+   */
+  getWorktreeSymlinkDirectories(): readonly string[] {
+    return this.worktreeSettings.symlinkDirectories ?? [];
   }
 
   /**
@@ -2988,6 +3267,15 @@ export class Config {
     return this.telemetrySettings.resourceAttributeWarnings ?? [];
   }
 
+  /**
+   * Whether to inject W3C `traceparent` on outbound `fetch` requests
+   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
+   * `OutboundCorrelationSettings` for rationale.
+   */
+  getOutboundCorrelationPropagateTraceContext(): boolean {
+    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
+  }
+
   getTelemetryOutfile(): string | undefined {
     return this.telemetrySettings.outfile;
   }
@@ -2998,6 +3286,33 @@ export class Config {
 
   getGeminiClient(): GeminiClient {
     return this.geminiClient;
+  }
+
+  /**
+   * Session-scoped memory pressure monitor. Child Configs created with
+   * `Object.create(parent)` inherit the parent's monitor through the prototype
+   * chain until this getter installs an own monitor backed by the inherited
+   * pressure config snapshot. This mirrors getFileReadCache()'s isolation
+   * contract while keeping type-safe direct field assignment inside the class.
+   */
+  getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
+    if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
+      const inheritedMonitor = this.memoryPressureMonitor;
+      if (inheritedMonitor) {
+        const inheritedConfig = this.memoryPressureConfig;
+        if (!inheritedConfig) {
+          throw new Error(
+            'Inherited memory pressure monitor is missing config',
+          );
+        }
+        this.memoryPressureConfig = { ...inheritedConfig };
+        this.memoryPressureMonitor = new MemoryPressureMonitor(
+          this,
+          this.memoryPressureConfig,
+        );
+      }
+    }
+    return this.memoryPressureMonitor;
   }
 
   getCronScheduler(): CronScheduler {
@@ -3011,6 +3326,15 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  isForkSubagentEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
+    return this.forkSubagentEnabled;
+  }
+
+  isComputerUseEnabled(): boolean {
+    return this.computerUseEnabled;
   }
 
   /**
@@ -3140,7 +3464,7 @@ export class Config {
 
   /**
    * Fast-path check: returns true only when hooks are enabled AND there are
-   * registered hooks for the given event name.  Callers can use this to skip
+   * registered hooks for the given event name. Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
   hasHooksForEvent(eventName: string, sessionId?: string): boolean {
@@ -3933,13 +4257,28 @@ export class Config {
       });
     }
 
+    // Register computer-use tools unless disabled. All 9 are deferred
+    // they surface only via ToolSearch keyword match
+    // (see packages/core/src/tools/computer-use/).
+    //
+    // Pass `registerLazy` (not the bare `registry`) so the same
+    // PermissionManager.isToolEnabled() check that gates every other
+    // built-in also gates these. Direct registry.registerFactory() would
+    // bypass coreTools allowlist + whole-tool deny rules.
+    if (this.isComputerUseEnabled()) {
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
+      await registerComputerUseTools(registerLazy);
+    }
+
     // Register monitor tool
     await registerLazy(ToolNames.MONITOR, async () => {
       const { MonitorTool } = await import('../tools/monitor.js');
       return new MonitorTool(this);
     });
 
-    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // apply any pending MCP
     // budget-event callback BEFORE `discoverAllTools` (legacy blocking
     // mode runs MCP discovery synchronously in there) and BEFORE the
     // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
@@ -3951,7 +4290,7 @@ export class Config {
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
       }
-      // PR 14b fix (codex round 6): clear after consumption so a
+      // clear after consumption so a
       // subsequent `createToolRegistry` call (e.g. subagent override
       // via `createApprovalModeOverride` /
       // `buildSubagentContextOverride`) doesn't re-apply the parent
@@ -3977,7 +4316,7 @@ export class Config {
   }
 
   /**
-   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * register the MCP guardrail
    * push-event callback. Acceptable to call at any point in the
    * Config lifecycle — before, during, or after `initialize()`.
    *

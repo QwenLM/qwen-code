@@ -270,7 +270,9 @@ export function DeleteSessionDialog({
   const hasSelection = selectedIds.size > 0;
 
   return (
-    <div className={dp('resume-picker')}>
+    // Hover selection is intentionally disabled here: otherwise a stationary
+    // mouse can override the row selected by keyboard ↑↓ navigation.
+    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('delete.title')}</span>
         {hasSelection && (
@@ -352,12 +354,13 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const checkbox = isCurrent ? '[-]' : isChecked ? '[✓]' : '[ ]';
+            const checkbox = isChecked ? '[x] ' : '[ ] ';
             return (
               <div
                 key={s.sessionId}
                 className={dp(
                   'resume-picker-item',
+                  'resume-picker-session-item',
                   i === selectedIdx && !searchMode ? 'selected' : undefined,
                   isCurrent ? 'resume-picker-item-current' : undefined,
                   isCurrent ? 'disabled' : undefined,
@@ -366,10 +369,12 @@ export function DeleteSessionDialog({
                   setSelectedIdx(i);
                   if (!isCurrent) toggleSelection(s.sessionId);
                 }}
-                onMouseEnter={() => setSelectedIdx(i)}
               >
                 <div className={dp('resume-picker-item-row')}>
                   <span className={dp('resume-picker-item-prefix')}>
+                    {i === selectedIdx && !searchMode ? '›' : ' '}
+                  </span>
+                  <span className={dp('resume-picker-item-checkbox')}>
                     {checkbox}
                   </span>
                   <span className={dp('resume-picker-item-title')}>

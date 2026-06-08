@@ -9,19 +9,16 @@ import {
   type ServeFeature,
   type ServeProtocolVersions,
 } from './capabilities.js';
-// Wenshao review #4335 / 3271978342 — import the canonical
-// `PermissionPolicy` union from acp-bridge instead of inlining
-// the four string literals below. Without the import, adding a
-// 5th policy literal upstream would silently widen the union
-// over there while this envelope kept accepting only the older
-// 4-literal narrower set, with no compiler error to flag the drift.
+// Import the canonical `PermissionPolicy` union from acp-bridge
+// instead of inlining the string literals, so upstream changes
+// are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): per #3803 §02, one `qwen --acp` child per
- *   daemon (the daemon binds to ONE workspace at boot). Multiple
+ * `http-bridge` (Stage 1): one `qwen --acp` child per daemon (the
+ *   daemon binds to ONE workspace at boot). Multiple
  *   sessions multiplex onto that child via the agent's native
  *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
  *   sharing the child's process / OAuth / file-cache / hierarchy-memory
@@ -64,7 +61,7 @@ export interface ServeOptions {
    * `server.maxConnections` unset, which falls back to Node's
    * built-in unlimited default. We avoid actually setting
    * `server.maxConnections = 0` because on Node 22 that causes the
-   * listener to refuse EVERY connection (tanzhenxin issue 1).
+   * listener to refuse EVERY connection.
    * NaN / negative values throw at boot. Independent of
    * `maxSessions` because one session can have many SSE subscribers
    * (default cap 64) plus short-lived REST calls.
@@ -73,16 +70,15 @@ export interface ServeOptions {
   /**
    * Per-session SSE replay ring depth. Threaded into the bridge as
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
-   * construction site. Defaults to 8000 (the target named in
-   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
    * rings let clients with longer reconnect gaps replay more history
    * at the cost of a few hundred KB extra RAM per session.
    */
   eventRingSize?: number;
   /**
-   * Absolute workspace path this daemon binds to. Per #3803 §02 the
-   * daemon is **1 daemon = 1 workspace × N sessions**: one bound
+   * Absolute workspace path this daemon binds to. The daemon is
+   * **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single
    * `qwen --acp` child via `connection.newSession()`.
    *
@@ -95,13 +91,13 @@ export interface ServeOptions {
    * systemd / docker-compose / k8s / `qwen-coordinator` reference
    * orchestrator. There is no intra-daemon multi-workspace mode
    * (the previous Stage 1 `byWorkspaceChannel` routing layer was
-   * removed in the §02 design revision).
+   * removed in the design revision).
    *
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
   /**
-   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * When true, refuses to boot without a bearer
    * token — even on loopback. Loopback's no-token developer default
    * is convenient for local prototyping but unsafe to ship inside
    * shared dev environments / CI runners / multi-tenant workstations
@@ -116,7 +112,7 @@ export interface ServeOptions {
    */
   requireAuth?: boolean;
   /**
-   * Issue #4175 PR 14. Cap on live MCP clients spawned inside the
+   * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
    * core's `McpClientManager` picks it up. Combined with
@@ -134,35 +130,37 @@ export interface ServeOptions {
    */
   mcpClientBudget?: number;
   /**
-   * Issue #4175 PR 14. Enforcement mode for `mcpClientBudget`.
+   * Enforcement mode for `mcpClientBudget`.
    * Boot rejects `enforce` without a budget; otherwise resolves to
    * `warn` when budget set / `off` when budget unset.
    */
   mcpBudgetMode?: 'enforce' | 'warn' | 'off';
   /**
-   * F2 (#4175 commit 5). Whether the daemon advertises the
+   * Whether the daemon advertises the
    * `mcp_workspace_pool` + `mcp_pool_restart` capability tags.
    */
   mcpPoolActive?: boolean;
   /**
-   * T2.4 (issue #4514). Cross-origin allowlist for browser webui
+   * Cross-origin allowlist for browser webui
    * deployments.
    */
   allowOrigins?: string[];
   /**
-   * Issue #4514 T2.9. Server-side wallclock cap on a single
+   * Server-side wallclock cap on a single
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
   /**
-   * Issue #4514 T2.9. Per-SSE-connection idle deadline.
+   * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
+  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  channelIdleTimeoutMs?: number;
 }
 
 /**
  * Capability envelope returned from `GET /capabilities`. Clients gate UI off
- * `features`, never off `mode` (per design §10 protocol-compatibility).
+ * `features`, never off `mode` (per protocol-compatibility design).
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
@@ -173,6 +171,11 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   protocolVersions?: ServeProtocolVersions;
+  /**
+   * Qwen Code CLI/SDK version served by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
   /**
@@ -185,8 +188,8 @@ export interface CapabilitiesEnvelope {
    */
   modelServices: string[];
   /**
-   * Absolute workspace path this daemon is bound to (per #3803 §02:
-   * `1 daemon = 1 workspace`). Clients use this to:
+   * Absolute workspace path this daemon is bound to
+   * (`1 daemon = 1 workspace`). Clients use this to:
    *   - Detect mismatch before posting `/session` (vs. waiting for
    *     400 workspace_mismatch from the bridge).
    *   - Omit `cwd` on `POST /session` — the route falls back to this
@@ -194,15 +197,13 @@ export interface CapabilitiesEnvelope {
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
-   * envelope introduced by #3803 §02. Daemons predating §02 still
-   * announce `v: 1` and omit this field; the protocol's "bump v only
-   * on incompatible frame changes" stance (see `qwen-serve-protocol.md`
-   * "Additive to v=1" note) makes additive optionality the correct
-   * shape. The post-§02 server code here always populates it.
+   * envelope. Older daemons may omit this field; additive optionality
+   * is the correct shape per the protocol's versioning stance. The
+   * current server code always populates it.
    */
   workspaceCwd?: string;
   /**
-   * #4175 F3 Commit 6 — daemon-policy namespace. Active values for
+   * Daemon-policy namespace. Active values for
    * cross-cutting daemon coordination policies that don't fit on a
    * per-feature flag. Today only `permission` is populated (active
    * `PermissionMediator` strategy); future entries (e.g. `network`,

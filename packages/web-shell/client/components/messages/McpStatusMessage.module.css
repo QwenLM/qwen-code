@@ -1,0 +1,192 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 10px 14px;
+  max-width: min(920px, calc(100vw - 64px));
+  background: var(--bg-primary);
+  margin-left: 14px;
+}
+
+.title {
+  font-weight: 700;
+  color: var(--accent-color);
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.startup {
+  color: var(--warning-color);
+}
+
+.note,
+.secondary {
+  color: var(--text-dimmed);
+}
+
+.server {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row,
+.tip {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-height: 18px;
+  cursor: pointer;
+}
+
+.selected {
+  color: var(--accent-color);
+}
+
+.disabled {
+  color: var(--text-dimmed);
+}
+
+.pointer {
+  display: inline-block;
+  width: 2ch;
+  color: var(--accent-color);
+}
+
+.nameCell {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.separator {
+  color: var(--text-dimmed);
+}
+
+.sectionTitle,
+.groupTitle {
+  font-weight: 700;
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.description {
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+.schema {
+  color: var(--text-dimmed);
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.tips {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.accent {
+  color: var(--accent-color);
+}
+
+.shortcuts {
+  color: var(--text-dimmed);
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.serverFields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.serverField {
+  display: grid;
+  grid-template-columns: 15ch minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.serverFieldLabel {
+  color: var(--text-primary);
+}
+
+.detailBlock,
+.parameters,
+.invalidBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.invalidBlock {
+  color: var(--error-color);
+}
+
+.parameterRow {
+  color: var(--text-dimmed);
+  white-space: pre-wrap;
+}
+
+.actionMessage {
+  color: var(--text-dimmed);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.oauthPage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scrollHint {
+  color: var(--text-dimmed);
+}

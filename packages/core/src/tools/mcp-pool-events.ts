@@ -12,7 +12,7 @@ import type { DiscoveredMCPPrompt } from './mcp-client.js';
  * `${serverName}::${fingerprint}`. Two pool entries with the same
  * server name but different fingerprints (e.g. divergent OAuth
  * tokens) carry distinct ConnectionIds — see
- * `docs/design/f2-mcp-transport-pool.md` §5 fingerprint key.
+ * `docs/design/f2-mcp-transport-pool.md` fingerprint key.
  */
 export type ConnectionId = `${string}::${string}`;
 
@@ -33,12 +33,12 @@ export type PoolEntryState =
  * Discriminated union of events emitted by a `PooledConnection` to
  * subscribed `SessionMcpView`s.
  *
- * See `docs/design/f2-mcp-transport-pool.md` §7 for the full lifecycle
+ * See `docs/design/f2-mcp-transport-pool.md` for the full lifecycle
  * (toolsChanged on `notifications/tools/list_changed` and on reconnect;
  * promptsChanged analog; disconnected → reconnected on restart success;
  * disconnected → failed on restart's reconnect-budget exhaustion;
  * active/draining → failed directly on silent transport drop via
- * `statusChangeListener` — W120/W131 path, no preceding `disconnected`).
+ * `statusChangeListener` — / path, no preceding `disconnected`).
  */
 export type PoolEvent =
   | {
@@ -90,7 +90,7 @@ export type PoolEvent =
        *     reconnect-budget concept; this case carries a synthetic
        *     marker string instead of the upstream cause (threading
        *     the real `McpClient` error to this emit is tracked as a
-       *     F2 follow-up — W133).
+       *     follow-up.
        * SDK consumers writing reducers around `'failed'` should NOT
        * assume "reconnect was attempted and exhausted"; the entry is
        * simply terminal and the manager-side `onFailed` listener has
@@ -105,14 +105,14 @@ export type PoolEvent =
  * are unsafe for writes (commit, file edit, etc.) and the pool can't
  * distinguish read from write. Caller decides retry policy.
  *
- * See `docs/design/f2-mcp-transport-pool.md` §13.4.
+ * See `docs/design/f2-mcp-transport-pool.md`.
  *
- * F2 (#4175 commit 5 review fix — wenshao R7 partial): the throw
+ * the throw
  * site lives in the pool's `callTool` wrapper which is scheduled
- * for a later F2 follow-up (the design's V21-5 in-flight call
+ * for a later follow-up (the design's in-flight call
  * interception). Type guards (`isToolsChangedEvent`, etc.),
  * `PoolEntryConnectionStatus`, and the `Prompt` re-export were
- * removed in the same fold-in — none had any callers and they
+ * removed in the same change — none had any callers and they
  * were premature public surface. `MCPCallInterruptedError` stays
  * because the design doc declares it as the user-facing contract;
  * removing it now would lose the invariant carrier across the

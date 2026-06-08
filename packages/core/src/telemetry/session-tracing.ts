@@ -27,10 +27,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import {
-  getCurrentSessionId,
-  setSessionContext,
-} from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -92,6 +89,22 @@ export interface LLMRequestMetadata {
    * in Phase 4a.
    */
   retryTotalDelayMs?: number;
+  /** Provider response ID (e.g. DashScope request_id / OpenAI completion id). */
+  responseId?: string;
+  /** Model finish/stop reason (e.g. "STOP", "MAX_TOKENS"). */
+  finishReason?: string;
+  /**
+   * Reasoning/thinking token count. For OpenAI-compatible providers,
+   * this value is already INCLUDED in outputTokens (candidatesTokenCount).
+   * Do not sum with outputTokens to avoid double-counting.
+   */
+  thoughtsTokenCount?: number;
+  /** Subagent name that originated this request, or undefined for main. */
+  subagentName?: string;
+  /** Structured error type (e.g. "RateLimitError", "APIConnectionError:ECONNREFUSED"). */
+  errorType?: string;
+  /** HTTP status code from the provider error response. */
+  errorStatusCode?: number;
 }
 
 export interface ToolSpanMetadata {
@@ -109,7 +122,7 @@ interface SpanContext {
     | 'llm_request'
     | 'tool'
     | 'tool.execution'
-    // Phase 2 forward-declarations (no start*/end* helpers wired yet —
+    // Phase 2 forward-declarations (no start*/end* helpers wired yet
     // see docs/design/workflow-tracing-gaps.md). Listed here so Phase 2
     // can add helpers without touching this type.
     | 'tool.blocked_on_user'
@@ -128,7 +141,7 @@ interface SpanContext {
  *     cross-prompt correlation uses the `session.id` attribute instead.
  *
  * SYNC: keep parent-resolution logic in step with getParentContext() in
- * telemetry/tracer.ts (#4302 review).
+ * telemetry/tracer.ts.
  */
 function resolveParentContext(parent: SpanContext | undefined): Context {
   if (parent) {
@@ -189,13 +202,13 @@ function sweepStaleSpans(now: number): void {
         ctx.ended = true;
         // Mark the span so backends can distinguish "abandoned and
         // garbage-collected by the TTL safety net" from "deliberately
-        // ended without setting status / attrs" (#4321 review).
+        // ended without setting status / attrs".
         const ageMs = now - ctx.startTime;
         const toolName = ctx.attributes['tool.name'];
         const callId = ctx.attributes['tool.call_id'];
         // setAttributes and span.end() are wrapped separately so a
-        // setAttributes throw can't prevent the span from being ended
-        // (#4321 review-3 wenshao Suggestion). For blocked_on_user
+        // setAttributes throw can't prevent the span from being ended.
+        // For blocked_on_user
         // spans, also stamp the canonical decision/source taxonomy so
         // dashboards filtering by `decision: 'aborted'` count
         // walk-aways consistently with explicit user aborts.
@@ -214,13 +227,13 @@ function sweepStaleSpans(now: number): void {
           // OTel errors must not prevent span.end() from running, but
           // they're worth surfacing — dropping the sentinel attrs makes
           // a TTL-aborted span look identical to a deliberately-UNSET
-          // one in dashboards (#4321 review-7 silent-failure-hunter).
+          // one in dashboards.
           debugLogger.warn(
             `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         // Include tool name + call_id so the log is actionable in
-        // production without a trace-backend lookup (review-3).
+        // production without a trace-backend lookup.
         const ctxLabel =
           toolName && callId
             ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
@@ -261,7 +274,7 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * Bound the size of error strings written to span attributes / status
  * messages. Hook server responses, raw exception stacks, or malicious
  * inputs can be unbounded; some OTel backends drop the entire span when
- * any field exceeds their limit (#4321 review-3 wenshao Critical).
+ * any field exceeds their limit.
  *
  * Truncates by UTF-16 code units (`String.length`/`String.slice`), not
  * bytes — for ASCII-heavy text this approximates a 1KB byte limit, but
@@ -269,15 +282,14 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * encoding. That's still well under all major OTel backends'
  * per-attribute limits (Jaeger ~64KB, Honeycomb ~64KB, OTLP default
  * ~32KB), so we keep the simpler char-count bound rather than paying
- * the encoder cost on every endXSpan (review-4 follow-up).
+ * the encoder cost on every endXSpan.
  */
 export function truncateSpanError(s: string): string {
   if (s.length <= SPAN_ERROR_MAX_CHARS) return s;
   // Back up one code unit if the cut lands on a high surrogate so we
   // don't emit a lone surrogate followed by the sentinel — strict
   // OTLP/gRPC collectors reject span batches with invalid UTF-8
-  // (a lone high surrogate encodes to an invalid byte sequence)
-  // (#4321 review-8 wenshao Suggestion).
+  // (a lone high surrogate encodes to an invalid byte sequence).
   let end = SPAN_ERROR_MAX_CHARS;
   const code = s.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--;
@@ -565,6 +577,31 @@ export function endLLMRequestSpan(
       endAttributes['success'] = metadata.success;
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
+      if (metadata.responseId !== undefined) {
+        endAttributes['response_id'] = metadata.responseId;
+        endAttributes['gen_ai.response.id'] = metadata.responseId;
+      }
+      if (metadata.finishReason !== undefined) {
+        endAttributes['finish_reason'] = metadata.finishReason;
+        endAttributes['gen_ai.response.finish_reasons'] = [
+          metadata.finishReason,
+        ];
+      }
+      if (metadata.thoughtsTokenCount !== undefined) {
+        endAttributes['thoughts_token_count'] = metadata.thoughtsTokenCount;
+        endAttributes['gen_ai.usage.reasoning_tokens'] =
+          metadata.thoughtsTokenCount;
+      }
+      if (metadata.subagentName !== undefined) {
+        endAttributes['subagent_name'] = metadata.subagentName;
+      }
+      if (metadata.errorType !== undefined) {
+        endAttributes['error_type'] = metadata.errorType;
+        endAttributes['error.type'] = metadata.errorType;
+      }
+      if (metadata.errorStatusCode !== undefined) {
+        endAttributes['error_status_code'] = metadata.errorStatusCode;
+      }
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -763,7 +800,7 @@ export function endToolExecutionSpan(
      * still recorded but status stays UNSET, mirroring setToolSpanCancelled
      * on the parent tool span. Without this, success: false unconditionally
      * sets ERROR and trace backends filtering for errors false-positive on
-     * user cancels (#4302 review).
+     * user cancels.
      */
     cancelled?: boolean;
   },
@@ -934,7 +971,11 @@ export function endToolBlockedOnUserSpan(
 
 // --- Hook Spans ---
 
-export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure';
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PostToolBatch';
 
 export interface StartHookSpanOptions {
   hookEvent: HookEvent;
@@ -954,6 +995,10 @@ export interface HookSpanMetadata {
   /** Discriminator for blocking decision when applicable. */
   blockType?: 'denied' | 'ask' | 'stop';
   hasAdditionalContext?: boolean;
+  /** PostToolBatch only: true when the batch hook stopped before the next turn. */
+  postBatchStop?: boolean;
+  /** PostToolBatch only: reason attached to a stop decision. */
+  postBatchStopReason?: string;
   /** Hook threw — span ends as ERROR with this message. */
   error?: string;
 }
@@ -962,7 +1007,7 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
   }
-  // Same defensive cleanup-interval kick as startToolBlockedOnUserSpan —
+  // Same defensive cleanup-interval kick as startToolBlockedOnUserSpan
   // hook spans may run before any interaction span has been created.
   ensureCleanupInterval();
 
@@ -1029,6 +1074,12 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
         endAttributes['block_type'] = metadata.blockType;
       if (metadata.hasAdditionalContext !== undefined)
         endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
+      if (metadata.postBatchStop !== undefined)
+        endAttributes['post_batch_stop'] = metadata.postBatchStop;
+      if (metadata.postBatchStopReason !== undefined)
+        endAttributes['post_batch_stop_reason'] = truncateSpanError(
+          metadata.postBatchStopReason,
+        );
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
     }
@@ -1075,7 +1126,7 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
-  // Reach into session-context module to prevent cross-test leakage (#4486).
+  // Reach into session-context module to prevent cross-test leakage.
   setSessionContext(undefined);
 }
 

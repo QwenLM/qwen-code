@@ -24,6 +24,7 @@ export {
 } from './DaemonAuthFlow.js';
 export {
   DaemonSessionClient,
+  type DaemonReplaySnapshot,
   type DaemonSessionClientOptions,
   type DaemonSessionSubscribeOptions,
 } from './DaemonSessionClient.js';
@@ -34,13 +35,11 @@ export {
   createDaemonSessionViewState,
   isDaemonEventType,
   isKnownDaemonEvent,
-  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W121): re-export
-  // the workspace-scoped budget event helper. Pre-fix the PR
-  // description and event JSDoc told consumers to use this helper to
-  // branch on `scope === 'workspace'`, but the function lived in
-  // `events.ts` and was never added to this barrel — SDK consumers
-  // had no public import path. Same omission pattern caught for PR-21
-  // auth surface; locked down by `daemon-public-surface.test.ts`.
+  // Re-export the workspace-scoped budget event helper. Previously
+  // the event JSDoc told consumers to use this helper to branch on
+  // `scope === 'workspace'`, but the function lived in `events.ts`
+  // and was never added to this barrel — SDK consumers had no public
+  // import path. Now locked down by `daemon-public-surface.test.ts`.
   isWorkspaceScopedBudgetEvent,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
@@ -96,6 +95,7 @@ export type {
 } from './ui/index.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -162,7 +162,7 @@ export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
-  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   DaemonStateResyncRequiredData,
   DaemonStateResyncRequiredEvent,
@@ -174,13 +174,15 @@ export type {
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,
   DaemonMcpServerRestartRefusedEvent,
+  DaemonSessionRewoundData,
+  DaemonSessionRewoundEvent,
   DaemonToolToggledData,
   DaemonToolToggledEvent,
   DaemonWorkspaceInitializedData,
   DaemonWorkspaceInitializedEvent,
   DaemonEventEnvelope,
   DaemonKnownEventType,
-  // PR 14b — MCP guardrail push-event types. See `mcp_guardrail_events`
+  // MCP guardrail push-event types. See `mcp_guardrail_events`
   // capability tag and the `DaemonMcpGuardrailEvent` union below.
   DaemonMcpBudgetWarningData,
   DaemonMcpBudgetWarningEvent,
@@ -197,7 +199,7 @@ export type {
   DaemonPermissionOption,
   DaemonPermissionAlreadyResolvedData,
   DaemonPermissionAlreadyResolvedEvent,
-  // #4175 F3 Commit 7 — multi-client permission coordination push events.
+  // Multi-client permission coordination push events.
   DaemonPermissionForbiddenData,
   DaemonPermissionForbiddenEvent,
   DaemonPermissionPartialVoteData,
@@ -254,10 +256,16 @@ export type {
 export type {
   DaemonAgentLevel,
   DaemonAgentMutationResult,
+  DaemonGeneratedAgentContent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
+  DaemonMcpManageAction,
+  DaemonMcpManageResult,
   DaemonMcpRestartResult,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
+  DaemonSessionBtwResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -303,6 +311,9 @@ export type {
   DaemonSessionTaskLifecycleStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionStatsStatus,
+  DaemonSessionStatsModelMetrics,
+  DaemonSessionStatsToolByName,
   DaemonSkillLevel,
   DaemonPreflightCell,
   DaemonPreflightKind,
@@ -337,6 +348,19 @@ export type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonCommandHookConfig,
+  DaemonFunctionHookConfig,
+  DaemonHookConfig,
+  DaemonHookEntry,
+  DaemonHookEventMeta,
+  DaemonHookEventName,
+  DaemonHookMatcherKind,
+  DaemonHookSource,
+  DaemonHttpHookConfig,
+  DaemonPromptHookConfig,
+  DaemonSessionHooksStatus,
+  DaemonUnknownHookConfig,
+  DaemonWorkspaceHooksStatus,
   HeartbeatResult,
   MCPServerConfigShape,
   PermissionOutcome,

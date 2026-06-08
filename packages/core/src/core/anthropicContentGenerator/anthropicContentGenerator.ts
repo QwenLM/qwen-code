@@ -266,7 +266,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       throw redactProxyError(error);
     }
 
-    return this.processStream(this.redactStreamErrors(stream));
+    return this.processStreamWithEmptyFallback(
+      this.redactStreamErrors(stream),
+      anthropicRequest,
+      request.config?.abortSignal,
+      headers,
+    );
   }
 
   async countTokens(
@@ -965,6 +970,59 @@ export class AnthropicContentGenerator implements ContentGenerator {
         default:
           break;
       }
+    }
+  }
+
+  // Some Anthropic-compatible gateways close the SSE stream with HTTP 200
+  // but emit no assistant content or stop reason (e.g. billing / quota
+  // limits hit mid-proxy). When that happens we probe once with the same
+  // request in non-streaming mode so the real provider error surfaces
+  // instead of the generic "stream ended without a finish reason".
+  private async *processStreamWithEmptyFallback(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+    fallbackRequest: MessageCreateParamsWithThinking,
+    abortSignal: AbortSignal | undefined,
+    headers: Record<string, string> | undefined,
+  ): AsyncGenerator<GenerateContentResponse> {
+    let hasAssistantPayload = false;
+    let hasFinishReason = false;
+
+    for await (const chunk of this.processStream(stream)) {
+      const candidates = chunk.candidates ?? [];
+      hasFinishReason ||= candidates.some(
+        (candidate) => candidate.finishReason !== undefined,
+      );
+      hasAssistantPayload ||= candidates.some((candidate) =>
+        candidate.content?.parts?.some(
+          (part) =>
+            part.text ||
+            part.thought ||
+            part.thoughtSignature ||
+            part.functionCall,
+        ),
+      );
+      yield chunk;
+    }
+
+    if (hasAssistantPayload || hasFinishReason) {
+      return;
+    }
+
+    debugLogger.warn(
+      'Anthropic stream ended without assistant payload or finish reason; ' +
+        'probing once with a non-streaming request to surface provider errors.',
+    );
+
+    let response: Message;
+    try {
+      runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
+      response = (await this.client.messages.create(fallbackRequest, {
+        signal: abortSignal,
+        ...(headers ? { headers } : {}),
+      })) as Message;
+      yield this.converter.convertAnthropicResponseToGemini(response);
+    } catch (error) {
+      throw redactProxyError(error);
     }
   }
 

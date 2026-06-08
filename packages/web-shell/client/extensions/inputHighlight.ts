@@ -4,14 +4,43 @@ import {
   DecorationSet,
   EditorView,
   ViewUpdate,
+  WidgetType,
 } from '@codemirror/view';
 import { RangeSetBuilder } from '@codemirror/state';
+import type { CommandInfo } from '../adapters/types';
+import { getSlashCommandArgumentHint } from '../completions/slashCompletion';
+import type { WebShellLanguage } from '../i18n';
 
 const slashDeco = Decoration.mark({ class: 'cm-input-slash' });
 const atDeco = Decoration.mark({ class: 'cm-input-at' });
 const backtickDeco = Decoration.mark({ class: 'cm-input-code' });
 
-function buildDecorations(view: EditorView): DecorationSet {
+class SlashArgumentHintWidget extends WidgetType {
+  constructor(private readonly text: string) {
+    super();
+  }
+
+  eq(other: SlashArgumentHintWidget) {
+    return other.text === this.text;
+  }
+
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-input-slash-argument-hint';
+    span.textContent = this.text;
+    return span;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
+}
+
+function buildDecorations(
+  view: EditorView,
+  getCommands: () => CommandInfo[],
+  getLanguage: () => WebShellLanguage,
+): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
   const ranges: Array<{ from: number; to: number; deco: Decoration }> = [];
@@ -26,6 +55,23 @@ function buildDecorations(view: EditorView): DecorationSet {
       const end = text.indexOf(' ');
       const slashEnd = end === -1 ? text.length : end;
       ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
+    }
+
+    const argumentHint = getSlashCommandArgumentHint(
+      text,
+      getCommands(),
+      getLanguage(),
+    );
+    if (argumentHint) {
+      const prefix = text.endsWith(' ') ? '' : ' ';
+      ranges.push({
+        from: offset + text.length,
+        to: offset + text.length,
+        deco: Decoration.widget({
+          widget: new SlashArgumentHintWidget(`${prefix}${argumentHint}`),
+          side: 1,
+        }),
+      });
     }
 
     // @path tokens
@@ -58,22 +104,31 @@ function buildDecorations(view: EditorView): DecorationSet {
   return builder.finish();
 }
 
-export const inputHighlight = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet;
-    constructor(view: EditorView) {
-      this.decorations = buildDecorations(view);
-    }
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged) {
-        this.decorations = buildDecorations(update.view);
+export function inputHighlight(
+  getCommands: () => CommandInfo[] = () => [],
+  getLanguage: () => WebShellLanguage = () => 'en',
+) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = buildDecorations(view, getCommands, getLanguage);
       }
-    }
-  },
-  {
-    decorations: (v) => v.decorations,
-  },
-);
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildDecorations(
+            update.view,
+            getCommands,
+            getLanguage,
+          );
+        }
+      }
+    },
+    {
+      decorations: (v) => v.decorations,
+    },
+  );
+}
 
 export const inputHighlightTheme = EditorView.baseTheme({
   '.cm-input-slash': {
@@ -87,5 +142,9 @@ export const inputHighlightTheme = EditorView.baseTheme({
     background: 'rgba(255, 255, 255, 0.06)',
     borderRadius: '3px',
     color: 'var(--text-secondary, #a0aec0)',
+  },
+  '.cm-input-slash-argument-hint': {
+    color: 'var(--text-tertiary, rgba(160, 174, 192, 0.55))',
+    pointerEvents: 'none',
   },
 });

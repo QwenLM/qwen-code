@@ -98,6 +98,7 @@ describe('AgentTool', () => {
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
+      assertCanStartBackgroundAgent: vi.fn(),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
       complete: vi.fn(),
@@ -142,6 +143,8 @@ describe('AgentTool', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(false),
+      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -233,6 +236,63 @@ describe('AgentTool', () => {
       // Should fall back to built-in agents instead of showing "no subagents"
       expect(failedAgentTool.description).toContain('general-purpose');
       expect(failedAgentTool.description).toContain('Explore');
+    });
+
+    it('includes "When to fork" section in description when fork enabled + interactive', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
+
+      const interactiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(interactiveTool.description).toContain('When to fork');
+      expect(interactiveTool.description).toContain("Don't peek");
+      expect(interactiveTool.description).toContain("Don't race");
+      expect(interactiveTool.description).toContain('Writing a fork prompt');
+    });
+
+    it('omits fork discipline but keeps "Writing the prompt" when non-interactive', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(false);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(false);
+
+      const nonInteractiveTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      // Fork-specific sections must be absent
+      expect(nonInteractiveTool.description).not.toContain('When to fork');
+      expect(nonInteractiveTool.description).not.toContain("Don't peek");
+      expect(nonInteractiveTool.description).not.toContain("Don't race");
+      expect(nonInteractiveTool.description).not.toContain(
+        'Writing a fork prompt',
+      );
+
+      // "Writing the prompt" section is always present (useful for fresh agents too)
+      expect(nonInteractiveTool.description).toContain('Writing the prompt');
+      expect(nonInteractiveTool.description).toContain(
+        'Never delegate understanding',
+      );
+    });
+
+    it('omits fork discipline when interactive but fork flag is off', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(false);
+
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).not.toContain('When to fork');
+      expect(tool.description).toContain(
+        'If omitted, the general-purpose agent is used',
+      );
     });
   });
 
@@ -781,6 +841,82 @@ describe('AgentTool', () => {
       } as unknown as ReturnType<Config['getGeminiClient']>);
 
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
+
+      // Fork requires interactive mode + feature flag — gate from isForkSubagentEnabled().
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
+    });
+
+    it('falls back to general-purpose when fork flag is off', async () => {
+      // Fork flag off — even though interactive
+      vi.mocked(
+        config.isForkSubagentEnabled as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Should load general-purpose, not fork
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
+    it('falls back to general-purpose when non-interactive (even with fork flag on)', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      // Fork flag is on, but non-interactive → isForkSubagentEnabled() returns false
+      // because it requires both flag + interactive.
+
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'fork task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Should fall back to general-purpose
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
     it('should call AgentHeadless.create directly and execute without options', async () => {
@@ -1763,6 +1899,7 @@ describe('AgentTool', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockRegistry: {
+      assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -1803,6 +1940,7 @@ describe('AgentTool', () => {
       MockedContextState.mockImplementation(() => mockContextState);
 
       mockRegistry = {
+        assertCanStartBackgroundAgent: vi.fn(),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -1988,6 +2126,114 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('returns registry registration errors to the model without launching the background body', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+
+      try {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+          'failed',
+        );
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect(mockAgent.execute).not.toHaveBeenCalled();
+        expect(mockRegistry.complete).not.toHaveBeenCalled();
+        expect(mockRegistry.fail).not.toHaveBeenCalled();
+      } finally {
+        attachSpy.mockRestore();
+      }
+    });
+
+    it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce();
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        expect.stringContaining('monitor-'),
+        'monitor',
+        expect.stringMatching(
+          /subagents[\\/]test-session-id[\\/]agent-monitor-.*\.jsonl$/,
+        ),
+        'Monitor done',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+      );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('preflights the background cap before hooks and subagent setup', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.assertCanStartBackgroundAgent.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
     });
 
     it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
@@ -2423,6 +2669,13 @@ describe('AgentTool', () => {
     });
 
     it('persists fork capability snapshots in the bootstrap transcript', async () => {
+      // Fork requires opt-in + interactive
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+
       const forkParams: AgentParams = {
         description: 'Fork task',
         prompt: 'Investigate issue',

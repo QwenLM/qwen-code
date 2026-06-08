@@ -69,12 +69,16 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentThought(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -87,12 +91,16 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentMessage(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -139,12 +147,29 @@ export class MessageEmitter extends BaseEmitter {
     role: 'user' | 'assistant',
     isThought: boolean = false,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     if (role === 'user') {
       return this.emitUserMessage(text, timestamp);
     }
     return isThought
-      ? this.emitAgentThought(text, timestamp)
-      : this.emitAgentMessage(text, timestamp);
+      ? this.emitAgentThought(text, timestamp, subagentMeta)
+      : this.emitAgentMessage(text, timestamp, subagentMeta);
+  }
+
+  private buildChunkMeta(
+    epochMs: number | undefined,
+    subagentMeta?: SubagentMeta,
+  ): Record<string, unknown> | undefined {
+    const meta: Record<string, unknown> = {
+      ...(subagentMeta?.parentToolCallId
+        ? { parentToolCallId: subagentMeta.parentToolCallId }
+        : {}),
+      ...(subagentMeta?.subagentType
+        ? { subagentType: subagentMeta.subagentType }
+        : {}),
+      ...(epochMs != null ? { timestamp: epochMs } : {}),
+    };
+    return Object.keys(meta).length > 0 ? meta : undefined;
   }
 }

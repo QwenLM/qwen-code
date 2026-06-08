@@ -55,3 +55,15 @@ export const StandaloneWebShell = WebShellWithProviders;
 
 export type { WebShellProps } from './App';
 export type { WebShellLanguage } from './i18n';
+export type {
+  CommandDisplayCategory,
+  CommandDisplayCategoryOrder,
+} from './utils/commandDisplay';
+export type {
+  MarkdownContentSource,
+  MarkdownRenderContext,
+  ToolHeaderExtraRenderer,
+  ToolHeaderExtraRenderInfo,
+  ToolHeaderKind,
+  WebShellMarkdownCustomization,
+} from './customization';

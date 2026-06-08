@@ -16,8 +16,8 @@
  * "session limit reached, retry after N seconds") without parsing
  * free-form text.
  *
- * Lifted from `packages/cli/src/serve/httpAcpBridge.ts` in #4175 PR
- * 22b/1 so the bridge package owns the error contract directly. The
+ *
+ * The bridge package owns the error contract directly. The
  * 7 error classes server.ts imports + 1 each from workspaceAgents.ts
  * and workspaceMemory.ts continue to resolve through the
  * httpAcpBridge.ts re-export shim.
@@ -40,14 +40,8 @@ export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
  * propagate to callers.
  */
 export function isNotCurrentlyGeneratingCancelError(err: unknown): boolean {
-  if (err instanceof Error && isNotCurrentlyGeneratingText(err.message)) {
-    return true;
-  }
   if (!err || typeof err !== 'object') return false;
-  const maybe = err as {
-    message?: unknown;
-    data?: unknown;
-  };
+  const maybe = err as { message?: unknown; data?: unknown };
   if (isNotCurrentlyGeneratingText(maybe.message)) return true;
   if (!maybe.data || typeof maybe.data !== 'object') return false;
   return isNotCurrentlyGeneratingText(
@@ -131,7 +125,7 @@ export class SessionLimitExceededError extends Error {
 
 /**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
- * canonicalize to the daemon's bound workspace. Per #3803 §02 every
+ * canonicalize to the daemon's bound workspace. Every
  * bridge instance is bound to exactly one workspace; cross-workspace
  * requests are rejected at the daemon boundary. The server route
  * translates this to a 400 response with `code: 'workspace_mismatch'`
@@ -208,11 +202,11 @@ export class InvalidSessionMetadataError extends Error {
 }
 
 /**
- * #4175 F3. Thrown by `MultiClientPermissionMediator.vote` when the
+ * Typed error for unimplemented permission policies. Thrown by `MultiClientPermissionMediator.vote` when the
  * active policy is wired into the schema/registry but the mediator
  * implementation has not been built yet.
  *
- * **Currently unreachable in production** — F3 Commit 4 implemented
+ * **Currently unreachable in production** — the current code implements
  * all 4 policies in the frozen `PermissionPolicy` union. The class +
  * route-level 501 mapping in `server.ts:sendPermissionVoteError` are
  * RETAINED as forward-compat infrastructure: when a future PR adds a
@@ -238,7 +232,7 @@ export class PermissionPolicyNotImplementedError extends Error {
 }
 
 /**
- * #4175 F3 Commit 1. Thrown by `MultiClientPermissionMediator.request`
+ * Collision defense. Thrown by `MultiClientPermissionMediator.request`
  * when an agent-declared `allowedOptionIds` set contains the
  * cancel-vote sentinel string. The bridge maps voter cancel intent
  * to that exact `optionId`; if the agent legitimately uses it as
@@ -266,7 +260,7 @@ export class CancelSentinelCollisionError extends Error {
 }
 
 /**
- * #4175 F3 Commit 2. Thrown by `bridge.respondToSessionPermission` /
+ * Permission forbidden error. Thrown by `bridge.respondToSessionPermission` /
  * `bridge.respondToPermission` when the active permission policy
  * rejects the vote (designated voter mismatch, or remote vote under
  * `local-only`). The bridge converts the mediator's
@@ -299,7 +293,7 @@ export class PermissionForbiddenError extends Error {
 }
 
 /**
- * #4175 Wave 4 PR 17. Thrown by `initWorkspace` when the target file
+ * Workspace init conflict. Thrown by `initWorkspace` when the target file
  * already exists with non-whitespace content and the caller did not
  * pass `force: true`. Translated to HTTP 409 by the route. The
  * `path` and `existingSize` fields let SDK clients render a clear
@@ -321,7 +315,7 @@ export class WorkspaceInitConflictError extends Error {
 }
 
 /**
- * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * Path escape guard. Thrown by `initWorkspace` when
  * the configured `context.fileName` resolves outside the bound
  * workspace via path arithmetic (e.g. `../outside.md`). Translated
  * to HTTP 400 by the route — distinguishable from a generic 500 so
@@ -345,7 +339,7 @@ export class WorkspaceInitPathEscapeError extends Error {
 }
 
 /**
- * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * Path escape guard. Thrown by `initWorkspace` when
  * the target file is itself a symlink, OR when the parent path
  * canonicalizes (via `realpath`) outside the bound workspace.
  * Translated to HTTP 400 by the route — same operator-clarity
@@ -365,7 +359,7 @@ export class WorkspaceInitSymlinkError extends Error {
 }
 
 /**
- * #4297 fold-in 10 (qwen-latest, addresses #3263954690). Thrown by
+ * Race condition guard. Thrown by
  * `initWorkspace` when the target file's inode misbehaved at write
  * time IN A NON-SYMLINK WAY — typically a TOCTOU race against a
  * concurrent writer:
@@ -393,7 +387,7 @@ export class WorkspaceInitRaceError extends Error {
 }
 
 /**
- * #4282 fold-in 1 (gpt-5.5 C5). Thrown by `restartMcpServer` when the
+ * MCP server not found. Thrown by `restartMcpServer` when the
  * caller asks for a server name that isn't in the daemon's
  * `McpServers` config. Translated to HTTP 404 + structured body by
  * the route — distinguishable from a generic 500 so a bad server
@@ -409,7 +403,7 @@ export class McpServerNotFoundError extends Error {
 }
 
 /**
- * #4282 fold-in 1 (gpt-5.5 C4). Thrown by `restartMcpServer` when
+ * MCP restart failure. Thrown by `restartMcpServer` when
  * `discoverMcpToolsForServer` resolves but the MCP client fails to
  * end up `CONNECTED` post-discover. The manager catches reconnect
  * errors and returns void, so without an explicit post-check the
@@ -428,5 +422,26 @@ export class McpServerRestartFailedError extends Error {
     this.name = 'McpServerRestartFailedError';
     this.serverName = serverName;
     this.mcpStatus = mcpStatus;
+  }
+}
+
+export class SessionBusyError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message?: string) {
+    super(message ?? `Session ${sessionId} is busy (prompt running)`);
+    this.name = 'SessionBusyError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class InvalidRewindTargetError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message?: string) {
+    super(
+      message ??
+        `Cannot rewind to the requested turn (compressed or does not exist)`,
+    );
+    this.name = 'InvalidRewindTargetError';
+    this.sessionId = sessionId;
   }
 }

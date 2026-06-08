@@ -14,14 +14,12 @@ import type { ToolRegistry } from './tool-registry.js';
 const debugLogger = createDebugLogger('McpPool:View');
 
 /**
- * F2 (#4175 commit 6 review fix — wenshao W12 / PR A; PR-A-R2 #2
- * folded the exports to delegate here): precompute lookup `Set`s
- * once per `applyTools` / `applyPrompts` pass so the per-tool
- * predicate is O(1) instead of repeating an array scan for every
- * snapshot entry. Same semantics: `excludeTools` is direct-equality
- * match (parens form not stripped — intentional pre-F2 behavior
- * preserved); `includeTools` strips the first `(...)` suffix so
- * `toolName(args)` matches `toolName`.
+ * Precompute lookup `Set`s once per `applyTools` / `applyPrompts`
+ * pass so the per-tool predicate is O(1) instead of repeating an
+ * array scan for every snapshot entry. Same semantics: `excludeTools`
+ * is direct-equality match (parens form not stripped — intentional
+ * previous behavior preserved); `includeTools` strips the first
+ * `(...)` suffix so `toolName(args)` matches `toolName`.
  *
  * PR-A-R2 #2: `passesSessionFilter` / `passesSessionPromptFilter`
  * (exported below for unit-testability) now route THROUGH
@@ -72,14 +70,14 @@ function compiledFilterAccepts(
  * Matches the existing `isEnabled` semantics in `mcp-client.ts` but
  * works against `DiscoveredMCPTool` instead of `FunctionDeclaration`.
  * `excludeTools` wins over `includeTools` when both list the same
- * tool (pre-F2 behavior preserved).
+ * tool (previous behavior preserved).
  *
  * `serverToolName` is the bare name as advertised by the MCP server.
  * `includeTools` entries may use either the bare name or a
  * `<name>(<args>)` parenthesized form — the parens form is stripped
  * before comparing (matches `mcp-client.ts:isEnabled` history).
  * `excludeTools` is checked via direct equality — no parens-form
- * support, intentionally matching the existing pre-F2 behavior so
+ * support, intentionally matching the existing previous behavior so
  * operators don't see semantic divergence between the two filter
  * lists when migrating sessions through pool mode.
  *
@@ -100,7 +98,7 @@ export function passesSessionFilter(
 }
 
 /**
- * F2 (#4175 commit 6 review fix — wenshao W66): prompt-side analog
+ * prompt-side analog
  * of `passesSessionFilter`. Same `excludeTools` / `includeTools`
  * semantics applied to the prompt's `name` field. Reuses the
  * `excludeTools` / `includeTools` config keys rather than inventing
@@ -131,7 +129,7 @@ export function passesSessionPromptFilter(
  * Per-session, per-server projection of a pool entry's tool/prompt
  * snapshots into a session's own `ToolRegistry` + `PromptRegistry`.
  *
- * F2 (#4175) commit 2: one shared `McpClient` in the pool produces
+ * commit 2: one shared `McpClient` in the pool produces
  * canonical `toolsSnapshot` / `promptsSnapshot`; N `SessionMcpView`
  * instances each subscribe and call `applyTools` / `applyPrompts`
  * on `toolsChanged` / `promptsChanged` events.
@@ -140,7 +138,7 @@ export function passesSessionPromptFilter(
  *   - Filters by per-session `includeTools` / `excludeTools` (cfg)
  *   - Decorates tools with per-session `trust` via `tool.withTrust(...)`
  *     so two sessions on the same pool entry can have different
- *     trust values without cross-contamination (see §7.1 / V21 C7)
+ *     trust values without cross-contamination
  *   - Registers into the session's own registries (does NOT touch
  *     the pool's snapshot)
  *   - `teardown()` removes all this view's registrations, used on
@@ -177,9 +175,9 @@ export class SessionMcpView {
    */
   applyTools(snapshot: readonly DiscoveredMCPTool[]): void {
     this.sessionToolRegistry.removeMcpToolsByServer(this.serverName);
-    // W12/PR A: precompute filter Sets once per pass so the per-tool
+    // Precompute filter Sets once per pass so the per-tool
     // predicate is O(1). Pre-fix `passesSessionFilter` re-scanned the
-    // includeTools / excludeTools arrays inside every iteration —
+    // includeTools / excludeTools arrays inside every iteration
     // O(M tools × N filter entries) per pass. Same semantics applied.
     const filter = compileNameFilter(
       this.cfg.includeTools,
@@ -190,7 +188,7 @@ export class SessionMcpView {
       if (!compiledFilterAccepts(filter, tool.serverToolName)) {
         continue;
       }
-      // V21 C7: per-session trust copy. `withTrust` returns the same
+      // Per-session trust copy. `withTrust` returns the same
       // instance when value unchanged, so the common case (same trust)
       // pays zero allocation.
       const sessionTool = tool.withTrust(this.cfg.trust);
@@ -205,7 +203,7 @@ export class SessionMcpView {
         );
       }
     }
-    // wenshao S3: pre-fix this string contained literal "N" instead
+    // Pre-fix this string contained literal "N" instead
     // of an interpolation; operators saw a meaningless placeholder.
     debugLogger.debug(
       `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} tools (filtered to ${registered} registered)`,
@@ -215,7 +213,7 @@ export class SessionMcpView {
   /**
    * Replace this session's registered prompts for `serverName` with
    * `snapshot`. Apply the same `excludeTools` / `includeTools`
-   * filter the tool path uses (W66 fold-in). Pre-fix prompts were
+   * filter the tool path uses. Pre-fix prompts were
    * registered unconditionally — a session restricting tools to a
    * subset still received every prompt the server advertised, AND
    * each prompt's bound `invoke` closure over the pool's shared
@@ -232,7 +230,7 @@ export class SessionMcpView {
    */
   applyPrompts(snapshot: readonly DiscoveredMCPPrompt[]): void {
     this.sessionPromptRegistry.removePromptsByServer(this.serverName);
-    // W12/PR A: same Set precompute as applyTools.
+    // Same Set precompute as applyTools.
     const filter = compileNameFilter(
       this.cfg.includeTools,
       this.cfg.excludeTools,
@@ -276,7 +274,7 @@ export class SessionMcpView {
   /**
    * Tear down this view's registrations. Called on:
    *   - Session close (full teardown via pool's `releaseSession`)
-   *   - `/mcp disable <serverName>` for this session (V21-6 / §10.4)
+   *   - `/mcp disable <serverName>` for this session
    *   - Permanent pool entry failure (subscribers should drop the
    *     server from their UI rather than show stale tools)
    *

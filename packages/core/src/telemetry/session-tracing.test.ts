@@ -694,6 +694,150 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('LLM request spans — response metadata & error enrichment', () => {
+    it('endLLMRequestSpan dual-emits response_id / gen_ai.response.id', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        responseId: 'chatcmpl-abc123',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBe('chatcmpl-abc123');
+      expect(attrs['gen_ai.response.id']).toBe('chatcmpl-abc123');
+    });
+
+    it('endLLMRequestSpan omits response_id when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBeUndefined();
+      expect(attrs['gen_ai.response.id']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan dual-emits finish_reason / gen_ai.response.finish_reasons (string vs array)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        finishReason: 'STOP',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['finish_reason']).toBe('STOP');
+      expect(attrs['gen_ai.response.finish_reasons']).toEqual(['STOP']);
+    });
+
+    it('endLLMRequestSpan omits finish_reason when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['finish_reason']).toBeUndefined();
+      expect(attrs['gen_ai.response.finish_reasons']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan dual-emits thoughts_token_count / gen_ai.usage.reasoning_tokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        thoughtsTokenCount: 42,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBe(42);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(42);
+    });
+
+    it('endLLMRequestSpan emits thoughts_token_count === 0 (no reasoning is meaningful info, not undefined)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        thoughtsTokenCount: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBe(0);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(0);
+    });
+
+    it('endLLMRequestSpan omits thoughts_token_count when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBeUndefined();
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits subagent_name when present', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        subagentName: 'Explore-abc123',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['subagent_name']).toBe('Explore-abc123');
+    });
+
+    it('endLLMRequestSpan omits subagent_name when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      expect(mockSpans[0]!.attributes['subagent_name']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits error_type and error.type on error spans', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: false,
+        error: 'API call failed',
+        errorType: 'RateLimitError',
+        errorStatusCode: 429,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['error_type']).toBe('RateLimitError');
+      expect(attrs['error.type']).toBe('RateLimitError');
+      expect(attrs['error_status_code']).toBe(429);
+    });
+
+    it('endLLMRequestSpan omits error_type/error_status_code on success spans', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['error_type']).toBeUndefined();
+      expect(attrs['error.type']).toBeUndefined();
+      expect(attrs['error_status_code']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits all new attributes together', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 500,
+        outputTokens: 100,
+        responseId: 'resp-xyz',
+        finishReason: 'MAX_TOKENS',
+        thoughtsTokenCount: 30,
+        subagentName: 'code-reviewer',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBe('resp-xyz');
+      expect(attrs['gen_ai.response.id']).toBe('resp-xyz');
+      expect(attrs['finish_reason']).toBe('MAX_TOKENS');
+      expect(attrs['gen_ai.response.finish_reasons']).toEqual(['MAX_TOKENS']);
+      expect(attrs['thoughts_token_count']).toBe(30);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(30);
+      expect(attrs['subagent_name']).toBe('code-reviewer');
+      expect(attrs['input_tokens']).toBe(500);
+      expect(attrs['output_tokens']).toBe(100);
+    });
+  });
+
   describe('tool spans', () => {
     it('creates and ends a tool span', () => {
       const span = startToolSpan('ReadFile', { 'tool.call_id': 'call-1' });
@@ -1141,6 +1285,30 @@ describe('session-tracing', () => {
       expect(hookRecord?.statuses).toHaveLength(0);
 
       endToolSpan(toolSpan, { success: true });
+    });
+
+    it('records shouldStop/hasAdditionalContext on PostToolBatch', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolBatch',
+        toolName: 'batch',
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+        postBatchStop: true,
+        postBatchStopReason: 'policy halt',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
+      expect(hookRecord?.statuses).toHaveLength(0);
     });
 
     it('marks status ERROR only when the hook itself threw', () => {

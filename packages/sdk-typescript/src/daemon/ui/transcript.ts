@@ -13,6 +13,8 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiTextEvent,
+  DaemonUserShellTranscriptBlock,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
@@ -41,6 +43,8 @@ export function createDaemonTranscriptState(
     toolBlockByCallId: {},
     trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},
+    activeAssistantBlockByParent: {},
+    activeThoughtBlockByParent: {},
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: {},
     awaitingResync: false,
@@ -97,6 +101,8 @@ export function appendLocalUserTranscriptMessage(
   next.activeUserBlockId = block.id;
   next.activeAssistantBlockId = undefined;
   next.activeThoughtBlockId = undefined;
+  next.activeAssistantBlockByParent = {};
+  next.activeThoughtBlockByParent = {};
   return trimTranscriptState(next);
 }
 
@@ -109,7 +115,7 @@ export function reduceDaemonTranscriptEvents(
   const next = cloneTranscriptState(state, opts);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
   const result = trimTranscriptState(next);
-  // doudouOUC R4: with lazy COW, `state.blocks` is shared across
+  // With lazy COW, `state.blocks` is shared across
   // sidechannel-only snapshots. A misbehaving consumer doing
   // `(state.blocks as DaemonTranscriptBlock[]).sort()` would corrupt
   // EVERY snapshot that shares the reference (previously only the
@@ -140,7 +146,7 @@ function applyDaemonTranscriptEvent(
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
   }
   if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
-    // wenshao R2 (qwen3.7-max): diagnostic for the "permanently frozen
+    // Diagnostic for the "permanently frozen
     // transcript" case. Without this log, consumers debugging a stuck UI
     // had no signal that events were being dropped. The latch is
     // intentional — daemon's `state_resync_required` means the SSE ring
@@ -151,7 +157,7 @@ function applyDaemonTranscriptEvent(
     // an uncaught issue. Throttled at the call site is the consumer's
     // job — this fires once per dropped event.
     if (typeof console !== 'undefined') {
-      // eslint-disable-next-line no-console -- intentional diagnostic for awaitingResync silent-drop, per wenshao R5
+      // eslint-disable-next-line no-console -- intentional diagnostic for awaitingResync silent-drop
       console.warn?.(
         `[daemon-ui] dropping event \`${event.type}\` while awaitingResync; ` +
           `state may be stale until session reconnect (lastResyncRequired: ${
@@ -165,6 +171,12 @@ function applyDaemonTranscriptEvent(
   }
 
   switch (event.type) {
+    case 'user.shell.command':
+      next.pendingUserShellCommand = {
+        command: event.command,
+        ...(event.cwd ? { cwd: event.cwd } : {}),
+      };
+      break;
     case 'user.text.delta':
       if (!next.activeUserBlockId) {
         next.lastFollowupSuggestion = undefined;
@@ -187,7 +199,7 @@ function applyDaemonTranscriptEvent(
       // never updated to a terminal state would otherwise spin forever.
       // Force them to 'cancelled' so renderers can clear spinners.
       //
-      // wenshao R2 (qwen3.7-max): scope this to application-layer
+      // Scope this to application-layer
       // terminations only. Transport-layer events (`stream_ended`,
       // `reconnected`) are NOT cancellations — the tool is still
       // running on the daemon side. Marking it cancelled here causes a
@@ -213,6 +225,9 @@ function applyDaemonTranscriptEvent(
       break;
     case 'shell.output':
       appendShellBlock(next, event);
+      break;
+    case 'user.shell.output':
+      appendUserShellBlock(next, event);
       break;
     case 'permission.request':
       upsertPermissionBlock(next, event);
@@ -316,7 +331,7 @@ function handleStateResyncRequired(
   appendStatusBlock(
     state,
     'error',
-    `State resync required: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}. Reload the session to recover.`,
+    `State resync required: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}.`,
     event,
   );
 }
@@ -326,7 +341,7 @@ function handleStateResyncRequired(
  * `lastDeliveredId+1 .. earliestAvailableId-1` produces inverted output
  * for `gap == 0` (next-id-is-next, no actual gap) and confusing
  * single-event range for `gap == 1`. Round all edge cases to natural
- * phrasing so the diagnostic stays readable. wenshao R4 (qwen3.7-max).
+ * phrasing so the diagnostic stays readable.
  */
 export function formatMissedRange(
   lastDeliveredId: number,
@@ -354,6 +369,10 @@ export function selectPendingPermissionBlocks(
   );
 }
 
+// Keyed (parentToolCallId) and scalar (activeAssistantBlockId) paths are
+// fully independent. Neither clears nor finalizes the other's blocks.
+// Only finishAssistant() or clearActiveText() with matching parentToolCallId
+// can finalize keyed-path blocks.
 function appendTextDelta(
   state: DaemonTranscriptState,
   kind: 'user' | 'assistant' | 'thought',
@@ -364,7 +383,24 @@ function appendTextDelta(
   text: string,
   event: DaemonUiEvent,
 ): void {
-  const existing = getWritableBlockById(state, state[activeKey]);
+  const parentId =
+    kind !== 'user' && 'parentToolCallId' in event
+      ? (event as DaemonUiTextEvent).parentToolCallId
+      : undefined;
+
+  const parentMap =
+    parentId != null
+      ? kind === 'assistant'
+        ? state.activeAssistantBlockByParent
+        : kind === 'thought'
+          ? state.activeThoughtBlockByParent
+          : undefined
+      : undefined;
+
+  const effectiveId =
+    parentMap && parentId != null ? parentMap[parentId] : state[activeKey];
+
+  const existing = getWritableBlockById(state, effectiveId);
   if (existing && existing.kind === kind) {
     existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
@@ -382,11 +418,37 @@ function appendTextDelta(
   );
   if (kind === 'assistant') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
+  if (parentId != null) {
+    (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
+  }
   appendBlock(state, block);
-  state[activeKey] = block.id;
-  if (kind !== 'user') state.activeUserBlockId = undefined;
-  if (kind !== 'assistant') state.activeAssistantBlockId = undefined;
-  if (kind !== 'thought') state.activeThoughtBlockId = undefined;
+
+  if (parentMap && parentId != null) {
+    parentMap[parentId] = block.id;
+  } else {
+    state[activeKey] = block.id;
+  }
+
+  if (parentId != null) {
+    if (kind === 'assistant') {
+      delete state.activeThoughtBlockByParent[parentId];
+    }
+    if (kind === 'thought') {
+      const evictedAssistId = state.activeAssistantBlockByParent[parentId];
+      if (evictedAssistId) {
+        const evicted = getWritableBlockById(state, evictedAssistId);
+        if (evicted?.kind === 'assistant') {
+          evicted.streaming = false;
+          evicted.updatedAt = state.now;
+        }
+      }
+      delete state.activeAssistantBlockByParent[parentId];
+    }
+  } else {
+    if (kind !== 'user') state.activeUserBlockId = undefined;
+    if (kind !== 'assistant') state.activeAssistantBlockId = undefined;
+    if (kind !== 'thought') state.activeThoughtBlockId = undefined;
+  }
 }
 
 function finishAssistant(state: DaemonTranscriptState): void {
@@ -396,6 +458,29 @@ function finishAssistant(state: DaemonTranscriptState): void {
     existing.updatedAt = state.now;
   }
   state.activeAssistantBlockId = undefined;
+
+  for (const blockId of Object.values(state.activeAssistantBlockByParent)) {
+    const block = getWritableBlockById(state, blockId);
+    if (block?.kind === 'assistant') {
+      block.streaming = false;
+      block.updatedAt = state.now;
+    }
+  }
+  state.activeAssistantBlockByParent = {};
+  for (const blockId of Object.values(state.activeThoughtBlockByParent)) {
+    const block = getWritableBlockById(state, blockId);
+    if (block?.kind === 'thought') {
+      block.streaming = false;
+      block.updatedAt = state.now;
+    }
+  }
+  state.activeThoughtBlockByParent = {};
+  const scalarThought = getWritableBlockById(state, state.activeThoughtBlockId);
+  if (scalarThought?.kind === 'thought') {
+    scalarThought.streaming = false;
+    scalarThought.updatedAt = state.now;
+  }
+  state.activeThoughtBlockId = undefined;
 }
 
 function upsertToolBlock(
@@ -525,14 +610,14 @@ function upsertToolBlock(
       }
     }
   }
-  // wenshao R6 (qwen3.7-max): pass the EFFECTIVE status — the block
+  // Pass the EFFECTIVE status — the block
   // was just created with `event.status ?? 'pending'`. If we pass
   // raw `event.status === undefined`, `updateCurrentToolPointer` early-
   // returns and the block sits as visually-pending but currentToolCallId
   // never points at it. Effective-status keeps the pointer in sync
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
-  clearActiveText(state);
+  clearActiveText(state, event.parentToolCallId);
 }
 
 /**
@@ -580,7 +665,7 @@ function findLatestInFlightToolCallId(
 function propagateCancellationToInFlightTools(
   state: DaemonTranscriptState,
 ): void {
-  // wenshao review: skip trimmed sentinels up front. Without this filter
+  // Skip trimmed sentinels up front. Without this filter
   // each cancellation walked the entire historical tool-call index (which
   // can hold up to `maxBlocks` trimmed sentinels in long sessions), even
   // though only 1-3 tools are typically in-flight. The `block.kind` check
@@ -626,6 +711,50 @@ function appendShellBlock(
       : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
+  appendBlock(state, block);
+  clearActiveText(state);
+}
+
+function appendUserShellBlock(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'user.shell.output' }>,
+): void {
+  if (!event.text) return;
+  const last = state.blocks[state.blocks.length - 1];
+  if (
+    last?.kind === 'user_shell' &&
+    last.stream === event.stream &&
+    !state.pendingUserShellCommand
+  ) {
+    const writable = getWritableBlockById(state, last.id);
+    if (writable?.kind === 'user_shell') {
+      writable.text = appendBoundedText(writable.text, event.text);
+      writable.updatedAt = state.now;
+      if (event.eventId !== undefined) writable.eventId = event.eventId;
+    }
+    return;
+  }
+
+  const pending = state.pendingUserShellCommand;
+  const previous = last?.kind === 'user_shell' ? last : undefined;
+  const block: DaemonUserShellTranscriptBlock = {
+    id: allocateBlockId(state, 'user-shell'),
+    kind: 'user_shell',
+    text: truncateText(event.text),
+    command: pending?.command ?? previous?.command ?? '',
+    ...(pending?.cwd || previous?.cwd
+      ? { cwd: pending?.cwd ?? previous?.cwd }
+      : {}),
+    clientReceivedAt: state.now,
+    createdAt: state.now,
+    updatedAt: state.now,
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+    ...(event.stream ? { stream: event.stream } : {}),
+  };
+  state.pendingUserShellCommand = undefined;
   appendBlock(state, block);
   clearActiveText(state);
 }
@@ -676,7 +805,7 @@ function resolvePermissionBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'permission.resolved' }>,
 ): void {
-  // wenshao review (Critical): mirror the `upsertPermissionBlock` guard at
+  // Mirror the `upsertPermissionBlock` guard at
   // line ~544. When `maxBlocks` trimming has already evicted the original
   // permission request block, the index still carries the
   // `TRIMMED_PERMISSION_BLOCK_ID` sentinel for that requestId. Without
@@ -685,7 +814,7 @@ function resolvePermissionBlock(
   // (b) fall through to create a brand-new orphan resolution block, which
   // wastes a slot, accelerates further trimming, and violates the
   // trimmed-block contract.
-  // wenshao R3 (qwen3.7-max): the prior fix guarded only the sentinel.
+  // The prior fix guarded only the sentinel.
   // After `pruneTrimmedPermissionIndexes` deletes a sentinel (long
   // sessions), a late `permission.resolved` for that requestId hits
   // `existingId === undefined`, bypasses the sentinel check, falls
@@ -775,7 +904,7 @@ function cloneTranscriptState(
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
-    // wenshao review (glm-5.1, 2026-05-23 13:03): lazy copy-on-write for
+    // Lazy copy-on-write for
     // `blocks` + `blockIndexById`. Eager `[...state.blocks]` defeated the
     // `sortedBlocksCache` / `childrenIndexCache` WeakMaps — every dispatch
     // (even sidechannel-only events that don't touch blocks) produced a
@@ -788,11 +917,13 @@ function cloneTranscriptState(
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
     toolBlockByCallId: { ...state.toolBlockByCallId },
+    activeAssistantBlockByParent: { ...state.activeAssistantBlockByParent },
+    activeThoughtBlockByParent: { ...state.activeThoughtBlockByParent },
     trimmedToolNotificationByCallId: {
       ...state.trimmedToolNotificationByCallId,
     },
     permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
-    // doudouOUC + wenshao reviews: deep-clone the inner progress records.
+    // Deep-clone the inner progress records.
     // The outer spread alone shares `{ ratio?, step? }` references between
     // snapshots — once `tool.progress` event handlers start mutating in
     // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
@@ -871,6 +1002,20 @@ function trimTranscriptState(
   }
   if (!keptIds.has(state.activeThoughtBlockId ?? '')) {
     state.activeThoughtBlockId = undefined;
+  }
+  for (const [parentId, blockId] of Object.entries(
+    state.activeAssistantBlockByParent,
+  )) {
+    if (!keptIds.has(blockId)) {
+      delete state.activeAssistantBlockByParent[parentId];
+    }
+  }
+  for (const [parentId, blockId] of Object.entries(
+    state.activeThoughtBlockByParent,
+  )) {
+    if (!keptIds.has(blockId)) {
+      delete state.activeThoughtBlockByParent[parentId];
+    }
   }
   return state;
 }
@@ -967,10 +1112,26 @@ function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {
   return id;
 }
 
-function clearActiveText(state: DaemonTranscriptState): void {
-  finishAssistant(state);
-  state.activeUserBlockId = undefined;
-  state.activeThoughtBlockId = undefined;
+function clearActiveText(
+  state: DaemonTranscriptState,
+  parentToolCallId?: string,
+): void {
+  if (parentToolCallId) {
+    const assistId = state.activeAssistantBlockByParent[parentToolCallId];
+    if (assistId) {
+      const block = getWritableBlockById(state, assistId);
+      if (block?.kind === 'assistant') {
+        block.streaming = false;
+        block.updatedAt = state.now;
+      }
+      delete state.activeAssistantBlockByParent[parentToolCallId];
+    }
+    delete state.activeThoughtBlockByParent[parentToolCallId];
+  } else {
+    finishAssistant(state);
+    state.activeUserBlockId = undefined;
+    state.activeThoughtBlockId = undefined;
+  }
 }
 
 function appendBoundedText(existing: string, text: string): string {
@@ -1001,7 +1162,7 @@ function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {
 }
 
 /**
- * wenshao review (Suggestion): mirror `pruneTrimmedToolIndexes` for the
+ * Mirror `pruneTrimmedToolIndexes` for the
  * permission index. In long sessions where many permission requests are
  * trimmed out, `permissionBlockByRequestId` would grow unboundedly
  * because the trimmed sentinel `TRIMMED_PERMISSION_BLOCK_ID` is written
@@ -1057,7 +1218,7 @@ function cloneJsonLike<T>(value: T, depth = 0): T {
  * itself is fresh.
  */
 /**
- * wenshao review: memoize by `state.blocks` array reference. The reducer
+ * Memoize by `state.blocks` array reference. The reducer
  * already preserves the same array reference for non-block-mutating events
  * (approval_mode change, session metadata, status, etc.), so this WeakMap
  * cache returns the same sorted array across renders that don't touch
@@ -1164,7 +1325,7 @@ export function selectToolProgress(
  * detect cycles defensively.
  */
 /**
- * wenshao review: memoized reverse index. The naive `state.blocks.filter`
+ * Memoized reverse index. The naive `state.blocks.filter`
  * was O(n) per call; in a render tree with m parent blocks each querying
  * their children, total work was O(n*m). Now we build a single
  * `Map<parentToolCallId, DaemonToolTranscriptBlock[]>` lazily per
@@ -1192,7 +1353,7 @@ function getOrBuildChildrenIndex(
     if (list) list.push(block);
     else mutable.set(block.parentToolCallId, [block]);
   }
-  // wenshao R3 (qwen3.7-max): freeze each child list at build time so
+  // Freeze each child list at build time so
   // consumers can hold the cached reference across renders (React.memo /
   // useMemo identity remains stable) without risk of in-place mutation
   // corrupting other consumers sharing the same `state.blocks`

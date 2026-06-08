@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import {
   ClientSideConnection,
@@ -22,28 +21,22 @@ import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
   TrustGateError,
-  getCurrentGeminiMdFilename,
   ShellExecutionService,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel } from './channel.js';
 import { EventBus, DEFAULT_RING_SIZE, type BridgeEvent } from './eventBus.js';
+import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  createIdleWorkspaceHooksStatus,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
-  createIdleAcpPreflightCells,
-  createIdleEnvStatus,
-  createIdleWorkspaceMcpStatus,
-  createIdleWorkspaceProvidersStatus,
-  createIdleWorkspaceSkillsStatus,
-  mapDomainErrorToErrorKind,
-  type ServePreflightCell,
+  type ServeSessionStatsStatus,
   type ServeSessionTasksStatus,
-  type ServeStatusCell,
 } from './status.js';
 import {
   SessionNotFoundError,
@@ -52,22 +45,17 @@ import {
   SessionLimitExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,
-  // Mediator's `vote()` validates `optionId ∈ allowedOptionIds`,
+  // Mediator's `vote()` validates `optionId in allowedOptionIds`,
   // but the bridge ALSO throws `InvalidPermissionOptionError`
   // pre-mediator when a wire client tries to inject the cancel
-  // sentinel via a `selected` outcome (wenshao review #4335 /
-  // 3271185588 — without this guard, a wire-supplied
-  // `optionId === CANCEL_VOTE_SENTINEL` would short-circuit all
-  // policy dispatch).
+  // sentinel via a `selected` outcome — without this guard, a
+  // wire-supplied `optionId === CANCEL_VOTE_SENTINEL` would
+  // short-circuit all policy dispatch.
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
-  WorkspaceInitConflictError,
-  WorkspaceInitPathEscapeError,
-  WorkspaceInitSymlinkError,
-  WorkspaceInitRaceError,
-  McpServerNotFoundError,
-  McpServerRestartFailedError,
   isNotCurrentlyGeneratingCancelError,
+  SessionBusyError,
+  InvalidRewindTargetError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -76,7 +64,7 @@ import type {
   BridgeSessionState,
   BridgeRestoredSession,
   BridgeSessionSummary,
-  HttpAcpBridge,
+  AcpSessionBridge,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -120,13 +108,9 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
 };
 
 /**
- * Stage 1 HTTP→ACP bridge factory + supporting helpers, lifted from
- * `cli/src/serve/httpAcpBridge.ts` to `@qwen-code/acp-bridge/bridge`
- * in #4175 PR F1 (step 3) so the bridge core can be consumed by
- * `channels/base/AcpBridge.ts` and the VSCode IDE companion without
- * reaching into the cli package.
+ * Stage 1 HTTP->ACP bridge factory + supporting helpers.
  *
- * Per #3803 §02 (architectural revision) and design §08 (Roadmap, Stage 1):
+ * Architecture:
  *   - **1 daemon = 1 workspace**: every bridge instance is bound to a
  *     single canonical workspace path at construction
  *     (`BridgeOptions.boundWorkspace`). All `spawnOrAttach` calls must
@@ -134,10 +118,8 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
  *     `WorkspaceMismatchError`. Multi-workspace deployments use multiple
  *     daemon processes (one per workspace, supervised externally).
  *   - One `qwen --acp` child total; multiple sessions multiplex onto it
- *     via `connection.newSession()` (the agent's native
- *     `sessions: Map<string, Session>` — see `acp-integration/acpAgent.ts:194`).
- *     Sessions share the child's process / OAuth state / `FileReadCache` /
- *     hierarchy-memory parse.
+ *     via `connection.newSession()`. Sessions share the child's process /
+ *     OAuth state / `FileReadCache` / hierarchy-memory parse.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
  *   - Child stdout NDJSON notifications publish onto each session's
  *     `EventBus`; HTTP SSE subscribers (`GET /session/:id/events`) drain
@@ -148,7 +130,7 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
  *     the ACP layer demultiplexes by sessionId.
  *
  * Stage 2 replaces the spawn step with an in-process call into core's
- * ACP-equivalent API. The `HttpAcpBridge` interface stays the same so HTTP
+ * ACP-equivalent API. The `AcpSessionBridge` interface stays the same so HTTP
  * route handlers don't need to change.
  */
 
@@ -157,13 +139,11 @@ interface ChannelInfo {
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
   client: BridgeClient;
-  // Note: pre-§02 a `workspaceCwd: string` field lived here so the
-  // `byWorkspaceChannel.get(entry.workspaceCwd)` lookup could route
-  // multi-workspace requests. Under "1 daemon = 1 workspace" the
-  // module-scope `boundWorkspace` is the single source of truth and
-  // every channel inherits it. Per-channel storage would suggest
-  // variance the model doesn't allow; dropping it makes the
-  // single-workspace invariant visible at the type level.
+  // Under "1 daemon = 1 workspace" the module-scope `boundWorkspace`
+  // is the single source of truth and every channel inherits it.
+  // Per-channel storage would suggest variance the model doesn't
+  // allow; keeping it out makes the single-workspace invariant visible
+  // at the type level.
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
@@ -214,6 +194,7 @@ interface ChannelInfo {
    * two-bit (alive, dying) state.
    */
   isDying: boolean;
+  handshakeComplete: boolean;
 }
 
 interface SessionEntry {
@@ -242,7 +223,7 @@ interface SessionEntry {
    */
   modelChangeQueue: Promise<void>;
   /**
-   * A1 (#4511): true while the bridge is driving a model roundtrip
+   * True while the bridge is driving a model roundtrip
    * (`setSessionModel` / `applyModelServiceId`) for this session. The
    * `current_model_update` extNotification demux in `BridgeClient` reads this
    * to SUPPRESS promotion of the agent's notification during a bridge-driven
@@ -252,13 +233,13 @@ interface SessionEntry {
    */
   modelRoundtripInFlight?: boolean;
   /**
-   * Per-session approval-mode FIFO (doudouOUC #4484 post-merge review,
-   * A3). Mirrors `modelChangeQueue`: serializes concurrent
-   * `setSessionApprovalMode` calls so two `POST /session/:id/approval-mode`
-   * can't race their ACP roundtrip + persist and publish an
-   * `approval_mode_changed` event whose `next` mode disagrees with the
-   * mode the ACP child actually settled on. Always resolves — failures
-   * swallowed at the tail like `modelChangeQueue`.
+   * Per-session approval-mode FIFO. Mirrors `modelChangeQueue`:
+   * serializes concurrent `setSessionApprovalMode` calls so two
+   * `POST /session/:id/approval-mode` can't race their ACP roundtrip
+   * + persist and publish an `approval_mode_changed` event whose
+   * `next` mode disagrees with the mode the ACP child actually settled
+   * on. Always resolves — failures swallowed at the tail like
+   * `modelChangeQueue`.
    */
   approvalModeQueue: Promise<void>;
   /**
@@ -289,16 +270,13 @@ interface SessionEntry {
    */
   activePromptOriginatorClientId?: string;
   /**
-   * Per-prompt "already broadcast `prompt_cancelled`" latch (doudouOUC
-   * #4484 post-merge review, D2). The explicit `cancelSession` route and
-   * the `sendPrompt` abort path (originator SSE drop) can both fire for
-   * the same active prompt — e.g. a client POSTs /cancel then immediately
-   * closes its socket. Without dedup, peers receive two `prompt_cancelled`
-   * frames for one turn. Reset to `false` when the **next prompt starts**
-   * (the latch is per-prompt); set `true` on the first broadcast. A cancel
-   * against an already-settled / idle session may be suppressed until the
-   * next prompt starts — acceptable since an idle-session cancel is a
-   * harmless no-op (see `cancelSession`).
+   * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
+   * `cancelSession` route and the `sendPrompt` abort path (originator SSE
+   * drop) can both fire for the same active prompt — e.g. a client POSTs
+   * /cancel then immediately closes its socket. Without dedup, peers
+   * receive two `prompt_cancelled` frames for one turn. Reset to `false`
+   * when the **next prompt starts** (the latch is per-prompt); set `true`
+   * on the first broadcast.
    */
   cancelBroadcast?: boolean;
   /**
@@ -307,9 +285,7 @@ interface SessionEntry {
    * session under `sessionScope: 'single'`. Used by the disconnect-
    * reaper in `server.ts`: if the spawn-owner client disconnected
    * during the spawn handshake but another client has already
-   * attached, the reaper must NOT tear the session down (option 1
-   * from PR #3889 review BQ9tV — "track an attached-after-spawn
-   * counter and skip kill if any other client attached"). The
+   * attached, the reaper must NOT tear the session down. The
    * increment + the killSession-skip-check both happen in the
    * synchronous portion of their respective async functions, so the
    * counter is observed atomically across the awaiting boundary.
@@ -339,16 +315,15 @@ interface SessionEntry {
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
-   * the caller identified themselves; consumed by future diagnostics
-   * (PR 12) and revocation policy (PR 24). Undefined until the first
-   * heartbeat lands.
+   * the caller identified themselves; consumed by diagnostics and
+   * revocation policy. Undefined until the first heartbeat lands.
    */
   sessionLastSeenAt?: number;
   /**
    * Per-`clientId` last heartbeat (Date.now() epoch ms). Only populated
    * when the heartbeat carried a trusted `X-Qwen-Client-Id`. Entries are
-   * dropped together with the parent session — there's no per-client
-   * eviction in this PR; revocation policy (PR 24) will own that.
+   * dropped together with the parent session — revocation policy will
+   * own per-client eviction.
    */
   clientLastSeenAt: Map<string, number>;
 }
@@ -409,13 +384,13 @@ function extractPermissionResponseMetadata(
  * `suppressOwnUserEcho: true` skip the echo for the originator (the
  * envelope-level `originatorClientId` matches their own clientId).
  *
- * Anonymous-prompt caveat (D2-review D5): a stable `X-Qwen-Client-Id` is a
- * PRECONDITION for that dedup. A prompt with no clientId (curl smoke /
- * pre-registration script) produces an envelope without
- * `originatorClientId`, so `suppressOwnUserEcho` has nothing to match and
- * the originating connection sees its own input echoed back. This is an
- * accepted edge for headless/anonymous callers; interactive multi-client
- * UIs always carry a clientId and are unaffected.
+ * Anonymous-prompt caveat: a stable `X-Qwen-Client-Id` is a PRECONDITION
+ * for that dedup. A prompt with no clientId (curl smoke / pre-registration
+ * script) produces an envelope without `originatorClientId`, so
+ * `suppressOwnUserEcho` has nothing to match and the originating connection
+ * sees its own input echoed back. This is an accepted edge for
+ * headless/anonymous callers; interactive multi-client UIs always carry a
+ * clientId and are unaffected.
  *
  * Source marker: `_meta.source: 'bridge-echo'` lets downstream tooling
  * distinguish bridge-synthesized echoes from agent-emitted content if
@@ -445,9 +420,7 @@ function echoPromptToSessionBus(
     // Every `ContentBlock` variant (text, image, audio, resource) is
     // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
     // accepts any `content` shape; rich rendering of non-text blocks is
-    // the consumer's responsibility. (Core's first-class multimodal
-    // user-content emit is tracked separately in PR #4353 §D — that
-    // affects the agent-side replay path, not this bridge echo.)
+    // the consumer's responsibility.
     try {
       entry.events.publish({
         type: 'session_update',
@@ -456,14 +429,11 @@ function echoPromptToSessionBus(
           update: {
             sessionUpdate: 'user_message_chunk',
             content: part,
-            // D3 (doudouOUC #4484 post-merge review): `_meta` lives inside
-            // the `update` object rather than at envelope level. Kept here
-            // deliberately — `_meta` is a standard JSON-RPC/MCP extension
+            // `_meta` lives inside the `update` object rather than at
+            // envelope level. `_meta` is a standard JSON-RPC/MCP extension
             // field permitted alongside spec fields, the SDK normalizer
             // reads it from `update._meta`/`data._meta`, and every other
             // agent-emitted session_update carries `_meta` the same way.
-            // Relocating to the envelope would be a coordinated wire change
-            // across all emitters + the SDK for no functional gain.
             _meta: { serverTimestamp, source: 'bridge-echo' },
           },
         },
@@ -511,7 +481,7 @@ function broadcastPromptCancelled(
 }
 
 /**
- * D2 dedup wrapper around {@link broadcastPromptCancelled}. Broadcasts at
+ * Dedup wrapper around {@link broadcastPromptCancelled}. Broadcasts at
  * most once per active prompt by latching `entry.cancelBroadcast`, so the
  * `cancelSession` route and the `sendPrompt` abort path can't both emit a
  * `prompt_cancelled` for a single turn (POST /cancel then socket close).
@@ -551,6 +521,48 @@ function broadcastTurnComplete(
   });
 }
 
+/**
+ * Extract a human-readable message from an unknown error value.
+ * Handles Error instances, JSON-RPC error objects (`{ code, message,
+ * data: { details } }` or string `data`), and plain objects with a `message`
+ * property.
+ * JSON-RPC internal errors carry the generic `"Internal error"` as
+ * `message`; the actual detail lives in `data.details`.
+ */
+export function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    const data = (err as Error & { data?: unknown }).data;
+    const detail = extractJsonRpcErrorDetail(data);
+    return detail ?? err.message;
+  }
+  if (typeof err === 'object' && err !== null) {
+    const obj = err as Record<string, unknown>;
+    const detail = extractJsonRpcErrorDetail(obj['data']);
+    if (detail) return detail;
+    const msg = obj['message'];
+    if (typeof msg === 'string') return msg;
+  }
+  return String(err);
+}
+
+function extractJsonRpcErrorDetail(data: unknown): string | undefined {
+  if (typeof data === 'string' && data.length > 0) return data;
+  if (typeof data === 'object' && data !== null) {
+    const details = (data as Record<string, unknown>)['details'];
+    if (typeof details === 'string' && details.length > 0) return details;
+  }
+  return undefined;
+}
+
+export function extractErrorCode(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err))
+    return undefined;
+  const raw = (err as Record<string, unknown>)['code'];
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number') return String(raw);
+  return undefined;
+}
+
 function broadcastTurnError(
   entry: SessionEntry,
   sessionId: string,
@@ -558,13 +570,8 @@ function broadcastTurnError(
   promptId: string | undefined,
   originatorClientId: string | undefined,
 ): void {
-  const message = err instanceof Error ? err.message : String(err);
-  const code =
-    err instanceof Error &&
-    'code' in err &&
-    typeof (err as Error & { code?: unknown }).code === 'string'
-      ? (err as Error & { code: string }).code
-      : undefined;
+  const message = extractErrorMessage(err);
+  const code = extractErrorCode(err);
   entry.events.publish({
     type: 'turn_error',
     data: {
@@ -589,6 +596,8 @@ function hasControlCharacter(value: string): boolean {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+const MCP_RESTART_TIMEOUT_MS = 300_000;
+const MCP_OAUTH_TIMEOUT_MS = 600_000;
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -629,16 +638,15 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 // `BridgeOptions.maxPendingPermissionsPerSession`.
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
-export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
+export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const defaultSessionScope = opts.sessionScope ?? 'single';
-  // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
+  // `undefined` → default 20 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
   //              long-standing alias since the cap check is `>= max`).
   // `NaN` / negative → throw. A typo / parse error in CLI/config
   //                    silently disabling the daemon's only resource
-  //                    guard is fail-OPEN behavior; gpt-5.5 flagged
-  //                    this as critical (BRApy) — we'd rather fail
+  //                    guard is fail-OPEN behavior — we'd rather fail
   //                    boot than serve unbounded.
   let maxSessions: number;
   if (opts.maxSessions === undefined) {
@@ -686,13 +694,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
-  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): close over
-  // a per-handle env-override snapshot. Calls to `channelFactory` at
-  // spawn time receive this as the 2nd arg, so the default factory
-  // can merge into the child env without consulting any global state
-  // that another concurrent `runQwenServe()` handle might have
-  // mutated. Frozen to make accidental mutation throw rather than
-  // silently corrupt later spawns.
+  // Close over a per-handle env-override snapshot. Calls to
+  // `channelFactory` at spawn time receive this as the 2nd arg, so
+  // the default factory can merge into the child env without
+  // consulting any global state that another concurrent
+  // `runQwenServe()` handle might have mutated. Frozen to make
+  // accidental mutation throw rather than silently corrupt later
+  // spawns.
   const childEnvOverrides: Readonly<Record<string, string | undefined>> =
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
@@ -718,24 +726,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
       ? maxPendingRaw
       : Infinity;
-  // #3803 §02: the bound path is the canonical form `spawnOrAttach`
-  // compares incoming `workspaceCwd` against. The caller MUST pass an
-  // already-canonical value (via `canonicalizeWorkspace`). `runQwenServe`
+  // The bound path is the canonical form `spawnOrAttach` compares
+  // incoming `workspaceCwd` against. The caller MUST pass an already-
+  // canonical value (via `canonicalizeWorkspace`). `runQwenServe`
   // does this at boot and threads the same value into both
-  // `createHttpAcpBridge` and `createServeApp` (via
-  // `deps.boundWorkspace`); direct embeds / tests that construct the
-  // bridge themselves must call `canonicalizeWorkspace` first.
-  //
-  // Pre-fix the bridge re-canonicalized defensively here. The fix
-  // (deepseek-v4-pro review) drops the redundant `realpathSync.native`:
-  // (a) on case-insensitive / symlinked filesystems two independent
-  // `realpathSync.native` calls could theoretically disagree if the FS
-  // mutates between them (NFS transient, operator rename), landing
-  // the bridge with one canonical form while `runQwenServe` advertises
-  // another and `/capabilities` clients see `workspace_mismatch` on
-  // every POST; (b) it's a syscall removed from the boot path. The
-  // `path.isAbsolute` guard stays — it's a structural input check, not
-  // a syscall.
+  // `createHttpAcpBridge` and `createServeApp`; direct embeds / tests
+  // must call `canonicalizeWorkspace` first. No redundant
+  // `realpathSync.native` here — on case-insensitive / symlinked
+  // filesystems two independent calls could disagree if the FS mutates
+  // between them. The `path.isAbsolute` guard is a structural input
+  // check, not a syscall.
   if (!path.isAbsolute(opts.boundWorkspace)) {
     throw new TypeError(
       `Invalid boundWorkspace: "${opts.boundWorkspace}". Must be an ` +
@@ -743,18 +743,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
-  // #4282 fold-in 5 (Codex P2-1). Snapshot the configured context
-  // filename at construction time. The daemon parent never updates
-  // the process-global through `loadCliConfig`, so `runQwenServe`
-  // reads the workspace's merged settings and forwards the value
-  // here. Falling back to `getCurrentGeminiMdFilename()` keeps
-  // bridge tests + embedded callers working without explicit setup.
-  const contextFilename = opts.contextFilename ?? getCurrentGeminiMdFilename();
   const persistApprovalMode = opts.persistApprovalMode;
-  const persistDisabledTools = opts.persistDisabledTools;
   const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
-  // #3803 §02 single-workspace model: the bridge hosts AT MOST one
+  // Single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
   // Multi-session multiplexing happens through `channelInfo.sessionIds`;
   // the `defaultEntry` slot is the FIRST session created (the one a
@@ -776,7 +768,56 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // `killAllSync`) gate on `isDying` rather than presence; see
   // `ChannelInfo.isDying` for the per-set-site rationale.
   let channelInfo: ChannelInfo | undefined;
-  // tanzhenxin BkUyD: superset of `channelInfo` covering channels
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelIdleTimer(): void {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  }
+
+  async function killChannelWithLog(
+    ci: ChannelInfo,
+    context?: string,
+  ): Promise<void> {
+    ci.isDying = true;
+    await ci.channel.kill().catch((err) => {
+      writeStderrLine(
+        `qwen serve: channel kill failed${context ? ` (${context})` : ''}: ${String(err)}`,
+      );
+    });
+  }
+
+  function resolvedChannelIdleTimeoutMs(): number {
+    const raw = opts.channelIdleTimeoutMs;
+    return raw !== undefined && Number.isFinite(raw) && raw > 0
+      ? Math.min(raw, 2_147_483_647)
+      : 0;
+  }
+
+  async function startIdleTimer(
+    ci: ChannelInfo,
+    context?: string,
+  ): Promise<void> {
+    const timeoutMs = resolvedChannelIdleTimeoutMs();
+    if (timeoutMs <= 0) {
+      await killChannelWithLog(ci, context);
+      return;
+    }
+    cancelIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        writeStderrLine(
+          `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
+        );
+        void killChannelWithLog(ci, 'idle timeout');
+      }
+    }, timeoutMs);
+    idleTimer.unref();
+  }
+  // BkUyD: superset of `channelInfo` covering channels
   // that are dying but not yet OS-reaped. `killSession` /
   // `doSpawn`-newSession-failure / `shutdown` mark a channel as
   // `isDying` and start its async kill; meanwhile a concurrent
@@ -796,7 +837,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
-  // F3 Commit 3 — pending + resolved permission state lifted to
+  // Pending + resolved permission state lives in
   // `MultiClientPermissionMediator` (constructed below). The bridge
   // keeps `entry.pendingPermissionIds: Set<string>` on each
   // SessionEntry as a fast cap-check index; the mediator is the
@@ -804,9 +845,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // duplicate-vote LRU.
 
   // Validate the optional consensus quorum override defensively at
-  // construction. The settings layer (Commit 5) is the primary
-  // enforcement point, but the bridge also rejects malformed values
-  // here so a buggy host wiring path can't NaN-poison the mediator.
+  // construction. The settings layer is the primary enforcement
+  // point, but the bridge also rejects malformed values here so a
+  // buggy host wiring path can't NaN-poison the mediator.
   const permissionConsensusQuorum = opts.permissionConsensusQuorum;
   if (
     permissionConsensusQuorum !== undefined &&
@@ -929,8 +970,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Otherwise a long-lived daemon servicing a churn of disconnect/
       // reconnect clients (each picking a fresh `clientId`) would
       // accumulate stale heartbeat timestamps for clients that no
-      // longer exist — the very leak revocation policy (PR 24) is
-      // meant to plug.
+      // longer exist — the very leak revocation policy is meant to
+      // plug.
       entry.clientLastSeenAt.delete(clientId);
     } else {
       entry.clientIds.set(clientId, count - 1);
@@ -948,43 +989,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return clientId;
   };
 
-  // Wenshao review #4335 / 3272493777 — `resolveAnyTrustedClientId`
-  // helper removed alongside its sole call site in
-  // `respondToPermission`. The function ranged across all live
-  // sessions to validate a clientId, which created a cross-session
-  // client-registration oracle when used in the unknown-requestId
-  // path. The session-scoped `resolveTrustedClientId` (defined
-  // above) is the correct primitive — it scopes to a single
-  // session and is never called on the unknown-requestId path
-  // after Round 7+8.
-
-  // F3 Commit 3 — `registerPending` / `rollbackPending` /
-  // `rememberResolvedPermission` / `publishPermissionAlreadyResolved`
-  // / `resolvePending` were lifted into
-  // `MultiClientPermissionMediator`. The mediator owns the pending
-  // registry, the resolved-LRU, the per-session timer, and the
-  // wire-event emit fan-out. The bridge talks to it through three
-  // narrow surfaces: `mediator.request` (issue), `mediator.vote`
-  // (resolve from a route), and `mediator.forgetSession` (cleanup
-  // on session teardown).
   //
   /**
-   * Get-or-create the daemon's single `qwen --acp` channel (#3803 §02).
-   * N sessions multiplex onto it via `connection.newSession()`.
-   * Concurrent callers coalesce through `inFlightChannelSpawn` so we
-   * never spawn two children. The returned `ChannelInfo` is shared —
-   * the caller adds their session id to `sessionIds` and uses
-   * `info.connection.newSession()`.
-   *
-   * Wires up the one-and-only `channel.exited` cleanup on first
-   * creation so the late-arriving event tears down ALL multiplexed
-   * sessions.
+   * Get-or-create the daemon's single `qwen --acp` channel. N sessions
+   * multiplex onto it via `connection.newSession()`. Concurrent callers
+   * coalesce through `inFlightChannelSpawn` so we never spawn two
+   * children. Wires up the one-and-only `channel.exited` cleanup on
+   * first creation so the late-arriving event tears down ALL
+   * multiplexed sessions.
    */
   async function ensureChannel(): Promise<ChannelInfo> {
     // Skip a channel that's marked dying — its underlying transport is
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
     // immediately 404s on every follow-up.
+    cancelIdleTimer();
     if (channelInfo && !channelInfo.isDying) return channelInfo;
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
@@ -1020,23 +1039,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         permissionMediator,
         permissionTimeoutMs,
         maxPendingPerSession,
-        // #4175 PR F1 step 5: forward the optional `BridgeFileSystem`
-        // injection so production `qwen serve` can wire PR 18's
-        // `WorkspaceFileSystem` adapter into BridgeClient's fs proxy
-        // methods. Tests + Mode A consumers + channels / IDE companion
-        // omit it; BridgeClient falls back to its inline fs proxy.
+        // Forward the optional `BridgeFileSystem` injection so
+        // production `qwen serve` can wire the `WorkspaceFileSystem`
+        // adapter into BridgeClient's fs proxy methods. Tests + Mode A
+        // consumers + channels / IDE companion omit it; BridgeClient
+        // falls back to its inline fs proxy.
         opts.fileSystem,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
       // Add to `aliveChannels` + register the `channel.exited` handler
-      // BEFORE the `initialize` handshake (tanzhenxin cold-spawn-window
-      // finding): the agent child exists from the moment
-      // `channelFactory(boundWorkspace)` returns, so a `killAllSync()`
-      // during the handshake window (up to `initTimeoutMs`, default
-      // 10s) must find it to avoid orphaning on `process.exit(1)`.
-      // Init-failure / child-crash / late-shutdown all converge on
-      // the same cleanup path via the handler below.
+      // BEFORE the `initialize` handshake: the agent child exists from
+      // the moment `channelFactory(boundWorkspace)` returns, so a
+      // `killAllSync()` during the handshake window (up to
+      // `initTimeoutMs`, default 10s) must find it to avoid orphaning
+      // on `process.exit(1)`. Init-failure / child-crash / late-shutdown
+      // all converge on the same cleanup path via the handler below.
       // `channelInfo` (the attach target) is assigned only AFTER
       // initialize succeeds so callers don't attach to a still-
       // handshaking channel.
@@ -1047,6 +1065,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionIds: new Set(),
         pendingRestoreIds: new Set(),
         isDying: false,
+        handshakeComplete: false,
       };
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
@@ -1074,24 +1093,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // iteration), publish `session_died` on each session's bus,
       // remove from byId / defaultEntry / pending tables.
       //
-      // Registered BEFORE the `initialize` await (tanzhenxin
-      // cold-spawn-window fix above) so init-failure / child-crash /
-      // late-shutdown all converge here. During handshake
-      // `sessionIds` is empty — the loop below no-ops, the stderr
-      // line still fires to tell operators "agent process gone
-      // during init", and `aliveChannels.delete(info)` clears the
-      // entry through the normal exit path.
+      // Registered BEFORE the `initialize` await so init-failure /
+      // child-crash / late-shutdown all converge here. During
+      // handshake `sessionIds` is empty — the loop below no-ops,
+      // the stderr line still fires, and `aliveChannels.delete(info)`
+      // clears the entry through the normal exit path.
       //
-      // tanzhenxin BkUyD: drop from `aliveChannels` ONLY when the OS
-      // process is actually gone. Async kill paths (`killSession`
-      // reap, `shutdown()` await, `doSpawn`'s newSession-failure
-      // tear-down) mark `isDying = true` but leave the entry in
-      // `aliveChannels` until this handler fires, so the double-Ctrl+C
-      // `killAllSync` force-kill path still has a reference to fire
-      // SIGKILL against during the SIGTERM grace window — even if a
-      // concurrent `spawnOrAttach` has already reassigned
-      // `channelInfo` to a fresh channel.
+      // BkUyD: drop from `aliveChannels` ONLY when the OS process is
+      // actually gone. Async kill paths mark `isDying = true` but
+      // leave the entry in `aliveChannels` until this handler fires,
+      // so `killAllSync` still has a reference to fire SIGKILL during
+      // the SIGTERM grace window — even if a concurrent `spawnOrAttach`
+      // has already reassigned `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        if (channelInfo === info) cancelIdleTimer();
         aliveChannels.delete(info);
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
@@ -1112,6 +1127,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // but daemon stays up) still logs — there's no upstream
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
+        const channelExitExpected = shuttingDown || info.isDying;
+        if (info.handshakeComplete) {
+          telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
+        }
         if (!shuttingDown) {
           telemetry.event('channel.exited', {
             'qwen-code.daemon.channel.exit_code': exitInfo?.exitCode ?? -1,
@@ -1143,10 +1162,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             /* bus already closed */
           }
           byId.delete(sid);
-          // PR 14b fix (codex round 5): tombstone the id so any
-          // late `extNotification` from the dying child can't leak
-          // into the early-event buffer for a future load/resume of
-          // the same persisted session id.
+          telemetry.metrics?.sessionLifecycle('die');
+          // Tombstone the id so any late `extNotification` from the
+          // dying child can't leak into the early-event buffer for a
+          // future load/resume of the same persisted session id.
           info.client.markSessionClosed(sid);
           if (defaultEntry === sessEntry) defaultEntry = undefined;
           sessEntry.events.close();
@@ -1201,7 +1220,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (shuttingDown) {
         info.isDying = true;
         await channel.kill().catch(() => {});
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
 
       // Handshake succeeded — now publish the channel as the
@@ -1210,6 +1229,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // never returns a still-handshaking channel to a concurrent
       // caller.
       channelInfo = info;
+      info.handshakeComplete = true;
+      telemetry.metrics?.channelLifecycle('spawn');
       return info;
     })();
 
@@ -1226,11 +1247,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     effectiveScope: 'single' | 'thread',
     requestedClientId?: string,
   ): Promise<BridgeSession> {
-    // #3803 §02: get-or-create the daemon's single channel, then call
+    // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
-    // process / OAuth / file-cache / hierarchy-memory parse via the
-    // agent's `sessions: Map<string, Session>` (see
-    // `acp-integration/acpAgent.ts:194`).
+    // process / OAuth / file-cache / hierarchy-memory parse.
     //
     // newSession on an established channel can fail (auth, config,
     // etc.) without the channel dying. We DON'T kill the channel on
@@ -1273,7 +1292,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // `channel.exited` cleanup spawns a fresh channel instead of
         // attaching to the one we're about to tear down. `channelInfo`
         // stays set until OS reap so `killAllSync` mid-SIGTERM still
-        // finds a target (tanzhenxin BkUyD invariant).
+        // finds a target (BkUyD invariant).
         ci.isDying = true;
         await ci.channel.kill().catch(() => {
           /* best-effort — channel.exited handler still runs */
@@ -1286,7 +1305,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // while we were in `connection.newSession` (~1s on cold start).
     if (shuttingDown) {
       // Don't kill the channel — see comment above. Just throw.
-      throw new Error('HttpAcpBridge is shutting down');
+      throw new Error('AcpSessionBridge is shutting down');
     }
 
     const entry = createSessionEntry(
@@ -1298,10 +1317,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // `defaultEntry` is the single-scope attach target — only sessions
     // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
     // never become the attach target, otherwise a later omitted-scope
-    // (or daemon-default-`single`) caller would attach with
-    // `attached: true` to what its sender promised was an isolated
-    // session — see #4175 PR 5 (mixed-scope leak found in review).
-    // Subsequent same-scope spawns also don't overwrite (first wins).
+    // (or daemon-default-`single`) caller would attach to what its
+    // sender promised was an isolated session. Subsequent same-scope
+    // spawns also don't overwrite (first wins).
     if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
 
     // ACP `newSession` doesn't take a model id; honor the caller's
@@ -1452,7 +1470,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
    * agent forward anyway.
    */
   const cancelPendingForSession = (sessionId: string) => {
-    // F3 N5 invariant — mediator first (it cancels each pending,
+    // Mediator first (it cancels each pending,
     // emits `permission_resolved`, writes audit, settles the
     // Promise), THEN clear the bridge's fast cap-check index.
     permissionMediator.forgetSession(sessionId);
@@ -1587,15 +1605,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   };
 
   /**
-   * Fan-out an event to every live session bus. PR 17 mutation events
+   * Fan-out an event to every live session bus. Mutation events
    * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`,
    * persisted `approval_mode_changed` mirror) call this.
-   *
-   * Mirrors PR 16's `publishWorkspaceEvent` member: per-entry
-   * success/failure accounting + an "ALL buses dropped" stderr
-   * elevation so monitoring catches the all-closed-during-shutdown
-   * scenario. Was a local swallow-and-skip until #4297 fold-in 1
-   * picked up the suggestion to align with the instrumented path.
    *
    * Kept as a local closure rather than a member method because call
    * sites within the bridge implementation run inside the factory
@@ -1605,9 +1617,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
    * from the broadcast. Used by `setSessionApprovalMode` to avoid
    * delivering `approval_mode_changed` twice to the requesting
    * session (which already received the session-scoped publish on
-   * its own bus). Without the skip, the SDK reducer's
-   * `approvalModeChangedCount` reaches 2 for a single mutation on
-   * the requesting client.
+   * its own bus).
    */
   const broadcastWorkspaceEvent = (
     envelope: Omit<BridgeEvent, 'id' | 'v'>,
@@ -1651,16 +1661,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // skipped naturally produce zero recipients — that's not an
     // "all dropped" condition, just nobody to deliver to.
     //
-    // #4297 fold-in 6 (deepseek S1, addresses #3261079572): count the
-    // sessions we actually skipped instead of unconditionally
-    // subtracting 1 when `skipSessionId` is set. The previous shape
-    // suppressed the all-dropped alarm when a non-matching
-    // `skipSessionId` was passed (caller mistake, stale id, or the
-    // matching session was just torn down) — eligible would land at
-    // `sessions.length - 1` even though every session was published
-    // to and every publish failed. Counting actual skips makes the
-    // alarm condition self-consistent regardless of how the caller
-    // mis-uses the param.
+    // Count the sessions we actually skipped instead of unconditionally
+    // subtracting 1 when `skipSessionId` is set. Counting actual skips
+    // makes the alarm condition self-consistent regardless of whether
+    // the `skipSessionId` matches any live session.
     const eligible = sessions.length - skippedCount;
     if (eligible > 0 && successCount === 0 && !shuttingDown) {
       writeStderrLine(
@@ -1669,11 +1673,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   };
 
+  const createSessionEventBus = (): EventBus =>
+    new EventBus(eventRingSize, undefined, new TurnBoundaryCompactionEngine());
+
   const createSessionEntry = (
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(eventRingSize),
+    events = createSessionEventBus(),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -1693,10 +1700,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
-    // PR 14b fix #1 (codex review round 1): drain any guardrail
-    // events that fired during this session's `newSession` handler
-    // (before this entry registered) onto the freshly-created
-    // EventBus. Idempotent on unknown sessionIds.
+    telemetry.metrics?.sessionLifecycle('spawn');
+    // Drain any guardrail events that fired during this session's
+    // `newSession` handler (before this entry registered) onto the
+    // freshly-created EventBus. Idempotent on unknown sessionIds.
     ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
   };
@@ -1732,12 +1739,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   };
 
+  const replayFieldsFor = (
+    entry: { events: EventBus },
+    action: 'load' | 'resume',
+  ): Pick<
+    BridgeRestoredSession,
+    'compactedReplay' | 'liveJournal' | 'lastEventId'
+  > => {
+    const snapshot = entry.events.snapshotReplay();
+    if (!snapshot) return { lastEventId: entry.events.lastEventId };
+    if (action === 'load') {
+      return {
+        compactedReplay: snapshot.compactedTurns,
+        liveJournal: snapshot.liveJournal,
+        lastEventId: snapshot.lastEventId,
+      };
+    }
+    return { lastEventId: snapshot.lastEventId };
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
-      throw new Error('HttpAcpBridge is shutting down');
+      throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
 
@@ -1754,20 +1780,18 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        ...replayFieldsFor(existing, action),
       };
     }
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
       // Cross-action races BOTH ways must reject. A `resume` arriving
-      // while a `load` is in flight cannot quietly coalesce: the load
-      // is replaying full history through SSE on a shared EventBus,
-      // and `DaemonSessionClient.resume()` seeds `lastEventId: 0`,
-      // which means the resume client would receive every replayed
-      // frame — directly violating resume's "no UI replay" contract.
-      // The mirror direction (`load` onto `resume`) is rejected for
-      // the same reason: a load caller expects history but resume
-      // didn't replay any. Same-action coalescing is unaffected.
+      // while a `load` is in flight cannot quietly coalesce: load
+      // returns compacted replay + watermark while resume returns only
+      // a watermark — mixing the two on a shared EventBus would give
+      // the resume client unexpected replay data or the load client a
+      // missing snapshot. Same-action coalescing is unaffected.
       if (action !== inFlight.action) {
         throw new RestoreInProgressError(
           req.sessionId,
@@ -1820,7 +1844,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus(eventRingSize);
+    const restoreEvents = createSessionEventBus();
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -1831,14 +1855,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       ci = await ensureChannel();
       ci.pendingRestoreIds.add(req.sessionId);
-      // PR 14b fix (codex round 6): mark this id as in-flight restore
-      // BEFORE the ACP `loadSession`/`unstable_resumeSession` call.
-      // Restore-time guardrail events arriving on the bridge during
-      // that ACP call hit `bufferEarlyEvent` BEFORE the
-      // post-restore `createSessionEntry → drainEarlyEvents` clears
-      // the (close-window) tombstone, so without this allow-list the
-      // tombstone would silently drop them. Cleared in the matching
-      // `finally` below regardless of success / failure.
+      // Mark this id as in-flight restore BEFORE the ACP
+      // `loadSession`/`unstable_resumeSession` call. Restore-time
+      // guardrail events arriving during that ACP call hit
+      // `bufferEarlyEvent` BEFORE the post-restore
+      // `createSessionEntry -> drainEarlyEvents` clears the tombstone,
+      // so without this allow-list the tombstone would silently drop
+      // them. Cleared in the matching `finally` below.
       ci.client.markRestoreInFlight(req.sessionId);
       // Restore is a low-frequency one-shot path, so we register a
       // fresh `channel.exited` listener per call instead of going
@@ -1914,7 +1937,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
       if (shuttingDown) {
         restoreEvents.close();
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
       if (ci.isDying || !aliveChannels.has(ci)) {
         restoreEvents.close();
@@ -1937,6 +1960,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           clientId,
           createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
+          ...replayFieldsFor(racedEntry, action),
         };
       }
 
@@ -1970,29 +1994,23 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        ...replayFieldsFor(entry, action),
       };
     })().finally(() => {
       ci?.pendingRestoreIds.delete(req.sessionId);
-      // PR 14b fix (codex round 6): pair with `markRestoreInFlight`.
-      // Once the IIFE settles, either `createSessionEntry` ran
-      // (`drainEarlyEvents` already cleared the tombstone) or the
-      // restore failed (handled below).
+      // Pair with `markRestoreInFlight`. Once the IIFE settles, either
+      // `createSessionEntry` ran (`drainEarlyEvents` already cleared
+      // the tombstone) or the restore failed (handled below).
       ci?.client.clearRestoreInFlight(req.sessionId);
       pendingRestoreEvents.delete(req.sessionId);
       if (!registeredEntry) {
         restoreEvents.close();
-        // PR 14b fix (codex round 7): on restore failure, purge any
-        // guardrail events that the child buffered during this
-        // restore window AND re-tombstone the id. Pre-fix the
-        // round-6 allow-list (`markRestoreInFlight`) let
-        // `bufferEarlyEvent` accept frames during the ACP call;
-        // failure here only cleared the allow-list entry, leaving
-        // queued frames in `earlyEvents`. A subsequent successful
-        // `session/load`/`session/resume` for the same id within
-        // 60s would then `drainEarlyEvents` those stale frames into
-        // the new session — exactly the leak round 5's tombstone
-        // was meant to prevent. `markSessionClosed` already does
-        // both: refresh tombstone + delete `earlyEvents[id]`.
+        // On restore failure, purge any guardrail events that the
+        // child buffered during this restore window AND re-tombstone
+        // the id. Without this, a subsequent successful restore for
+        // the same id within 60s would drain stale frames into the
+        // new session. `markSessionClosed` already does both: refresh
+        // tombstone + delete `earlyEvents[id]`.
         ci?.client.markSessionClosed(req.sessionId);
       }
     });
@@ -2008,6 +2026,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   return {
     get sessionCount() {
       return byId.size;
+    },
+
+    isChannelLive() {
+      return !!liveChannelInfo();
     },
 
     get pendingPermissionCount() {
@@ -2033,9 +2055,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // connections can still hit `POST /session`. Refuse here so
         // late-arrivers don't spawn children the shutdown path won't
         // see — they'd otherwise leak past `process.exit(0)`.
-        throw new Error('HttpAcpBridge is shutting down');
+        throw new Error('AcpSessionBridge is shutting down');
       }
-      // Fast-path the common §02 case: clients pre-flight `caps.workspaceCwd`
+      // Fast-path the common case: clients pre-flight `caps.workspaceCwd`
       // and post back the exact same string, so the equality check
       // saves a `realpathSync.native` syscall per spawnOrAttach. The
       // omit-cwd path in `server.ts` also synthesizes `cwd =
@@ -2048,8 +2070,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
       // Resolve the effective scope for THIS call. A per-request
       // `req.sessionScope` overrides the daemon-wide default; omitting
-      // it falls back to `defaultSessionScope` so every existing caller
-      // observes pre-#4175-PR-5 behavior bit-for-bit. The string-validation
+      // it falls back to `defaultSessionScope`. The string-validation
       // happens here (rather than at the route layer alone) so direct
       // callers — tests, embeds, future entry points — can't bypass it.
       if (
@@ -2074,7 +2095,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // BVryk + BWGSL: counter is NOT strictly monotonic any
           // more — `detachClient()` decrements it to roll back an
           // attach whose HTTP response couldn't be written
-          // (tanzhenxin issue 2). The race-guard invariant we still
+          // The race-guard invariant we still
           // hold is "attachCount reflects the number of attaching
           // clients whose response was written or is about to be
           // written"; decrementing is the symmetric cleanup for
@@ -2130,8 +2151,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // guarantee is "every attach-bump runs before the
           // matching killSession sync prefix" only if the bump is
           // the first sync step after `await inFlight`. Doing the
-          // model-switch await first re-opens the race deepseek-v4-pro
-          // flagged in BRSCi.
+          // model-switch await first re-opens the race.
           const attachedEntry = byId.get(session.sessionId);
           if (attachedEntry) attachedEntry.attachCount++;
           // BX9_U: even with the BRSCi bump-before-await ordering,
@@ -2230,15 +2250,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
       const result = entry.promptQueue.then(() =>
-        telemetry.runWithContext(
-          capturedContext,
-          async () =>
-            await telemetry.withSpan(
+        telemetry.runWithContext(capturedContext, async () => {
+          const queueWaitMs = Date.now() - queuedAt;
+          telemetry.metrics?.promptQueueWait(queueWaitMs);
+          const dispatchStartMs = Date.now();
+          try {
+            return await telemetry.withSpan(
               'prompt.dispatch',
               {
                 'qwen-code.daemon.bridge.operation': 'prompt.dispatch',
                 'session.id': sessionId,
-                'qwen-code.daemon.prompt.queue_wait_ms': Date.now() - queuedAt,
+                'qwen-code.daemon.prompt.queue_wait_ms': queueWaitMs,
                 ...(context?.clientId
                   ? { 'qwen-code.client_id': context.clientId }
                   : {}),
@@ -2277,8 +2299,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 //
                 // Multi-modal: one envelope per content block. Non-text blocks
                 // pass through verbatim (the agent's Core multimodal echo is a
-                // separate follow-up tracked in PR #4353 §D); for now the
-                // common text path is the immediate fix.
+                // for now the common text path is the immediate fix.
                 entry.cancelBroadcast = false;
                 echoPromptToSessionBus(entry, normalized, originatorClientId);
                 const promptPromise = entry.connection
@@ -2303,31 +2324,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 // cooperates. Stage 2 should add a configurable per-prompt
                 // wall clock (e.g. `--prompt-deadline 30m`) into this race so
                 // a wedged agent can't slow-leak prompt promises. Tracked
-                // under #3803 follow-ups.
+                // as a follow-up.
                 const racedPromise = Promise.race([
                   promptPromise,
                   getTransportClosedReject(entry),
                 ]);
 
-                // C3 (doudouOUC #4484 post-merge review): the user echo
-                // (`echoPromptToSessionBus`) was already published BEFORE the
-                // forward. If the forward itself fails (transport died, ACP child
-                // error) and it wasn't a user-initiated cancel that already
-                // broadcast, peers would be stuck having seen the echoed input with
-                // no response and no terminal signal — permanent silence. Emit a
-                // compensating `prompt_cancelled{reason:'forward_failed'}` so the
-                // turn visibly ends. The `…Once` latch dedups against the abort
-                // path (a normal cancel resolves rather than rejects, so this only
-                // fires on genuine forward failures). Side-effect only — the
-                // caller's `racedPromise` reference still surfaces the rejection.
+                // The user echo (`echoPromptToSessionBus`) was already published
+                // BEFORE the forward. If the forward itself fails (transport died,
+                // ACP child error) and it wasn't a user-initiated cancel that
+                // already broadcast, peers would be stuck with no terminal signal.
+                // Emit a compensating `prompt_cancelled{reason:'forward_failed'}`
+                // so the turn visibly ends. The `...Once` latch dedups against
+                // the abort path. Side-effect only — the caller's `racedPromise`
+                // reference still surfaces the rejection.
                 void racedPromise
                   .then(
                     () => {},
                     (err) => {
                       writeStderrLine(
-                        `sendPrompt: forward failed for session ${sessionId}: ${
-                          err instanceof Error ? err.message : String(err)
-                        }`,
+                        `sendPrompt: forward failed for session ${sessionId}: ${extractErrorMessage(err)}`,
                       );
                       broadcastPromptCancelledOnce(
                         entry,
@@ -2362,8 +2378,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 }
                 return racedPromise;
               },
-            ),
-        ),
+            );
+          } finally {
+            telemetry.metrics?.promptDuration(Date.now() - dispatchStartMs);
+          }
+        }),
       );
       const promptId = context?.promptId;
       result.then(
@@ -2426,10 +2445,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // user-voted); this top-level `prompt_cancelled` carries the
       // cancelling client so peer UIs can attribute it.
       //
-      // `…Once` (D2): dedups against the `sendPrompt` abort path so a
-      // client that POSTs /cancel and then drops its socket doesn't emit
-      // two `prompt_cancelled` frames for the same turn. The latch resets
-      // at the next prompt start, so a later turn still broadcasts.
+      // `...Once` dedups against the `sendPrompt` abort path so a client
+      // that POSTs /cancel and then drops its socket doesn't emit two
+      // `prompt_cancelled` frames for the same turn. The latch resets at
+      // the next prompt start, so a later turn still broadcasts.
       broadcastPromptCancelledOnce(entry, sessionId, cancelOriginatorClientId);
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
@@ -2453,6 +2472,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const notif: CancelNotification = req
         ? { ...req, sessionId }
         : { sessionId };
+      telemetry.metrics?.cancelled();
       await telemetry.withSpan(
         'session.cancel',
         {
@@ -2483,36 +2503,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     respondToPermission(requestId, response, context) {
-      // F3 Commit 3 — legacy workspace-level vote route. Look up the
-      // session via mediator's resolved+pending peek, forward to
-      // session-scoped handler if both ids agree.
+      // Legacy workspace-level vote route. Look up the session via
+      // mediator's resolved+pending peek, forward to session-scoped
+      // handler if both ids agree.
       const sessionId = permissionMediator.peekSessionFor(requestId);
-      // I4 (Commit 3 review) — also check `byId.has(sessionId)`. The
-      // mediator's resolved LRU survives session teardown by design;
+      // Also check `byId.has(sessionId)`. The mediator's resolved LRU
+      // survives session teardown by design; without this guard,
       // `respondToSessionPermission` would throw `SessionNotFoundError`
-      // once `byId.delete(sessionId)` ran. Pre-F3 returned a clean
-      // false → 404 for this case; preserve.
+      // once `byId.delete(sessionId)` ran.
       if (sessionId === undefined || !byId.has(sessionId)) {
-        // Wenshao review #4335 / 3272493777 — the PR #4231 security
-        // boundary that previously called `resolveAnyTrustedClientId`
-        // here was inverted: it returned 400 for unregistered
-        // clientIds and 404 for registered ones, creating a
-        // cross-session client-registration oracle. A remote prober
-        // posting `POST /permission/<fabricated-id>` with various
-        // X-Qwen-Client-Id headers could distinguish "this clientId
-        // is registered in some active session" (404) from "not
-        // registered anywhere" (400). The session-scoped route at
-        // `respondToSessionPermission` already short-circuits to
-        // `false` BEFORE clientId validation when the requestId is
-        // unknown (Round 7 / 3271978329); applying the same
-        // posture here closes the oracle on the legacy route.
-        //
-        // Wenshao review #4335 / 3273077256 — symmetric observability:
-        // the session-scoped sibling writes an unconditional stderr
-        // breadcrumb on its analogous unknown-requestId rejection
-        // (Round 8 / 3272493792). Match that posture here so an
-        // operator tailing daemon stderr sees both routes' 404s
-        // without needing QWEN_SERVE_DEBUG=1.
+        // Short-circuit to false (404) BEFORE clientId validation when
+        // the requestId is unknown. Without this, a probe with a
+        // fabricated clientId could distinguish "session exists with
+        // these clients" (400) from "no such request" (404), creating
+        // a cross-session client-registration oracle.
         writeStderrLine(
           `qwen serve: legacy permission vote ${JSON.stringify(requestId)} ` +
             `has no live session (peek returned ${JSON.stringify(sessionId)}); ` +
@@ -2531,9 +2535,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     respondToSessionPermission(sessionId, requestId, response, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      // C1 (Commit 3 review) — preserve pre-F3 cross-session reject
-      // semantics: a vote whose requestId belongs to a DIFFERENT
-      // session must return false (→ 404) WITHOUT validating
+      // Cross-session reject: a vote whose requestId belongs to a
+      // DIFFERENT session must return false (404) WITHOUT validating
       // `context.clientId` against this session's registry.
       const actualSessionId = permissionMediator.peekSessionFor(requestId);
       if (actualSessionId !== undefined && actualSessionId !== sessionId) {
@@ -2544,26 +2547,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         );
         return false;
       }
-      // Wenshao review #4335 / 3271978329 (Critical) — error precedence:
-      // when `peekSessionFor` returns `undefined` (timed out / LRU-
-      // evicted / never registered), pre-F3 returned `false` (→ 404)
-      // BEFORE any clientId validation. Without this explicit guard,
+      // Error precedence: when `peekSessionFor` returns `undefined`
+      // (timed out / LRU-evicted / never registered), return `false`
+      // (404) BEFORE any clientId validation. Without this guard,
       // execution falls through to `resolveTrustedClientId` which
-      // throws `InvalidClientIdError` (→ 400) when the caller's
-      // `X-Qwen-Client-Id` isn't registered, leaking session-exists
-      // information: a probe with a fabricated clientId could
-      // distinguish "session exists with these clients" (400) from
-      // "no such request" (404). Match pre-F3 by short-circuiting
-      // here.
-      //
-      // Wenshao review #4335 / 3272493792 — observability: the
-      // forbidden-vote paths in the mediator write unconditional
-      // stderr breadcrumbs (`writeForbiddenStderr`), but this
-      // security-sensitive guard previously logged only via the
-      // debug-gated `writeServeDebugLine`. Promote to an
-      // unconditional `writeStderrLine` so operators tailing
-      // stderr at 3 AM can correlate unexpected 404s without
-      // having to reboot with `QWEN_SERVE_DEBUG=1`.
+      // throws `InvalidClientIdError` (400), leaking session-exists
+      // information. Logged unconditionally so operators can correlate
+      // unexpected 404s without debug mode.
       if (actualSessionId === undefined) {
         writeStderrLine(
           `qwen serve: rejected permission vote ${JSON.stringify(requestId)} ` +
@@ -2577,24 +2567,19 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // (mapped to 400 by the route) when the supplied id isn't in
       // `entry.clientIds`.
       const trustedClientId = resolveTrustedClientId(entry, context?.clientId);
-      // F3 voter cancel sentinel: when the ACP body is
+      // Voter cancel sentinel: when the ACP body is
       // `{outcome: 'cancelled'}`, the wire frame doesn't carry an
       // `optionId`. Map it to the mediator-internal sentinel so
       // the mediator can resolve the pending as cancelled
       // regardless of the active policy.
       //
-      // Wenshao review #4335 / 3271185588 (Critical) — the mediator
-      // recognizes `CANCEL_VOTE_SENTINEL` BEFORE validating the
-      // option against `allowedOptionIds`, so a wire client sending
-      // `{outcome: 'selected', optionId: '__cancelled__'}` would
-      // short-circuit all policy dispatch (designated originator
-      // check / consensus quorum / local-only loopback gate). The
-      // mediator's JSDoc warns that callers MUST NOT forward this
-      // case from the wire; enforce the precondition here. The
-      // collision-defense at request issue time
-      // (`CancelSentinelCollisionError`) already prevents agents
-      // from advertising the sentinel as an option, so this guard
-      // closes the only remaining vector.
+      // The mediator recognizes `CANCEL_VOTE_SENTINEL` BEFORE
+      // validating the option against `allowedOptionIds`, so a wire
+      // client sending `{outcome: 'selected', optionId: '__cancelled__'}`
+      // would short-circuit all policy dispatch. Enforce the
+      // precondition here — the collision-defense at request issue
+      // time already prevents agents from advertising the sentinel
+      // as an option, so this guard closes the only remaining vector.
       if (
         response.outcome.outcome === 'selected' &&
         response.outcome.optionId === CANCEL_VOTE_SENTINEL
@@ -2664,41 +2649,23 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         'session.id': sessionId,
       });
       if (defaultEntry === entry) defaultEntry = undefined;
-      // #4325 fix: resolve the channel via `channelInfoForEntry(entry)`
-      // (search `aliveChannels` for the entry's actual channel) instead
-      // of the module-scoped `channelInfo` (the CURRENT attach target).
-      // The two diverge during the channel-overlap window — A dying,
-      // B freshly spawned as `channelInfo` — where capturing
-      // `channelInfo` would (1) skip the `sessionIds.delete()` since
-      // `B.channel !== entry.channel`, leaving A's `sessionIds` set
-      // pinned past the close, and (2) call `markSessionClosed` on
-      // **B**'s client instead of **A**'s, evaluating B's kill
-      // condition with stale assumptions about its session count.
-      // Other session methods in this file already use the helper
-      // (`setSessionApprovalMode`, `requestSessionStatus`); this
-      // brings closeSession in line.
-      //
-      // HAZARD(#4325): the regression test for this fix
-      // (`httpAcpBridge.test.ts` ~L6421) is single-channel smoke ONLY —
-      // a revert that reintroduces the module-scoped `channelInfo`
-      // capture WILL NOT fail any existing test, because the
-      // overlap-race state isn't deterministically constructable
-      // without factory-internal hooks. Code-review-time visibility
-      // of the `channelInfoForEntry(entry)` call here is the primary
-      // defense against accidental revert. Don't refactor away the
-      // helper call without first landing the deterministic overlap
-      // test (deferred follow-up).
+      // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
+      // `aliveChannels` for the entry's actual channel) instead of the
+      // module-scoped `channelInfo` (the CURRENT attach target). The two
+      // diverge during the channel-overlap window — A dying, B freshly
+      // spawned as `channelInfo` — where capturing `channelInfo` would
+      // (1) skip the `sessionIds.delete()` since `B.channel !==
+      // entry.channel`, and (2) call `markSessionClosed` on B's client
+      // instead of A's. The regression test is single-channel smoke only
+      // and WILL NOT fail if this reverts to module-scoped channelInfo.
+      // Keep `channelInfoForEntry(entry)` until a deterministic overlap
+      // test lands.
       const ci = channelInfoForEntry(entry);
       if (!ci) {
-        // Diagnostic visibility (#4334 wenshao review DWrbr): when the
-        // entry's channel has already been torn down out-of-band, the
-        // cleanup branches below all short-circuit silently. The
-        // "closing session" log at the top of this method fires
-        // regardless, so the close *call* is visible — but the fact
-        // that channel-side bookkeeping was skipped is not. Sibling
-        // methods (e.g. `requestSessionStatus`) surface this as
-        // `SessionNotFoundError`; `closeSession` is intentionally
-        // idempotent so we just log instead of throwing.
+        // When the entry's channel has already been torn down out-of-band,
+        // the cleanup branches below all short-circuit silently. Sibling
+        // methods surface this as `SessionNotFoundError`; `closeSession`
+        // is intentionally idempotent so we just log instead of throwing.
         writeStderrLine(
           `qwen serve: closeSession channelInfoForEntry returned undefined ` +
             `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
@@ -2708,17 +2675,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ci.sessionIds.delete(sessionId);
       }
       await notifyAgentSessionClose(entry, ci, 'closeSession');
-      // F3 Commit 3 — mediator-driven cancel cascade replaces the
-      // pre-F3 per-id resolvePending loop. Same effect (each pending
-      // settles as cancelled, SSE permission_resolved emits, audit
-      // records); state lives in the mediator now.
+      // Mediator-driven cancel cascade. Each pending settles as
+      // cancelled, SSE permission_resolved emits, audit records.
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       byId.delete(sessionId);
-      // PR 14b fix (codex round 5): tombstone the closed sessionId
-      // so any late `extNotification` from the (now-defunct) child
-      // can't seed the early-event buffer and leak into a future
-      // load/resume of the same persisted id.
+      telemetry.metrics?.sessionLifecycle('close');
+      // Tombstone the closed sessionId so any late `extNotification`
+      // from the (now-defunct) child can't seed the early-event buffer
+      // and leak into a future load/resume of the same persisted id.
       ci?.client.markSessionClosed(sessionId);
       try {
         entry.events.publish({
@@ -2754,13 +2719,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* no active prompt or session already torn down */
       }
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        ci.isDying = true;
-        await ci.channel.kill().catch((err) => {
-          writeStderrLine(
-            `qwen serve: closeSession channel kill failed for session ` +
-              `${JSON.stringify(sessionId)}: ${String(err)}`,
-          );
-        });
+        await startIdleTimer(ci, `closeSession "${sessionId}"`);
       }
     },
 
@@ -2879,28 +2838,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     publishWorkspaceEvent(event) {
-      // Issue #4175 PR 16. Workspace-level mutations (memory writes /
-      // agent CRUD) need a fan-out path that doesn't require a session
-      // id. Iterate every live session's bus best-effort — a closed bus
-      // (mid-shutdown, or evicted under load) is silently skipped, same
-      // posture as the `permission_resolved` publish inside
-      // `resolvePending`.
+      // Workspace-level mutations (memory writes / agent CRUD) need a
+      // fan-out path that doesn't require a session id. Iterate every
+      // live session's bus best-effort — a closed bus (mid-shutdown,
+      // or evicted under load) is silently skipped.
       //
       // The route handler's contract is "read-after-write" and any SSE
       // subscriber that misses the event can re-fetch via the route's
-      // GET sibling. Stage 5 PR 24 PermissionMediator can layer a
-      // proper workspace event bus on top if adapters need stricter
-      // delivery semantics.
+      // GET sibling.
       //
       // Per-entry exceptions go to stderr in normal operation, but
       // are downgraded to the debug channel when `shuttingDown` is
-      // true. `EventBus.publish` is documented never to throw (BX9_p
-      // contract at eventBus.ts:186), so anything landing here in
-      // normal ops is by definition unexpected — silencing it via
-      // QWEN_SERVE_DEBUG would let a true regression succeed at the
-      // route layer (200 OK) while SSE subscribers stop seeing
-      // events. The shutdown gate keeps the common race noise out of
-      // the production log without hiding actual bugs.
+      // true. `EventBus.publish` is documented never to throw, so
+      // anything landing here in normal ops is unexpected — silencing
+      // via QWEN_SERVE_DEBUG would let a regression succeed at the
+      // route layer while SSE subscribers stop seeing events.
       //
       // PR #4255 fold-in 9: track per-session success/fail. A
       // closed-bus return (`undefined` from `EventBus.publish` —
@@ -2916,8 +2868,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       //   - the local `broadcastWorkspaceEvent` closure declared above
       //     in this factory body (PR 17 mutation surface) — used by
       //     `setSessionApprovalMode`
-      //     / `setWorkspaceToolEnabled` / `restartMcpServer` / `initWorkspace`
-      //     because their call sites run inside the factory closure
+      //     because its call site runs inside the factory closure
       //     where `this` isn't yet the proxy. The closure also takes
       //     an optional `skipSessionId` for the persisted approval-mode
       //     mirror; this member doesn't.
@@ -2964,9 +2915,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Returned as a fresh Set so callers can mutate-safely (the live
       // per-session maps stay private). Workspace-level mutation routes
       // use this to validate `X-Qwen-Client-Id` without owning a
-      // session id; PR 24 will replace it with a workspace-scoped
-      // registry that doesn't conflate session-attach with workspace-
-      // attach.
+      // session id.
       const out = new Set<string>();
       for (const entry of byId.values()) {
         for (const id of entry.clientIds.keys()) out.add(id);
@@ -2974,10 +2923,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return out;
     },
 
-    async getWorkspaceMcpStatus() {
-      return requestWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
-        createIdleWorkspaceMcpStatus(boundWorkspace),
+    async queryWorkspaceStatus(method, idle) {
+      return requestWorkspaceStatus(method, idle);
+    },
+
+    async invokeWorkspaceCommand<T>(
+      method: string,
+      params?: Record<string, unknown>,
+      invokeOpts?: { timeoutMs?: number },
+    ) {
+      const info = liveChannelInfo();
+      if (!info) throw new SessionNotFoundError(`workspace-command:${method}`);
+      const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
+      const response = await withTimeout(
+        Promise.race([
+          info.connection.extMethod(method, params ?? {}),
+          getChannelClosedReject(info),
+        ]),
+        timeout,
+        method,
       );
+      return response as T;
     },
 
     async getWorkspaceMcpToolsStatus(serverName) {
@@ -3002,13 +2968,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
-    async getWorkspaceSkillsStatus() {
-      return requestWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceSkills,
-        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
-      );
-    },
-
     async getWorkspaceToolsStatus() {
       return requestWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceTools,
@@ -3027,122 +2986,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           ],
         }),
       );
-    },
-
-    async getWorkspaceProvidersStatus() {
-      return requestWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceProviders,
-        () => createIdleWorkspaceProvidersStatus(boundWorkspace),
-      );
-    },
-
-    async getWorkspaceEnvStatus() {
-      const acpChannelLive = !!liveChannelInfo();
-      // PR 22b/2: daemon-host env snapshot delegated to
-      // `BridgeOptions.statusProvider`. When omitted (Mode A in-process
-      // consumers, tests) the bridge returns an idle envelope —
-      // matches the "queryable but empty" pattern PR 12 / 13
-      // established for diagnostic routes.
-      //
-      // Wenshao review fold-in (#4304): a custom provider that throws
-      // would otherwise propagate past the bridge into `/workspace/env`
-      // as a 500. Catch + log + fall back to the idle envelope so the
-      // route still responds — the `daemon cells always answerable`
-      // invariant the pre-injection `buildEnvStatusFromProcess` carried
-      // (it never threw because it was synchronous and self-contained)
-      // is preserved structurally.
-      if (!opts.statusProvider) {
-        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
-      }
-      try {
-        return await opts.statusProvider.getEnvStatus(
-          boundWorkspace,
-          acpChannelLive,
-        );
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: statusProvider.getEnvStatus failed; ` +
-            `falling back to idle envelope: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
-      }
-    },
-
-    async getWorkspacePreflightStatus() {
-      // PR 22b/2: daemon-host preflight cells delegated to
-      // `BridgeOptions.statusProvider`. Without a provider the daemon
-      // half is empty `[]`; ACP-side cells are still fetched normally
-      // when a child is live.
-      //
-      // Wenshao review fold-in (#4304): a throwing provider would
-      // otherwise propagate past the bridge and turn the entire
-      // preflight envelope into a 500 — losing both daemon cells AND
-      // the ACP-side cells fetched below. Catch + log + fall back to
-      // empty so ACP cells still render. Pre-injection
-      // `buildDaemonPreflightCells` used `Promise.allSettled` and was
-      // effectively unthrowable; this preserves that route-level
-      // invariant for custom provider impls that may throw.
-      let daemonCells: ServePreflightCell[];
-      if (!opts.statusProvider) {
-        // Asymmetric vs `getWorkspaceEnvStatus` (which falls back to a
-        // full `createIdleEnvStatus` envelope): preflight is the union
-        // of daemon-locality + ACP-locality cells stitched below, so an
-        // empty daemon slice IS the right fallback — the ACP slice
-        // fills in independently from the live channel (or its
-        // `not_started` placeholders).
-        daemonCells = [];
-      } else {
-        try {
-          daemonCells =
-            await opts.statusProvider.getDaemonPreflightCells(boundWorkspace);
-        } catch (err) {
-          writeStderrLine(
-            `qwen serve: statusProvider.getDaemonPreflightCells failed; ` +
-              `falling back to empty daemon cells: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-          daemonCells = [];
-        }
-      }
-      const acpChannelLive = !!liveChannelInfo();
-
-      let acpResponse:
-        | { cells: ServePreflightCell[]; errors?: ServeStatusCell[] }
-        | undefined;
-      let envelopeError: ServeStatusCell | undefined;
-      try {
-        acpResponse = await requestWorkspaceStatus(
-          SERVE_STATUS_EXT_METHODS.workspacePreflight,
-          () => ({ cells: createIdleAcpPreflightCells() }),
-        );
-      } catch (err) {
-        // Bridge-side timeout / channel close while consulting ACP. Daemon
-        // cells still render; envelope-level error tells the client which
-        // surface failed without sinking the whole route.
-        const errorKind = mapDomainErrorToErrorKind(err);
-        envelopeError = {
-          kind: 'preflight',
-          status: 'error',
-          error: err instanceof Error ? err.message : String(err),
-          ...(errorKind ? { errorKind } : {}),
-        };
-        acpResponse = { cells: createIdleAcpPreflightCells() };
-      }
-
-      const errors: ServeStatusCell[] = [
-        ...(acpResponse.errors ?? []),
-        ...(envelopeError ? [envelopeError] : []),
-      ];
-
-      return {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true as const,
-        acpChannelLive,
-        cells: [...daemonCells, ...acpResponse.cells],
-        ...(errors.length > 0 ? { errors } : {}),
-      };
     },
 
     async getSessionContextStatus(sessionId) {
@@ -3171,6 +3014,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return requestSessionStatus<ServeSessionTasksStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
+      );
+    },
+
+    async getSessionStatsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionStatsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+      );
+    },
+
+    async getWorkspaceHooksStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceHooks,
+        () => createIdleWorkspaceHooksStatus(boundWorkspace),
+      );
+    },
+
+    async getSessionHooksStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionHooks,
       );
     },
 
@@ -3332,13 +3196,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async setSessionApprovalMode(sessionId, mode, opts, context) {
-      // #4175 Wave 4 PR 17. Forwards through `qwen/control/session/
-      // approval_mode` so the change lands inside the ACP child's own
-      // `Config` (per-session `setApprovalMode`). The bridge layer adds
-      // two things on top: trusted `originatorClientId` resolution and
-      // an opt-in persist hook that writes `tools.approvalMode` to the
-      // workspace settings file. Persist is OFF by default — see the
-      // interface doc for the reasoning.
+      // Forwards through `qwen/control/session/approval_mode` so the
+      // change lands inside the ACP child's own `Config` (per-session
+      // `setApprovalMode`). The bridge layer adds two things on top:
+      // trusted `originatorClientId` resolution and an opt-in persist
+      // hook that writes `tools.approvalMode` to the workspace settings
+      // file. Persist is OFF by default — see the interface doc.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
@@ -3347,13 +3210,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry,
         context?.clientId,
       );
-      // #4282 fold-in 4 (qwen-latest C1): validate the persist contract
-      // BEFORE the ACP roundtrip changes the in-process mode. The previous
-      // post-call placement meant a missing `persistApprovalMode` callback
-      // produced a 500 *after* the ACP child had already applied the
-      // mode change — observable to other in-flight requests but
-      // invisible to the caller. Mirrors the pre-call validation in
-      // `setWorkspaceToolEnabled`.
+      // Validate the persist contract BEFORE the ACP roundtrip changes
+      // the in-process mode. A missing `persistApprovalMode` callback
+      // would otherwise produce a 500 after the ACP child already
+      // applied the mode change.
       if (opts.persist && !persistApprovalMode) {
         throw new Error(
           'setSessionApprovalMode called with `persist: true` but no ' +
@@ -3416,10 +3276,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         } catch {
           /* bus closed */
         }
-        // #4282 fold-in 4 (S2): a persisted change becomes the workspace
-        // default, so fan out a workspace-scoped mirror for peer sessions.
-        // #4297 fold-in 1: skip the requesting session (its own bus already
-        // got the publish above) to avoid double-counting in the reducer.
+        // A persisted change becomes the workspace default, so fan out a
+        // workspace-scoped mirror for peer sessions. Skip the requesting
+        // session (its own bus already got the publish above) to avoid
+        // double-counting in the reducer.
         if (persisted) {
           broadcastWorkspaceEvent(
             {
@@ -3472,7 +3332,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async generateSessionRecap(sessionId, _context) {
-      // #4175 follow-up. Thin pass-through to `qwen/control/session/
+      // Thin pass-through to `qwen/control/session/
       // recap` — the ACP child runs `generateSessionRecap` against the
       // session's GeminiClient history and returns `{sessionId, recap}`
       // where `recap` may be `null` for too-short histories or transient
@@ -3690,193 +3550,146 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
     },
 
-    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
-      // #4175 Wave 4 PR 17. Pure file IO + event fan-out — no ACP
-      // roundtrip. The settings file is the source of truth; live
-      // sessions retain their already-registered tools until the next
-      // ACP child spawn (when `tools.disabled` is consulted at Config
-      // construction time).
-      if (!persistDisabledTools) {
-        throw new Error(
-          'setWorkspaceToolEnabled requires `persistDisabledTools` in ' +
-            'BridgeOptions; runQwenServe wires the production callback. ' +
-            'Direct embeds and tests must opt in.',
-        );
-      }
-      await persistDisabledTools(boundWorkspace, toolName, enabled);
-      broadcastWorkspaceEvent({
-        type: 'tool_toggled',
-        data: { toolName, enabled },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-      return { toolName, enabled };
+    async getRewindSnapshots(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      );
     },
 
-    async restartMcpServer(serverName, originatorClientId, opts) {
-      // #4175 Wave 4 PR 17. The restart logic lives inside the ACP
-      // child (it owns the `McpClientManager`); the bridge's role is
-      // to (a) pick a live channel to forward through, (b) translate
-      // the structured response back into the typed result, (c) fan
-      // out the appropriate event to every session bus. Soft refusals
-      // (skipped:true) come back as a normal response; hard errors
-      // (server not configured, manager unavailable, post-discover
-      // not connected) are translated via `data.errorKind` into typed
-      // bridge errors that `sendBridgeError` maps to stable HTTP
-      // responses (#4282 gpt-5.5 C4/C5 fold-in).
-      //
-      // F2 (#4175 commit 5): `opts.entryIndex` is forwarded to the
-      // ACP child for pool-mode restart targeting. The agent's
-      // handler falls back to legacy single-entry semantics when no
-      // pool entry matches, so older daemons that don't yet honor
-      // `entryIndex` keep the pre-F2 response shape — clients
-      // gated on the `mcp_pool_restart` capability tag are the only
-      // ones that send `entryIndex`.
-      const info = liveChannelInfo();
-      if (!info) {
-        throw new SessionNotFoundError(`mcp:${serverName}`);
-      }
-      type LegacyOk = {
-        serverName: string;
-        restarted: true;
-        durationMs: number;
-      };
-      type LegacySkip = {
-        serverName: string;
-        restarted: false;
-        skipped: true;
-        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-      };
-      type PoolEntries = {
-        serverName: string;
-        entries: Array<{
-          entryIndex: number;
-          restarted: boolean;
-          durationMs?: number;
-          reason?: string;
-        }>;
-      };
-      let response: LegacyOk | LegacySkip | PoolEntries;
-      const params: Record<string, unknown> = { serverName };
-      if (opts?.entryIndex !== undefined) {
-        params['entryIndex'] = opts.entryIndex;
-      }
+    async rewindSession(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+
+      let response: Record<string, unknown>;
       try {
         response = (await Promise.race([
           withTimeout(
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-              params,
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionRewind,
+              { sessionId, promptId: req.promptId, rewindFiles: true },
             ),
-            MCP_RESTART_SERVER_DEADLINE_MS,
-            SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionRewind,
           ),
-          getChannelClosedReject(info),
-        ])) as LegacyOk | LegacySkip | PoolEntries;
+          getTransportClosedReject(entry),
+        ])) as Record<string, unknown>;
       } catch (err) {
-        // Detect structured ACP error payloads and re-instantiate as
-        // typed bridge errors. JSON-RPC strips class names across the
-        // wire; the agent attaches `data.errorKind` as the
-        // reconstruction signal.
         const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object') {
-          const kind = (data as { errorKind?: unknown }).errorKind;
-          const sn = (data as { serverName?: unknown }).serverName;
-          if (kind === 'mcp_server_not_found' && typeof sn === 'string') {
-            throw new McpServerNotFoundError(sn);
+        if (data && typeof data === 'object' && 'errorKind' in data) {
+          const kind = (data as { errorKind: string }).errorKind;
+          const msg =
+            (err as { message?: string })?.message ?? 'Rewind failed';
+          if (kind === 'session_busy') {
+            throw new SessionBusyError(sessionId, msg);
           }
-          if (kind === 'mcp_restart_failed' && typeof sn === 'string') {
-            const status = (data as { mcpStatus?: unknown }).mcpStatus;
-            throw new McpServerRestartFailedError(
-              sn,
-              typeof status === 'string' ? status : 'unknown',
-            );
+          if (kind === 'invalid_rewind_target') {
+            throw new InvalidRewindTargetError(sessionId, msg);
           }
         }
         throw err;
       }
-      // F2 (#4175 commit 5): pool-mode `entries[]` shape fans out one
-      // typed event per entry so SDK reducers see a stable per-entry
-      // count regardless of whether the underlying restart was
-      // single-entry (legacy) or multi-entry (pool-mode). Reusing the
-      // existing `mcp_server_restarted` / `mcp_server_restart_refused`
-      // event types keeps `KnownDaemonEvent` schema additive — clients
-      // gated only on `entryCount > 1` get accurate per-entry signals
-      // without a new event type.
-      // F2 (#4175 commit 6 review fix — wenshao W15): the response
-      // arrives as untyped JSON from `info.connection.extMethod(...)`
-      // — a buggy/out-of-sync ACP child returning a malformed shape
-      // (e.g. `entries` is a string, or per-entry objects miss
-      // `entryIndex`) would otherwise crash this route with a
-      // TypeError. Add a runtime shape check and degrade-with-error
-      // for entries that don't match the typed wire contract.
-      if ('entries' in response) {
-        const entries = Array.isArray(response.entries) ? response.entries : [];
-        if (!Array.isArray(response.entries)) {
-          writeStderrLine(
-            `qwen serve: pool restart response carried 'entries' field ` +
-              `but it is not an array (server=${response.serverName}); ` +
-              `treating as empty.`,
-          );
-        }
-        for (const entry of entries) {
-          if (
-            typeof entry !== 'object' ||
-            entry === null ||
-            typeof (entry as { entryIndex?: unknown }).entryIndex !== 'number'
-          ) {
-            writeStderrLine(
-              `qwen serve: skipping malformed pool restart entry ` +
-                `(server=${response.serverName}): ${JSON.stringify(entry)}`,
-            );
-            continue;
-          }
-          if (entry.restarted) {
-            broadcastWorkspaceEvent({
-              type: 'mcp_server_restarted',
-              data: {
-                serverName: response.serverName,
-                durationMs: entry.durationMs ?? 0,
-                entryIndex: entry.entryIndex,
-              },
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
-          } else {
-            broadcastWorkspaceEvent({
-              type: 'mcp_server_restart_refused',
-              data: {
-                serverName: response.serverName,
-                reason: 'restart_failed',
-                entryIndex: entry.entryIndex,
-                ...(entry.reason ? { details: entry.reason } : {}),
-              },
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
-          }
-        }
-      } else if (response.restarted === true) {
-        broadcastWorkspaceEvent({
-          type: 'mcp_server_restarted',
+
+      const targetTurnIndex =
+        (response['targetTurnIndex'] as number) ?? 0;
+      const filesChanged =
+        (response['filesChanged'] as string[]) ?? [];
+      const filesFailed =
+        (response['filesFailed'] as string[]) ?? [];
+
+      try {
+        entry.events.publish({
+          type: 'session_rewound',
           data: {
-            serverName: response.serverName,
-            durationMs: response.durationMs,
+            sessionId,
+            promptId: req.promptId,
+            targetTurnIndex,
+            filesChanged,
+            filesFailed,
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
-      } else {
-        broadcastWorkspaceEvent({
-          type: 'mcp_server_restart_refused',
-          data: {
-            serverName: response.serverName,
-            reason: response.reason,
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+      } catch {
+        /* bus closed */
       }
+
+      return {
+        rewound: filesFailed.length === 0,
+        targetTurnIndex,
+        filesChanged,
+        filesFailed,
+      };
+    },
+
+    async manageMcpServer(serverName, action, originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError(`mcp:${serverName}`);
+      }
+      const timeout =
+        action === 'authenticate'
+          ? MCP_OAUTH_TIMEOUT_MS
+          : MCP_RESTART_TIMEOUT_MS;
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+            { serverName, action, originatorClientId },
+          ),
+          timeout,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        serverName: string;
+        action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+        ok: true;
+        changed?: boolean;
+        messages?: string[];
+        authUrl?: string;
+      };
+      broadcastWorkspaceEvent({
+        type: 'mcp_server_changed',
+        data: {
+          serverName: response.serverName,
+          action: response.action,
+          originatorClientId,
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
       return response;
     },
 
+    async generateWorkspaceAgent(description, _originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError('agents:generate');
+      }
+      return (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+            { description },
+          ),
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        name: string;
+        description: string;
+        systemPrompt: string;
+      };
+    },
+
     async addRuntimeMcpServer(name, config, originatorClientId) {
-      // T2.8 (#4514). Round-trip the runtime-add ext-method through the
+      // Round-trip the runtime-add ext-method through the
       // live ACP child and broadcast an `mcp_server_added` event on
       // success. Soft-refuse (`budget_warning_only`) returns the skip
       // shape without emitting — the caller (HTTP route) decides how to
@@ -3933,7 +3746,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async removeRuntimeMcpServer(name, originatorClientId) {
-      // T2.8 (#4514). Round-trip the runtime-remove ext-method through
+      // Round-trip the runtime-remove ext-method through
       // the live ACP child and broadcast `mcp_server_removed` on success.
       // Idempotent skip (`not_present`) returns without emitting.
       const info = liveChannelInfo();
@@ -3950,29 +3763,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         originatorClientId: string;
       };
       type RemoveSkip = { name: string; skipped: true; reason: 'not_present' };
-      let response: RemoveOk | RemoveSkip;
-      try {
-        response = (await Promise.race([
-          withTimeout(
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
-              { name, originatorClientId },
-            ),
-            MCP_RESTART_SERVER_DEADLINE_MS,
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+            { name, originatorClientId },
           ),
-          getChannelClosedReject(info),
-        ])) as RemoveOk | RemoveSkip;
-      } catch (err) {
-        const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object') {
-          const kind = (data as { errorKind?: unknown }).errorKind;
-          if (kind === 'acp_channel_unavailable') {
-            throw err;
-          }
-        }
-        throw err;
-      }
+          MCP_RESTART_SERVER_DEADLINE_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+        ),
+        getChannelClosedReject(info),
+      ])) as RemoveOk | RemoveSkip;
       // Emit event on success (non-skip)
       const removeSkipped =
         (response as { skipped?: boolean }).skipped === true;
@@ -3989,300 +3790,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         });
       }
       return response;
-    },
-
-    async initWorkspace(initOpts, originatorClientId) {
-      // #4175 Wave 4 PR 17. Mechanical scaffold of an empty `QWEN.md`
-      // (or whatever `getCurrentGeminiMdFilename()` returns under
-      // `--memory-file-name` overrides). No ACP roundtrip, no LLM
-      // call — clients that want AI-fill follow up with
-      // `POST /session/:id/prompt`.
-      //
-      // FIXME(#4282 fold-in 2 — deepseek SV2): this route uses
-      // `node:fs/promises` directly instead of routing through
-      // `WorkspaceFileSystem` (PR 18 boundary), so it produces no
-      // `fs.access`/`fs.denied` audit trail and skips
-      // `assertTrustedForIntent`. The bridge doesn't have an
-      // `fsFactory` plumbed at the bridge layer today — the boundary
-      // is constructed per-request inside `createServeApp` for PR 19+
-      // routes. A follow-up will hoist the factory into
-      // `BridgeOptions` so daemon-level routes (init, future
-      // workspace ops) can share the same trust + audit posture.
-      // Impact today is low: the daemon binds to a workspace the
-      // operator chose and the trust dialog flow doesn't yet exist
-      // for the daemon. The CV1 symlink reject below covers the
-      // immediate boundary-escape concern.
-      // #4282 fold-in 5 (Codex P2-1). Use the snapshot from
-      // `BridgeOptions.contextFilename` (sourced from the workspace's
-      // merged settings at daemon boot) instead of the process-global
-      // `getCurrentGeminiMdFilename()` — the daemon parent never goes
-      // through `loadCliConfig`, so a workspace configured with
-      // `context.fileName: 'AGENTS.md'` would otherwise see init
-      // create `QWEN.md` while the rest of the workspace reads a
-      // different file.
-      const filename = contextFilename;
-      // #4282 gpt-5.5 C1 fold-in: `context.fileName` is settings-
-      // controlled. A daemon configured with `context.fileName:
-      // "../outside.md"` would otherwise resolve outside
-      // `boundWorkspace` and let this strict-gated mutation create
-      // or truncate a file outside the workspace boundary. Resolve
-      // the joined path and reject anything that escapes.
-      const target = path.resolve(boundWorkspace, filename);
-      const withinWorkspace =
-        target === boundWorkspace ||
-        target.startsWith(boundWorkspace + path.sep);
-      if (!withinWorkspace) {
-        throw new WorkspaceInitPathEscapeError(filename, boundWorkspace);
-      }
-      // #4282 fold-in 5 (Codex P2-4). The textual `withinWorkspace`
-      // and final-component `lstat` checks miss intermediate symlinks
-      // — e.g. `context.fileName: "docs/QWEN.md"` with `docs` a
-      // symlink to `/tmp` would let the later `writeFile(target)`
-      // follow the parent symlink and create or truncate outside
-      // `boundWorkspace`. Resolve the parent chain via
-      // `realpath`, walking up through any not-yet-existing ancestors,
-      // and verify the canonical parent stays within the canonical
-      // workspace.
-      const wsCanonical = await fs.realpath(boundWorkspace);
-      const parentCanonical = await canonicalizeExistingAncestor(
-        path.dirname(target),
-      );
-      const parentWithinWorkspace =
-        parentCanonical === wsCanonical ||
-        parentCanonical.startsWith(wsCanonical + path.sep);
-      if (!parentWithinWorkspace) {
-        throw new WorkspaceInitSymlinkError(
-          target,
-          'parent',
-          `Configured workspace context filename ${JSON.stringify(filename)} ` +
-            `has a parent path that resolves outside the bound workspace ` +
-            `(parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
-            `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
-            `Refusing to write — replace any symlinked parent directory ` +
-            `with a real directory before re-running init.`,
-        );
-      }
-      // #4282 fold-in 2 (gpt-5.5 CV1): the textual `withinWorkspace`
-      // check above only validates the JOINED path, but a file at
-      // `target` that's a symlink can still point outside the
-      // workspace. Without an explicit `lstat` reject, `force: true`
-      // would follow the link and truncate the external target; a
-      // dangling-symlink pointing outside would also let `writeFile`
-      // create the external target. Reject symlinks at the boundary
-      // — PR 18's `WorkspaceFileSystem` will provide the proper
-      // chain-aware resolution + audit hooks once `initWorkspace`
-      // routes through that boundary (tracked as a follow-up).
-      try {
-        const lst = await fs.lstat(target);
-        if (lst.isSymbolicLink()) {
-          throw new WorkspaceInitSymlinkError(
-            target,
-            'target',
-            `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
-              `Refusing to follow it for write — replace the symlink with a ` +
-              `regular file (or remove it) before re-running init.`,
-          );
-        }
-      } catch (err) {
-        if (err instanceof WorkspaceInitSymlinkError) throw err;
-        const code = (err as { code?: unknown } | null | undefined)?.code;
-        if (code !== 'ENOENT') throw err;
-        // ENOENT — target doesn't exist; fresh create is fine.
-      }
-      let existingSize: number | undefined;
-      let action: 'created' | 'overwrote' | 'noop' = 'created';
-      try {
-        const existing = await fs.readFile(target, 'utf8');
-        if (existing.trim().length > 0) {
-          existingSize = Buffer.byteLength(existing, 'utf8');
-          if (initOpts.force !== true) {
-            throw new WorkspaceInitConflictError(target, existingSize);
-          }
-          action = 'overwrote';
-        } else {
-          // #4282 wenshao H4 fold-in: an existing whitespace-only file
-          // is treated as a no-op rather than silently overwritten.
-          // Previously the code would label the response `'created'`
-          // and unconditionally `writeFile(target, '')`, destroying
-          // the user's whitespace content (stray template, half-
-          // written init, intentional newline) without `force: true`.
-          // The HTTP intent of "init only if absent" is honored by
-          // skipping the write and surfacing `'noop'` so the SSE
-          // event accurately reflects that no on-disk change
-          // occurred.
-          action = 'noop';
-        }
-      } catch (err) {
-        if (err instanceof WorkspaceInitConflictError) throw err;
-        const code = (err as { code?: unknown } | null | undefined)?.code;
-        if (code !== 'ENOENT') throw err;
-        // ENOENT — fall through to create.
-      }
-      if (action === 'created') {
-        // #4297 fold-in 5 (wenshao critical, addresses #3260836305).
-        // Close the TOCTOU window between the `lstat`/`readFile`
-        // checks above and this write by using `'wx'`
-        // (O_WRONLY|O_CREAT|O_EXCL): the open atomically refuses
-        // when ANY inode (regular file, dir, symlink, …) exists at
-        // the target path, so a local attacker can't slip a symlink
-        // between our checks and follow it through here.
-        //
-        // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690):
-        // EEXIST bubbles up as `WorkspaceInitRaceError(kind:
-        // 'eexist')` — a sibling class to `WorkspaceInitSymlinkError`
-        // so the HTTP code distinguishes a race-created inode (could
-        // be regular file OR symlink — we don't know which) from the
-        // symlink-confirmed cases at the lstat / O_NOFOLLOW sites.
-        let fh: import('node:fs/promises').FileHandle;
-        try {
-          fh = await fs.open(target, 'wx');
-        } catch (err) {
-          const code = (err as { code?: unknown } | null | undefined)?.code;
-          if (code === 'EEXIST') {
-            throw new WorkspaceInitRaceError(
-              target,
-              'eexist',
-              `Workspace context file ${JSON.stringify(target)} appeared ` +
-                `between our absence check and the create — refusing to ` +
-                `proceed (a regular file or symlink was just placed at the ` +
-                `target path, and following it could escape the workspace).`,
-            );
-          }
-          throw err;
-        }
-        try {
-          // #4297 fold-in 10 (qwen-latest S5, addresses #3263954707):
-          // post-open parent re-verification narrows the parent-symlink
-          // TOCTOU window between `canonicalizeExistingAncestor` and
-          // `fs.open`. `O_NOFOLLOW` only protects the final component;
-          // a local writer could swap a real `docs/` parent for a
-          // `docs -> /tmp` symlink between our pre-check and this open
-          // and the kernel would resolve the parent unconditionally.
-          // Re-canonicalizing the parent post-open and refusing the
-          // write when it moved out of the workspace catches that race
-          // (cost: one extra realpath syscall per init).
-          await verifyParentWithinWorkspace(target, wsCanonical, 'create', fh);
-          await fh.writeFile('', 'utf8');
-        } finally {
-          await fh.close();
-        }
-      } else if (action === 'overwrote') {
-        // #4297 fold-in 7 (gpt-5.5 critical, addresses #3262615446):
-        // close the TOCTOU window on the `force: true` path with
-        // `O_WRONLY|O_TRUNC|O_NOFOLLOW`. `O_NOFOLLOW` causes
-        // `open()` to fail with ELOOP if the final component is a
-        // symlink — even if a local writer races a symlink in
-        // between our `lstat`/`readFile` checks and this open, the
-        // open refuses rather than truncating the link target.
-        // (The symbol exists on Linux/macOS; on Windows the constant
-        // is 0/no-op since the OS always follows symlinks, which
-        // is consistent with the documented Stage-1 trust posture
-        // there — Windows daemon support is best-effort.)
-        let fh: import('node:fs/promises').FileHandle;
-        try {
-          // #4297 post-merge wenshao Critical fold-in (folded into F1
-          // #4319): drop `O_TRUNC` from the open flags. The kernel
-          // applies O_TRUNC AT `open(2)` SYSCALL TIME — before
-          // `verifyParentWithinWorkspace` (below) gets a chance to
-          // detect a parent-symlink race. With O_TRUNC, a local user
-          // who wins the TOCTOU between `canonicalizeExistingAncestor`
-          // and this `open()` zeros the file at the attacker-
-          // redirected location (arbitrary-file-truncation primitive
-          // against any file the daemon UID can open). The pre-fix
-          // code's own comment on `verifyParentWithinWorkspace`
-          // acknowledged this as "documented residual risk"; wenshao
-          // pushed back that this exceeds the Stage-1 trust model.
-          //
-          // Truncation now happens AFTER `verifyParentWithinWorkspace`
-          // succeeds, via `fh.truncate(0)` on the fd we already hold.
-          // fd-based truncate does NOT re-resolve the path, so an
-          // attacker swapping the parent symlink after we open can't
-          // redirect the truncation.
-          //
-          // #4297 fold-in 10 (qwen-latest S3, addresses #3263954697):
-          // `O_NOFOLLOW ?? 0` matches the defensive pattern in
-          // `core/src/utils/{sessionStorageUtils,gitDiff}.ts` and
-          // `cli/src/ui/utils/customBanner.ts` for platforms that
-          // don't expose the constant. Functionally a no-op (JS
-          // bitwise coerces `undefined` to 0) but keeps the codebase
-          // consistent for the next greppy refactor.
-          fh = await fs.open(
-            target,
-            fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0),
-          );
-        } catch (err) {
-          const code = (err as { code?: unknown } | null | undefined)?.code;
-          // #4297 fold-in 8 (qwen-latest S1, addresses #3262861754):
-          // split ELOOP and ENOENT diagnostics so operators don't
-          // misdiagnose. ELOOP is the genuine `O_NOFOLLOW` rejection
-          // — a symlink at the final component, possibly an attack
-          // race. ENOENT here means the file was DELETED between
-          // the readFile content check and this open — a benign race
-          // with a concurrent writer (git checkout, editor save).
-          // Both still surface as `WorkspaceInitSymlinkError(kind:
-          // 'target')` so the route maps to a structured 400; the
-          // class doubles as the workspace-init race-condition
-          // bucket, but the message is now accurate per case.
-          if (code === 'ELOOP') {
-            throw new WorkspaceInitSymlinkError(
-              target,
-              'target',
-              `Workspace context file ${JSON.stringify(target)} could not ` +
-                `be opened with O_NOFOLLOW (ELOOP); the path may have been ` +
-                `swapped to a symlink between the content check and the ` +
-                `overwrite. Refusing to follow it.`,
-            );
-          }
-          if (code === 'ENOENT') {
-            // #4297 fold-in 10 (qwen-latest S2, addresses #3263954690):
-            // ENOENT here means race-deletion, not a symlink — use the
-            // sibling `WorkspaceInitRaceError` so the HTTP code
-            // (`workspace_init_race`) doesn't mislead operators into
-            // hunting a symlink attack on benign concurrent-modification.
-            throw new WorkspaceInitRaceError(
-              target,
-              'enoent',
-              `Workspace context file ${JSON.stringify(target)} was deleted ` +
-                `between the content check and the overwrite (likely a ` +
-                `concurrent writer — git checkout, editor save, etc.). ` +
-                `Refusing to recreate blindly; rerun init.`,
-            );
-          }
-          throw err;
-        }
-        try {
-          // #4297 fold-in 10 (qwen-latest S5, addresses #3263954707):
-          // same post-open parent re-verification as the create path.
-          // The overwrite branch is more sensitive — race-substituting
-          // a parent symlink to redirect TRUNCATE outside the workspace
-          // is the worst-case escape. Verifying after `O_NOFOLLOW` open
-          // succeeds catches the parent-only race that O_NOFOLLOW
-          // doesn't cover (the kernel resolved the parent path).
-          await verifyParentWithinWorkspace(
-            target,
-            wsCanonical,
-            'overwrite',
-            fh,
-          );
-          // #4297 post-merge wenshao Critical fold-in (folded into F1
-          // #4319): truncate AFTER verify, using the fd we already
-          // hold. fd-based truncate doesn't re-resolve the path, so
-          // an attacker who swaps the parent symlink between
-          // verifyParentWithinWorkspace and here can't redirect the
-          // truncation to an external file. See the open-flags
-          // comment above for the full O_TRUNC race analysis.
-          await fh.truncate(0);
-          await fh.writeFile('', 'utf8');
-        } finally {
-          await fh.close();
-        }
-      }
-      broadcastWorkspaceEvent({
-        type: 'workspace_initialized',
-        data: { path: target, action },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-      return { path: target, action };
     },
 
     async killSession(sessionId, opts) {
@@ -4305,36 +3812,33 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.spawnOwnerWantedKill = true;
         return;
       }
-      // F3 Commit 3 — mediator-driven cancel cascade. Must run BEFORE
-      // byId.delete so the mediator's emit callback can still reach
-      // entry.events via byId.get(sessionId) (same order as closeSession).
+      // Mediator-driven cancel cascade. Must run BEFORE byId.delete so
+      // the mediator's emit callback can still reach entry.events via
+      // byId.get(sessionId) (same order as closeSession).
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
       byId.delete(sessionId);
+      telemetry.metrics?.sessionLifecycle('die');
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
       //
-      // #4325 fix: same channel-overlap fix as in `closeSession` above.
+      // HAZARD: Same channel-overlap fix as in `closeSession` above.
       // `channelInfoForEntry(entry)` returns the entry's actual
       // channel rather than the module-scoped `channelInfo` (current
       // attach target), preventing the "kill operates on the freshly-
       // spawned channel B instead of the dying channel A" cascade
-      // during the overlap window.
-      //
-      // HAZARD(#4325): see the matching block in `closeSession`. The
-      // regression test for this fix is single-channel smoke and
-      // would NOT fail if this line reverts to `channelInfo`. Keep
-      // `channelInfoForEntry(entry)` until the deterministic overlap
-      // test lands.
+      // during the overlap window. The regression test is single-channel
+      // smoke only and WILL NOT fail if this reverts to module-scoped
+      // channelInfo. Keep `channelInfoForEntry(entry)` until a
+      // deterministic overlap test lands.
       const ci = channelInfoForEntry(entry);
       if (!ci) {
-        // Same diagnostic as `closeSession` (#4334 wenshao review
-        // DWrbr) — when the entry's channel is already gone, the
-        // cleanup below short-circuits silently; surface that.
+        // Same diagnostic as `closeSession` — when the entry's channel
+        // is already gone, the cleanup below short-circuits silently.
         writeStderrLine(
           `qwen serve: killSession channelInfoForEntry returned undefined ` +
             `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
@@ -4344,11 +3848,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ci.sessionIds.delete(sessionId);
       }
       await notifyAgentSessionClose(entry, ci, 'killSession');
-      // PR 14b fix (codex round 5): tombstone the killed sessionId
-      // so any in-flight `extNotification` from the (about-to-be-
-      // killed) child can't seed the early-event buffer for a
-      // subsequent load/resume of the same persisted id. See the
-      // matching guard in BridgeClient.bufferEarlyEvent.
+      // Tombstone the killed sessionId so any in-flight
+      // `extNotification` from the (about-to-be-killed) child can't
+      // seed the early-event buffer for a subsequent load/resume of
+      // the same persisted id.
       ci?.client.markSessionClosed(sessionId);
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
@@ -4372,38 +3875,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        // Mark dying SYNCHRONOUSLY before the await so a concurrent
-        // `spawnOrAttach` arriving during the SIGTERM grace window
-        // doesn't attach to a transport we're tearing down — without
-        // this it would land the caller with a sessionId that 404s on
-        // every follow-up once `channel.exited` fires (the equivalent
-        // of the pre-PR eager `byWorkspaceChannel.delete()` from the
-        // Stage 1 routing era). `channelInfo` stays set until OS reap
-        // so `killAllSync` still finds a target (BkUyD).
-        ci.isDying = true;
-        await ci.channel.kill().catch(() => {
-          // Best-effort kill — channel may already be dead.
-        });
+        await startIdleTimer(ci, `killSession "${sessionId}"`);
       }
     },
 
     async detachClient(sessionId, clientId) {
-      // tanzhenxin issue 2: the BQ9tV `attachCount` race guard is
-      // monotonic — once any attach bumps it, the spawn-owner's
-      // disconnect-reaper becomes a permanent no-op even if the
-      // attaching client itself disconnected. This is the symmetric
-      // rollback the server's `!res.writable && session.attached`
-      // path calls into.
+      // The `attachCount` race guard is monotonic — once any attach
+      // bumps it, the spawn-owner's disconnect-reaper becomes a
+      // permanent no-op even if the attaching client itself
+      // disconnected. This is the symmetric rollback the server's
+      // `!res.writable && session.attached` path calls into.
       //
-      // BkwQP: detachClient ONLY decrements; it does NOT reap on
-      // its own. Reaping is the spawn-owner's responsibility, and
-      // the spawn owner's `killSession({ requireZeroAttaches: true })`
-      // sets `spawnOwnerWantedKill` if they had to bail because we
-      // already had `attachCount > 0`. Only when that tombstone is
-      // set do we complete the deferred reap from here. Without
-      // this restraint, a transient attach disconnecting would
-      // reap a still-valid session whose spawn owner is alive but
-      // hasn't opened SSE yet.
+      // BkwQP: detachClient ONLY decrements; it does NOT reap on its
+      // own. Reaping is the spawn-owner's responsibility, and the spawn
+      // owner's `killSession({ requireZeroAttaches: true })` sets
+      // `spawnOwnerWantedKill` if they had to bail. Only when that
+      // tombstone is set do we complete the deferred reap from here.
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
@@ -4423,20 +3910,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     killAllSync() {
-      // Bd1y6: synchronous best-effort SIGKILL on EVERY alive channel
+      // Synchronous best-effort SIGKILL on EVERY alive channel
       // (typically 1, but during a `killSession`-then-`spawnOrAttach`
-      // overlap there can be 2 — the dying one in `aliveChannels`
-      // plus a fresh attach-target in `channelInfo`). Set
-      // `shuttingDown` so any racing async path fails fast.
+      // overlap there can be 2). Set `shuttingDown` so any racing
+      // async path fails fast.
       //
-      // tanzhenxin BkUyD: iterate `aliveChannels` (the OS-level "still
-      // alive" source of truth) — `channelInfo` only points at the
-      // CURRENT attach target, missing any dying channel whose
-      // `channel.exited` hasn't fired yet. Without this, a fresh
-      // spawn overwriting `channelInfo` during the prior channel's
-      // SIGTERM grace would leave the dying child without SIGKILL
-      // escalation when `process.exit(1)` fires.
+      // BkUyD: iterate `aliveChannels` (the OS-level "still alive"
+      // source of truth) — `channelInfo` only points at the CURRENT
+      // attach target, missing any dying channel whose
+      // `channel.exited` hasn't fired yet.
       shuttingDown = true;
+      cancelIdleTimer();
       const channels = Array.from(aliveChannels);
       defaultEntry = undefined;
       byId.clear();
@@ -4455,6 +3939,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // entered the bridge.shutdown() phase fails fast instead of
       // spawning a child this teardown won't see.
       shuttingDown = true;
+      cancelIdleTimer();
       const entries = Array.from(byId.values());
       // Snapshot every alive channel (typically 1; up to 2 during a
       // `killSession`-then-`spawnOrAttach` overlap) — entries are
@@ -4470,11 +3955,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // state and not attach).
       const channels = Array.from(aliveChannels);
       for (const ci of channels) ci.isDying = true;
-      // F3 Commit 3 — drain mediator pending state before clearing
-      // byId so awaiting `requestPermission` callers unwind. Each
-      // `forgetSession` settles all matching pending as
-      // session_closed; the bridge's per-entry index gets cleared
-      // alongside.
+      // Drain mediator pending state before clearing byId so awaiting
+      // `requestPermission` callers unwind. Each `forgetSession`
+      // settles all matching pending as session_closed; the bridge's
+      // per-entry index gets cleared alongside.
       for (const e of entries) {
         permissionMediator.forgetSession(e.sessionId);
         e.pendingPermissionIds.clear();
@@ -4489,6 +3973,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `byId` (above), so the handler's `byId.get(...)` is undefined
       // and the automatic publish wouldn't fire.
       for (const e of entries) {
+        telemetry.metrics?.sessionLifecycle('die');
         try {
           e.events.publish({
             type: 'session_died',
@@ -4535,130 +4020,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         inFlightChannelAwait,
       ]);
     },
-  };
-}
 
-/**
- * #4282 fold-in 5 (Codex P2-4). Resolve `inputPath` to its real
- * filesystem path, walking up through directory components that
- * don't yet exist on disk. Used by `initWorkspace` to make sure
- * every parent directory of the target file canonicalizes inside
- * the bound workspace — a symlink at any level (e.g. `docs/QWEN.md`
- * with `docs -> /tmp`) would otherwise let `writeFile` escape the
- * workspace boundary.
- *
- * The walk-up mirrors what `realpath` would do if it accepted
- * non-existent terminal segments: the deepest extant ancestor
- * dictates the canonical prefix, and any not-yet-created components
- * inherit it. Hitting the filesystem root (`path.dirname(p) === p`)
- * without finding anything that exists rethrows the underlying
- * ENOENT — by that point the input was unrooted in a way the
- * caller's contract can't honor.
- */
-async function canonicalizeExistingAncestor(
-  inputPath: string,
-): Promise<string> {
-  let current = inputPath;
-  while (true) {
-    try {
-      return await fs.realpath(current);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
-      // #4297 post-merge wenshao S2 fold-in (folded into F1 #4319):
-      // also catch ELOOP — a circular symlink in the parent path
-      // (e.g., `a -> b`, `b -> a`) makes `fs.realpath` fail with
-      // ELOOP. Without this, that bubbles up as an unstructured
-      // HTTP 500 instead of the typed `WorkspaceInitSymlinkError`
-      // (400) the route handler expects from the workspace-init
-      // race detection family. Walking up the parent chain when
-      // ELOOP hits at a sub-component preserves the existing
-      // "walk to the deepest extant ancestor" contract.
-      if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
-        throw err;
+    async preheat() {
+      if (shuttingDown) return;
+      const ci = await ensureChannel();
+      const idleMs = resolvedChannelIdleTimeoutMs();
+      if (
+        idleMs > 0 &&
+        ci.sessionIds.size === 0 &&
+        ci.pendingRestoreIds.size === 0
+      ) {
+        await startIdleTimer(ci);
       }
-      const parent = path.dirname(current);
-      if (parent === current) throw err;
-      current = parent;
-    }
-  }
-}
-
-/**
- * #4297 fold-in 10 (qwen-latest S5, addresses #3263954707). Re-verify
- * the parent directory canonicalizes inside the workspace AFTER the
- * `fs.open()` succeeded. `O_NOFOLLOW` only covers the final path
- * component; a local writer with workspace write access could race-
- * substitute a parent dir for a symlink between the pre-open
- * `canonicalizeExistingAncestor` check and the actual open. The
- * kernel resolves parent symlinks unconditionally during open, so
- * the fd we just opened may point outside `wsCanonical`.
- *
- * Catching the race after the fact: re-realpath the parent and
- * compare against `wsCanonical`. If the parent moved, the open
- * succeeded against an out-of-workspace inode; we throw
- * `WorkspaceInitSymlinkError(kind: 'parent')` so the route maps
- * to a 400 (config / race / attack ambiguous, but not a daemon
- * failure).
- *
- * The cleanup parameter distinguishes:
- *   - `'create'`: the open created the file; on race detection we
- *     unlink it best-effort to avoid leaving an empty file in the
- *     attacker's redirected location.
- *   - `'overwrite'`: the open truncated an existing file we'd
- *     already content-checked. The truncate happened at open time
- *     so the damage (zero-length file at the redirected path) is
- *     already done — but the throw at least prevents subsequent
- *     write content; documented residual risk.
- *
- * Residual race window: between this `realpath` and the next
- * `writeFile` on the fd, the parent could in principle be swapped
- * again. The fd we hold is still valid against the inode it was
- * opened against, which is what `writeFile` writes to — so this
- * remaining window is sub-millisecond and bounded to "fd opened
- * against an inode that briefly was under wsCanonical." Acceptable
- * residual posture for the Stage-1 trust model.
- */
-async function verifyParentWithinWorkspace(
-  target: string,
-  wsCanonical: string,
-  cleanup: 'create' | 'overwrite',
-  fh: import('node:fs/promises').FileHandle,
-): Promise<void> {
-  const parentCanonical = await canonicalizeExistingAncestor(
-    path.dirname(target),
-  );
-  const within =
-    parentCanonical === wsCanonical ||
-    parentCanonical.startsWith(wsCanonical + path.sep);
-  if (within) return;
-  // Best-effort cleanup before throwing. We're already in a failure
-  // path; ignore secondary errors so the original race-detection
-  // throw isn't shadowed.
-  //
-  // #4297 post-merge wenshao Critical fold-in (folded into F1 #4319):
-  // do NOT `fs.unlink(target)`. After a parent-directory race the
-  // textual `target` path now resolves through the attacker's freshly-
-  // planted parent symlink to an external location — `fs.unlink`
-  // would happily delete whatever file exists at the attacker's
-  // chosen path, giving any local user with workspace write access
-  // an arbitrary-file-deletion primitive against the daemon's UID.
-  // The empty file we created at the pre-race location is harmless
-  // (0 bytes, inside the workspace we'd just verified). Leaving it
-  // there over deleting an arbitrary external file is the right
-  // safety trade.
-  if (cleanup === 'create') {
-    await fh.close().catch(() => {});
-  }
-  throw new WorkspaceInitSymlinkError(
-    target,
-    'parent',
-    `Workspace context file ${JSON.stringify(target)}'s parent moved ` +
-      `outside the workspace between the pre-open canonicalize and ` +
-      `the post-open verify (parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
-      `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
-      `Refusing to write — investigate the concurrent writer or the ` +
-      `parent-directory permissions.`,
-  );
+    },
+  };
 }
 
 /**
@@ -4705,3 +4080,6 @@ async function withTimeout<T>(
     if (timer) clearTimeout(timer);
   }
 }
+
+/** @deprecated Use `createAcpSessionBridge` instead. */
+export const createHttpAcpBridge = createAcpSessionBridge;

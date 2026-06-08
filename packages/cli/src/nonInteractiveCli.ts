@@ -43,7 +43,9 @@ import {
   handleToolError,
   handleCancellationError,
   handleMaxTurnsExceededError,
+  handleBudgetExceededError,
 } from './utils/errors.js';
+import { RunBudgetEnforcer } from './utils/runBudget.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -220,6 +222,44 @@ export async function runNonInteractive(
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
 
+    // Run-level budget enforcement for headless / unattended runs
+    // (issue #4103). Tied to the same abortController as user-initiated
+    // SIGINT so the existing cancellation plumbing carries the abort;
+    // `routeAbort` below interprets the reason so the user sees
+    // "budget exceeded" instead of a generic "cancelled" envelope.
+    const budgetEnforcer = new RunBudgetEnforcer(
+      {
+        maxWallTimeSeconds: config.getMaxWallTimeSeconds(),
+        maxToolCalls: config.getMaxToolCalls(),
+      },
+      abortController,
+    );
+    budgetEnforcer.start();
+
+    /**
+     * Called at every abort-detection site in place of
+     * `handleCancellationError` directly. If a budget tripped, surface the
+     * structured budget error (exit 55); otherwise fall through to the
+     * SIGINT / user-cancel path (exit 130) so existing behavior is
+     * preserved. Both branches call into `process.exit(...)` so the
+     * `unreachable` throw is only present to keep the type-checker honest.
+     */
+    const routeAbort = async (): Promise<never> => {
+      const exceeded = budgetEnforcer.getExceeded();
+      if (exceeded) {
+        await handleBudgetExceededError(config, exceeded);
+        // Explicit unreachable — `handleBudgetExceededError` is `never`
+        // in production (it calls `process.exit`). If a test stubs
+        // `process.exit` or a future refactor makes the handler
+        // resumable, this throw carries the original budget message
+        // so the outer catch's `errorMessage` field stays actionable
+        // (vs. a useless literal "unreachable").
+        throw new Error(exceeded.message);
+      }
+      await handleCancellationError(config);
+      throw new Error('Operation cancelled.');
+    };
+
     interface LocalQueueItem {
       displayText: string;
       modelText: string;
@@ -375,27 +415,42 @@ export async function runNonInteractive(
         initialPartList = [{ text: input }];
       }
 
-      // Phase C: when --resume restored a session with an active worktree,
-      // prepend a system-reminder block to the user prompt so the model
-      // knows to keep using the worktree path. Stale sidecars (worktree
-      // dir deleted between sessions) are cleaned up inside the helper.
-      // TUI does this via historyManager.addItem(INFO); headless does it
-      // here because there is no UI history to write into.
-      if (config.getResumedSessionData()) {
+      // Inject a worktree context notice into the model's first prompt.
+      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // before loadCliConfig) takes precedence over the Phase C resume
+      // restore. TUI does this via historyManager.addItem(INFO); here in
+      // headless we prepend a `<system-reminder>` block since there is
+      // no UI history to write into.
+      const withReminder = (
+        existing: PartListUnion,
+        text: string,
+      ): PartListUnion => {
+        const reminderPart: Part = {
+          text: `<system-reminder>\n${text}\n</system-reminder>\n\n`,
+        };
+        return Array.isArray(existing)
+          ? [reminderPart, ...existing]
+          : [reminderPart, existing];
+      };
+
+      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      if (startupNotice) {
+        initialPartList = withReminder(initialPartList, startupNotice);
+        adapter.emitSystemMessage('worktree_started', {
+          notice: startupNotice,
+        });
+      } else if (config.getResumedSessionData()) {
         try {
           const sessionPath = config
             .getSessionService()
             .getWorktreeSessionPath(sessionId);
           const restored = await restoreWorktreeContext(sessionPath);
           if (restored.contextMessage) {
-            const reminderPart: Part = {
-              text: `<system-reminder>\n${restored.contextMessage}\n</system-reminder>\n\n`,
-            };
-            const partsArr = Array.isArray(initialPartList)
-              ? initialPartList
-              : [initialPartList];
-            initialPartList = [reminderPart, ...partsArr];
-            // Also surface the notice in the JSON stream so SDK consumers
+            initialPartList = withReminder(
+              initialPartList,
+              restored.contextMessage,
+            );
+            // Surface the notice in the JSON stream so SDK consumers
             // can react to it (logging, UI hints, etc.).
             adapter.emitSystemMessage('worktree_restored', {
               slug: restored.session?.slug,
@@ -613,6 +668,34 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
+          // Tick BEFORE the call so that --max-tool-calls=N caps the run
+          // at exactly N executions: the (N+1)th tick aborts before the
+          // tool runs. Ticking after would let the (N+1)th tool execute
+          // and only then abort. See issue #4103.
+          //
+          // Exempt `structured_output` ONLY when `--json-schema` is
+          // active: under --json-schema this is the terminal "I'm done"
+          // contract tool, not real work, and counting it would abort
+          // an otherwise-valid completion at the budget edge (budget=3,
+          // model used 3 tools then emits structured_output as call #4
+          // → exit 55 instead of success). Guarding on
+          // `getJsonSchema()` keeps the exemption tied to the feature
+          // that owns the tool name — an MCP server that registers an
+          // unrelated tool literally named `structured_output` would
+          // otherwise inherit a free pass.
+          //
+          // Caveat: failed structured_output calls (Ajv validation
+          // failure) also skip the tick, so a model stuck in a
+          // validation-retry loop is not bounded by --max-tool-calls.
+          // Documented in docs/users/features/headless.md → "Scope".
+          // Combine with --max-session-turns or --max-wall-time.
+          const isStructuredOutputExempt =
+            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+            config.getJsonSchema?.() !== undefined;
+          if (!isStructuredOutputExempt) {
+            budgetEnforcer.tickToolCall();
+          }
+          if (abortController.signal.aborted) await routeAbort();
           const toolResponse = await executeToolCall(
             config,
             requestInfo,
@@ -749,7 +832,12 @@ export async function runNonInteractive(
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
-            await handleCancellationError(config);
+            // Pair the startAssistantMessage() above so stream-json mode
+            // doesn't leave an unterminated message_start when a budget /
+            // SIGINT abort lands mid-stream. Symmetric with the drain-item
+            // loop fix below.
+            adapter.finalizeAssistantMessage();
+            await routeAbort();
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
@@ -863,10 +951,24 @@ export async function runNonInteractive(
 
               for await (const event of itemStream) {
                 if (abortController.signal.aborted) {
-                  // Pair the startAssistantMessage() above so stream-json mode doesn't
-                  // leave an unterminated message_start.
+                  // Pair the startAssistantMessage() above so stream-json
+                  // mode doesn't leave an unterminated message_start, then
+                  // route through `routeAbort` so a budget overrun in the
+                  // final drain item surfaces as exit code 55 instead of
+                  // being silently swallowed by the outer success path
+                  // (drain-loop fall-through; see issue #4103 review).
+                  //
+                  // Also flush queued task notifications and finalize
+                  // one-shot monitors here. Previously this site used a
+                  // bare `return` and let control fall through to the
+                  // outer holdback loop, which did the flushing before
+                  // exiting; routing through `routeAbort` skips that
+                  // path, so we re-do it inline to preserve the
+                  // task_started↔task_notification pairing invariant.
                   adapter.finalizeAssistantMessage();
-                  return;
+                  flushQueuedNotificationsToSdk(localQueue);
+                  finalizeOneShotMonitors();
+                  await routeAbort();
                 }
                 adapter.processEvent(event);
                 if (event.type === GeminiEventType.ToolCallRequest) {
@@ -1018,12 +1120,12 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              // Flush queued terminal notifications before handleCancellationError
-              // exits so stream-json consumers always see a task_notification paired
-              // with every task_started.
+              // Flush queued terminal notifications before routeAbort
+              // exits so stream-json consumers always see a task_notification
+              // paired with every task_started.
               flushQueuedNotificationsToSdk(localQueue);
               finalizeOneShotMonitors();
-              await handleCancellationError(config);
+              await routeAbort();
             }
             // Once we enter the final holdback loop, monitor events should no
             // longer extend one-shot runtime. Already-queued events still drain
@@ -1130,8 +1232,22 @@ export async function runNonInteractive(
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
+      // If a run-level budget tripped during an awaited stream / tool
+      // call, the underlying fetch's AbortError lands here before our
+      // explicit `routeAbort` sites can fire. Capture the reason so we
+      // can (a) include the friendly "Run aborted: …" message in the
+      // adapter's terminal result envelope (STREAM_JSON consumers
+      // depend on that envelope to close the stream cleanly) and (b)
+      // exit with the budget handler's exit code 55 instead of the
+      // generic `handleError` exit code 1 from a raw "AbortError".
+      const budgetExceeded = budgetEnforcer.getExceeded();
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
-      const message = error instanceof Error ? error.message : String(error);
+      const message = budgetExceeded
+        ? budgetExceeded.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -1152,18 +1268,43 @@ export async function runNonInteractive(
         outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
 
       if (!skipAdapterEmit) {
-        adapter.emitResult({
-          isError: true,
-          durationMs: Date.now() - startTime,
-          apiDurationMs: totalApiDurationMs,
-          numTurns: turnCount,
-          errorMessage: message,
-          usage,
-          stats,
-        });
+        // Wrap in try/catch: emitResult eventually hits stdout.write, which
+        // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
+        // consumer closes early (`qwen -p ... | head -n 1` is the common
+        // case). Letting that throw bubble out skips `handleBudgetExceededError`
+        // / `handleError` below, dropping the documented exit code 55
+        // contract — precisely when stdout is in trouble. Best-effort emit
+        // and continue to the exit handler.
+        try {
+          adapter.emitResult({
+            isError: true,
+            durationMs: Date.now() - startTime,
+            apiDurationMs: totalApiDurationMs,
+            numTurns: turnCount,
+            errorMessage: message,
+            usage,
+            stats,
+          });
+        } catch (emitErr) {
+          debugLogger.error(
+            `Failed to emit terminal result envelope: ${
+              emitErr instanceof Error ? emitErr.message : String(emitErr)
+            }`,
+          );
+        }
+      }
+      if (budgetExceeded) {
+        // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
+        // see a terminal result envelope before the process dies.
+        await handleBudgetExceededError(config, budgetExceeded);
       }
       await handleError(error, config);
     } finally {
+      // Cancel the wall-clock timer so it doesn't fire after a successful
+      // run completes — important for callers (e.g. the `qwen serve`
+      // daemon, SDK) that reuse a single process across many runs.
+      budgetEnforcer.stop();
+
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);

@@ -142,6 +142,12 @@ function createState(
       ...(seed.permissionBlockByRequestId ?? {}),
     },
     toolProgress: { ...(seed.toolProgress ?? {}) },
+    activeAssistantBlockByParent: {
+      ...(seed.activeAssistantBlockByParent ?? {}),
+    },
+    activeThoughtBlockByParent: {
+      ...(seed.activeThoughtBlockByParent ?? {}),
+    },
     lastResyncRequired:
       seed.lastResyncRequired !== undefined
         ? { ...seed.lastResyncRequired }

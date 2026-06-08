@@ -2,14 +2,26 @@ import type {
   Completion,
   CompletionContext,
   CompletionResult,
+  CompletionSection,
 } from '@codemirror/autocomplete';
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
+import {
+  compareCommandsByCategory,
+  DEFAULT_COMMAND_CATEGORY_ORDER,
+  getCategoryRank,
+  getCommandDisplayCategory,
+  type CommandDisplayCategory,
+  type CommandDisplayCategoryOrder,
+} from '../utils/commandDisplay';
 
 export interface SkillInfo {
   name: string;
   description: string;
 }
+
+type Translate = (key: string) => string;
+const COMMAND_NAME_PATTERN = String.raw`([^\s/]+)`;
 
 interface SubcommandNode {
   name: string;
@@ -20,30 +32,11 @@ interface SubcommandNode {
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
-    {
-      name: 'create',
-      description: '创建新的 subagent',
-      children: [
-        { name: 'user', description: '创建 User subagent' },
-        { name: 'project', description: '创建 Project subagent' },
-      ],
-    },
+    { name: 'create', description: '创建新的 subagent' },
   ],
   theme: [
     { name: 'light', description: '切换到浅色主题' },
     { name: 'dark', description: '切换到深色主题' },
-  ],
-  memory: [
-    {
-      name: 'add',
-      description: '新增 memory',
-      children: [
-        { name: 'user', description: '写入 User memory' },
-        { name: 'project', description: '写入 Project memory' },
-      ],
-    },
-    { name: 'show', description: '查看 memory 文件' },
-    { name: 'refresh', description: '刷新 memory 文件列表' },
   ],
   export: [
     { name: 'md', description: '将会话导出为 Markdown 文件' },
@@ -67,30 +60,11 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: 'Manage existing subagents' },
-    {
-      name: 'create',
-      description: 'Create a new subagent',
-      children: [
-        { name: 'user', description: 'Create a user subagent' },
-        { name: 'project', description: 'Create a project subagent' },
-      ],
-    },
+    { name: 'create', description: 'Create a new subagent' },
   ],
   theme: [
     { name: 'light', description: 'Switch to light theme' },
     { name: 'dark', description: 'Switch to dark theme' },
-  ],
-  memory: [
-    {
-      name: 'add',
-      description: 'Add memory',
-      children: [
-        { name: 'user', description: 'Write user memory' },
-        { name: 'project', description: 'Write project memory' },
-      ],
-    },
-    { name: 'show', description: 'Show memory files' },
-    { name: 'refresh', description: 'Refresh memory files' },
   ],
   export: [
     { name: 'md', description: 'Export as Markdown' },
@@ -111,6 +85,54 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   ],
 };
 
+const IMPLICIT_SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: '显示详细上下文信息' }],
+  copy: [
+    { name: 'code', description: '复制代码块' },
+    { name: 'latex', description: '复制 LaTeX 公式' },
+    { name: 'inline-latex', description: '复制行内 LaTeX 公式' },
+  ],
+  tools: [{ name: 'desc', description: '显示工具详细描述' }],
+  stats: [
+    { name: 'model', description: '显示各模型使用统计' },
+    { name: 'tools', description: '显示工具使用统计' },
+  ],
+  mcp: [
+    { name: 'desc', description: '显示 MCP server 和工具描述' },
+    { name: 'nodesc', description: '隐藏 MCP server 和工具描述' },
+    { name: 'schema', description: '显示工具参数 schema' },
+  ],
+  memory: [
+    { name: 'show', description: '查看 memory 文件' },
+    { name: 'add', description: '新增 memory' },
+    { name: 'refresh', description: '刷新 memory 文件列表' },
+  ],
+};
+
+const IMPLICIT_SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: 'Show detailed context info' }],
+  copy: [
+    { name: 'code', description: 'Copy code blocks' },
+    { name: 'latex', description: 'Copy LaTeX formula' },
+    { name: 'inline-latex', description: 'Copy inline LaTeX formula' },
+  ],
+  tools: [{ name: 'desc', description: 'Show tool descriptions' }],
+  stats: [
+    { name: 'model', description: 'Show per-model usage statistics' },
+    { name: 'tools', description: 'Show tool usage statistics' },
+  ],
+  mcp: [
+    { name: 'desc', description: 'Show MCP server and tool descriptions' },
+    { name: 'nodesc', description: 'Hide MCP server and tool descriptions' },
+    { name: 'schema', description: 'Show tool parameter schemas' },
+  ],
+  memory: [
+    { name: 'show', description: 'Show memory files' },
+    { name: 'add', description: 'Add memory' },
+    { name: 'refresh', description: 'Refresh memory files' },
+  ],
+};
+
 function resolveSubcommands(
   cmdName: string,
   parts: string[],
@@ -127,6 +149,15 @@ function resolveSubcommands(
 
   const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
   let nodes = tree[cmdName];
+
+  if (!nodes) {
+    const implicitTree =
+      language === 'zh-CN'
+        ? IMPLICIT_SUBCOMMAND_TREE_ZH
+        : IMPLICIT_SUBCOMMAND_TREE_EN;
+    nodes = implicitTree[cmdName];
+  }
+
   if (!nodes) return null;
 
   for (const part of parts) {
@@ -146,17 +177,127 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
   return a.localeCompare(b);
 }
 
+function compareSlashCommands(
+  a: CommandInfo,
+  b: CommandInfo,
+  query: string,
+  categoryOrder: CommandDisplayCategoryOrder,
+): number {
+  const order = compareCommandsByCategory(a, b, categoryOrder);
+  if (order !== 0) return order;
+  return query ? comparePrefixFirst(a.name, b.name, query) : 0;
+}
+
+const COMMAND_SECTION_KEYS: Record<CommandDisplayCategory, string> = {
+  custom: 'slash.category.custom',
+  skill: 'slash.category.skill',
+  system: 'slash.category.system',
+};
+
+function renderCommandSectionHeader(section: CompletionSection): HTMLElement {
+  const header = document.createElement('completion-section');
+  header.className = 'cm-command-section-header';
+  header.setAttribute('aria-label', section.name);
+  return header;
+}
+
+function getCommandSection(
+  command: CommandInfo,
+  translate: Translate,
+  categoryOrder: CommandDisplayCategoryOrder,
+): CompletionSection {
+  const category = getCommandDisplayCategory(command);
+  return {
+    name: translate(COMMAND_SECTION_KEYS[category]),
+    rank: getCategoryRank(category, categoryOrder),
+    header: renderCommandSectionHeader,
+  };
+}
+
+export function getMissingSlashPrefixCompletion(
+  text: string,
+  commands: CommandInfo[],
+): string | null {
+  if (!text || text.includes(' ') || /^[/@!?]/.test(text)) return null;
+
+  const lp = text.toLowerCase();
+  const match = commands.find((c) => c.name.toLowerCase().startsWith(lp));
+  if (!match) return null;
+
+  return `/${match.name} `;
+}
+
+export function getImplicitTabCompletion(
+  text: string,
+  commands: CommandInfo[],
+  language: WebShellLanguage,
+): string | null {
+  const match = text.match(new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+$`));
+  if (!match) return null;
+
+  const cmdName = match[1];
+  const cmd = commands.find((c) => c.name === cmdName);
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  if (cmd?.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
+    return null;
+  }
+
+  const implicitTree =
+    language === 'zh-CN'
+      ? IMPLICIT_SUBCOMMAND_TREE_ZH
+      : IMPLICIT_SUBCOMMAND_TREE_EN;
+  const nodes = implicitTree[cmdName];
+  if (!nodes || nodes.length === 0) return null;
+
+  return `/${cmdName} ${nodes[0].name} `;
+}
+
+export function getSlashCommandArgumentHint(
+  text: string,
+  commands: CommandInfo[],
+  language: WebShellLanguage,
+): string | null {
+  const match = text.match(new RegExp(`^/${COMMAND_NAME_PATTERN}(\\s*)$`));
+  if (!match) return null;
+
+  const cmdName = match[1];
+  const cmd = commands.find((c) => c.name === cmdName);
+  if (!cmd) return null;
+
+  const argumentHint = cmd.argumentHint?.trim();
+  if (argumentHint) return argumentHint;
+
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  if (cmd.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
+    return null;
+  }
+
+  const implicitTree =
+    language === 'zh-CN'
+      ? IMPLICIT_SUBCOMMAND_TREE_ZH
+      : IMPLICIT_SUBCOMMAND_TREE_EN;
+  const nodes = implicitTree[cmdName];
+  if (!nodes || nodes.length === 0) return null;
+
+  return `[${nodes.map((node) => node.name).join('|')}]`;
+}
+
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => SkillInfo[] = () => [],
   getLanguage: () => WebShellLanguage = () => 'en',
+  translate: Translate = (key) => key,
+  getCategoryOrder: () => CommandDisplayCategoryOrder | undefined = () =>
+    DEFAULT_COMMAND_CATEGORY_ORDER,
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const line = context.state.doc.lineAt(context.pos);
     const textBefore = line.text.slice(0, context.pos - line.from);
 
     // Sub-command completion: "/command arg1 arg2..."
-    const subMatch = textBefore.match(/^\/(\w[\w-]*)\s+(.*)$/);
+    const subMatch = textBefore.match(
+      new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+(.*)$`),
+    );
     if (subMatch) {
       const [, cmdName, rest] = subMatch;
       const commands = getCommands();
@@ -164,13 +305,29 @@ export function slashCompletionSource(
       const language = getLanguage();
       const tree =
         language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+      const implicitTree =
+        language === 'zh-CN'
+          ? IMPLICIT_SUBCOMMAND_TREE_ZH
+          : IMPLICIT_SUBCOMMAND_TREE_EN;
       const hasTree = !!tree[cmdName] || cmdName === 'skills';
-      if (!cmd?.subcommands?.length && !hasTree) return null;
+      const hasImplicitTree = !!implicitTree[cmdName];
+      if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree)
+        return null;
 
       // Split rest into completed parts and current typing
       const tokens = rest.split(/\s+/);
       const currentTyping = tokens.pop() || '';
       const completedParts = tokens;
+
+      // Implicit sub-commands: only show when user starts typing (not on space alone)
+      if (
+        !cmd?.subcommands?.length &&
+        !hasTree &&
+        hasImplicitTree &&
+        !currentTyping
+      ) {
+        return null;
+      }
 
       const nodes = resolveSubcommands(
         cmdName,
@@ -216,33 +373,37 @@ export function slashCompletionSource(
       };
     }
 
-    // Top-level command completion: "/" or "/ex"
-    const match = textBefore.match(/^\/(\w*)$/);
+    // Top-level command completion: "/" or "/ex".
+    // Use the whole line so moving the cursor before or inside the command
+    // still offers the same completions and replaces the full command token.
+    const match = line.text.match(/^\/([^\s/]*)$/);
     if (!match) return null;
 
     const prefix = match[1];
     const commands = getCommands();
-
+    const categoryOrder = getCategoryOrder() ?? DEFAULT_COMMAND_CATEGORY_ORDER;
     const lp = prefix.toLowerCase();
-    const options = commands
+    const filteredCommands = commands
       .filter((c) => {
         if (!prefix) return true;
         return c.name.toLowerCase().includes(lp);
       })
-      .sort((a, b) => (prefix ? comparePrefixFirst(a.name, b.name, lp) : 0))
-      .map((c): Completion => {
-        const command = `/${c.name}`;
-        return {
-          label: command,
-          detail: c.description || undefined,
-          apply: `${command} `,
-        };
-      });
+      .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
+    const options = filteredCommands.map((c): Completion => {
+      const command = `/${c.name}`;
+      return {
+        label: command,
+        detail: c.description || undefined,
+        apply: `${command} `,
+        section: getCommandSection(c, translate, categoryOrder),
+      };
+    });
 
     if (options.length === 0) return null;
 
     return {
       from: line.from,
+      to: line.to,
       options,
       filter: false,
     };

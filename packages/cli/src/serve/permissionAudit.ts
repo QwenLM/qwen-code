@@ -5,7 +5,7 @@
  */
 
 /**
- * Permission audit ring. F3 Commit 4 (#4175).
+ * Permission audit ring.
  *
  * Writes 5 record types (`permission.requested` / `permission.voted` /
  * `permission.forbidden` / `permission.resolved` / `permission.timeout`)
@@ -15,12 +15,12 @@
  * intentionally separate channels per the F3 plan.
  *
  * v1 does not expose a `GET /workspace/permission/audit` route — the
- * ring is held inside `createHttpAcpBridge`'s closure for future query
+ * ring is held inside `createAcpSessionBridge`'s closure for future query
  * infrastructure. This file provides the writer; the bridge factory
  * constructs the ring (only when `BridgeOptions.permissionAudit` is
  * omitted; a host-supplied publisher takes the ring's place) and
  * wires it to the publisher. The ring is NOT exposed on the
- * `HttpAcpBridge` interface today — a follow-up PR adding
+ * `AcpSessionBridge` interface today — a follow-up PR adding
  * `GET /workspace/permission/audit` will need to surface it via a new
  * accessor or pass it through `BridgeOptions`.
  *
@@ -103,6 +103,20 @@ export type PermissionAuditEntry =
       readonly issuedAtMs: number;
     };
 
+function takeLast<T>(
+  arr: readonly T[],
+  limit: number | undefined,
+  methodName: string,
+): readonly T[] {
+  if (limit === undefined) return arr.slice();
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error(
+      `${methodName} limit must be a non-negative integer; got ${String(limit)}`,
+    );
+  }
+  return arr.slice(Math.max(0, arr.length - limit));
+}
+
 /**
  * Bounded ring buffer for permission audit entries. Operates as a
  * FIFO: when the ring is full, the oldest entry is evicted to make
@@ -131,13 +145,7 @@ export class PermissionAuditRing {
 
   /** Snapshot the most-recent `limit` entries (or all if omitted). */
   snapshot(limit?: number): readonly PermissionAuditEntry[] {
-    if (limit === undefined) return this.buf.slice();
-    if (!Number.isInteger(limit) || limit < 0) {
-      throw new Error(
-        `PermissionAuditRing.snapshot limit must be a non-negative integer; got ${String(limit)}`,
-      );
-    }
-    return this.buf.slice(Math.max(0, this.buf.length - limit));
+    return takeLast(this.buf, limit, 'PermissionAuditRing.snapshot');
   }
 
   /** Subset filtered by sessionId. */
@@ -145,14 +153,11 @@ export class PermissionAuditRing {
     sessionId: string,
     limit?: number,
   ): readonly PermissionAuditEntry[] {
-    const all = this.buf.filter((e) => e.sessionId === sessionId);
-    if (limit === undefined) return all;
-    if (!Number.isInteger(limit) || limit < 0) {
-      throw new Error(
-        `PermissionAuditRing.snapshotForSession limit must be a non-negative integer; got ${String(limit)}`,
-      );
-    }
-    return all.slice(Math.max(0, all.length - limit));
+    return takeLast(
+      this.buf.filter((e) => e.sessionId === sessionId),
+      limit,
+      'PermissionAuditRing.snapshotForSession',
+    );
   }
 
   /** Current entry count (≤ capacity). For diagnostics. */

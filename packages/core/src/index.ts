@@ -82,7 +82,7 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
-// F2 (#4175 commit 4): pool primitives consumed by acpAgent (daemon
+// pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
   McpTransportPool,
@@ -156,6 +156,10 @@ export * from './providers/index.js';
 // Services
 // ============================================================================
 
+export {
+  computeThresholds,
+  type CompactionThresholds,
+} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
@@ -196,7 +200,7 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
-// Issue #4175 PR 16: write helper for hierarchical context files,
+// Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
 export * from './memory/writeContextFile.js';
@@ -304,6 +308,7 @@ export * from './followup/index.js';
 // Utilities
 // ============================================================================
 
+export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
@@ -404,7 +409,11 @@ export * from './test-utils/index.js';
 // ============================================================================
 
 export * from './hooks/types.js';
-export { HookSystem, HookRegistry } from './hooks/index.js';
+export {
+  HookSystem,
+  HookRegistry,
+  hookEventSupportsMatcher,
+} from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,

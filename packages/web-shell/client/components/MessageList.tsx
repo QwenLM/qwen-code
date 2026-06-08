@@ -31,6 +31,8 @@ interface MessageListProps {
   catchingUp?: boolean;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
+  tailContent?: ReactNode;
+  tailKey?: string;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -191,6 +193,7 @@ const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_APPROVAL = 200;
+const ESTIMATE_TAIL = 240;
 
 export function MessageList({
   messages,
@@ -199,6 +202,8 @@ export function MessageList({
   catchingUp,
   welcomeHeader,
   workspaceCwd,
+  tailContent,
+  tailKey = 'tail',
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
   const mergedMessages = useMemo(
@@ -261,9 +266,13 @@ export function MessageList({
 
   const shouldFollow = useRef(true);
   const lastScrollTop = useRef(0);
+  const scrollCooldown = useRef(false);
+  const scrollCooldownCount = useRef(0);
   const prevLastUserMsgId = useRef<string | null>(null);
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
+  const catchingUpRef = useRef(catchingUp);
+  catchingUpRef.current = catchingUp;
 
   const hasTailApproval = useMemo(() => {
     if (!pendingApproval) return false;
@@ -271,18 +280,28 @@ export function MessageList({
     return !approvalMatchesToolGroup(messages, pendingApproval);
   }, [pendingApproval, messages]);
 
+  const hasTailContent = tailContent !== undefined && tailContent !== null;
   const hasHeader = !!welcomeHeader;
   const headerOffset = hasHeader ? 1 : 0;
-  const totalCount =
-    headerOffset + displayItems.length + (hasTailApproval ? 1 : 0);
+  const tailApprovalIndex = headerOffset + displayItems.length;
+  const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
+  const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
 
   // Rule 6: skip if content doesn't overflow (no scrollbar).
   const scrollToBottom = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     if (el.scrollHeight <= el.clientHeight) return;
+    scrollCooldownCount.current += 1;
+    const gen = scrollCooldownCount.current;
+    scrollCooldown.current = true;
     el.scrollTop = el.scrollHeight;
     lastScrollTop.current = el.scrollTop;
+    requestAnimationFrame(() => {
+      if (scrollCooldownCount.current === gen) {
+        scrollCooldown.current = false;
+      }
+    });
   }, []);
 
   const virtualizer = useVirtualizer({
@@ -290,18 +309,22 @@ export function MessageList({
     getScrollElement: () => containerRef.current,
     getItemKey: (index) => {
       if (hasHeader && index === HEADER_INDEX) return 'header';
-      if (hasTailApproval && index === totalCount - 1) {
+      if (hasTailApproval && index === tailApprovalIndex) {
         return pendingApproval ? `approval-${pendingApproval.id}` : 'approval';
       }
+      if (hasTailContent && index === tailContentIndex) return tailKey;
       const item = displayItems[index - headerOffset];
       return item?.key ?? `row-${index}`;
     },
     estimateSize: (index) => {
       if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-      if (hasTailApproval && index === totalCount - 1) return ESTIMATE_APPROVAL;
+      if (hasTailApproval && index === tailApprovalIndex) {
+        return ESTIMATE_APPROVAL;
+      }
+      if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
       return ESTIMATE_MESSAGE;
     },
-    overscan: 5,
+    overscan: 20,
     useAnimationFrameWithResizeObserver: true,
   });
 
@@ -311,6 +334,10 @@ export function MessageList({
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
+    if (scrollCooldown.current) {
+      lastScrollTop.current = el.scrollTop;
+      return;
+    }
     const prev = lastScrollTop.current;
     const curr = el.scrollTop;
     lastScrollTop.current = curr;
@@ -319,9 +346,11 @@ export function MessageList({
     // Rule 2: scrolling up → pause follow
     if (curr < prev - 1) {
       shouldFollow.current = false;
-      return;
     }
     // Rule 3: near bottom → resume follow
+    // (runs unconditionally so that container-resize-induced scrollTop
+    // clamping — which looks like scrolling up — doesn't permanently
+    // disable follow when the viewport is still near the bottom)
     if (distanceFromBottom < 30) {
       shouldFollow.current = true;
     }
@@ -333,6 +362,26 @@ export function MessageList({
       shouldFollow.current = true;
     }
   }, [messages.length]);
+
+  // Container-resize guard: when floating panels (TodoPanel,
+  // ActiveAgentsPanel) appear or disappear the scroll container's
+  // clientHeight changes. Snap back to bottom so the user doesn't
+  // lose their place while follow mode is active.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (catchingUpRef.current) return;
+      if (!shouldFollow.current) return;
+      requestAnimationFrame(() => {
+        if (!catchingUpRef.current && shouldFollow.current) {
+          scrollToBottom();
+        }
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scrollToBottom]);
 
   // Rule 4: new user message → force follow on so the model's reply
   // scrolls into view as it streams in.
@@ -366,7 +415,7 @@ export function MessageList({
         return welcomeHeader;
       }
 
-      if (hasTailApproval && index === totalCount - 1) {
+      if (hasTailApproval && index === tailApprovalIndex) {
         if (pendingApproval && isAskUserQuestion(pendingApproval)) {
           return (
             <AskUserQuestion request={pendingApproval} onConfirm={onConfirm} />
@@ -378,6 +427,10 @@ export function MessageList({
           );
         }
         return null;
+      }
+
+      if (hasTailContent && index === tailContentIndex) {
+        return tailContent;
       }
 
       const itemIndex = index - headerOffset;
@@ -406,8 +459,11 @@ export function MessageList({
     [
       hasHeader,
       welcomeHeader,
+      hasTailContent,
+      tailContent,
+      tailContentIndex,
       hasTailApproval,
-      totalCount,
+      tailApprovalIndex,
       pendingApproval,
       onConfirm,
       headerOffset,

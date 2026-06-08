@@ -26,8 +26,11 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
   slashCompletionSource,
+  getImplicitTabCompletion,
+  getMissingSlashPrefixCompletion,
   type SkillInfo,
 } from '../completions/slashCompletion';
+import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
@@ -47,6 +50,7 @@ interface EditorProps {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
   onClearQueuedMessages?: () => boolean;
@@ -63,12 +67,74 @@ interface EditorProps {
 export interface EditorHandle {
   blur(): void;
   focus(): void;
+  getText(): string;
   insertText(text: string): void;
   retryLast(): void;
 }
 
 const editableCompartment = new Compartment();
 const placeholderCompartment = new Compartment();
+const LARGE_PASTE_CHAR_THRESHOLD = 1000;
+const LARGE_PASTE_LINE_THRESHOLD = 10;
+
+export function normalizePastedText(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+export function isLargePaste(text: string): boolean {
+  return (
+    [...text].length > LARGE_PASTE_CHAR_THRESHOLD ||
+    text.split('\n').length > LARGE_PASTE_LINE_THRESHOLD
+  );
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export interface LargePastePlaceholderResult {
+  placeholderText: string;
+  nextPasteId: number;
+}
+
+export function createLargePastePlaceholder(
+  pendingPastes: Map<string, string>,
+  nextPasteId: number,
+  pasted: string,
+): LargePastePlaceholderResult {
+  const charCount = [...pasted].length;
+  const base = `[Pasted Content ${charCount} chars]`;
+  const placeholderText = nextPasteId === 1 ? base : `${base} #${nextPasteId}`;
+  pendingPastes.set(placeholderText, pasted);
+  return { placeholderText, nextPasteId: nextPasteId + 1 };
+}
+
+export function prunePendingPastes(
+  pendingPastes: Map<string, string>,
+  docText: string,
+): number | null {
+  for (const placeholderText of pendingPastes.keys()) {
+    if (!docText.includes(placeholderText)) {
+      pendingPastes.delete(placeholderText);
+    }
+  }
+  return pendingPastes.size === 0 ? 1 : null;
+}
+
+export function expandLargePastePlaceholders(
+  pendingPastes: Map<string, string>,
+  text: string,
+): string {
+  if (pendingPastes.size === 0) return text;
+  const placeholders = [...pendingPastes.keys()].sort(
+    (a, b) => b.length - a.length,
+  );
+  const pattern = new RegExp(placeholders.map(escapeRegExp).join('|'), 'g');
+  return text.replace(
+    pattern,
+    (placeholderText) => pendingPastes.get(placeholderText) ?? placeholderText,
+  );
+}
 
 function getModeClass(mode: string, shellMode: boolean): string {
   if (shellMode) return '';
@@ -93,6 +159,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     placeholderText = 'Type a message...',
     commands,
     skills = [],
+    slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
     onClearQueuedMessages,
@@ -123,6 +190,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
+  const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
+  slashCommandCategoryOrderRef.current = slashCommandCategoryOrder;
+  const tRef = useRef(t);
+  tRef.current = t;
   const queuedMessagesRef = useRef(queuedMessages);
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
@@ -152,6 +223,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
+  const pendingPastesRef = useRef<Map<string, string>>(new Map());
+  const nextPasteIdRef = useRef(1);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -194,8 +267,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (!containerRef.current) return;
 
     const submitText = (view: EditorView, textOverride?: string) => {
-      const text = (textOverride ?? view.state.doc.toString()).trim();
-      if (!text) return true;
+      const rawText = (textOverride ?? view.state.doc.toString()).trim();
+      if (!rawText) return true;
+      const text = expandLargePastePlaceholders(
+        pendingPastesRef.current,
+        rawText,
+      );
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
       const accepted = onSubmitRef.current(
@@ -204,6 +281,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       );
       if (accepted === false) return true;
       onDismissFollowupRef.current?.();
+      pendingPastesRef.current.clear();
+      nextPasteIdRef.current = 1;
       if (isShellMode) {
         shellHistoryActionsRef.current.push(text);
         shellHistoryActionsRef.current.reset();
@@ -223,6 +302,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         () => commandsRef.current,
         () => skillsRef.current,
         () => languageRef.current,
+        (key) => tRef.current(key),
+        () => slashCommandCategoryOrderRef.current,
       ),
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
@@ -384,20 +465,49 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Tab',
+        // Priority: active menu > implicit subcommand > missing "/" prefix > followup suggestion
         run: (view) => {
           if (completionStatus(view.state) === 'active') {
             return acceptCompletion(view);
           }
+          const text = view.state.doc.toString();
+          const implicitResult = getImplicitTabCompletion(
+            text,
+            commandsRef.current,
+            languageRef.current,
+          );
+          if (implicitResult) {
+            view.dispatch({
+              changes: {
+                from: 0,
+                to: view.state.doc.length,
+                insert: implicitResult,
+              },
+              selection: { anchor: implicitResult.length },
+            });
+            return true;
+          }
+          const missingSlash = getMissingSlashPrefixCompletion(
+            text,
+            commandsRef.current,
+          );
+          if (missingSlash) {
+            view.dispatch({
+              changes: {
+                from: 0,
+                to: view.state.doc.length,
+                insert: missingSlash,
+              },
+              selection: { anchor: missingSlash.length },
+            });
+            return true;
+          }
           const followup = followupStateRef.current;
-          if (
-            view.state.doc.toString().length === 0 &&
-            followup?.isVisible &&
-            followup.suggestion
-          ) {
+          if (text.length === 0 && followup?.isVisible && followup.suggestion) {
             onAcceptFollowupRef.current?.('tab');
             return true;
           }
-          return acceptCompletion(view);
+          return true;
         },
       },
       {
@@ -426,17 +536,22 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ]);
 
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
-      if (!update.docChanged) {
+      if (!update.docChanged && !update.selectionSet) {
         return;
+      }
+      if (update.docChanged && pendingPastesRef.current.size > 0) {
+        const nextPasteId = prunePendingPastes(
+          pendingPastesRef.current,
+          update.state.doc.toString(),
+        );
+        if (nextPasteId !== null) {
+          nextPasteIdRef.current = nextPasteId;
+        }
       }
       const selection = update.state.selection.main;
       if (!selection.empty) return;
       const line = update.state.doc.lineAt(selection.head);
-      const textBefore = line.text.slice(0, selection.head - line.from);
-      const shouldCompleteSlash =
-        line.from === 0 &&
-        textBefore.startsWith('/') &&
-        !textBefore.includes('\n');
+      const shouldCompleteSlash = line.from === 0 && line.text.startsWith('/');
       if (!shouldCompleteSlash) return;
       window.setTimeout(() => {
         const view = viewRef.current;
@@ -444,11 +559,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         const nextSelection = view.state.selection.main;
         if (!nextSelection.empty) return;
         const nextLine = view.state.doc.lineAt(nextSelection.head);
-        const nextTextBefore = nextLine.text.slice(
-          0,
-          nextSelection.head - nextLine.from,
-        );
-        if (nextLine.from === 0 && nextTextBefore.startsWith('/')) {
+        if (nextLine.from === 0 && nextLine.text.startsWith('/')) {
           startCompletion(view);
         }
       }, 0);
@@ -475,7 +586,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         placeholderCompartment.of(placeholder('')),
         EditorView.lineWrapping,
         editableCompartment.of(EditorView.editable.of(true)),
-        inputHighlight,
+        inputHighlight(
+          () => commandsRef.current,
+          () => languageRef.current,
+        ),
         inputHighlightTheme,
         slashCompletionRestarter,
         EditorView.inputHandler.of((view, from, to, insert) => {
@@ -530,7 +644,36 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
               event.preventDefault();
               return true;
             }
-            return false;
+            const pasted = normalizePastedText(
+              event.clipboardData?.getData('text/plain') ?? '',
+            );
+            if (!pasted || !isLargePaste(pasted)) return false;
+
+            event.preventDefault();
+            if (
+              view.state.doc.toString() === '' &&
+              followupStateRef.current?.isVisible
+            ) {
+              onDismissFollowupRef.current?.();
+            }
+            const { placeholderText, nextPasteId } =
+              createLargePastePlaceholder(
+                pendingPastesRef.current,
+                nextPasteIdRef.current,
+                pasted,
+              );
+            nextPasteIdRef.current = nextPasteId;
+            const selection = view.state.selection.main;
+            view.dispatch({
+              changes: {
+                from: selection.from,
+                to: selection.to,
+                insert: placeholderText,
+              },
+              selection: { anchor: selection.from + placeholderText.length },
+              scrollIntoView: true,
+            });
+            return true;
           },
         }),
         EditorView.theme({
@@ -582,6 +725,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           '.cm-tooltip-autocomplete ul li[aria-selected]': {
             background: 'var(--bg-tertiary, #1e1e1e)',
             color: 'var(--accent-color, #4a9eff)',
+          },
+          '.cm-tooltip-autocomplete completion-section': {
+            display: 'block',
+            height: '0',
+            margin: '6px 10px 3px',
+            padding: '0',
+            borderBottom: '1px solid var(--border-color, #2a2a2a)',
+          },
+          '.cm-tooltip-autocomplete completion-section:first-of-type': {
+            display: 'none',
           },
           '.cm-completionLabel': {
             fontFamily: 'var(--font-mono, monospace)',
@@ -788,6 +941,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     }
   }, []);
 
+  const getText = useCallback(() => {
+    return viewRef.current?.state.doc.toString() ?? '';
+  }, []);
+
   const retryLast = useCallback(() => {
     const last = historyActionsRef.current.getLastEntry(
       (e) => !e.startsWith('/') && !e.startsWith('!'),
@@ -803,10 +960,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     () => ({
       blur,
       focus,
+      getText,
       insertText,
       retryLast,
     }),
-    [blur, focus, insertText, retryLast],
+    [blur, focus, getText, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

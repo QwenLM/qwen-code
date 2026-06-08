@@ -180,6 +180,12 @@ export type {
   DaemonContextToolDetail,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
+  /** Per-model API and token metrics within a stats response. */
+  DaemonSessionStatsModelMetrics,
+  /** Structured session statistics from `GET /session/:id/stats`. */
+  DaemonSessionStatsStatus,
+  /** Per-tool call count, success/fail, and duration within a stats response. */
+  DaemonSessionStatsToolByName,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
 } from './daemon/index.js';
@@ -191,8 +197,14 @@ export type {
   DaemonMessage,
   /** Assistant (model) response message. */
   DaemonAssistantMessage,
+  /** Insight generation progress update (stage + percent). */
+  DaemonInsightErrorMessage,
+  DaemonInsightProgressMessage,
+  DaemonInsightReadyMessage,
   /** User prompt message. */
   DaemonUserMessage,
+  /** User-triggered shell command output (`!cmd`). */
+  DaemonUserShellMessage,
   /** System status/error/debug message. */
   DaemonSystemMessage,
   /** Plan-mode confirmation message shown during `plan` approval. */

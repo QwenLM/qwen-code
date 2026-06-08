@@ -5,6 +5,7 @@
  */
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
+import type { HookEventName } from '@qwen-code/qwen-code-core';
 import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -24,15 +25,15 @@ export const SERVE_ERROR_KINDS = [
   'missing_file',
   'parse_error',
   'stat_failed',
-  // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
+  // Budget refusal under `--mcp-budget-mode=enforce`.
   // Surfaced on per-server `mcp_server` cells (refused at discovery)
   // and on the workspace-level `mcp_budget` cell (any refusal this pass).
   'budget_exhausted',
-  // Issue #4514 T2.8: runtime MCP mutation routes
+  // Runtime MCP mutation routes
   'mcp_budget_would_exceed',
   'mcp_server_spawn_failed',
   'invalid_config',
-  // Issue #4514 T2.9: prompt deadline + writer idle timeout
+  // Prompt deadline + writer idle timeout
   'prompt_deadline_exceeded',
   'writer_idle_timeout',
 ] as const;
@@ -48,7 +49,7 @@ export class BridgeTimeoutError extends Error {
   readonly label: string;
   readonly timeoutMs: number;
   constructor(label: string, timeoutMs: number) {
-    super(`HttpAcpBridge ${label} timed out after ${timeoutMs}ms`);
+    super(`AcpSessionBridge ${label} timed out after ${timeoutMs}ms`);
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;
@@ -106,10 +107,14 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionStats: 'qwen/status/session/stats',
+  sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
+  workspaceHooks: 'qwen/status/workspace/hooks',
+  sessionHooks: 'qwen/status/session/hooks',
 } as const;
 
 /**
- * Control-plane (mutation) ACP extMethods introduced in #4175 Wave 4 PR 17.
+ * Control-plane (mutation) ACP extMethods introduced in Mutation control.
  * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
  * surface independently from read-only diagnostics. Each route in
  * `server.ts` forwards through the matching extMethod into `acpAgent.ts`
@@ -122,8 +127,11 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
+  sessionRewind: 'qwen/control/session/rewind',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
-  // T2.8 (#4514): runtime MCP server mutation ext-methods
+  workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
+  workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  // Runtime MCP server mutation ext-methods
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
 } as const;
@@ -168,29 +176,38 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   mcpStatus?: ServeMcpServerRuntimeStatus;
   transport: ServeMcpTransport;
   disabled: boolean;
+  hasOAuthTokens?: boolean;
+  source?: 'user' | 'project' | 'extension';
+  config?: {
+    command?: string;
+    args?: string[];
+    httpUrl?: string;
+    url?: string;
+    cwd?: string;
+  };
   description?: string;
   extensionName?: string;
   /**
    * Why this server is not live, when known. Distinguishes
    * operator-disabled (`disabled: true` from `disabledMcpServers`
-   * config) from PR 14 budget-refused (`status: 'error', errorKind:
+   * config) from The budget feature budget-refused (`status: 'error', errorKind:
    * 'budget_exhausted'`). Operators dashboarding the workspace
    * shouldn't have to cross-reference the `errors[]` or `budgets[]`
    * arrays to render a per-server row correctly.
    */
   disabledReason?: 'config' | 'budget';
   /**
-   * F2 (#4175 commit 5): pool-mode workspaces can hold multiple
+   * Pool-mode workspaces can hold multiple
    * `PoolEntry` instances under the same `name` when sessions inject
    * different fingerprints (e.g. per-session OAuth headers). Absent on
-   * pre-F2 daemons and on F2 daemons with `QWEN_SERVE_NO_MCP_POOL=1`;
+   * older daemons and on daemons with `QWEN_SERVE_NO_MCP_POOL=1`;
    * present (≥1) when the pool advertises `mcp_workspace_pool`.
    * Operators use this to render an "N entries" badge or drill into
    * `entrySummary` for the per-entry breakdown.
    */
   entryCount?: number;
   /**
-   * F2 (#4175 commit 5): per-entry breakdown for multi-entry server
+   * Per-entry breakdown for multi-entry server
    * names. `entryIndex` is a stable opaque integer assigned at entry
    * creation (V21-7) — NOT the raw fingerprint, which would leak
    * OAuth/env rotation timing through snapshot diffs. `refs` is the
@@ -212,13 +229,13 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   }>;
 }
 
-/** Budget mode for the MCP client guardrails (issue #4175 PR 14). */
+/** Budget mode for the MCP client guardrails. */
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
  * Workspace-level budget status cell. Surfaced as one entry in
  * `ServeWorkspaceMcpStatus.budgets[]`. The list shape (vs a single
- * `budget?` field) is forward-compat for Wave 5 PR 23, which will
+ * `budget?` field) is forward-compat for a future change that may
  * add a `scope: 'pool'` cell alongside without a schema bump.
  *
  * Consumers MUST tolerate additional entries with unrecognized
@@ -229,16 +246,16 @@ export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   /**
    * Identifies which accounting scope this cell describes.
    *
-   * **PR 14 v1 emits `'session'`** because each ACP session creates
+   * **The budget feature v1 emits `'session'`** because each ACP session creates
    * its own `Config`/`McpClientManager` via `acpAgent.newSessionConfig()`
    * — so the budget caps live MCP clients **per session**, not
    * per-workspace. The snapshot reflects the bootstrap session's
    * view; concurrent sessions each enforce their own copy of the
-   * cap independently. See `qwen-serve-protocol.md` "PR 14 v1
+   * cap independently. See `qwen-serve-protocol.md` "The budget feature v1
    * scope: per-session" for the operator-facing rationale.
    *
    * Future PRs:
-   *   - Wave 5 PR 23 (shared MCP pool) introduces a workspace-scoped
+   *   - A future shared MCP pool may introduce a workspace-scoped
    *     manager and will emit `'workspace'` (or `'pool'`) cells.
    *   - The `string & {}` widening keeps IDE autocomplete + literal
    *     narrowing for known scopes while allowing unknown scopes
@@ -264,16 +281,16 @@ export interface ServeWorkspaceMcpStatus {
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
   errors?: ServeStatusCell[];
-  /** PR 14: live MCP client count (sum across all transports). */
+  /** The budget feature: live MCP client count (sum across all transports). */
   clientCount?: number;
-  /** PR 14: configured budget. Absent when no cap was set. */
+  /** The budget feature: configured budget. Absent when no cap was set. */
   clientBudget?: number;
-  /** PR 14: active enforcement mode. Absent on pre-PR-14 daemons. */
+  /** The budget feature: active enforcement mode. Absent on older daemons. */
   budgetMode?: ServeMcpBudgetMode;
   /**
-   * PR 14: workspace-level status cells for budget enforcement. Always
-   * an array (possibly empty) on post-PR-14 daemons; absent on older
-   * daemons. PR 23 will add a `scope: 'pool'` cell alongside.
+   * The budget feature: workspace-level status cells for budget enforcement. Always
+   * an array (possibly empty) on newer daemons; absent on older
+   * daemons. A future version may add a `scope: 'pool'` cell alongside.
    */
   budgets?: ServeMcpBudgetStatusCell[];
 }
@@ -322,6 +339,8 @@ export interface ServeWorkspaceSkillsStatus {
 export interface ServeWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;
+  baseUrl?: string;
+  fastModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -330,6 +349,14 @@ export interface ServeWorkspaceProviderModel {
   name: string;
   description?: string | null;
   contextLimit?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
 }
@@ -495,11 +522,60 @@ export interface ServeSessionTasksStatus {
   tasks: ServeSessionTaskStatus[];
 }
 
+export interface ServeSessionStatsModelMetrics {
+  api: {
+    totalRequests: number;
+    totalErrors: number;
+    totalLatencyMs: number;
+  };
+  tokens: {
+    prompt: number;
+    candidates: number;
+    total: number;
+    cached: number;
+    thoughts: number;
+  };
+}
+
+export interface ServeSessionStatsToolByName {
+  count: number;
+  success: number;
+  fail: number;
+  durationMs: number;
+  decisions: {
+    accept: number;
+    reject: number;
+    modify: number;
+    auto_accept: number;
+  };
+}
+
+export interface ServeSessionStatsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  sessionStartTimeMs: number;
+  durationMs: number;
+  promptCount: number;
+  models: Record<string, ServeSessionStatsModelMetrics>;
+  tools: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    totalDurationMs: number;
+    byName: Record<string, ServeSessionStatsToolByName>;
+  };
+  files: {
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+  };
+}
+
 /**
- * Issue #4175 PR 16: workspace memory + agents read surfaces.
+ * Workspace memory + agents read surfaces.
  *
  * Both shapes mirror the `kind / status / error? / errorKind? / hint?`
- * cell pattern that PR 12's mcp/skills/providers status structures use,
+ * cell pattern that The mcp/skills/providers status structures use,
  * so the SDK reducer can render any of these with one pattern.
  */
 
@@ -585,6 +661,155 @@ export interface ServeWorkspaceAgentsStatus {
   errors?: ServeStatusCell[];
 }
 
+// ---------------------------------------------------------------------------
+// Issue #4514 T3.9: workspace + session hooks diagnostic surfaces.
+// ---------------------------------------------------------------------------
+
+export type ServeHookMatcherKind =
+  | 'toolName'
+  | 'agentType'
+  | 'trigger'
+  | 'sessionTrigger'
+  | 'error'
+  | 'notificationType';
+
+export interface ServeHookEventMeta {
+  description: string;
+  matcherKind?: ServeHookMatcherKind;
+}
+
+export interface ServeCommandHookConfig {
+  type: 'command';
+  command: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  async?: boolean;
+  shell?: 'bash' | 'powershell';
+  statusMessage?: string;
+}
+
+export interface ServeHttpHookConfig {
+  type: 'http';
+  url: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  if?: string;
+  statusMessage?: string;
+  once?: boolean;
+}
+
+export interface ServeFunctionHookConfig {
+  type: 'function';
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  errorMessage?: string;
+  statusMessage?: string;
+}
+
+export interface ServePromptHookConfig {
+  type: 'prompt';
+  prompt: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  model?: string;
+  statusMessage?: string;
+}
+
+export interface ServeUnknownHookConfig {
+  type: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  statusMessage?: string;
+}
+
+export type ServeHookConfig =
+  | ServeCommandHookConfig
+  | ServeHttpHookConfig
+  | ServeFunctionHookConfig
+  | ServePromptHookConfig
+  | ServeUnknownHookConfig;
+
+export type ServeHookSource =
+  | 'project'
+  | 'user'
+  | 'system'
+  | 'extensions'
+  | 'session';
+
+export interface ServeHookEntry {
+  kind: 'hook';
+  eventName: string;
+  config: ServeHookConfig;
+  source: ServeHookSource;
+  matcher?: string;
+  sequential?: boolean;
+  enabled: boolean;
+  hookId?: string;
+  skillRoot?: string;
+}
+
+export interface ServeWorkspaceHooksStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  initialized: boolean;
+  disabled: boolean;
+  hooks: ServeHookEntry[];
+  events: Record<string, ServeHookEventMeta>;
+  errors?: ServeStatusCell[];
+}
+
+export interface ServeSessionHooksStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  disabled: boolean;
+  hooks: ServeHookEntry[];
+  errors?: ServeStatusCell[];
+}
+
+export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
+  PreToolUse: { description: 'Before tool execution', matcherKind: 'toolName' },
+  PostToolUse: { description: 'After tool execution', matcherKind: 'toolName' },
+  PostToolUseFailure: { description: 'After tool execution fails', matcherKind: 'toolName' },
+  PostToolBatch: { description: 'After a batch of tool calls resolves' },
+  Notification: { description: 'When notifications are sent', matcherKind: 'notificationType' },
+  UserPromptSubmit: { description: 'When the user submits a prompt' },
+  SessionStart: { description: 'When a new session is started', matcherKind: 'sessionTrigger' },
+  Stop: { description: 'Right before Qwen Code concludes its response' },
+  SubagentStart: { description: 'When a subagent is started', matcherKind: 'agentType' },
+  SubagentStop: { description: 'Right before a subagent concludes its response', matcherKind: 'agentType' },
+  PreCompact: { description: 'Before conversation compaction', matcherKind: 'trigger' },
+  PostCompact: { description: 'After conversation compaction', matcherKind: 'trigger' },
+  SessionEnd: { description: 'When a session is ending', matcherKind: 'sessionTrigger' },
+  PermissionRequest: { description: 'When a permission dialog is displayed', matcherKind: 'toolName' },
+  PermissionDenied: { description: 'When a tool call is denied', matcherKind: 'toolName' },
+  StopFailure: { description: 'When the turn ends due to an API error', matcherKind: 'error' },
+  TodoCreated: { description: 'When a new todo item is created' },
+  TodoCompleted: { description: 'When a todo item is marked as completed' },
+};
+
+export function createIdleWorkspaceHooksStatus(
+  workspaceCwd: string,
+): ServeWorkspaceHooksStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: false,
+    disabled: false,
+    hooks: [],
+    events: IDLE_HOOK_EVENTS,
+  };
+}
+
 export function createIdleWorkspaceMemoryStatus(
   workspaceCwd: string,
 ): ServeWorkspaceMemoryStatus {
@@ -612,7 +837,7 @@ export function createIdleWorkspaceAgentsStatus(
 export function createIdleWorkspaceMcpStatus(
   workspaceCwd: string,
 ): ServeWorkspaceMcpStatus {
-  // PR 14: an idle workspace has zero live clients and no enforcement
+  // The budget feature: an idle workspace has zero live clients and no enforcement
   // pressure. `budgetMode` is `'off'` (regardless of how the operator
   // configured it) because no discovery has run, so no reservation
   // could have happened. `budgets` is an empty array, not absent —
@@ -654,7 +879,7 @@ export function createIdleWorkspaceProvidersStatus(
 }
 
 /**
- * #4175 PR 22b/2: idle envelope for `/workspace/env` when the bridge
+ * Idle envelope for `/workspace/env` when the bridge
  * has no `DaemonStatusProvider` injected (Mode A in-process consumers,
  * tests, embedded callers that don't need daemon-host cells). Single
  * construction site so future optional-field additions to
@@ -691,7 +916,8 @@ export type ServeEnvKind =
   | 'platform'
   | 'sandbox'
   | 'proxy'
-  | 'env_var';
+  | 'env_var'
+  | 'memory';
 
 export interface ServeEnvCell extends ServeStatusCell {
   kind: ServeEnvKind;
@@ -858,7 +1084,7 @@ export function mapDomainErrorToErrorKind(
   // dropping the skill `errorKind` classification on diagnostic cells.
   // The `OR .name === 'SkillError'` branch keeps classification working
   // regardless of which copy of the class the value carries.
-  // Wenshao review fold-in (#4298 thread r3262781757).
+
   if (
     err instanceof SkillError ||
     (err as Error | undefined)?.name === 'SkillError'

@@ -40,8 +40,14 @@ export function mapProviderStatus(
       ) {
         contextWindow = model.contextLimit;
       }
-      if (seen.has(model.modelId)) continue;
-      seen.add(model.modelId);
+      const modelKey = [
+        provider.authType,
+        model.modelId,
+        model.baseUrl ?? '',
+        model.envKey ?? '',
+      ].join('\0');
+      if (seen.has(modelKey)) continue;
+      seen.add(modelKey);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -50,6 +56,11 @@ export function mapProviderStatus(
         ...(model.contextLimit !== undefined
           ? { contextWindow: model.contextLimit }
           : {}),
+        ...(model.modalities !== undefined
+          ? { modalities: model.modalities }
+          : {}),
+        ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+        ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
       });
     }
@@ -70,6 +81,7 @@ export function mapSupportedCommands(
     name: command.name,
     description: command.description || '',
     ...(command.input?.hint ? { argumentHint: command.input.hint } : {}),
+    ...mapCommandMeta(command._meta),
     raw: command,
   }));
   const skillCommands = status.availableSkills.map((skill) => ({
@@ -199,6 +211,7 @@ function mapAvailableCommandsUpdate(
         ...(daemonCommand.input?.hint
           ? { argumentHint: daemonCommand.input.hint }
           : {}),
+        ...mapCommandMeta(daemonCommand._meta),
         raw: daemonCommand,
       },
     ];
@@ -222,6 +235,16 @@ function mapAvailableCommandsUpdate(
   return {
     commands: mergeCommands(commands, skillCommands),
     skills,
+  };
+}
+
+function mapCommandMeta(
+  meta: Record<string, unknown> | null | undefined,
+): Pick<DaemonCommandInfo, 'source'> {
+  const record = meta ?? undefined;
+  const source = getString(record, 'source');
+  return {
+    ...(source ? { source } : {}),
   };
 }
 

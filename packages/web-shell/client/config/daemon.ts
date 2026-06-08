@@ -21,6 +21,7 @@ export function getDaemonToken(): string | undefined {
 
 export function removeDaemonTokenFromUrl(): void {
   if (typeof window === 'undefined') return;
+  if (import.meta.env.DEV) return;
   const url = new URL(window.location.href);
   if (!url.searchParams.has('token')) return;
   url.searchParams.delete('token');

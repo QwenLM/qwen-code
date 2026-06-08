@@ -998,6 +998,86 @@ describe('PermissionManager', () => {
       ).toBe('ask');
     });
 
+    // Regression coverage for issue #4093: command substitution must never
+    // produce a hard 'deny' from resolveDefaultPermission. Before the fix
+    // the L4 default branch returned 'deny' for any command containing
+    // $(), backticks, <(), or >(), which:
+    //   1. could not be overridden by YOLO mode, and
+    //   2. fired inconsistently — only when hasRelevantRules() happened to
+    //      be true (e.g. a compound command where another sub-command
+    //      matched an unrelated allow rule). Standalone substitution
+    //      commands with no relevant rule skipped L4 entirely and got
+    //      'ask' from L3, producing surprising asymmetry.
+    // Both shapes must now resolve to 'ask' regardless of rule shape.
+    describe('command substitution (issue #4093)', () => {
+      it('returns ask for a standalone command with $() substitution', async () => {
+        // No 'python3' rule is configured, but the substitution must not
+        // trip a deny — the only acceptable answer is 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for a compound command where one sub-command matches an allow rule and another contains $()', async () => {
+        // Structurally equivalent to the scenario reported in issue #4093:
+        // the first sub-command (`git status`) matches the surrounding
+        // describe's `Bash(git *)` allow rule, which makes
+        // hasRelevantRules() return true and triggers full PM evaluation;
+        // the second sub-command (`python3 -c "..."`) contains command
+        // substitution and does not match any rule, so it falls into
+        // resolveDefaultPermission. Before the fix, that path returned
+        // 'deny' for the substitution sub-command and the most-restrictive
+        // combine made the whole compound deny. After the fix it returns
+        // 'ask' and the compound resolves to 'ask'.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && python3 -c "print($(echo hello))"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for backtick command substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo `whoami`',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for process substitution <()', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'diff <(ls /a) <(ls /b)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for >() output process substitution', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo data > >(tee log.txt)',
+          }),
+        ).toBe('ask');
+      });
+
+      it('still honors explicit deny rules over substitution-bearing commands', async () => {
+        // The 'ask' from substitution must never downgrade a real deny rule.
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'rm -rf "$(pwd)/build"',
+          }),
+        ).toBe('deny');
+      });
+    });
+
     it('isCommandAllowed delegates to evaluate', async () => {
       expect(await pm.isCommandAllowed('git commit')).toBe('allow');
       expect(await pm.isCommandAllowed('rm -rf /')).toBe('deny');

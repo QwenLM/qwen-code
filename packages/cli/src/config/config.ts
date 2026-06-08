@@ -76,6 +76,11 @@ export function isValidSessionId(value: string): boolean {
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  parseDurationSeconds,
+  validateMaxToolCalls,
+  validateMaxWallTimeSetting,
+} from '../utils/runBudget.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -171,7 +176,20 @@ export interface CliArgs {
   forkSession?: boolean | undefined;
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
+  /**
+   * Start the session inside a git worktree. Accepted forms:
+   * - bare `--worktree` (empty string from yargs) → auto-generated slug
+   * - `--worktree foo` / `--worktree=foo` → explicit slug
+   * - `--worktree=#123` / `--worktree https://github.com/o/r/pull/123` → PR ref
+   *
+   * Consumed by `setupStartupWorktree()` before `loadCliConfig()`. When set,
+   * the CLI chdirs into `<repoRoot>/.qwen/worktrees/<slug>/` and the entire
+   * session runs inside that worktree.
+   */
+  worktree?: string | undefined;
   maxSessionTurns: number | undefined;
+  maxWallTime: string | undefined;
+  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -825,9 +843,27 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           hidden: true,
         })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+            'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
+            'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
+            'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
+        })
+        .option('max-wall-time', {
+          type: 'string',
+          description:
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
+        })
+        .option('max-tool-calls', {
+          type: 'number',
+          description:
+            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',
@@ -1005,7 +1041,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand);
 
   yargsInstance
@@ -1117,12 +1153,74 @@ export async function loadHierarchicalGeminiMemory(
   );
 }
 
+/**
+ * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
+ * unlimited). Order of precedence: `--max-wall-time` flag, then
+ * `model.maxWallTimeSeconds` from settings, else unlimited.
+ *
+ * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
+ * settings entry is a plain number of seconds (parity with
+ * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
+ * values up front — a typo in a CI guardrail should fail loud at startup,
+ * not silently disable the budget.
+ */
+function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
+  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
+    try {
+      return parseDurationSeconds(String(argv.maxWallTime));
+    } catch (err) {
+      throw new Error(`--max-wall-time: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxWallTimeSeconds;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxWallTimeSetting(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
+/**
+ * Resolves the tool-call budget for a run. Returns the validated count
+ * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
+ * `model.maxToolCalls` from settings, else unlimited.
+ *
+ * Symmetric with `resolveMaxWallTimeSeconds`: yargs accepts `NaN` from
+ * non-numeric flag values, and the enforcer's `>= 0` gate would silently
+ * disable the budget for `NaN` / negatives. Validate up front so a typo
+ * in a CI guardrail fails loudly.
+ */
+function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
+  if (argv.maxToolCalls !== undefined && argv.maxToolCalls !== null) {
+    try {
+      return validateMaxToolCalls(argv.maxToolCalls);
+    } catch (err) {
+      throw new Error(`--max-tool-calls: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxToolCalls;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxToolCalls(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -1423,12 +1521,9 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
-  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
-  // while preserving original casing; downstream lookups go through
-  // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output. Shared helper since the MCP
-  // restart refresh path (`cli/src/acp-integration/acpAgent.ts`) MUST agree
-  // byte-for-byte with this — #4175 F1 (#4319) fold-in for #4329.
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
   const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
@@ -1705,6 +1800,7 @@ export async function loadCliConfig(
       screenReader,
     },
     telemetry: telemetrySettings,
+    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
@@ -1726,8 +1822,11 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
+    maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
@@ -1766,10 +1865,12 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? false),
+      : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1807,6 +1908,11 @@ export async function loadCliConfig(
                   settings.agents.arena.preserveArtifacts ?? false,
               }
             : undefined,
+        }
+      : undefined,
+    worktree: settings.worktree
+      ? {
+          symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,
   };

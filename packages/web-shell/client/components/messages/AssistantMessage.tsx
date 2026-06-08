@@ -18,7 +18,9 @@ export const AssistantMessage = memo(function AssistantMessage({
       {thinking && !compactMode && (
         <div className={styles.thinking}>
           <span className={styles.prefix}>✦</span>
-          <pre>{thinking}</pre>
+          <div className={styles.thinkingBody}>
+            <Markdown content={thinking} />
+          </div>
         </div>
       )}
 
@@ -26,7 +28,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.content}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.contentBody}>
-            <Markdown content={content} />
+            <Markdown content={content} source="assistant" />
           </div>
         </div>
       )}

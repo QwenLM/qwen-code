@@ -10,7 +10,7 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * with ACP taking precedence on duplicates.
  */
 export function getLocalCommands(t: Translate): CommandInfo[] {
-  return [
+  const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
     {
       name: 'theme',
@@ -26,13 +26,17 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'plan', description: t('local.plan'), argumentHint: '<prompt>' },
     {
+      name: 'btw',
+      description: t('local.btw'),
+      argumentHint: '<your question>',
+    },
+    {
       name: 'copy',
       description: t('local.copy'),
       argumentHint: '[code|<lang>|latex|inline-latex] [index]',
     },
     { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
-    { name: 'mode', description: t('local.mode'), argumentHint: '<mode>' },
     {
       name: 'approval-mode',
       description: t('local.approvalMode'),
@@ -43,13 +47,23 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.model'),
       argumentHint: '[--fast] [<model>]',
     },
-    { name: 'mcp', description: t('local.mcp') },
+    {
+      name: 'mcp',
+      description: t('local.mcp'),
+      argumentHint: 'desc|nodesc|schema|auth|noauth',
+    },
     { name: 'skills', description: t('local.skills') },
+    { name: 'status', description: t('local.status') },
+    {
+      name: 'stats',
+      description: t('local.stats'),
+      argumentHint: '[model|tools]',
+      subcommands: ['model', 'tools'],
+    },
     { name: 'tools', description: t('local.tools'), argumentHint: '[desc]' },
     {
       name: 'memory',
       description: t('local.memory'),
-      argumentHint: 'show|add|refresh',
     },
     {
       name: 'context',
@@ -59,7 +73,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     {
       name: 'agents',
       description: t('local.agents'),
-      argumentHint: 'manage|create user|create project',
+      argumentHint: 'manage|create',
     },
     { name: 'recap', description: t('local.recap') },
     { name: 'clear', description: t('local.clear') },
@@ -76,4 +90,8 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '<session-id>',
     },
   ];
+  return commands.map((command) => ({
+    ...command,
+    source: 'builtin-command',
+  }));
 }

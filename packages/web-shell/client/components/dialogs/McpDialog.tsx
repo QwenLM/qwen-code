@@ -22,13 +22,58 @@ interface ServerAction {
   run: () => void;
 }
 
-function statusLabel(server: DaemonWorkspaceMcpServerStatus): string {
+function getServerStatus(server: DaemonWorkspaceMcpServerStatus): string {
   if (server.disabled) {
     return server.disabledReason
       ? `disabled:${server.disabledReason}`
       : 'disabled';
   }
   return server.mcpStatus || 'unknown';
+}
+
+function statusText(
+  status: string,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  if (status.startsWith('disabled:')) {
+    return `✗ ${t('mcp.status.disabled')}:${status.slice('disabled:'.length)}`;
+  }
+  switch (status) {
+    case 'connected':
+      return `✓ ${t('mcp.status.connected')}`;
+    case 'connecting':
+      return `… ${t('mcp.status.connecting')}`;
+    case 'disconnected':
+      return `✗ ${t('mcp.status.disconnected')}`;
+    case 'disabled':
+      return `✗ ${t('mcp.status.disabled')}`;
+    default:
+      return status || t('mcp.status.unknown');
+  }
+}
+
+function statusClass(status: string) {
+  if (status === 'connected') return 'mcp-status-connected';
+  if (status === 'connecting') return 'mcp-status-connecting';
+  if (status === 'disconnected') return 'mcp-status-disconnected';
+  if (status === 'disabled' || status.startsWith('disabled:')) {
+    return 'mcp-status-disabled';
+  }
+  return 'mcp-status-unknown';
+}
+
+function StatusLabel({
+  status,
+  t,
+}: {
+  status: string;
+  t: ReturnType<typeof useI18n>['t'];
+}) {
+  return (
+    <span className={dp('mcp-status', statusClass(status))}>
+      {statusText(status, t)}
+    </span>
+  );
 }
 
 function sourceLabel(
@@ -77,6 +122,19 @@ function schemaSummary(
     lines.push(`${required.has(name) ? '*' : ' '} ${name}: ${type}${desc}`);
   }
   return lines;
+}
+
+function toolAnnotationText(
+  tool: DaemonWorkspaceMcpToolStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  const annotations = tool.annotations ?? {};
+  const hints: string[] = [];
+  if (annotations.destructiveHint) hints.push(t('mcp.annotation.destructive'));
+  if (annotations.readOnlyHint) hints.push(t('mcp.annotation.readOnly'));
+  if (annotations.openWorldHint) hints.push(t('mcp.annotation.openWorld'));
+  if (annotations.idempotentHint) hints.push(t('mcp.annotation.idempotent'));
+  return hints.join(', ');
 }
 
 export function McpDialog({ onClose }: McpDialogProps) {
@@ -151,6 +209,16 @@ export function McpDialog({ onClose }: McpDialogProps) {
     });
   }, [status, t]);
 
+  const footerText = useMemo(() => {
+    if (view === 'servers') {
+      return servers.length === 0
+        ? t('dialog.footer.close')
+        : t('dialog.footer.mcpServers');
+    }
+    if (view === 'tool') return t('dialog.footer.back');
+    return t('dialog.footer.mcpSelect');
+  }, [servers.length, t, view]);
+
   const handleRestart = useCallback(
     (serverName: string) => {
       setBusyServer(serverName);
@@ -198,44 +266,56 @@ export function McpDialog({ onClose }: McpDialogProps) {
     if (!selected) return [];
     const toolStatus = toolsByServer[selected.name];
     const toolCount = toolStatus?.tools.length ?? 0;
-    return [
-      {
+    const nextActions: ServerAction[] = [];
+    if (!selected.disabled && (toolStatus || loadingTools === selected.name)) {
+      nextActions.push({
         label: t('mcp.action.tools'),
         hint:
           loadingTools === selected.name
             ? t('common.loading')
-            : toolStatus
-              ? `${toolCount} ${t('mcp.tools')}`
-              : t('mcp.action.toolsHint'),
+            : `${toolCount} ${t('mcp.tools')}`,
+        disabled: loadingTools === selected.name || toolCount === 0,
         run: () => {
           setView('tools');
           setToolIdx(0);
           if (!toolStatus) loadServerTools(selected.name);
         },
-      },
-      {
-        label: selected.disabled
-          ? t('tools.update.enable')
-          : t('tools.update.disable'),
-        hint: t('mcp.action.authHint'),
-        disabled: true,
-        run: () => setMessage(t('mcp.action.enableMessage')),
-      },
-      {
+      });
+    } else if (!selected.disabled) {
+      nextActions.push({
+        label: t('mcp.action.tools'),
+        hint: t('mcp.action.toolsHint'),
+        run: () => {
+          setView('tools');
+          setToolIdx(0);
+          loadServerTools(selected.name);
+        },
+      });
+    }
+    nextActions.push({
+      label: selected.disabled
+        ? t('tools.update.enable')
+        : t('tools.update.disable'),
+      hint: t('mcp.action.authHint'),
+      disabled: true,
+      run: () => setMessage(t('mcp.action.enableMessage')),
+    });
+    if (!selected.disabled) {
+      nextActions.push({
         label: t('mcp.action.auth'),
         hint: t('mcp.action.authHint'),
         disabled: true,
         run: () => setMessage(t('mcp.action.authMessage')),
-      },
-      {
-        label: selected.disabled
-          ? t('mcp.action.reconnect')
-          : t('mcp.action.restart'),
-        hint: selected.disabled ? t('mcp.action.authHint') : undefined,
-        disabled: selected.disabled || busyServer === selected.name,
+      });
+    }
+    if (!selected.disabled && getServerStatus(selected) === 'disconnected') {
+      nextActions.push({
+        label: t('mcp.action.reconnect'),
+        disabled: busyServer === selected.name,
         run: () => handleRestart(selected.name),
-      },
-    ];
+      });
+    }
+    return nextActions;
   }, [
     busyServer,
     handleRestart,
@@ -328,14 +408,18 @@ export function McpDialog({ onClose }: McpDialogProps) {
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>
           {view === 'servers'
-            ? t('mcp.title')
+            ? t('local.mcp')
             : view === 'tools'
-              ? `${selected?.name ?? 'MCP'} ${t('mcp.tools')}`
+              ? t('mcp.toolsForServer', {
+                  name: selected?.name ?? 'MCP',
+                })
               : view === 'tool'
                 ? selectedTool?.name
                 : selected?.name}
         </span>
-        <span className={dp('resume-picker-count')}>{budgetText}</span>
+        {view !== 'servers' && (
+          <span className={dp('resume-picker-count')}>{budgetText}</span>
+        )}
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
@@ -383,13 +467,12 @@ export function McpDialog({ onClose }: McpDialogProps) {
                   {server.name}
                 </span>
                 <span className={dp('resume-picker-item-badge')}>
-                  {statusLabel(server)}
+                  <StatusLabel status={getServerStatus(server)} t={t} />
                 </span>
               </div>
               <div className={dp('resume-picker-item-meta')}>
                 {server.transport}
                 {server.extensionName ? ` · ${server.extensionName}` : ''}
-                {server.description ? ` · ${server.description}` : ''}
               </div>
             </div>
           ))}
@@ -400,7 +483,8 @@ export function McpDialog({ onClose }: McpDialogProps) {
         <div className={dp('resume-picker-list')} ref={listRef}>
           <div className={dp('dialog-detail')}>
             <div>
-              {t('mcp.status')}: {statusLabel(selected)}
+              {t('mcp.status')}:{' '}
+              <StatusLabel status={getServerStatus(selected)} t={t} />
             </div>
             <div>
               {t('mcp.source')}: {sourceLabel(selected, t)}
@@ -414,7 +498,6 @@ export function McpDialog({ onClose }: McpDialogProps) {
                 ? t('common.loading')
                 : `${toolsByServer[selected.name]?.tools.length ?? 0} ${t('mcp.tools')}`}
             </div>
-            {selected.description && <div>{selected.description}</div>}
           </div>
           {actions.map((action, i) => (
             <div
@@ -452,34 +535,43 @@ export function McpDialog({ onClose }: McpDialogProps) {
               {t('mcp.emptyTools')}
             </div>
           )}
-          {selectedTools.map((tool, i) => (
-            <div
-              key={tool.name}
-              className={dp(
-                'resume-picker-item',
-                i === toolIdx ? 'selected' : undefined,
-              )}
-              onClick={() => setView('tool')}
-              onMouseEnter={() => setToolIdx(i)}
-            >
-              <div className={dp('resume-picker-item-row')}>
-                <span className={dp('resume-picker-item-prefix')}>
-                  {i === toolIdx ? '›' : ' '}
-                </span>
-                <span className={dp('resume-picker-item-title')}>
-                  {tool.name}
-                </span>
-                <span className={dp('resume-picker-item-badge')}>
-                  {tool.isValid ? t('common.valid') : t('common.invalid')}
-                </span>
+          {selectedTools.map((tool, i) => {
+            const annotations = toolAnnotationText(tool, t);
+            return (
+              <div
+                key={tool.name}
+                className={dp(
+                  'resume-picker-item',
+                  i === toolIdx ? 'selected' : undefined,
+                )}
+                onClick={() => setView('tool')}
+                onMouseEnter={() => setToolIdx(i)}
+              >
+                <div className={dp('resume-picker-item-row')}>
+                  <span className={dp('resume-picker-item-prefix')}>
+                    {i === toolIdx ? '›' : ' '}
+                  </span>
+                  <span className={dp('resume-picker-item-title')}>
+                    {tool.name}
+                  </span>
+                  {!tool.isValid ? (
+                    <span className={dp('resume-picker-item-badge')}>
+                      {t('common.invalid')}
+                    </span>
+                  ) : annotations ? (
+                    <span className={dp('resume-picker-item-badge')}>
+                      {annotations}
+                    </span>
+                  ) : null}
+                </div>
+                {!tool.isValid && (
+                  <div className={dp('resume-picker-item-meta')}>
+                    {tool.invalidReason || t('common.invalid')}
+                  </div>
+                )}
               </div>
-              <div className={dp('resume-picker-item-meta')}>
-                {tool.description ||
-                  tool.invalidReason ||
-                  t('mcp.noDescription')}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -487,11 +579,7 @@ export function McpDialog({ onClose }: McpDialogProps) {
 
       <div className={dp('resume-picker-sep')} />
 
-      <div className={dp('resume-picker-footer')}>
-        {view === 'servers'
-          ? t('dialog.footer.mcpServers')
-          : t('dialog.footer.mcpSelect')}
-      </div>
+      <div className={dp('resume-picker-footer')}>{footerText}</div>
     </div>
   );
 }
@@ -509,12 +597,11 @@ function ToolDetail({ tool }: { tool: DaemonWorkspaceMcpToolStatus }) {
             {t('mcp.serverTool')}: {tool.serverToolName}
           </div>
         )}
-        <div>
-          {t('mcp.status')}:{' '}
-          {tool.isValid
-            ? t('common.valid')
-            : tool.invalidReason || t('common.invalid')}
-        </div>
+        {!tool.isValid && (
+          <div>
+            {t('mcp.status')}: {tool.invalidReason || t('common.invalid')}
+          </div>
+        )}
         {tool.description && (
           <div>
             {t('mcp.description')}: {tool.description}

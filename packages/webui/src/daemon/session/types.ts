@@ -11,12 +11,14 @@ import type {
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonAvailableCommand,
+  DaemonSessionBtwResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionStatsStatus,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -96,6 +98,8 @@ export interface DaemonModelInfo {
     audio?: boolean;
     video?: boolean;
   };
+  baseUrl?: string;
+  envKey?: string;
   isRuntime?: boolean;
 }
 
@@ -103,6 +107,7 @@ export interface DaemonCommandInfo {
   name: string;
   description: string;
   argumentHint?: string;
+  source?: string;
   raw: DaemonAvailableCommand;
 }
 
@@ -196,8 +201,13 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  btwSession(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonSessionBtwResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
+  getStats(): Promise<DaemonSessionStatsStatus>;
 }
 
 export interface DaemonSessionContextValue {

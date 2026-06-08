@@ -14,7 +14,7 @@ import {
   runQwenServe,
   validatePolicyConfig,
 } from './runQwenServe.js';
-import type { HttpAcpBridge } from './httpAcpBridge.js';
+import type { HttpAcpBridge } from './acpSessionBridge.js';
 
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the
@@ -208,6 +208,7 @@ describe('runQwenServe daemon logger wiring', () => {
       publishWorkspaceEvent: vi.fn(),
       getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
       resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
     } as unknown as HttpAcpBridge;
 
     // Point daemon logger at our temp debug dir

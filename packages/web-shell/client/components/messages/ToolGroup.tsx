@@ -33,6 +33,11 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { CompactModeContext } from '../../App';
+import {
+  type ToolHeaderExtraRenderInfo,
+  type ToolHeaderKind,
+  useWebShellCustomization,
+} from '../../customization';
 import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
@@ -247,28 +252,6 @@ function getWriteContent(tool: ACPToolCall): string {
   return '';
 }
 
-function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
-  const content = useMemo(() => getWriteContent(tool), [tool]);
-  const lines = useMemo(() => {
-    const nextLines = content.split('\n');
-    if (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
-      nextLines.pop();
-    }
-    return nextLines;
-  }, [content]);
-  if (!content) return null;
-
-  return (
-    <div className={styles.expandedWrite}>
-      <pre className={styles.expandedOutput}>
-        {lines.map((line, i) => (
-          <span key={i} className={styles.writeAdd}>{`+ ${line}\n`}</span>
-        ))}
-      </pre>
-    </div>
-  );
-}
-
 function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
   const todos = extractTodosFromToolCall(tool);
   if (todos) {
@@ -405,6 +388,46 @@ function shouldAutoExpand(tool: ACPToolCall): boolean {
   return false;
 }
 
+function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
+  const name = tool.toolName.toLowerCase();
+  if (isSubAgentToolCall(tool)) return 'agent';
+  if (isShellToolName(name)) return 'shell';
+  if (isWebFetchToolName(name)) return 'fetch';
+  if (name === 'todowrite') return 'todo';
+  if (name === 'read' || name === 'read_file' || name === 'readfile')
+    return 'read';
+  if (name === 'edit' || name === 'editfile') return 'edit';
+  if (name === 'write' || name === 'write_file' || name === 'writefile')
+    return 'write';
+  return 'other';
+}
+
+function DefaultToolHeaderExtra({
+  description,
+  elapsed,
+}: {
+  description: string;
+  elapsed: string;
+}) {
+  return (
+    <>
+      {description && <span className={styles.lineArg}>{description}</span>}
+      {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+    </>
+  );
+}
+
+function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
+  const { renderToolHeaderExtra } = useWebShellCustomization();
+  if (renderToolHeaderExtra) return <>{renderToolHeaderExtra(info)}</>;
+  return (
+    <DefaultToolHeaderExtra
+      description={info.description}
+      elapsed={info.elapsed}
+    />
+  );
+}
+
 function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
@@ -427,6 +450,7 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
+  const displayName = formatToolDisplayName(activeTool.toolName);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
@@ -439,17 +463,23 @@ function CompactToolGroup({
     <div className={styles.compactGroup}>
       <div className={styles.compactHeader}>
         <StatusIcon status={overallStatus} />
-        <span className={styles.lineName}>
-          {formatToolDisplayName(activeTool.toolName)}
-        </span>
+        <span className={styles.lineName}>{displayName}</span>
         {tools.length > 1 && (
           <span className={styles.compactCount}>
             {'× '}
             {tools.length}
           </span>
         )}
-        {description && <span className={styles.lineArg}>{description}</span>}
-        {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+        <ToolHeaderExtra
+          info={{
+            kind: getToolHeaderKind(activeTool),
+            tool: activeTool,
+            displayName,
+            description,
+            elapsed,
+            workspaceCwd,
+          }}
+        />
       </div>
       <div className={styles.compactHint}>{t('compact.hint')}</div>
     </div>
@@ -473,6 +503,7 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
+    a.args === b.args &&
     a.content === b.content &&
     a.title === b.title &&
     areSubToolsEqual(a.subTools, b.subTools)
@@ -511,6 +542,7 @@ const ToolLine = memo(function ToolLine({
   onConfirm,
   workspaceCwd,
 }: ToolLineProps) {
+  const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
@@ -524,13 +556,13 @@ const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
   );
+  const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
   const hasSubToolApproval =
     !hasApproval &&
     approval?.toolCallId &&
-    isSubAgentToolCall(tool) &&
+    isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
-  const isAgent = isSubAgentToolCall(tool);
   const isRunningAgent = isAgent && tool.status === 'in_progress';
 
   useEffect(() => {
@@ -541,7 +573,16 @@ const ToolLine = memo(function ToolLine({
   }, [isRunningAgent]);
 
   if (isAgent) {
+    if (hasApproval && onConfirm) {
+      return (
+        <div className={styles.line}>
+          <ToolApproval request={approval} onConfirm={onConfirm} />
+        </div>
+      );
+    }
+
     const info = getAgentDisplayInfo(tool, now);
+    const displayName = t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const toolHint = getAgentCurrentToolHint(tool);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
@@ -553,12 +594,19 @@ const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         <div className={styles.lineMain}>
           <StatusIcon status={tool.status} />
-          <span className={styles.lineName}>Agent</span>
-          {info.description && (
-            <span className={styles.lineArg}>
-              {truncateText(info.description, 60)}
-            </span>
-          )}
+          <span className={styles.lineName}>{displayName}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: 'agent',
+              tool,
+              displayName,
+              description: info.description
+                ? truncateText(info.description, 60)
+                : '',
+              elapsed: '',
+              workspaceCwd,
+            }}
+          />
         </div>
         {!isComplete && (
           <div
@@ -620,6 +668,7 @@ const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
+  const displayName = formatToolDisplayName(tool.toolName);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
@@ -629,6 +678,14 @@ const ToolLine = memo(function ToolLine({
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
 
+  if (hasApproval && onConfirm) {
+    return (
+      <div className={styles.line}>
+        <ToolApproval request={approval} onConfirm={onConfirm} />
+      </div>
+    );
+  }
+
   return (
     <div className={styles.line}>
       <div
@@ -636,15 +693,18 @@ const ToolLine = memo(function ToolLine({
         onClick={expandable ? () => setExpanded(!expanded) : undefined}
       >
         <StatusIcon status={tool.status} />
-        <span className={styles.lineName}>
-          {formatToolDisplayName(tool.toolName)}
-        </span>
-        {description && <span className={styles.lineArg}>{description}</span>}
-        {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+        <span className={styles.lineName}>{displayName}</span>
+        <ToolHeaderExtra
+          info={{
+            kind: getToolHeaderKind(tool),
+            tool,
+            displayName,
+            description,
+            elapsed,
+            workspaceCwd,
+          }}
+        />
       </div>
-      {hasApproval && onConfirm && (
-        <ToolApproval request={approval} onConfirm={onConfirm} />
-      )}
       {isTodo && <TodoWriteContent tool={tool} />}
       {!isTodo && !expanded && result && (
         <div className={styles.lineOutput}>{result}</div>
@@ -653,7 +713,7 @@ const ToolLine = memo(function ToolLine({
         <div className={styles.lineDetail}>
           {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
           {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedWriteContent tool={tool} />
+            <ExpandedEditDiff tool={tool} />
           )}
           {(name === 'edit' || name === 'write' || name === 'editfile') && (
             <ExpandedEditDiff tool={tool} />
@@ -674,10 +734,17 @@ export const ToolGroup = memo(function ToolGroup({
   workspaceCwd,
 }: ToolGroupProps) {
   const compactMode = useContext(CompactModeContext);
+  const directApprovalTool =
+    pendingApproval?.toolCallId &&
+    tools.find((t) => t.callId === pendingApproval.toolCallId);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
+
+  if (directApprovalTool && tools.length === 1 && onConfirm) {
+    return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
+  }
 
   if (showCompact) {
     return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;

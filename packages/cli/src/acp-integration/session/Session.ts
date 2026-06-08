@@ -23,6 +23,8 @@ import type {
   MessageBus,
   StreamEvent,
   ChatCompressionInfo,
+  AutoModeDecision,
+  AutoModeOutcome,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -67,11 +69,13 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
@@ -139,6 +143,13 @@ import {
 
 const debugLogger = createDebugLogger('SESSION');
 
+function maskApiKeyForDisplay(apiKey: string | undefined): string {
+  const trimmed = apiKey?.trim() ?? '';
+  if (trimmed.length === 0) return '(not set)';
+  if (trimmed.length <= 6) return '***';
+  return `${trimmed.slice(0, 3)}...${trimmed.slice(-4)}`;
+}
+
 type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
@@ -171,6 +182,31 @@ export function computeInitialTurnFromHistory(
   }
 
   return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+export async function fireSessionPermissionDeniedForAutoMode(
+  config: Config,
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+  toolName: string,
+  toolParams: Record<string, unknown>,
+  callId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (
+    !config.getDisableAllHooks?.() &&
+    shouldFirePermissionDeniedForAutoMode(decision, outcome)
+  ) {
+    await config
+      .getHookSystem?.()
+      ?.firePermissionDeniedEvent(
+        toolName,
+        toolParams,
+        callId,
+        getAutoModePermissionDeniedReason(decision),
+        signal,
+      );
+  }
 }
 
 function getRecordPromptIds(record: ChatRecord): string[] {
@@ -285,6 +321,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private readonly createdAt: number = Date.now();
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
@@ -347,6 +384,14 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  getTurnCount(): number {
+    return this.turn;
+  }
+
+  getCreatedAt(): number {
+    return this.createdAt;
+  }
+
   /**
    * Install the message rewrite middleware if configured.
    * Must be called AFTER history replay to avoid rewriting historical messages.
@@ -394,7 +439,7 @@ export class Session implements SessionContext {
     }
 
     const chat = this.config.getGeminiClient()!.getChat();
-    const apiHistory = chat.getHistory();
+    const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
       targetTurnIndex,
@@ -418,7 +463,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistory();
+    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
   restoreHistory(history: Content[]): void {
@@ -816,7 +861,7 @@ export class Session implements SessionContext {
             // arena) so the model sees them, matching the behaviour of
             // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
-            // should avoid edits (#1151).
+            // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
               parts = [...systemReminders, ...parts];
@@ -1039,16 +1084,10 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
-      // Get response text from the chat history
-      const history = this.#getCurrentChat().getHistory();
-      const lastModelMessage = history
-        .filter((msg: Content) => msg.role === 'model')
-        .pop();
+      // Extract last model text without cloning the full history.
       const responseText =
-        lastModelMessage?.parts
-          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
-          .map((p: { text: string }) => p.text)
-          .join('') || '[no response text]';
+        this.#getCurrentChat().getLastModelMessageText?.() ||
+        '[no response text]';
 
       const response = await messageBus.request<
         HookExecutionRequest,
@@ -1293,8 +1332,12 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          const reasonClause =
+            compressed.triggerReason === 'image_overflow'
+              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
+              : `approached the input token limit for ${this.config.getModel()}`;
           compressionDiagnostic =
-            `IMPORTANT: This conversation approached the input token limit for ${this.config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
             `${compressed.newTokenCount ?? 'unknown'} tokens).`;
@@ -1807,7 +1850,11 @@ export class Session implements SessionContext {
         : undefined,
     );
 
-    // A1 (#4511): notify attached clients of an in-session model switch so a
+    const after = this.config.getContentGeneratorConfig?.();
+    const effectiveAuthType = after?.authType ?? selectedAuthType;
+    const effectiveModelId = after?.model ?? parsed.modelId;
+
+    // Notify attached clients of an in-session model switch so a
     // `/model` slash command or plan-mode change reaches the bus (today only
     // the HTTP `POST /session/:id/model` path publishes `model_switched`).
     // `current_model_update` is NOT an ACP `SessionUpdate` variant (the type
@@ -1821,7 +1868,7 @@ export class Session implements SessionContext {
       .extNotification('qwen/notify/session/model-update', {
         v: 1,
         sessionId: this.sessionId,
-        currentModelId: parsed.modelId,
+        currentModelId: effectiveModelId,
       })
       .catch(() => {
         // Advisory only; a failed notification must not fail the model switch.
@@ -1836,6 +1883,18 @@ export class Session implements SessionContext {
         selectedAuthType,
       );
     }
+
+    return {
+      _meta: {
+        qwenModelSwitch: {
+          authType: effectiveAuthType,
+          modelId: effectiveModelId,
+          baseUrl: after?.baseUrl ?? '(default)',
+          apiKey: maskApiKeyForDisplay(after?.apiKey),
+          isRuntime: rawModelId.startsWith('$runtime|'),
+        },
+      },
+    };
   }
 
   /**
@@ -1948,7 +2007,7 @@ export class Session implements SessionContext {
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
    * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
-   * silently inert (#1151) and subagent/arena sessions lose context.
+   * silently inert and subagent/arena sessions lose context.
    *
    * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
    * included here. Managed auto-memory requires a prefetch pipeline that
@@ -2208,7 +2267,10 @@ export class Session implements SessionContext {
               messages,
               config: this.config,
               signal: abortSignal,
-              skipClassifier: shouldFallback(denialState).fallback,
+              skipClassifierReason: (() => {
+                const fb = shouldFallback(denialState);
+                return fb.fallback ? fb.reason : undefined;
+              })(),
             });
 
             // Apply decision via shared helper — eliminates ~40 lines of
@@ -2939,11 +3001,7 @@ export class Session implements SessionContext {
           processedQueryParts.push(clampInlineMediaPart(part));
         }
       }
-    } else if (embeddedContext.length > 0) {
-      // No @path files to read, but we have embedded context
-      processedQueryParts.push({ text: initialQueryText.trim() });
     } else {
-      // No @path files found
       processedQueryParts.push({ text: initialQueryText.trim() });
     }
 

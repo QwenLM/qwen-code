@@ -23,8 +23,18 @@ import {
 function runtimeMs(
   entry: { startTime: number; endTime?: number },
   now: number,
-) {
+): number {
   return Math.max(0, (entry.endTime ?? now) - entry.startTime);
+}
+
+/** Include `{key: value}` in a spread only when `value` is defined; empty object otherwise. */
+function optionalField<K extends string, V>(
+  key: K,
+  value: V | undefined,
+): { [P in K]: V } | Record<string, never> {
+  return value !== undefined
+    ? ({ [key]: value } as { [P in K]: V })
+    : ({} as Record<string, never>);
 }
 
 function serializeAgentTask(
@@ -40,15 +50,11 @@ function serializeAgentTask(
     startTime: entry.startTime,
     runtimeMs: runtimeMs(entry, now),
     outputFile: entry.outputFile,
-    ...(entry.endTime !== undefined ? { endTime: entry.endTime } : {}),
-    ...(entry.subagentType !== undefined
-      ? { subagentType: entry.subagentType }
-      : {}),
+    ...optionalField('endTime', entry.endTime),
+    ...optionalField('subagentType', entry.subagentType),
     isBackgrounded: entry.isBackgrounded,
-    ...(entry.error !== undefined ? { error: entry.error } : {}),
-    ...(entry.resumeBlockedReason !== undefined
-      ? { resumeBlockedReason: entry.resumeBlockedReason }
-      : {}),
+    ...optionalField('error', entry.error),
+    ...optionalField('resumeBlockedReason', entry.resumeBlockedReason),
   };
 }
 
@@ -67,10 +73,10 @@ function serializeShellTask(
     outputFile: entry.outputFile,
     command: entry.command,
     cwd: entry.cwd,
-    ...(entry.endTime !== undefined ? { endTime: entry.endTime } : {}),
-    ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
-    ...(entry.exitCode !== undefined ? { exitCode: entry.exitCode } : {}),
-    ...(entry.error !== undefined ? { error: entry.error } : {}),
+    ...optionalField('endTime', entry.endTime),
+    ...optionalField('pid', entry.pid),
+    ...optionalField('exitCode', entry.exitCode),
+    ...optionalField('error', entry.error),
   };
 }
 
@@ -90,13 +96,11 @@ function serializeMonitorTask(
     eventCount: entry.eventCount,
     lastEventTime: entry.lastEventTime,
     droppedLines: entry.droppedLines,
-    ...(entry.endTime !== undefined ? { endTime: entry.endTime } : {}),
-    ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
-    ...(entry.exitCode !== undefined ? { exitCode: entry.exitCode } : {}),
-    ...(entry.error !== undefined ? { error: entry.error } : {}),
-    ...(entry.ownerAgentId !== undefined
-      ? { ownerAgentId: entry.ownerAgentId }
-      : {}),
+    ...optionalField('endTime', entry.endTime),
+    ...optionalField('pid', entry.pid),
+    ...optionalField('exitCode', entry.exitCode),
+    ...optionalField('error', entry.error),
+    ...optionalField('ownerAgentId', entry.ownerAgentId),
   };
 }
 

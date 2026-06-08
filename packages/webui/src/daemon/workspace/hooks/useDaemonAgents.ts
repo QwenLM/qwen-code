@@ -30,6 +30,8 @@ export function useDaemonAgents(options: DaemonResourceOptions = {}) {
     agents: result.data?.agents ?? [],
     getAgent: workspaceActions.getAgent,
     createAgent: workspaceActions.createAgent,
+    generateAgent: workspaceActions.generateAgent,
     deleteAgent: workspaceActions.deleteAgent,
+    updateAgent: workspaceActions.updateAgent,
   };
 }

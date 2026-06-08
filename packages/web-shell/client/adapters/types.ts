@@ -21,6 +21,9 @@ export type StreamingState = DaemonStreamingState;
 export type {
   DaemonUserMessage as UserMessage,
   DaemonAssistantMessage as AssistantMessage,
+  DaemonInsightErrorMessage as InsightErrorMessage,
+  DaemonInsightProgressMessage as InsightProgressMessage,
+  DaemonInsightReadyMessage as InsightReadyMessage,
   DaemonToolGroupMessage as ToolGroupMessage,
   DaemonPlanMessage as PlanMessage,
   DaemonSystemMessage as SystemMessage,
@@ -61,6 +64,8 @@ export interface CommandInfo {
   description: string;
   argumentHint?: string;
   subcommands?: string[];
+  source?: string;
+  displayCategory?: 'custom' | 'skill' | 'system';
 }
 
 export interface ModelInfo {
