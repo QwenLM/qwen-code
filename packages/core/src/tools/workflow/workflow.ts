@@ -119,23 +119,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // try/catch with a clear placeholder so a serialization issue
       // degrades gracefully instead of masquerading as a run failure.
       const llmText = safeStringifyResult(outcome.result);
-      // T30 (PR #4732 R3): sibling drift of the R1 T12/T18 fix.
-      // safeStringifyDisplayPayload wraps the entire payload in one
-      // JSON.stringify — without pre-sanitizing, a non-serializable
-      // `result` would collapse the display to "(display payload not
-      // JSON-serializable)" and lose runId / phases / logs (all of which
-      // are always serializable). Pre-sanitize `result` only.
-      let safeResult: unknown = outcome.result;
-      try {
-        JSON.stringify(outcome.result);
-      } catch {
-        safeResult = `(non-JSON-serializable value of type ${typeof outcome.result})`;
-      }
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
         phases: outcome.phases,
         logs: outcome.logs,
-        result: safeResult,
+        result: outcome.result,
       });
 
       return {
@@ -191,10 +179,36 @@ function safeStringifyResult(result: unknown): string {
   }
 }
 
+/**
+ * T30 (PR #4732 R3): degrade per-field instead of all-or-nothing. The
+ * happy path is one stringify; on failure, walk the top-level keys and
+ * replace each non-serializable value with a placeholder, then
+ * re-stringify. This keeps always-serializable metadata (runId, phases,
+ * logs) visible to the user even when one field (typically `result`)
+ * carries a BigInt / circular value. Future-proof against new payload
+ * fields without requiring caller-side special cases.
+ */
 function safeStringifyDisplayPayload(payload: unknown): string {
   try {
     return JSON.stringify(payload, null, 2);
   } catch {
+    if (payload && typeof payload === 'object') {
+      const sanitized: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(payload)) {
+        try {
+          JSON.stringify(value);
+          sanitized[key] = value;
+        } catch {
+          sanitized[key] =
+            `(non-JSON-serializable value of type ${typeof value})`;
+        }
+      }
+      try {
+        return JSON.stringify(sanitized, null, 2);
+      } catch {
+        // Fall through to the generic fallback string below.
+      }
+    }
     return '(display payload not JSON-serializable)';
   }
 }

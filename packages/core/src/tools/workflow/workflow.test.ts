@@ -140,8 +140,9 @@ describe('WorkflowTool', () => {
   // returnDisplay payload (runId + phases + logs + result) used to be
   // wrapped in a single JSON.stringify — one bad `result` collapsed the
   // entire display to "(display payload not JSON-serializable)", losing
-  // the runId, the phases, AND the logs. Pre-sanitize `result` so the
-  // always-serializable metadata survives.
+  // the runId, the phases, AND the logs. safeStringifyDisplayPayload now
+  // degrades per-field on the failure path so always-serializable
+  // metadata survives regardless of which field went bad.
   it('execute() preserves runId/phases/logs in returnDisplay when result is non-JSON-serializable', async () => {
     const tool = new WorkflowTool(fakeConfig(), {
       dispatch: async () => 'unused',
