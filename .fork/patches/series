@@ -3,7 +3,6 @@
 0003-i18n-dataworks.patch
 0004-dsw-oauth-redirect.patch
 0005-osc8-internal.patch
-0006-dingtalk-channel-enhancements.patch
 0007-feishu-channel.patch
 0009-claude-websearch-compat.patch
 0010-build-single-bundle.patch
