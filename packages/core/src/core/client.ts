@@ -1296,7 +1296,7 @@ export class GeminiClient {
       }
     }
     debugLogger.debug(
-      `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+      `[TIME-BASED MC] gap ${m.gapMinutes}min >= ${m.thresholdMinutes}min, ` +
         `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
         `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
     );
