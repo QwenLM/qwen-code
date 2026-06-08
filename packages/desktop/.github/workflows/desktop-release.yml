@@ -82,6 +82,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -178,6 +183,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.release_metadata.outputs.release_ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
 
       - name: Check out Qwen Code source
         if: ${{ inputs.qwen_code_source == 'source_branch' }}
