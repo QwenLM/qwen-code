@@ -519,11 +519,13 @@ function targetAlreadySyncedCommit(
 }
 
 async function ensureSimpleMergeCommit(params: {
+  mode: MigrationMode;
   sourceRepo: string;
   commit: string;
   parents: string[];
   pathspecs: string[];
   handledCommits: Set<string>;
+  targetSyncedCommits: Set<string>;
 }): Promise<void> {
   const [firstParent, secondParent] = params.parents;
   if (!firstParent || !secondParent || params.parents.length !== 2) {
@@ -536,9 +538,17 @@ async function ensureSimpleMergeCommit(params: {
     params.commit,
     params.pathspecs,
   );
-  const missingCommits = introducedCommits.filter(
-    (commit) => !params.handledCommits.has(commit),
-  );
+  const missingCommits: string[] = [];
+  for (const commit of introducedCommits) {
+    if (
+      params.handledCommits.has(commit) ||
+      params.targetSyncedCommits.has(commit) ||
+      (await shouldSkipSyncedCommit(params.sourceRepo, commit, params.mode))
+    ) {
+      continue;
+    }
+    missingCommits.push(commit);
+  }
   if (missingCommits.length > 0) {
     throw new Error(
       `Merge commit introduced unhandled commits: ${params.commit}\n` +
@@ -609,7 +619,13 @@ async function commitChanges(
     throw new Error('Unable to inspect staged sync diff.');
   }
 
-  await git(cwd, ['commit', '-m', [subject, '', ...trailers].join('\n')]);
+  await git(cwd, [
+    '-c',
+    'core.hooksPath=/dev/null',
+    'commit',
+    '-m',
+    [subject, '', ...trailers].join('\n'),
+  ]);
   return true;
 }
 
@@ -663,11 +679,13 @@ async function migrateCommits(params: {
 
     if (parents.length > 1) {
       await ensureSimpleMergeCommit({
+        mode: params.mode,
         sourceRepo: params.sourceRepo,
         commit,
         parents,
         pathspecs: params.pathspecs,
         handledCommits,
+        targetSyncedCommits,
       });
       console.log(
         `Skipping merge ${commit.slice(0, 12)}; regular commits handled.`,
