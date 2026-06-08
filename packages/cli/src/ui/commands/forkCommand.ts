@@ -170,16 +170,20 @@ export const forkCommand: SlashCommand = {
       };
     }
 
-    config.getGeminiClient().addHistory({
-      role: 'user',
-      parts: [
-        {
-          text: t('User launched a background fork via /fork: {{directive}}', {
-            directive,
-          }),
-        },
-      ],
-    });
+    try {
+      config.getGeminiClient().addHistory({
+        role: 'user',
+        parts: [
+          {
+            text: t('User launched a background fork via /fork: {{directive}}', {
+              directive,
+            }),
+          },
+        ],
+      });
+    } catch (error) {
+      debugLogger.debug('Failed to record fork event in history:', error);
+    }
 
     return {
       type: 'message',

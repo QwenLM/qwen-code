@@ -211,6 +211,18 @@ describe('forkCommand', () => {
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
   });
 
+  it('still reports success when recording the fork event in history fails', async () => {
+    mockAddHistory.mockImplementation(() => {
+      throw new Error('history disconnected');
+    });
+
+    const result = await forkCommand.action!(mockContext, 'do something');
+
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+    expect(mockAddHistory).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+  });
+
   it('truncates an overlong directive for the panel label', async () => {
     const long = 'x'.repeat(200);
     await forkCommand.action!(mockContext, long);
