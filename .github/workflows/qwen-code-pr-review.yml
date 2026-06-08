@@ -35,8 +35,13 @@ on:
         type: 'number'
 
 concurrency:
-  group: 'qwen-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
-  cancel-in-progress: true
+  # PR lifecycle events share a PR-scoped group so new pushes restart the delay.
+  # Comment/review events use per-run groups to avoid cancelling active reviews.
+  group: >-
+    ${{ github.event_name == 'pull_request_target' &&
+    format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
+    format('qwen-pr-review-run-{0}', github.run_id) }}
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' }}"
 
 jobs:
   review-config:
