@@ -46,3 +46,9 @@ export { VapidStore, type VapidKeys } from './webpush/vapid.js';
 export { PushStore, type PushSubscriptionRecord } from './pushStore.js';
 export { createPushRouter } from './routes/push.js';
 export { buildPayload, type PushPayload } from './webpush/payload.js';
+export {
+  PushSender,
+  type PushTransport,
+  type PushTransportResult,
+  type PushSenderOptions,
+} from './webpush/sender.js';
