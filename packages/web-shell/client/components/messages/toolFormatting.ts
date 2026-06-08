@@ -39,6 +39,11 @@ export function formatToolDisplayName(toolName: string): string {
   return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
 }
 
+export function isAskUserQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}
+
 export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
@@ -120,9 +125,7 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     return lines[0] || '';
   }
 
-  if (name === 'ask_user_question') {
-    return '';
-  }
+  if (isAskUserQuestionToolName(name)) return '';
 
   const firstLine = lines[0] || '';
   return truncateText(firstLine, 80);

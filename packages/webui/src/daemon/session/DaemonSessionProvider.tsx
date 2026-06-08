@@ -41,14 +41,9 @@ import {
 } from './mappers.js';
 import {
   selectDaemonActiveTodoList,
-  selectDaemonLatestTodoList,
   selectDaemonPendingPermissions,
-  selectDaemonPendingPermissionRequest,
   selectDaemonStreamingState,
-  selectDaemonTodoLists,
 } from './selectors.js';
-import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
-import type { DaemonMessage } from './messageTypes.js';
 import {
   clearPassiveAssistantDoneTimer,
   delay,
@@ -76,9 +71,6 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
-  DaemonPendingPermissionRequest,
-  DaemonPermissionOptionKind,
-  DaemonPermissionRequestOption,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonSessionActions,
@@ -980,21 +972,6 @@ export function useDaemonPendingPermissions() {
   return useMemo(() => selectDaemonPendingPermissions(blocks), [blocks]);
 }
 
-export function useDaemonPendingPermissionRequest() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonPendingPermissionRequest(blocks), [blocks]);
-}
-
-export function useDaemonTodoLists() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonTodoLists(blocks), [blocks]);
-}
-
-export function useDaemonLatestTodoList() {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonLatestTodoList(blocks), [blocks]);
-}
-
 export function useDaemonActiveTodoList() {
   const blocks = useDaemonTranscriptBlocks();
   return useMemo(() => selectDaemonActiveTodoList(blocks), [blocks]);
@@ -1007,11 +984,6 @@ export function useDaemonStreamingState() {
     () => selectDaemonStreamingState(blocks, promptStatus),
     [blocks, promptStatus],
   );
-}
-
-export function useDaemonMessages(): DaemonMessage[] {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => transcriptBlocksToDaemonMessages(blocks), [blocks]);
 }
 
 export function useDaemonActions(): DaemonSessionActions {

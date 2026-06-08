@@ -15,7 +15,6 @@ import {
   selectDaemonActiveTodoList,
   selectDaemonLatestTodoList,
   selectDaemonPendingPermissions,
-  selectDaemonPendingPermissionRequest,
   selectDaemonSubAgentToolBlocks,
   selectDaemonStreamingState,
   selectDaemonTodoLists,
@@ -34,65 +33,6 @@ describe('daemon selectors', () => {
     expect(selectDaemonPendingPermissions([pending, resolved])).toEqual([
       pending,
     ]);
-  });
-
-  it('maps the first pending permission into a UI-ready request', () => {
-    const permission = block({
-      kind: 'permission',
-      requestId: 'permission-1',
-      sessionId: 'session-1',
-      title: 'Ask user 1 question',
-      options: [
-        {
-          optionId: 'proceed_once',
-          label: 'Submit',
-          raw: { kind: 'allow_once' },
-        },
-        {
-          optionId: 'cancel',
-          label: 'Cancel',
-          description: 'Dismiss',
-          raw: { kind: 'reject_once' },
-        },
-      ],
-      toolCall: {
-        toolCallId: 'tool-1',
-        rawInput: {
-          questions: [
-            {
-              header: 'Name',
-              question: 'Student name?',
-              options: [{ label: 'Alice' }],
-            },
-          ],
-        },
-      },
-    });
-
-    expect(selectDaemonPendingPermissionRequest([permission])).toMatchObject({
-      id: 'permission-1',
-      sessionId: 'session-1',
-      toolCallId: 'tool-1',
-      title: 'Ask user 1 question',
-      options: [
-        { id: 'proceed_once', label: 'Submit', kind: 'allow_once' },
-        {
-          id: 'cancel',
-          label: 'Cancel',
-          description: 'Dismiss',
-          kind: 'reject_once',
-        },
-      ],
-      rawInput: {
-        questions: [
-          {
-            header: 'Name',
-            question: 'Student name?',
-            options: [{ label: 'Alice' }],
-          },
-        ],
-      },
-    });
   });
 
   it('extracts todo lists from plan and TodoWrite tool blocks', () => {
@@ -149,6 +89,86 @@ describe('daemon selectors', () => {
     expect(selectDaemonActiveTodoList([completed, active])).toMatchObject({
       toolCallId: 'tool-2',
     });
+  });
+
+  it('does not resurrect stale active todos after the latest list completes', () => {
+    const active = block({
+      kind: 'tool',
+      id: 'tool-block-1',
+      toolCallId: 'tool-1',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-1',
+            content: 'active',
+            status: 'in_progress',
+          },
+        ],
+      },
+    });
+    const completed = block({
+      kind: 'tool',
+      id: 'tool-block-2',
+      toolCallId: 'tool-2',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-1',
+            content: 'active',
+            status: 'completed',
+          },
+        ],
+      },
+    });
+
+    expect(selectDaemonActiveTodoList([active, completed])).toBeUndefined();
+  });
+
+  it('ignores earlier active todo lists when the latest list is complete', () => {
+    const earlierActive = block({
+      kind: 'tool',
+      id: 'tool-block-1',
+      toolCallId: 'tool-1',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-1',
+            content: 'older active work',
+            status: 'in_progress',
+          },
+        ],
+      },
+    });
+    const latestCompleted = block({
+      kind: 'tool',
+      id: 'tool-block-2',
+      toolCallId: 'tool-2',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [
+          {
+            id: 'todo-2',
+            content: 'newer finished work',
+            status: 'completed',
+          },
+        ],
+      },
+    });
+
+    expect(
+      selectDaemonActiveTodoList([earlierActive, latestCompleted]),
+    ).toBeUndefined();
   });
 
   it('identifies sub-agent tool blocks from daemon metadata and raw output', () => {

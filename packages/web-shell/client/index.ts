@@ -7,5 +7,7 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
 } from './customization';
+export type { WelcomeHeaderProps } from './components/WelcomeHeader';

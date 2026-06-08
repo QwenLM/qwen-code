@@ -1,8 +1,9 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import type { Components, Options } from 'react-markdown';
 import type { ACPToolCall } from './adapters/types';
+import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 
-export type MarkdownContentSource = 'assistant';
+export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
@@ -41,8 +42,12 @@ export type ToolHeaderExtraRenderer = (
   info: ToolHeaderExtraRenderInfo,
 ) => ReactNode;
 
+export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
+
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  renderWelcomeHeader?: WelcomeHeaderRenderer;
+  compactThinking?: boolean;
   markdown?: WebShellMarkdownCustomization;
 }
 

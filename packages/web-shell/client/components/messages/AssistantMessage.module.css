@@ -56,6 +56,31 @@
   word-break: break-word;
 }
 
+.thinkingCollapsed {
+  max-height: calc(5 * 1.5em);
+  overflow: hidden;
+}
+
+.thinkingCollapsedMask {
+  mask-image: linear-gradient(to bottom, #000 60%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+}
+
+.expandToggle {
+  display: inline-block;
+  background: none;
+  border: none;
+  color: var(--text-dimmed);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  margin-top: 2px;
+}
+
+.expandToggle:hover {
+  color: var(--accent-color);
+}
+
 .content {
   display: flex;
   align-items: baseline;

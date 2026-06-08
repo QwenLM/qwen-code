@@ -123,30 +123,6 @@ export interface DaemonPromptImage {
   media_type?: string;
 }
 
-export type DaemonPermissionOptionKind =
-  | 'allow_once'
-  | 'allow_always'
-  | 'reject_once'
-  | 'reject_always';
-
-export interface DaemonPermissionRequestOption {
-  id: string;
-  label: string;
-  description?: string;
-  kind?: DaemonPermissionOptionKind;
-  raw: unknown;
-}
-
-export interface DaemonPendingPermissionRequest {
-  id: string;
-  sessionId?: string;
-  toolCallId?: string;
-  title: string;
-  options: DaemonPermissionRequestOption[];
-  rawInput?: Record<string, unknown>;
-  raw: Extract<DaemonTranscriptBlock, { kind: 'permission' }>;
-}
-
 export type DaemonTodoStatus = 'pending' | 'in_progress' | 'completed';
 export type DaemonTodoPriority = 'low' | 'medium' | 'high';
 

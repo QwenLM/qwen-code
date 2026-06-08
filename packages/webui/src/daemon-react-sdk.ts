@@ -16,10 +16,8 @@
  * import {
  *   DaemonSessionProvider,
  *   DaemonWorkspaceProvider,
- *   useMessages,
  *   useConnection,
  *   useStreamingState,
- *   type DaemonMessage,
  * } from '@qwen-code/webui/daemon-react-sdk';
  * ```
  */
@@ -48,9 +46,6 @@ export { useDaemonActions as useActions } from './daemon/index.js';
 /** Connection status, capabilities, and model info. */
 export { useDaemonConnection as useConnection } from './daemon/index.js';
 
-/** Pre-converted message list (user, assistant, tool groups, plans). */
-export { useDaemonMessages as useMessages } from './daemon/index.js';
-
 /** Current session metadata (id, model, approval mode). */
 export { useDaemonSession as useSession } from './daemon/index.js';
 
@@ -59,9 +54,6 @@ export { useDaemonStreamingState as useStreamingState } from './daemon/index.js'
 
 // ── Permission Hooks ──────────────────────────────────────────────
 
-/** The single pending permission request awaiting user response (or null). */
-export { useDaemonPendingPermissionRequest as usePendingPermissionRequest } from './daemon/index.js';
-
 /** All unresolved permission requests in the current transcript. */
 export { useDaemonPendingPermissions as usePendingPermissions } from './daemon/index.js';
 
@@ -69,12 +61,6 @@ export { useDaemonPendingPermissions as usePendingPermissions } from './daemon/i
 
 /** The currently active (most relevant) todo list. */
 export { useDaemonActiveTodoList as useActiveTodoList } from './daemon/index.js';
-
-/** The most recently updated todo list. */
-export { useDaemonLatestTodoList as useLatestTodoList } from './daemon/index.js';
-
-/** All todo lists extracted from the transcript. */
-export { useDaemonTodoLists as useTodoLists } from './daemon/index.js';
 
 // ── Resource Hooks ────────────────────────────────────────────────
 
@@ -191,57 +177,6 @@ export type {
   DaemonSessionStatsToolByName,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
-} from './daemon/index.js';
-
-// ── Types: Messages ──────────────────────────────────────────────
-
-export type {
-  /** Union of all converted message types shown in the chat UI. */
-  DaemonMessage,
-  /** Assistant (model) response message. */
-  DaemonAssistantMessage,
-  /** Insight generation progress update (stage + percent). */
-  DaemonInsightErrorMessage,
-  DaemonInsightProgressMessage,
-  DaemonInsightReadyMessage,
-  /** User prompt message. */
-  DaemonUserMessage,
-  /** User-triggered shell command output (`!cmd`). */
-  DaemonUserShellMessage,
-  /** System status/error/debug message. */
-  DaemonSystemMessage,
-  /** Plan-mode confirmation message shown during `plan` approval. */
-  DaemonPlanMessage,
-  /** Grouped tool invocations rendered together in the UI. */
-  DaemonToolGroupMessage,
-} from './daemon/index.js';
-
-// ── Types: Tool Calls ────────────────────────────────────────────
-
-export type {
-  /** Single tool call within a tool group: name, status, preview, content. */
-  DaemonMessageToolCall,
-  /** Tool call output content (text, error, structured data). */
-  DaemonMessageToolCallContent,
-  /** Tool execution status: `'running' | 'completed' | 'error'` etc. */
-  DaemonMessageToolCallStatus,
-  /** Tool category: `'bash' | 'file_read' | 'file_write' | 'mcp'` etc. */
-  DaemonMessageToolKind,
-  /** File location reference within a tool result. */
-  DaemonMessageToolCallLocation,
-  /** Todo item within a tool-managed task list. */
-  DaemonMessageTodoItem,
-} from './daemon/index.js';
-
-// ── Types: Permissions ───────────────────────────────────────────
-
-export type {
-  /** Pending permission request with title, options, and raw block. */
-  DaemonPendingPermissionRequest,
-  /** Option kind: `'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'`. */
-  DaemonPermissionOptionKind,
-  /** Single selectable option within a permission request. */
-  DaemonPermissionRequestOption,
 } from './daemon/index.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────

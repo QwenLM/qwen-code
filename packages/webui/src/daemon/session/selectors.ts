@@ -10,8 +10,6 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonPendingPermissionRequest,
-  DaemonPermissionOptionKind,
   DaemonPromptStatus,
   DaemonTodoItem,
   DaemonTodoList,
@@ -30,36 +28,6 @@ export function selectDaemonPendingPermissions(
     (block): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
       block.kind === 'permission' && block.resolved === undefined,
   );
-}
-
-export function selectDaemonPendingPermissionRequest(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonPendingPermissionRequest | undefined {
-  const [permission] = selectDaemonPendingPermissions(blocks);
-  if (!permission) return undefined;
-  const toolCall = getRecord(permission.toolCall);
-  const toolCallId =
-    getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
-
-  return {
-    id: permission.requestId,
-    ...(permission.sessionId ? { sessionId: permission.sessionId } : {}),
-    ...(toolCallId ? { toolCallId } : {}),
-    title: permission.title,
-    options: permission.options.map((option) => ({
-      id: option.optionId,
-      label: option.label,
-      ...(option.description ? { description: option.description } : {}),
-      ...(getPermissionOptionKind(option.raw)
-        ? { kind: getPermissionOptionKind(option.raw) }
-        : {}),
-      raw: option.raw,
-    })),
-    ...(getPermissionRawInput(permission.toolCall)
-      ? { rawInput: getPermissionRawInput(permission.toolCall) }
-      : {}),
-    raw: permission,
-  };
 }
 
 export function selectDaemonTodoLists(
@@ -91,11 +59,10 @@ export function selectDaemonLatestTodoList(
 export function selectDaemonActiveTodoList(
   blocks: readonly DaemonTranscriptBlock[],
 ): DaemonTodoList | undefined {
-  const lists = selectDaemonTodoLists(blocks);
-  for (let i = lists.length - 1; i >= 0; i--) {
-    if (hasDaemonActiveTodos(lists[i].items)) return lists[i];
-  }
-  return undefined;
+  const latest = selectDaemonLatestTodoList(blocks);
+  // Only the latest list is considered active; earlier active items are stale
+  // once a newer TodoWrite/plan snapshot has arrived.
+  return latest && hasDaemonActiveTodos(latest.items) ? latest : undefined;
 }
 
 export function extractDaemonTodosFromToolBlock(
@@ -139,9 +106,10 @@ export function parseDaemonTodoItemsFromEntries(
         id,
         content,
         status: getTodoStatus(getString(item, 'status')),
-        ...(getTodoPriority(getString(item, 'priority'))
-          ? { priority: getTodoPriority(getString(item, 'priority')) }
-          : {}),
+        ...(() => {
+          const priority = getTodoPriority(getString(item, 'priority'));
+          return priority ? { priority } : {};
+        })(),
       },
     ];
   });
@@ -222,31 +190,6 @@ function isStreamingTextBlock(block: DaemonTextTranscriptBlock): boolean {
 
 function isRunningToolBlock(block: DaemonToolTranscriptBlock): boolean {
   return block.status === 'running' || block.status === 'in_progress';
-}
-
-function getPermissionRawInput(
-  toolCall: unknown,
-): Record<string, unknown> | undefined {
-  const record = getRecord(toolCall);
-  if (!record) return undefined;
-  const nested =
-    getRecord(record['rawInput']) ??
-    getRecord(record['input']) ??
-    getRecord(record['args']);
-  return nested ?? record;
-}
-
-function getPermissionOptionKind(
-  raw: unknown,
-): DaemonPermissionOptionKind | undefined {
-  const record = getRecord(raw);
-  const kind = record?.['kind'];
-  return kind === 'allow_once' ||
-    kind === 'allow_always' ||
-    kind === 'reject_once' ||
-    kind === 'reject_always'
-    ? kind
-    : undefined;
 }
 
 function getTodoArray(
