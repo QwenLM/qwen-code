@@ -95,6 +95,7 @@ import {
   isValidAutoImproveLoopId,
   markActiveAutoImproveRunCancelled,
 } from '../commands/autoImproveState.js';
+import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -1036,10 +1037,25 @@ export const useGeminiStream = (
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
         if (!prev) {
+          if (debugLogger.isEnabled()) {
+            debugLogger.debug(
+              `[THOUGHT_MERGE] New thought: ` +
+                `subjectLength=${incoming.subject?.length ?? 0}, ` +
+                `description length=${incoming.description?.length ?? 0}`,
+            );
+          }
           return incoming;
         }
         const subject = incoming.subject || prev.subject;
         const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[THOUGHT_MERGE] Accumulating thought: ` +
+              `prev length=${prev.description?.length ?? 0}, ` +
+              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `total length=${description.length}`,
+          );
+        }
         return { subject, description };
       });
     },
@@ -1063,6 +1079,15 @@ export const useGeminiStream = (
       }
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[THOUGHT_BUFFER] Buffer growing: ` +
+            `current=${currentThoughtBuffer.length}, ` +
+            `incoming=${thoughtText.length}, ` +
+            `total=${newThoughtBuffer.length}`,
+        );
+      }
 
       const pendingType = pendingHistoryItemRef.current?.type;
       const isPendingThought =
