@@ -425,6 +425,17 @@ export function DaemonSessionProvider({
                     { updateConnection: false },
                   ),
                 );
+                if (replayEvent.type === 'turn_complete') {
+                  const stopReason =
+                    (replayEvent.data as DaemonTurnCompleteData | undefined)
+                      ?.stopReason ?? 'end_turn';
+                  allUiEvents.push({
+                    type: 'assistant.done',
+                    reason: stopReason,
+                  });
+                } else if (replayEvent.type === 'turn_error') {
+                  allUiEvents.push({ type: 'assistant.done', reason: 'error' });
+                }
               } catch (error) {
                 const message =
                   error instanceof Error ? error.message : String(error);

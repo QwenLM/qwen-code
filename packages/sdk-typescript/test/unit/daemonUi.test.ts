@@ -133,9 +133,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
     );
 
     expect(streaming.blocks).toMatchObject([
-      { kind: 'thought', text: 'thinking' },
+      { kind: 'thought', text: 'thinking', streaming: true },
     ]);
-    expect(streaming.blocks[0]).not.toHaveProperty('streaming', false);
 
     const finished = reduceDaemonTranscriptEvents(
       streaming,
@@ -2066,6 +2065,66 @@ describe('daemon UI time schema (PR-B)', () => {
     expect(events[0]).toMatchObject({
       type: 'user.text.delta',
       serverTimestamp: 1_888_888_888_888,
+    });
+  });
+
+  it('extracts serverTimestamp from ACP update _meta timestamp', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          _meta: { timestamp: 1_780_905_333_596 },
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+    expect(events[0]).toMatchObject({
+      type: 'user.text.delta',
+      serverTimestamp: 1_780_905_333_596,
+    });
+  });
+
+  it('backfills serverTimestamp onto an existing text block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'hel' },
+          },
+        },
+      }),
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            _meta: { timestamp: 1_780_910_319_876 },
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'lo' },
+          },
+        },
+      }),
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'hello',
+      eventId: 2,
+      serverTimestamp: 1_780_910_319_876,
     });
   });
 
@@ -5883,8 +5942,8 @@ describe('parallel subAgent text interleaving fix', () => {
     const before = state.blocks.filter((b) => b.kind === 'thought') as Array<{
       streaming?: boolean;
     }>;
-    expect(before[0]!.streaming).toBeUndefined();
-    expect(before[1]!.streaming).toBeUndefined();
+    expect(before[0]!.streaming).toBe(true);
+    expect(before[1]!.streaming).toBe(true);
 
     state = reduceDaemonTranscriptEvents(
       state,
@@ -6010,6 +6069,12 @@ describe('parallel subAgent text interleaving fix', () => {
 
     expect(state.activeAssistantBlockByParent).toEqual({});
     expect(state.activeThoughtBlockByParent).toEqual({});
+    expect(
+      state.blocks.find(
+        (block) =>
+          block.kind === 'assistant' && block.parentToolCallId === 'task-Y',
+      ),
+    ).toMatchObject({ streaming: false, updatedAt: 3 });
   });
 
   it('T8: thought evicts assistant block and finalizes streaming for same parent', () => {
@@ -6186,6 +6251,81 @@ describe('parallel subAgent text interleaving fix', () => {
 
     expect(state.activeThoughtBlockByParent['task-E']).toBeUndefined();
     expect(state.activeAssistantBlockByParent['task-E']).toBeDefined();
+    expect(
+      state.blocks.find((block) => block.kind === 'thought'),
+    ).toMatchObject({ streaming: false, updatedAt: 3 });
+  });
+
+  it('T12b: scalar assistant finalizes previous scalar thought block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'thought.text.delta', text: 'thinking first' }],
+      { now: 2 },
+    );
+
+    expect(state.activeThoughtBlockId).toBeDefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'now responding' }],
+      { now: 3 },
+    );
+
+    expect(state.activeThoughtBlockId).toBeUndefined();
+    expect(state.activeAssistantBlockId).toBeDefined();
+    expect(
+      state.blocks.find((block) => block.kind === 'thought'),
+    ).toMatchObject({ streaming: false, updatedAt: 3 });
+  });
+
+  it('T12c: scalar thought finalizes previous scalar assistant block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer first' }],
+      { now: 2 },
+    );
+
+    expect(state.activeAssistantBlockId).toBeDefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'thought.text.delta', text: 'thinking next' }],
+      { now: 3 },
+    );
+
+    expect(state.activeAssistantBlockId).toBeUndefined();
+    expect(state.activeThoughtBlockId).toBeDefined();
+    expect(
+      state.blocks.find((block) => block.kind === 'assistant'),
+    ).toMatchObject({ streaming: false, updatedAt: 3 });
+  });
+
+  it('T12d: scalar user text finalizes previous scalar assistant block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'answer first' }],
+      { now: 2 },
+    );
+
+    expect(state.activeAssistantBlockId).toBeDefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'user.text.delta', text: 'new question' }],
+      { now: 3 },
+    );
+
+    expect(state.activeAssistantBlockId).toBeUndefined();
+    expect(state.activeUserBlockId).toBeDefined();
+    expect(
+      state.blocks.find((block) => block.kind === 'assistant'),
+    ).toMatchObject({ streaming: false, updatedAt: 3 });
   });
 
   it('T13: scoped clearActiveText sets streaming=false on cleared block', () => {
@@ -6228,6 +6368,56 @@ describe('parallel subAgent text interleaving fix', () => {
         (b as { parentToolCallId?: string }).parentToolCallId === 'task-B',
     ) as Array<{ streaming?: boolean }>;
     expect(bBlocks[0]!.streaming).toBe(true);
+  });
+
+  it('T13b: scoped clearActiveText finalizes assistant and thought for the same parent', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'assistant streaming',
+          parentToolCallId: 'task-A',
+        },
+        {
+          type: 'thought.text.delta',
+          text: 'thought streaming',
+          parentToolCallId: 'task-B',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'child-tool-A',
+          title: 'Bash',
+          status: 'running',
+          parentToolCallId: 'task-A',
+        } as DaemonUiEvent,
+        {
+          type: 'tool.update',
+          toolCallId: 'child-tool-B',
+          title: 'Bash',
+          status: 'running',
+          parentToolCallId: 'task-B',
+        } as DaemonUiEvent,
+      ],
+      { now: 2 },
+    );
+
+    expect(
+      state.blocks.find(
+        (block) =>
+          block.kind === 'assistant' && block.parentToolCallId === 'task-A',
+      ),
+    ).toMatchObject({ streaming: false });
+    expect(
+      state.blocks.find(
+        (block) =>
+          block.kind === 'thought' && block.parentToolCallId === 'task-B',
+      ),
+    ).toMatchObject({ streaming: false });
+    expect(state.activeAssistantBlockByParent['task-A']).toBeUndefined();
+    expect(state.activeThoughtBlockByParent['task-B']).toBeUndefined();
   });
 
   it('T14: scoped clearActiveText preserves scalar activeAssistantBlockId', () => {

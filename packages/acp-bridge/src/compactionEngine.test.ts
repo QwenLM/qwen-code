@@ -686,6 +686,9 @@ describe('EventBus + CompactionEngine integration', () => {
       update: { content: { text: string } };
     };
     expect(mergedText.update.content.text).toBe('Hi there');
+    expect(snapshot!.compactedTurns[1]!._meta?.['serverTimestamp']).toEqual(
+      expect.any(Number),
+    );
   });
 
   it('snapshotReplay returns undefined when no engine is configured', () => {

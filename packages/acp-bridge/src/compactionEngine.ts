@@ -44,6 +44,7 @@ type CompactedSlot =
       chunks: string[];
       lastEventId: number;
       lastMeta: unknown;
+      lastEnvelopeMeta?: Record<string, unknown>;
     }
   | { kind: 'tool'; toolCallId: string; event: BridgeEvent }
   | { kind: 'misc'; event: BridgeEvent }
@@ -220,6 +221,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         slot.chunks.push(text);
         if (event.id !== undefined) slot.lastEventId = event.id;
         slot.lastMeta = meta ?? slot.lastMeta;
+        slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
       } else {
         this.textSlotIndex.set(slotKey, this.slots.length);
         this.slots.push({
@@ -228,6 +230,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           chunks: [text],
           lastEventId: event.id ?? 0,
           lastMeta: meta,
+          lastEnvelopeMeta: event._meta,
         });
       }
     } else {
@@ -243,6 +246,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         lastSlot.chunks.push(text);
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
         lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
+        lastSlot.lastEnvelopeMeta = event._meta ?? lastSlot.lastEnvelopeMeta;
       } else {
         this.slots.push({
           kind,
@@ -250,6 +254,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           chunks: [text],
           lastEventId: event.id ?? 0,
           lastMeta: meta,
+          lastEnvelopeMeta: event._meta,
         });
       }
     }
@@ -270,6 +275,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
               slot.chunks.join(''),
               slot.lastEventId,
               slot.lastMeta,
+              slot.lastEnvelopeMeta,
             ),
           );
           break;
@@ -297,11 +303,13 @@ function makeMergedSessionUpdateEvent(
   text: string,
   eventId: number,
   meta: unknown,
+  envelopeMeta: Record<string, unknown> | undefined,
 ): BridgeEvent {
   return {
     id: eventId || undefined,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
+    ...(envelopeMeta !== undefined ? { _meta: envelopeMeta } : {}),
     data: {
       update: {
         sessionUpdate,
@@ -326,9 +334,7 @@ function normalizeToolCallType(event: BridgeEvent): BridgeEvent {
   return event;
 }
 
-function extractParentToolCallIdFromMeta(
-  meta: unknown,
-): string | undefined {
+function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
   if (typeof meta === 'object' && meta !== null) {
     const val = (meta as Record<string, unknown>)['parentToolCallId'];
     return typeof val === 'string' && val.length > 0 ? val : undefined;
