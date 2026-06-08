@@ -81,6 +81,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       [
         "ask_user_question",
         "cron_list",
+        "enter_plan_mode",
         "exit_plan_mode",
         "glob",
         "grep_search",

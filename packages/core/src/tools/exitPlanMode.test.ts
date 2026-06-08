@@ -23,6 +23,7 @@ describe('ExitPlanModeTool', () => {
         approvalMode = mode;
       }),
       savePlan: vi.fn(),
+      getPlanGateState: vi.fn(() => undefined),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -54,6 +55,10 @@ describe('ExitPlanModeTool', () => {
             plan: {
               type: 'string',
               description: expect.stringContaining('The plan you came up with'),
+            },
+            resolutionSummary: {
+              type: 'string',
+              description: expect.stringContaining('gate review'),
             },
           },
           required: ['plan'],
@@ -136,12 +141,10 @@ describe('ExitPlanModeTool', () => {
 
       const result = await invocation.execute(signal);
 
-      expect(result.llmContent).toContain(
-        'User has approved your plan. You can now start coding',
-      );
+      expect(result.llmContent).toContain('You can now start coding');
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
-        message: 'User approved the plan.',
+        message: expect.stringContaining('User approved'),
         plan: params.plan,
       });
 
@@ -333,33 +336,56 @@ describe('ExitPlanModeTool', () => {
   });
 
   describe('YOLO mode', () => {
-    it('should exit plan mode without onConfirm being called when approval mode is YOLO', async () => {
-      // Simulate YOLO: scheduler sets approvalMode=YOLO but never calls onConfirm
-      approvalMode = ApprovalMode.YOLO;
+    it('should restore YOLO via user_override gate path', async () => {
+      // With the gate, YOLO exit goes through the autonomous path.
+      // user_override skips the gate and restores prePlanMode.
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'user_override',
+          lastFindings: [],
+          capEscalationPending: false,
+        },
+      );
+
       const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      // Do NOT call onConfirm — this mirrors what the YOLO scheduler does
       const result = await invocation.execute(signal);
 
-      expect(result.llmContent).toContain(
-        'User has approved your plan. You can now start coding',
-      );
+      expect(result.llmContent).toContain('You can now start coding');
       expect(result.llmContent).not.toContain('not approved');
+      // Should restore YOLO, not downgrade
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.YOLO,
+      );
     });
 
-    it('should not downgrade approval mode to AUTO_EDIT when YOLO', async () => {
-      approvalMode = ApprovalMode.YOLO;
+    it('should return allow from getDefaultPermission when prePlanMode is YOLO', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        {
+          entryId: 1,
+          reviewCount: 0,
+          gateMode: 'capped',
+          lastFindings: [],
+          capEscalationPending: false,
+        },
+      );
+
       const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
-      const signal = new AbortController().signal;
-
       const invocation = tool.build(params);
-      await invocation.execute(signal);
-
-      // Approval mode must remain YOLO — do not downgrade to AUTO_EDIT
-      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
-      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
     });
   });
 });
