@@ -15,6 +15,8 @@ import {
   createGatewayApp,
   TokenStore,
   PairingService,
+  VapidStore,
+  PushStore,
   SESSION_READ,
   APPROVE,
   WRITE,
@@ -100,7 +102,9 @@ try {
   // Gateway in front of the real daemon.
   const store = await TokenStore.open(join(workspace, 'tokens.json'));
   const pairing = new PairingService();
-  const app = createGatewayApp({ daemon: dc, store, pairing });
+  const vapid = await VapidStore.open(join(workspace, 'vapid.json'));
+  const pushStore = await PushStore.open(join(workspace, 'push.json'));
+  const app = createGatewayApp({ daemon: dc, store, pairing, vapid, pushStore });
   gatewayServer = await new Promise((res) => {
     const s = app.listen(GATEWAY_PORT, '127.0.0.1', () => res(s));
   });
@@ -221,6 +225,55 @@ try {
     r.status === 502
       ? ok('prompt reached real daemon (502 for unknown session)')
       : bad(`prompt returned ${r.status}`);
+  }
+
+  // WebPush (cycle 8): vapid key, subscribe, list, delete — pure gateway state,
+  // exercised with the session:read userToken (own-subscription ops only).
+  {
+    const vr = await fetch(`${gw}/rc/push/vapid`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const vb = await vr.json();
+    vr.status === 200 && typeof vb.applicationServerKey === 'string'
+      ? ok('push vapid -> 200 with applicationServerKey')
+      : bad(`push vapid ${vr.status} ${JSON.stringify(vb)}`);
+
+    const sr = await fetch(`${gw}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://push.example.com/e2e-1',
+          keys: { p256dh: 'p256dh-e2e', auth: 'auth-e2e' },
+        },
+      }),
+    });
+    const sb = await sr.json();
+    const subId = sb.id;
+    sr.status === 201 && typeof subId === 'string'
+      ? ok('push subscribe -> 201 with id')
+      : bad(`push subscribe ${sr.status} ${JSON.stringify(sb)}`);
+
+    const lr = await fetch(`${gw}/rc/push/subscriptions`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const lb = await lr.json();
+    lr.status === 200 &&
+    Array.isArray(lb.subscriptions) &&
+    lb.subscriptions.some((s) => s.id === subId)
+      ? ok('push subscriptions list includes new subscription')
+      : bad(`push list ${lr.status} ${JSON.stringify(lb)}`);
+
+    const dr = await fetch(`${gw}/rc/push/subscriptions/${subId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    dr.status === 204
+      ? ok('push unsubscribe -> 204')
+      : bad(`push delete ${dr.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
