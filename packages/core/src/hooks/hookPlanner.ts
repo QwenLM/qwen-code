@@ -13,11 +13,13 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 type HookMatcherTargetKind =
   | 'toolName'
+  | 'commandName'
   | 'agentType'
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'filePath';
 
 interface HookMatcherTarget {
   kind: HookMatcherTargetKind;
@@ -33,6 +35,7 @@ export function getHookMatcherTarget(
     case HookEventName.PostToolUse:
     case HookEventName.PostToolUseFailure:
     case HookEventName.PermissionRequest:
+    case HookEventName.PermissionDenied:
       return { kind: 'toolName', target: context?.toolName ?? '' };
 
     case HookEventName.SubagentStart:
@@ -56,8 +59,17 @@ export function getHookMatcherTarget(
         target: context?.notificationType ?? '',
       };
 
+    case HookEventName.InstructionsLoaded:
+      return { kind: 'filePath', target: context?.filePath ?? '' };
+
+    case HookEventName.UserPromptExpansion:
+      // Unlike UserPromptSubmit, command expansions are matchable by the slash
+      // command name that produced the submitted prompt.
+      return { kind: 'commandName', target: context?.commandName ?? '' };
+
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
+    case HookEventName.PostToolBatch:
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
       return undefined;
@@ -67,6 +79,11 @@ export function getHookMatcherTarget(
       return exhaustive;
     }
   }
+}
+
+export function hookEventSupportsMatcher(eventName: HookEventName): boolean {
+  const target = getHookMatcherTarget(eventName);
+  return typeof target === 'object' && target !== null;
 }
 
 /**
@@ -151,6 +168,9 @@ export class HookPlanner {
       case 'toolName':
         return this.matchesToolName(matcher, matcherTarget.target);
 
+      case 'commandName':
+        return this.matchesCommandName(matcher, matcherTarget.target);
+
       case 'agentType':
         return this.matchesAgentType(matcher, matcherTarget.target);
 
@@ -160,6 +180,9 @@ export class HookPlanner {
 
       case 'notificationType':
         return this.matchesNotificationType(matcher, matcherTarget.target);
+
+      case 'filePath':
+        return this.matchesFilePath(matcher, matcherTarget.target);
 
       case 'sessionTrigger':
         return this.matchesSessionTrigger(matcher, matcherTarget.target);
@@ -179,6 +202,21 @@ export class HookPlanner {
     notificationType: string,
   ): boolean {
     return matcher === notificationType;
+  }
+
+  /**
+   * Match loaded instruction file path against matcher pattern.
+   */
+  private matchesFilePath(matcher: string, filePath: string): boolean {
+    try {
+      const regex = new RegExp(matcher);
+      return regex.test(filePath);
+    } catch (error) {
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for file path "${filePath}", falling back to exact match: ${error}`,
+      );
+      return matcher === filePath;
+    }
   }
 
   /**
@@ -212,6 +250,23 @@ export class HookPlanner {
         `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
       );
       return matcher === toolName;
+    }
+  }
+
+  /**
+   * Match slash command name against matcher pattern.
+   */
+  private matchesCommandName(matcher: string, commandName: string): boolean {
+    try {
+      // Attempt to treat the matcher as a regular expression.
+      const regex = new RegExp(matcher);
+      return regex.test(commandName);
+    } catch (error) {
+      // If it's not a valid regex, treat it as a literal string for an exact match.
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for command "${commandName}", falling back to exact match: ${error}`,
+      );
+      return matcher === commandName;
     }
   }
 
@@ -263,10 +318,14 @@ export class HookPlanner {
  */
 export interface HookEventContext {
   toolName?: string;
+  /** Command name for UserPromptExpansion matcher filtering */
+  commandName?: string;
   trigger?: string;
   notificationType?: string;
   /** Agent type for SubagentStart/SubagentStop matcher filtering */
   agentType?: string;
   /** Error type for StopFailure matcher filtering (fieldToMatch: 'error') */
   error?: string;
+  /** Loaded instruction/context file path for InstructionsLoaded matcher filtering */
+  filePath?: string;
 }

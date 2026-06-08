@@ -36,8 +36,16 @@ export interface SkillConfig {
   description: string;
 
   /**
-   * Optional list of tool names that this skill is allowed to use.
-   * For v1, this is informational only (no gating).
+   * Optional list of tools to auto-approve while this skill is active.
+   *
+   * Each entry is a permission rule string in the same syntax as
+   * `settings.json` `permissions.allow` — e.g. `Bash(git *)`, `Edit`, `Read`,
+   * `mcp__server__tool`. When the skill is invoked (via the model Skill-tool or
+   * a user `/<skill>` slash command), each entry is added as a session-scoped
+   * allow rule, so matching tool calls are auto-approved instead of prompting.
+   *
+   * This is an additive grant only: it never hides or restricts the tools the
+   * model can see. Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];
 

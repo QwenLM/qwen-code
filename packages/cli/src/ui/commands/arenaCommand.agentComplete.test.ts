@@ -66,7 +66,9 @@ describe('arenaCommand agent completion history', () => {
       })),
       getApprovalMode: vi.fn(() => 'default'),
       getGeminiClient: vi.fn(() => ({
-        getHistory: vi.fn(() => []),
+        getChat: vi.fn(() => ({
+          getHistoryShallow: vi.fn(() => []),
+        })),
       })),
       getChatRecordingService: vi.fn(() => chatRecorder),
     };

@@ -125,7 +125,20 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
+vi.mock('./authMethods.js', () => {
+  const buildAuthMethods = vi.fn();
+  return {
+    buildAuthMethods,
+    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
+      const authMethods = buildAuthMethods();
+      if (!selectedType) return authMethods;
+      const matched = authMethods.filter(
+        (method: { id: string }) => method.id === selectedType,
+      );
+      return matched.length ? matched : authMethods;
+    }),
+  };
+});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -133,7 +146,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
 vi.mock('../utils/acpModelUtils.js', () => ({
   formatAcpModelId: vi.fn(),
@@ -298,6 +314,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
       };
       lastSessionMock = mock;

@@ -297,7 +297,7 @@ function convertToHistoryItems(
             payload?.displayText ||
             extractTextFromParts(record.message?.parts as Part[]);
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({ type: 'notification', text });
           }
           break;
         }

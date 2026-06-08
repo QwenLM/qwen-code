@@ -11,6 +11,7 @@ import * as crypto from 'node:crypto';
 import { BaseTokenStorage } from './base-token-storage.js';
 import type { OAuthCredentials } from './types.js';
 import { Storage } from '../../config/storage.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 
 export class FileTokenStorage extends BaseTokenStorage {
   private readonly tokenFilePath: string;
@@ -100,7 +101,11 @@ export class FileTokenStorage extends BaseTokenStorage {
     const json = JSON.stringify(data, null, 2);
     const encrypted = this.encrypt(json);
 
-    await fs.writeFile(this.tokenFilePath, encrypted, { mode: 0o600 });
+    await atomicWriteFile(this.tokenFilePath, encrypted, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
   }
 
   async getCredentials(serverName: string): Promise<OAuthCredentials | null> {

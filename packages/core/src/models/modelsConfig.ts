@@ -313,6 +313,18 @@ export class ModelsConfig {
   }
 
   /**
+   * Get the display name for a model by its id.
+   * Looks up the model in the registry using the current authType and returns
+   * its resolved name. Falls back to the raw model id when the model is not
+   * found in the registry (e.g. runtime models or unknown models).
+   */
+  getModelDisplayName(modelId: string): string {
+    if (!this.currentAuthType) return modelId;
+    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    return resolved?.name ?? modelId;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */
@@ -450,17 +462,45 @@ export class ModelsConfig {
         );
       }
 
+      const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousModel =
+        !isAuthTypeChange && previousModelId
+          ? (this.modelRegistry.getModel(
+              authType,
+              previousModelId,
+              rollbackSnapshot.generationConfig.baseUrl,
+            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+          : undefined;
+      const canReusePreviousApiKey =
+        authType !== AuthType.QWEN_OAUTH &&
+        !isAuthTypeChange &&
+        !!rollbackSnapshot.generationConfig.apiKey &&
+        !!model.envKey &&
+        previousModel?.envKey === model.envKey &&
+        previousModel.baseUrl === model.baseUrl;
+      const previousApiKey = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfig.apiKey
+        : undefined;
+      const previousApiKeySource = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfigSources['apiKey']
+        : undefined;
+
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
+      if (!this._generationConfig.apiKey && previousApiKey) {
+        this._generationConfig.apiKey = previousApiKey;
+        if (previousApiKeySource) {
+          this.generationConfigSources['apiKey'] =
+            ModelsConfig.deepClone(previousApiKeySource);
+        }
+      }
 
       // Clear active runtime model snapshot since we're now using a registry model
       this.activeRuntimeModelSnapshotId = undefined;
 
       const requiresRefresh = isAuthTypeChange
         ? true
-        : this.checkRequiresRefresh(
-            rollbackSnapshot.generationConfig.model || '',
-          );
+        : this.checkRequiresRefresh(previousModelId);
 
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);

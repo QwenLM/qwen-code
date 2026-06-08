@@ -53,6 +53,7 @@ import {
   isShellCommandReadOnlyAST,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -366,6 +367,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
           QWEN_CODE: '1',
           TERM: 'dumb', // no color codes for streaming
           PAGER: 'cat',
+          ...getShellContextEnvVars(),
         },
       });
     } catch (err) {
