@@ -2561,7 +2561,8 @@ export const useGeminiStream = (
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
-    setAgentNotificationCallback((displayText, modelText) => {
+    const taskRegistry = config.getTaskRegistry();
+    setAgentNotificationCallback(taskRegistry, (displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2570,13 +2571,14 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      setAgentNotificationCallback(undefined);
+      setAgentNotificationCallback(taskRegistry, undefined);
     };
   }, [config]);
 
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
-    setShellNotificationCallback((displayText, modelText) => {
+    const taskRegistry = config.getTaskRegistry();
+    setShellNotificationCallback(taskRegistry, (displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2585,13 +2587,14 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      setShellNotificationCallback(undefined);
+      setShellNotificationCallback(taskRegistry, undefined);
     };
   }, [config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
-    setMonitorNotificationCallback((displayText, modelText) => {
+    const taskRegistry = config.getTaskRegistry();
+    setMonitorNotificationCallback(taskRegistry, (displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2600,7 +2603,7 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      setMonitorNotificationCallback(undefined);
+      setMonitorNotificationCallback(taskRegistry, undefined);
     };
   }, [config]);
 

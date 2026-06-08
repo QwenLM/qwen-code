@@ -201,20 +201,23 @@ class Session {
       return;
     }
 
-    setMonitorNotificationCallback((displayText, modelText, meta) => {
-      if (this.isShuttingDown || this.abortController.signal.aborted) {
-        return;
-      }
-      this.enqueueMonitorNotification({
-        displayText,
-        modelText,
-        sdkNotification: {
-          task_id: meta.monitorId,
-          tool_use_id: meta.toolUseId,
-          status: meta.status,
-        },
-      });
-    });
+    setMonitorNotificationCallback(
+      this.config.getTaskRegistry(),
+      (displayText, modelText, meta) => {
+        if (this.isShuttingDown || this.abortController.signal.aborted) {
+          return;
+        }
+        this.enqueueMonitorNotification({
+          displayText,
+          modelText,
+          sdkNotification: {
+            task_id: meta.monitorId,
+            tool_use_id: meta.toolUseId,
+            status: meta.status,
+          },
+        });
+      },
+    );
     this.monitorNotificationsRegistered = true;
   }
 
@@ -223,7 +226,7 @@ class Session {
       return;
     }
 
-    setMonitorRegisterCallback((entry) => {
+    setMonitorRegisterCallback(this.config.getTaskRegistry(), (entry) => {
       if (this.isShuttingDown || this.abortController.signal.aborted) {
         return;
       }
@@ -689,12 +692,13 @@ class Session {
       return;
     }
 
+    const taskRegistry = this.config.getTaskRegistry();
     if (this.monitorNotificationsRegistered) {
-      setMonitorNotificationCallback(undefined);
+      setMonitorNotificationCallback(taskRegistry, undefined);
       this.monitorNotificationsRegistered = false;
     }
     if (this.monitorRegistrationsRegistered) {
-      setMonitorRegisterCallback(undefined);
+      setMonitorRegisterCallback(taskRegistry, undefined);
       this.monitorRegistrationsRegistered = false;
     }
   }

@@ -101,7 +101,7 @@ describe('monitor-task', () => {
 
     it('fires the global register callback for top-level monitors', () => {
       const cb: MonitorRegisterCallback = vi.fn();
-      setMonitorRegisterCallback(cb);
+      setMonitorRegisterCallback(registry, cb);
       const entry = monitorRegister(registry, makeReg('mon_1'));
       expect(cb).toHaveBeenCalledTimes(1);
       expect(cb).toHaveBeenCalledWith(entry);
@@ -109,7 +109,7 @@ describe('monitor-task', () => {
 
     it('does NOT fire the global register callback for owner-scoped monitors', () => {
       const cb: MonitorRegisterCallback = vi.fn();
-      setMonitorRegisterCallback(cb);
+      setMonitorRegisterCallback(registry, cb);
       monitorRegister(
         registry,
         makeReg('mon_owned', { ownerAgentId: 'agent-A' }),
@@ -150,7 +150,7 @@ describe('monitor-task', () => {
 
     it('auto-stops when maxEvents reached and emits a terminal notification', () => {
       const notify: MonitorNotificationCallback = vi.fn();
-      setMonitorNotificationCallback(notify);
+      setMonitorNotificationCallback(registry, notify);
       monitorRegister(registry, makeReg('mon_1', { maxEvents: 3 }));
 
       monitorEmitEvent(registry, 'mon_1', 'a');
@@ -186,7 +186,7 @@ describe('monitor-task', () => {
   describe('monitorComplete / monitorFail', () => {
     it('strips Unicode bidi (Trojan Source) characters from terminal notifications', () => {
       const notify: MonitorNotificationCallback = vi.fn();
-      setMonitorNotificationCallback(notify);
+      setMonitorNotificationCallback(registry, notify);
       // U+202E RIGHT-TO-LEFT OVERRIDE + U+2066 LEFT-TO-RIGHT ISOLATE — a
       // malicious monitored process could emit these in its description or
       // output to visually reorder adjacent text (CVE-2021-42574). They are
@@ -337,7 +337,7 @@ describe('monitor-task', () => {
     it('routes notifications to the owner-routed callback, not the global one', () => {
       const global: MonitorNotificationCallback = vi.fn();
       const ownerCb: MonitorNotificationCallback = vi.fn();
-      setMonitorNotificationCallback(global);
+      setMonitorNotificationCallback(registry, global);
       setMonitorAgentNotificationCallback('agent-A', ownerCb);
       monitorRegister(
         registry,

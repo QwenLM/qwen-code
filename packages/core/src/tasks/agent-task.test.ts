@@ -198,14 +198,14 @@ describe('agent lifecycle', () => {
     vi.useFakeTimers();
     registry = new TaskRegistry();
     notify = vi.fn();
-    setAgentNotificationCallback(notify);
+    setAgentNotificationCallback(registry, notify);
     // The lifecycle paths aren't exercising the concurrency guard; keep the
     // cap generous so registering many short-lived entries never trips it.
     setAgentBackgroundCapForTest(1000);
   });
 
   afterEach(() => {
-    setAgentNotificationCallback(undefined);
+    setAgentNotificationCallback(registry, undefined);
     setAgentBackgroundCapForTest(undefined);
     vi.useRealTimers();
   });
@@ -416,5 +416,76 @@ describe('agent lifecycle', () => {
       expect(cancelling.status).toBe('cancelled');
       expect(cancelling.notified).toBe(false);
     });
+  });
+});
+
+// Regression guard for PR #3982: the agent notification/register callbacks
+// are keyed by TaskRegistry instance, not held as a bare module singleton.
+// The ACP agent runs concurrent sessions in one process, each with its own
+// Config/TaskRegistry; a singleton would let the most-recently-registered
+// session's callback receive another session's background-task notifications.
+describe('per-registry callback isolation (ACP multi-session)', () => {
+  beforeEach(() => {
+    setAgentBackgroundCapForTest(1000);
+  });
+
+  afterEach(() => {
+    setAgentBackgroundCapForTest(undefined);
+  });
+
+  it('routes each registry’s notifications only to that registry’s callback', () => {
+    const registryA = new TaskRegistry();
+    const registryB = new TaskRegistry();
+    const notifyA = vi.fn();
+    const notifyB = vi.fn();
+    setAgentNotificationCallback(registryA, notifyA);
+    setAgentNotificationCallback(registryB, notifyB);
+
+    agentRegister(registryA, makeAgentReg('bg-a'));
+    agentRegister(registryB, makeAgentReg('bg-b'));
+    agentComplete(registryA, 'bg-a', 'done-a');
+    agentComplete(registryB, 'bg-b', 'done-b');
+
+    expect(notifyA).toHaveBeenCalledTimes(1);
+    expect(notifyB).toHaveBeenCalledTimes(1);
+    const [, modelTextA] = notifyA.mock.calls[0];
+    const [, modelTextB] = notifyB.mock.calls[0];
+    expect(modelTextA).toContain('bg-a');
+    expect(modelTextA).not.toContain('bg-b');
+    expect(modelTextB).toContain('bg-b');
+    expect(modelTextB).not.toContain('bg-a');
+  });
+
+  it('does not fire a sibling registry’s callback when this registry has none', () => {
+    const registryA = new TaskRegistry();
+    const registryB = new TaskRegistry();
+    const notifyA = vi.fn();
+    setAgentNotificationCallback(registryA, notifyA);
+    // registryB intentionally has no callback registered.
+
+    agentRegister(registryB, makeAgentReg('bg-b'));
+    expect(() => agentComplete(registryB, 'bg-b', 'done-b')).not.toThrow();
+
+    expect(notifyA).not.toHaveBeenCalled();
+  });
+
+  it('clearing one registry’s callback leaves the other intact', () => {
+    const registryA = new TaskRegistry();
+    const registryB = new TaskRegistry();
+    const notifyA = vi.fn();
+    const notifyB = vi.fn();
+    setAgentNotificationCallback(registryA, notifyA);
+    setAgentNotificationCallback(registryB, notifyB);
+
+    // Tear down session A (mirrors Session.dispose()).
+    setAgentNotificationCallback(registryA, undefined);
+
+    agentRegister(registryA, makeAgentReg('bg-a'));
+    agentRegister(registryB, makeAgentReg('bg-b'));
+    agentComplete(registryA, 'bg-a', 'done-a');
+    agentComplete(registryB, 'bg-b', 'done-b');
+
+    expect(notifyA).not.toHaveBeenCalled();
+    expect(notifyB).toHaveBeenCalledTimes(1);
   });
 });

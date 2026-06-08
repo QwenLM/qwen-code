@@ -381,11 +381,12 @@ describe('useGeminiStream', () => {
 
     await waitFor(() => {
       expect(mockSetShellNotificationCallback).toHaveBeenCalledWith(
+        expect.anything(),
         expect.any(Function),
       );
     });
 
-    const callback = mockSetShellNotificationCallback.mock.calls[0][0] as (
+    const callback = mockSetShellNotificationCallback.mock.calls[0][1] as (
       displayText: string,
       modelText: string,
     ) => void;

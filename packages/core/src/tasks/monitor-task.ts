@@ -154,15 +154,24 @@ export interface MonitorCancelOptions {
 }
 
 /**
- * Module-level singletons replacing the per-instance callback fields on
- * `MonitorRegistry`. Same rationale as `agent-task.ts`: the registry's
+ * Per-registry callback tables replacing the per-instance callback fields
+ * on `MonitorRegistry`. Same rationale as `agent-task.ts`: the registry's
  * polymorphic `subscribe` covers UI re-renders; these two callbacks
  * carry the monitor kind's SDK-specific event signals (per-event
  * notification XML for the parent model, register fan-out for SDK
  * consumers).
+ *
+ * Keyed by `TaskRegistry` so concurrent ACP sessions (each with its own
+ * `Config`/`TaskRegistry`) don't overwrite each other's callback — see
+ * the equivalent note in `agent-task.ts`. The owner-scoped Maps below
+ * stay keyed by `ownerAgentId` (globally unique), so they don't share
+ * the cross-session collision hazard.
  */
-let notificationCallback: MonitorNotificationCallback | undefined;
-let registerCallback: MonitorRegisterCallback | undefined;
+let notificationCallbacks = new WeakMap<
+  TaskRegistry,
+  MonitorNotificationCallback
+>();
+let registerCallbacks = new WeakMap<TaskRegistry, MonitorRegisterCallback>();
 
 /**
  * Per-owner-agent notification + lifecycle callbacks. Module-level
@@ -180,15 +189,25 @@ const agentLifecycleCallbacks = new Map<
 >();
 
 export function setMonitorNotificationCallback(
+  registry: TaskRegistry,
   cb: MonitorNotificationCallback | undefined,
 ): void {
-  notificationCallback = cb;
+  if (cb) {
+    notificationCallbacks.set(registry, cb);
+  } else {
+    notificationCallbacks.delete(registry);
+  }
 }
 
 export function setMonitorRegisterCallback(
+  registry: TaskRegistry,
   cb: MonitorRegisterCallback | undefined,
 ): void {
-  registerCallback = cb;
+  if (cb) {
+    registerCallbacks.set(registry, cb);
+  } else {
+    registerCallbacks.delete(registry);
+  }
 }
 
 export function setMonitorAgentNotificationCallback(
@@ -220,8 +239,8 @@ export function setMonitorAgentLifecycleCallback(
  * starts with a clean slate.
  */
 export function _resetMonitorTaskModuleStateForTest(): void {
-  notificationCallback = undefined;
-  registerCallback = undefined;
+  notificationCallbacks = new WeakMap();
+  registerCallbacks = new WeakMap();
   agentNotificationCallbacks.clear();
   agentLifecycleCallbacks.clear();
 }
@@ -292,6 +311,7 @@ export function monitorRegister(
   // Owner-scoped monitors don't fire the global register callback —
   // their lifecycle is surfaced to the owning subagent, not the
   // top-level SDK register fan-out.
+  const registerCallback = registerCallbacks.get(registry);
   if (!entry.ownerAgentId && registerCallback) {
     try {
       registerCallback(entry);
@@ -335,7 +355,7 @@ export function monitorEmitEvent(
       ? line.slice(0, EVENT_LINE_TRUNCATE) + '...[truncated]'
       : line;
 
-  emitEventNotification(entry, truncatedLine);
+  emitEventNotification(registry, entry, truncatedLine);
 
   // Auto-stop if max events reached. Settle BEFORE aborting so that any
   // synchronous abort listener that flushes buffered output back through
@@ -349,7 +369,7 @@ export function monitorEmitEvent(
     );
     settle(registry, entry, 'completed', { error: 'Max events reached' });
     entry.abortController.abort();
-    emitTerminalNotification(entry, 'Max events reached');
+    emitTerminalNotification(registry, entry, 'Max events reached');
   }
 }
 
@@ -367,6 +387,7 @@ export function monitorComplete(
     `Monitor completed: ${monitorId} (exit ${exitCode}, ${entry.eventCount} events)`,
   );
   emitTerminalNotification(
+    registry,
     entry,
     exitCode !== null ? `Exited with code ${exitCode}` : undefined,
   );
@@ -383,7 +404,7 @@ export function monitorFail(
 
   settle(registry, entry, 'failed', { error });
   debugLogger.info(`Monitor failed: ${monitorId}: ${error}`);
-  emitTerminalNotification(entry, error);
+  emitTerminalNotification(registry, entry, error);
 }
 
 /**
@@ -428,7 +449,7 @@ export function monitorCancel(
   if (entry.status !== 'running') return;
   settle(registry, entry, 'cancelled');
   debugLogger.info(`Monitor cancelled: ${monitorId}`);
-  emitTerminalNotification(entry);
+  emitTerminalNotification(registry, entry);
 }
 
 export function monitorAbortAll(
@@ -521,6 +542,7 @@ function dispatchOwnerLifecycleWake(entry: MonitorTask): void {
  * session.
  */
 function dispatchNotification(
+  registry: TaskRegistry,
   entry: MonitorTask,
   displayLine: string,
   modelText: string,
@@ -528,7 +550,7 @@ function dispatchNotification(
 ): void {
   const callback = entry.ownerAgentId
     ? agentNotificationCallbacks.get(entry.ownerAgentId)
-    : notificationCallback;
+    : notificationCallbacks.get(registry);
   if (!callback) {
     if (entry.ownerAgentId) {
       debugLogger.warn(
@@ -602,7 +624,7 @@ function resetIdleTimer(registry: TaskRegistry, entry: MonitorTask): void {
         return current;
       });
       settle(registry, entry, 'completed');
-      emitTerminalNotification(entry, 'Idle timeout');
+      emitTerminalNotification(registry, entry, 'Idle timeout');
     }
   }, entry.idleTimeoutMs);
   entry.idleTimer.unref?.();
@@ -629,7 +651,11 @@ function sanitizeForNotification(text: string): string {
 }
 
 /** Emit a streaming event notification (status=running, includes stdout line). */
-function emitEventNotification(entry: MonitorTask, eventLine: string): void {
+function emitEventNotification(
+  registry: TaskRegistry,
+  entry: MonitorTask,
+  eventLine: string,
+): void {
   const desc = sanitizeForNotification(truncateDescription(entry.description));
   const safeEventLine = sanitizeForNotification(eventLine);
   const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${safeEventLine}`;
@@ -658,11 +684,15 @@ function emitEventNotification(entry: MonitorTask, eventLine: string): void {
     ownerAgentId: entry.ownerAgentId,
   };
 
-  dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
+  dispatchNotification(registry, entry, displayLine, xmlParts.join('\n'), meta);
 }
 
 /** Emit a terminal notification (completed/failed/cancelled). */
-function emitTerminalNotification(entry: MonitorTask, detail?: string): void {
+function emitTerminalNotification(
+  registry: TaskRegistry,
+  entry: MonitorTask,
+  detail?: string,
+): void {
   const statusText =
     entry.status === 'completed'
       ? 'completed'
@@ -705,7 +735,7 @@ function emitTerminalNotification(entry: MonitorTask, detail?: string): void {
     ownerAgentId: entry.ownerAgentId,
   };
 
-  dispatchNotification(entry, displayLine, xmlParts.join('\n'), meta);
+  dispatchNotification(registry, entry, displayLine, xmlParts.join('\n'), meta);
 }
 
 function truncateDescription(desc: string): string {

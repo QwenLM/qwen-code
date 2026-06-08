@@ -280,6 +280,10 @@ describe('Session', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      // Background-notification callbacks are keyed by the session's
+      // TaskRegistry, so the constructor reads this. The task-module setters
+      // are mocked above, so a stub instance is sufficient.
+      getTaskRegistry: vi.fn().mockReturnValue({}),
     } as unknown as Config;
 
     mockClient = {
@@ -872,7 +876,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -996,7 +1000,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1057,7 +1061,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1089,7 +1093,7 @@ describe('Session', () => {
         }
       ).pendingPrompt = new AbortController();
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1137,7 +1141,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1202,7 +1206,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background work' }],
       });
 
-      const callback = mockSetAgentNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetAgentNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { agentId: string; status: string; toolUseId?: string },
@@ -1228,7 +1232,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start monitor' }],
       });
 
-      const callback = mockSetMonitorNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetMonitorNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { monitorId: string; status: string; toolUseId?: string },
@@ -1287,7 +1291,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'start background shell' }],
       });
 
-      const callback = mockSetShellNotificationCallback.mock.calls[0][0] as (
+      const callback = mockSetShellNotificationCallback.mock.calls[0][1] as (
         displayText: string,
         modelText: string,
         meta: { shellId: string; status: string },
@@ -4216,12 +4220,15 @@ describe('Session', () => {
       expect(internals.cronQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
       expect(mockSetAgentNotificationCallback).toHaveBeenLastCalledWith(
+        expect.anything(),
         undefined,
       );
       expect(mockSetMonitorNotificationCallback).toHaveBeenLastCalledWith(
+        expect.anything(),
         undefined,
       );
       expect(mockSetShellNotificationCallback).toHaveBeenLastCalledWith(
+        expect.anything(),
         undefined,
       );
     });
@@ -4273,7 +4280,7 @@ describe('Session', () => {
       // The second dispose still unregisters (passes undefined again), which
       // is harmless. We only care that no surprise re-registration occurs.
       const last = mockSetAgentNotificationCallback.mock.calls.at(-1);
-      expect(last?.[0]).toBeUndefined();
+      expect(last?.[1]).toBeUndefined();
       expect(
         mockSetAgentNotificationCallback.mock.calls.length,
       ).toBeGreaterThanOrEqual(callsAfterFirst);

@@ -54,15 +54,29 @@ export type BackgroundShellNotificationCallback = (
 ) => void;
 
 // ---------------------------------------------------------------------------
-// Module-level notification callback (mirrors monitor-task.ts pattern)
+// Per-registry notification callback (mirrors monitor-task.ts pattern)
+//
+// Keyed by `TaskRegistry` rather than a bare module singleton so that
+// concurrent ACP sessions — each with its own `Config`/`TaskRegistry` —
+// don't overwrite each other's notification callback. See the equivalent
+// note in `agent-task.ts`. `WeakMap` so a disposed session's entry is
+// collected with its `Config`.
 // ---------------------------------------------------------------------------
 
-let notificationCallback: BackgroundShellNotificationCallback | undefined;
+let notificationCallbacks = new WeakMap<
+  TaskRegistry,
+  BackgroundShellNotificationCallback
+>();
 
 export function setShellNotificationCallback(
+  registry: TaskRegistry,
   cb: BackgroundShellNotificationCallback | undefined,
 ): void {
-  notificationCallback = cb;
+  if (cb) {
+    notificationCallbacks.set(registry, cb);
+  } else {
+    notificationCallbacks.delete(registry);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +206,13 @@ function truncateCommandForModel(command: string): {
  * Emit a terminal notification for a shell entry that just settled.
  * No-op if the entry was already notified or no callback is registered.
  */
-function emitShellNotification(entry: ShellTask): void {
+function emitShellNotification(registry: TaskRegistry, entry: ShellTask): void {
   if (entry.notified) return;
 
   // Mark notified silently — no need to trigger change listeners.
   entry.notified = true;
 
+  const notificationCallback = notificationCallbacks.get(registry);
   if (!notificationCallback) {
     debugLogger.debug(
       `Notification dropped for shell ${entry.shellId}: no callback registered`,
@@ -270,7 +285,7 @@ function emitShellNotification(entry: ShellTask): void {
  * `_resetTaskKindModuleStateForTest` in `tasks/index.ts`.
  */
 export function _resetShellTaskModuleStateForTest(): void {
-  notificationCallback = undefined;
+  notificationCallbacks = new WeakMap();
 }
 
 /**
@@ -417,7 +432,7 @@ export function shellComplete(
     current.endTime = endTime;
     return current;
   });
-  emitShellNotification(entry);
+  emitShellNotification(registry, entry);
   pruneTerminalEntries(registry);
 }
 
@@ -439,7 +454,7 @@ export function shellFail(
     current.endTime = endTime;
     return current;
   });
-  emitShellNotification(entry);
+  emitShellNotification(registry, entry);
   pruneTerminalEntries(registry);
 }
 
@@ -465,7 +480,7 @@ export function shellCancel(
     return current;
   });
   if (options.notify !== false) {
-    emitShellNotification(entry);
+    emitShellNotification(registry, entry);
   }
   pruneTerminalEntries(registry);
 }

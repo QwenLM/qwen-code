@@ -364,10 +364,10 @@ describe('runNonInteractiveStreamJson', () => {
           },
         ) => void)
       | undefined;
-    mockSetMonitorRegisterCallback.mockImplementation((cb) => {
+    mockSetMonitorRegisterCallback.mockImplementation((_registry, cb) => {
       registerCallback = cb;
     });
-    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
       monitorCallback = cb;
     });
 
@@ -470,10 +470,10 @@ describe('runNonInteractiveStreamJson', () => {
         ) => void)
       | undefined;
 
-    mockSetMonitorRegisterCallback.mockImplementation((cb) => {
+    mockSetMonitorRegisterCallback.mockImplementation((_registry, cb) => {
       registerCallback = cb;
     });
-    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
       notificationCallback = cb;
     });
 
@@ -530,9 +530,11 @@ describe('runNonInteractiveStreamJson', () => {
     closeInput?.();
     await vi.waitFor(() => {
       expect(mockSetMonitorNotificationCallback).toHaveBeenLastCalledWith(
+        expect.anything(),
         undefined,
       );
       expect(mockSetMonitorRegisterCallback).toHaveBeenLastCalledWith(
+        expect.anything(),
         undefined,
       );
     });
@@ -567,10 +569,13 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
 
     const clearCalls = mockSetMonitorNotificationCallback.mock.calls
-      .map(([cb]) => cb)
+      .map(([, cb]) => cb)
       .filter((cb) => cb === undefined);
     expect(clearCalls).toHaveLength(1);
-    expect(mockSetMonitorRegisterCallback).toHaveBeenLastCalledWith(undefined);
+    expect(mockSetMonitorRegisterCallback).toHaveBeenLastCalledWith(
+      expect.anything(),
+      undefined,
+    );
   });
 
   it('enqueues user messages received during processing', async () => {

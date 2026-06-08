@@ -219,8 +219,8 @@ describe('MonitorTool', () => {
   afterEach(() => {
     monitorAbortAll(monitorRegistry);
     // Clear module-level callbacks so state doesn't leak across tests.
-    setMonitorNotificationCallback(undefined);
-    setMonitorRegisterCallback(undefined);
+    setMonitorNotificationCallback(monitorRegistry, undefined);
+    setMonitorRegisterCallback(monitorRegistry, undefined);
   });
 
   // Helper to access protected validateToolParamValues
@@ -891,7 +891,7 @@ describe('MonitorTool', () => {
         command: 'tail -f log',
       });
       const registerCallback = vi.fn();
-      setMonitorRegisterCallback(registerCallback);
+      setMonitorRegisterCallback(monitorRegistry, registerCallback);
       mockSpawn.mockImplementation(() => {
         throw new Error('spawn failed');
       });
@@ -917,8 +917,8 @@ describe('MonitorTool', () => {
 
     it('replays spawn errors emitted before the late handler is attached', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
-      setMonitorRegisterCallback(() => {
+      setMonitorNotificationCallback(monitorRegistry, callback);
+      setMonitorRegisterCallback(monitorRegistry, () => {
         mockChild._emitError(new Error('spawn ENOENT'));
       });
       const invocation = createInvocation({
@@ -941,7 +941,7 @@ describe('MonitorTool', () => {
 
     it('emits events on stdout lines', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'echo hello',
@@ -957,7 +957,7 @@ describe('MonitorTool', () => {
 
     it('buffers partial lines across chunks', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'echo hello',
@@ -993,7 +993,7 @@ describe('MonitorTool', () => {
 
     it('drains stdout emitted after exit before completing', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
       const invocation = createInvocation({
         command: 'echo done',
       });
@@ -1050,7 +1050,7 @@ describe('MonitorTool', () => {
 
     it('settles as completed when exit and close both report null code and null signal', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'some-cmd',
@@ -1090,7 +1090,7 @@ describe('MonitorTool', () => {
 
     it('processes stderr data same as stdout', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'some-cmd',
@@ -1105,7 +1105,7 @@ describe('MonitorTool', () => {
 
     it('filters out empty lines', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'echo hello',
@@ -1121,7 +1121,7 @@ describe('MonitorTool', () => {
 
     it('uses separate buffers for stdout and stderr', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'some-cmd',
@@ -1160,7 +1160,7 @@ describe('MonitorTool', () => {
 
     it('caps unbounded partial-line accumulation (no newlines)', async () => {
       const callback = vi.fn();
-      setMonitorNotificationCallback(callback);
+      setMonitorNotificationCallback(monitorRegistry, callback);
 
       const invocation = createInvocation({
         command: 'tight-loop --no-newlines',
@@ -1209,7 +1209,7 @@ describe('MonitorTool', () => {
       try {
         vi.setSystemTime(0);
         const callback = vi.fn();
-        setMonitorNotificationCallback(callback);
+        setMonitorNotificationCallback(monitorRegistry, callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);
@@ -1233,7 +1233,7 @@ describe('MonitorTool', () => {
       try {
         vi.setSystemTime(0);
         const callback = vi.fn();
-        setMonitorNotificationCallback(callback);
+        setMonitorNotificationCallback(monitorRegistry, callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);
@@ -1270,7 +1270,7 @@ describe('MonitorTool', () => {
       try {
         vi.setSystemTime(0);
         const callback = vi.fn();
-        setMonitorNotificationCallback(callback);
+        setMonitorNotificationCallback(monitorRegistry, callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);
@@ -1298,7 +1298,7 @@ describe('MonitorTool', () => {
       try {
         vi.setSystemTime(0);
         const callback = vi.fn();
-        setMonitorNotificationCallback(callback);
+        setMonitorNotificationCallback(monitorRegistry, callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);
@@ -1324,7 +1324,7 @@ describe('MonitorTool', () => {
       try {
         mockTime = 0;
         const callback = vi.fn();
-        setMonitorNotificationCallback(callback);
+        setMonitorNotificationCallback(monitorRegistry, callback);
 
         const invocation = createInvocation({ command: 'noisy-cmd' });
         await invocation.execute(new AbortController().signal);

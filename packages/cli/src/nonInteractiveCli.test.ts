@@ -1398,7 +1398,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -1610,7 +1610,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -1776,7 +1776,7 @@ describe('runNonInteractive', () => {
         ) => void)
       | undefined;
 
-    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
       monitorNotificationCallback = cb ?? undefined;
       if (!cb) {
         return;
@@ -3203,7 +3203,7 @@ describe('runNonInteractive', () => {
         '<summary>Monitor emitted event #1.</summary>\n' +
         '<result>ready</result>\n' +
         '</task-notification>';
-      mockSetMonitorNotificationCallback.mockImplementation((cb) => {
+      mockSetMonitorNotificationCallback.mockImplementation((_registry, cb) => {
         if (!cb) return;
         cb('Monitor "logs" event #1: ready', notificationXml, {
           monitorId: 'mon_1',
@@ -3331,7 +3331,7 @@ describe('runNonInteractive', () => {
             },
           ) => void)
         | null = null;
-      mockSetAgentNotificationCallback.mockImplementation((cb) => {
+      mockSetAgentNotificationCallback.mockImplementation((_registry, cb) => {
         notificationCallback = cb ?? null;
       });
       abortAllSpy.mockImplementation(() => {

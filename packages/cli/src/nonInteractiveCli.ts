@@ -476,7 +476,7 @@ export async function runNonInteractive(
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
       const registry = config.getTaskRegistry();
-      setAgentNotificationCallback((displayText, modelText, meta) => {
+      setAgentNotificationCallback(registry, (displayText, modelText, meta) => {
         localQueue.push({
           displayText,
           modelText,
@@ -496,7 +496,7 @@ export async function runNonInteractive(
         });
       });
 
-      setAgentRegisterCallback((entry) => {
+      setAgentRegisterCallback(registry, (entry) => {
         adapter.emitSystemMessage('task_started', {
           task_id: entry.agentId,
           tool_use_id: entry.toolUseId,
@@ -511,29 +511,32 @@ export async function runNonInteractive(
         // Persistent stream-json sessions own this callback at the Session
         // layer instead, so future monitor events can continue after the
         // originating turn has already completed.
-        setMonitorNotificationCallback((displayText, modelText, meta) => {
-          const queueItem = {
-            displayText,
-            modelText,
-            sendMessageType: SendMessageType.Notification,
-            sdkNotification: {
-              task_id: meta.monitorId,
-              tool_use_id: meta.toolUseId,
-              status: meta.status,
-            },
-          };
+        setMonitorNotificationCallback(
+          registry,
+          (displayText, modelText, meta) => {
+            const queueItem = {
+              displayText,
+              modelText,
+              sendMessageType: SendMessageType.Notification,
+              sdkNotification: {
+                task_id: meta.monitorId,
+                tool_use_id: meta.toolUseId,
+                status: meta.status,
+              },
+            };
 
-          if (captureMonitorTurnsInLocalQueue) {
-            localQueue.push(queueItem);
-          } else {
-            sdkOnlyMonitorQueue.push(queueItem);
-            flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
-          }
-        });
+            if (captureMonitorTurnsInLocalQueue) {
+              localQueue.push(queueItem);
+            } else {
+              sdkOnlyMonitorQueue.push(queueItem);
+              flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
+            }
+          },
+        );
       }
 
       if (options.captureMonitorRegistrations !== false) {
-        setMonitorRegisterCallback((entry) => {
+        setMonitorRegisterCallback(registry, (entry) => {
           adapter.emitSystemMessage('task_started', {
             task_id: entry.monitorId,
             tool_use_id: entry.toolUseId,
@@ -1309,9 +1312,9 @@ export async function runNonInteractive(
       // daemon, SDK) that reuse a single process across many runs.
       budgetEnforcer.stop();
 
-      setAgentNotificationCallback(undefined);
-      setAgentRegisterCallback(undefined);
       const taskRegistry = config.getTaskRegistry();
+      setAgentNotificationCallback(taskRegistry, undefined);
+      setAgentRegisterCallback(taskRegistry, undefined);
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result
       // is emitted. Session runs manage monitor lifecycle independently.
@@ -1319,10 +1322,10 @@ export async function runNonInteractive(
         if (!oneShotMonitorsFinalized) {
           monitorAbortAll(taskRegistry, { notify: false });
         }
-        setMonitorNotificationCallback(undefined);
+        setMonitorNotificationCallback(taskRegistry, undefined);
       }
       if (options.captureMonitorRegistrations !== false) {
-        setMonitorRegisterCallback(undefined);
+        setMonitorRegisterCallback(taskRegistry, undefined);
       }
 
       process.stdout.removeListener('error', stdoutErrorHandler);

@@ -100,8 +100,8 @@ export function setAgentBackgroundCapForTest(cap: number | undefined): void {
  * the monitor/shell siblings.
  */
 export function _resetAgentTaskModuleStateForTest(): void {
-  notificationCallback = undefined;
-  registerCallback = undefined;
+  notificationCallbacks = new WeakMap();
+  registerCallbacks = new WeakMap();
   messageWaiters.clear();
   setAgentBackgroundCapForTest(undefined);
 }
@@ -292,18 +292,30 @@ export interface AgentCancelOptions {
 }
 
 /**
- * Module-level singletons replacing the per-instance callback fields on
- * `BackgroundTaskRegistry`. The registry's polymorphic `subscribe` covers
- * UI re-renders; the two callbacks below carry the agent kind's
+ * Per-registry callback tables replacing the per-instance callback fields
+ * on `BackgroundTaskRegistry`. The registry's polymorphic `subscribe`
+ * covers UI re-renders; the two callbacks below carry the agent kind's
  * SDK-specific event signals — terminal `<task-notification>` payload
  * (model-facing) and `task_started` register fan-out (SDK consumers).
  *
- * Single subscriber on purpose: the headless and interactive entry
- * points each install exactly one of these per session, and a list
- * would invite drift in error-handling.
+ * Keyed by `TaskRegistry` rather than held as a bare module singleton:
+ * the ACP agent runs multiple concurrent sessions in one process, each
+ * with its own `Config` (hence its own `TaskRegistry`). A bare singleton
+ * would let the most-recently-started session's callback overwrite the
+ * others, misrouting one session's background-task notifications to a
+ * different session's connection. Keying by the registry restores the
+ * per-session isolation the old per-instance fields had. `WeakMap` so a
+ * disposed session's entry is collected with its `Config`.
+ *
+ * Single subscriber per registry on purpose: the headless and
+ * interactive entry points each install exactly one of these per
+ * session, and a list would invite drift in error-handling.
  */
-let notificationCallback: BackgroundNotificationCallback | undefined;
-let registerCallback: BackgroundRegisterCallback | undefined;
+let notificationCallbacks = new WeakMap<
+  TaskRegistry,
+  BackgroundNotificationCallback
+>();
+let registerCallbacks = new WeakMap<TaskRegistry, BackgroundRegisterCallback>();
 
 type MessageWaiter = () => void;
 
@@ -327,15 +339,25 @@ function wakeMessageWaiters(agentId: string): void {
 }
 
 export function setAgentNotificationCallback(
+  registry: TaskRegistry,
   cb: BackgroundNotificationCallback | undefined,
 ): void {
-  notificationCallback = cb;
+  if (cb) {
+    notificationCallbacks.set(registry, cb);
+  } else {
+    notificationCallbacks.delete(registry);
+  }
 }
 
 export function setAgentRegisterCallback(
+  registry: TaskRegistry,
   cb: BackgroundRegisterCallback | undefined,
 ): void {
-  registerCallback = cb;
+  if (cb) {
+    registerCallbacks.set(registry, cb);
+  } else {
+    registerCallbacks.delete(registry);
+  }
 }
 
 /**
@@ -446,6 +468,7 @@ export function agentRegister(
   registry.register(entry);
   debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
+  const registerCallback = registerCallbacks.get(registry);
   if (entry.isBackgrounded && registerCallback) {
     try {
       registerCallback(entry);
@@ -915,6 +938,7 @@ function emitNotification(registry: TaskRegistry, agentId: string): void {
   // model the same payload twice.
   if (!entry.isBackgrounded) return;
 
+  const notificationCallback = notificationCallbacks.get(registry);
   if (!notificationCallback) return;
 
   const statusText =

@@ -335,9 +335,9 @@ describe('shell-task helpers', () => {
     it('prevents notifications after clearing', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a' }));
-      setShellNotificationCallback(undefined);
+      setShellNotificationCallback(reg, undefined);
       shellComplete(reg, 'a', 0, 2000);
       expect(callback).not.toHaveBeenCalled();
     });
@@ -348,7 +348,7 @@ describe('shell-task helpers', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
       const outputPath = makeOutputFile('first line\nfinal result\n');
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(
         reg,
         makeEntry({
@@ -390,7 +390,7 @@ describe('shell-task helpers', () => {
       const command = `node -e ${'a'.repeat(700)}`;
       const displayCommand = command.slice(0, 77) + '...';
       const modelCommand = command.slice(0, 497) + '...';
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', command }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -411,7 +411,7 @@ describe('shell-task helpers', () => {
     it('escapes XML and strips display control characters on failure', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(
         reg,
         makeEntry({
@@ -445,7 +445,7 @@ describe('shell-task helpers', () => {
           'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES) +
           '\nlast line\n',
       );
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', outputPath }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -465,7 +465,7 @@ describe('shell-task helpers', () => {
       const padding = 'a'.repeat(MAX_NOTIFICATION_OUTPUT_TAIL_BYTES - 1);
       const content = padding + '\u20AC' + '\nfinal output\n';
       writeFileSync(file, content);
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', outputPath: file }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -479,7 +479,7 @@ describe('shell-task helpers', () => {
     it('strips control characters from cwd and output-file XML fields', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(
         reg,
         makeEntry({
@@ -509,7 +509,7 @@ describe('shell-task helpers', () => {
       const outputPath = join(dir, 'shell.output');
       writeFileSync(secretPath, 'secret credentials');
       symlinkSync(secretPath, outputPath);
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', outputPath }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -522,7 +522,7 @@ describe('shell-task helpers', () => {
     it('skips output-tail when the output file does not exist', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(
         reg,
         makeEntry({
@@ -543,7 +543,7 @@ describe('shell-task helpers', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', outputPath: dir }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -557,7 +557,7 @@ describe('shell-task helpers', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
       const outputPath = makeOutputFile('');
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a', outputPath }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -569,7 +569,7 @@ describe('shell-task helpers', () => {
 
     it('keeps the registry usable when the notification callback throws', () => {
       const reg = new TaskRegistry();
-      setShellNotificationCallback(() => {
+      setShellNotificationCallback(reg, () => {
         throw new Error('subscriber blew up');
       });
       shellRegister(reg, makeEntry({ shellId: 'a' }));
@@ -584,7 +584,7 @@ describe('shell-task helpers', () => {
     it('does not emit more than once for late terminal transitions', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a' }));
 
       shellComplete(reg, 'a', 0, 2000);
@@ -597,7 +597,7 @@ describe('shell-task helpers', () => {
     it('waits until cancel() to notify after requestCancel()', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a' }));
 
       shellRequestCancel(reg, 'a');
@@ -620,7 +620,7 @@ describe('shell-task helpers', () => {
     it('does not emit notifications from abortAll shutdown cleanup', () => {
       const reg = new TaskRegistry();
       const callback = vi.fn();
-      setShellNotificationCallback(callback);
+      setShellNotificationCallback(reg, callback);
       shellRegister(reg, makeEntry({ shellId: 'a' }));
       shellRegister(reg, makeEntry({ shellId: 'b' }));
 

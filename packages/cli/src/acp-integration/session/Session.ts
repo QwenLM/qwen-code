@@ -411,9 +411,10 @@ export class Session implements SessionContext {
     this.cronProcessing = false;
     this.cronCompletion = null;
 
-    setAgentNotificationCallback(undefined);
-    setMonitorNotificationCallback(undefined);
-    setShellNotificationCallback(undefined);
+    const taskRegistry = this.config.getTaskRegistry();
+    setAgentNotificationCallback(taskRegistry, undefined);
+    setMonitorNotificationCallback(taskRegistry, undefined);
+    setShellNotificationCallback(taskRegistry, undefined);
   }
 
   /**
@@ -1652,41 +1653,51 @@ export class Session implements SessionContext {
   }
 
   #registerBackgroundNotificationCallbacks(): void {
-    setAgentNotificationCallback((displayText, modelText, meta) => {
-      this.#enqueueBackgroundNotification({
-        displayText,
-        modelText,
-        taskId: meta.agentId,
-        status: meta.status,
-        kind: 'agent',
-        toolUseId: meta.toolUseId,
-      });
-    });
+    const taskRegistry = this.config.getTaskRegistry();
+    setAgentNotificationCallback(
+      taskRegistry,
+      (displayText, modelText, meta) => {
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: meta.agentId,
+          status: meta.status,
+          kind: 'agent',
+          toolUseId: meta.toolUseId,
+        });
+      },
+    );
 
-    setMonitorNotificationCallback((displayText, modelText, meta) => {
-      if (meta.status === 'running') {
-        return;
-      }
+    setMonitorNotificationCallback(
+      taskRegistry,
+      (displayText, modelText, meta) => {
+        if (meta.status === 'running') {
+          return;
+        }
 
-      this.#enqueueBackgroundNotification({
-        displayText,
-        modelText,
-        taskId: meta.monitorId,
-        status: meta.status,
-        kind: 'monitor',
-        toolUseId: meta.toolUseId,
-      });
-    });
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: meta.monitorId,
+          status: meta.status,
+          kind: 'monitor',
+          toolUseId: meta.toolUseId,
+        });
+      },
+    );
 
-    setShellNotificationCallback((displayText, modelText, meta) => {
-      this.#enqueueBackgroundNotification({
-        displayText,
-        modelText,
-        taskId: meta.shellId,
-        status: meta.status,
-        kind: 'shell',
-      });
-    });
+    setShellNotificationCallback(
+      taskRegistry,
+      (displayText, modelText, meta) => {
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: meta.shellId,
+          status: meta.status,
+          kind: 'shell',
+        });
+      },
+    );
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
