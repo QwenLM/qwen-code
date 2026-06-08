@@ -211,7 +211,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch',
+      f !== 'session_branch' &&
+      f !== 'rate_limit',
   ),
   'workspace_settings',
   'workspace_init',
@@ -232,6 +233,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  'rate_limit',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1323,6 +1325,18 @@ describe('createServeApp', () => {
             getAdvertisedServeFeatures(undefined, {
               persistSettingAvailable: true,
             }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'rate_limit') {
+          expect(predicate({ rateLimit: true })).toBe(true);
+          expect(predicate({ rateLimit: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { rateLimit: true }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,

@@ -1132,6 +1132,14 @@ export async function runQwenServe(
                 );
               }
             }
+            // Dispose rate limiter (clear GC timer + buckets).
+            const rl = app.locals['_rateLimiter'] as
+              | { dispose(): void; setDraining(v: boolean): void }
+              | undefined;
+            if (rl) {
+              rl.setDraining(true);
+              rl.dispose();
+            }
             forceFlushMetrics()
               .catch((flushErr) => {
                 daemonLog.warn(

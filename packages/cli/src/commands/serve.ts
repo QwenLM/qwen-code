@@ -49,6 +49,11 @@ interface ServeArgs {
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
+  'rate-limit': boolean;
+  'rate-limit-prompt'?: number;
+  'rate-limit-mutation'?: number;
+  'rate-limit-read'?: number;
+  'rate-limit-window-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -175,6 +180,38 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
           '0 or unset = immediate kill (default).',
+      })
+      .option('rate-limit', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Enable per-tier HTTP rate limiting. Tiers: prompt (10/min), ' +
+          'mutation (30/min), read (120/min). Health, heartbeat, SSE, ' +
+          'and /acp are exempt.',
+      })
+      .option('rate-limit-prompt', {
+        type: 'number',
+        description:
+          'Max prompt requests per window per client (default 10). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-mutation', {
+        type: 'number',
+        description:
+          'Max mutation requests per window per client (default 30). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-read', {
+        type: 'number',
+        description:
+          'Max read requests per window per client (default 120). ' +
+          'Requires --rate-limit.',
+      })
+      .option('rate-limit-window-ms', {
+        type: 'number',
+        description:
+          'Rate limit window duration in ms (default 60000). ' +
+          'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -265,6 +302,56 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       // path will report the same error to the user via Session.
     }
 
+    // Rate limit resolution + validation (only when enabled).
+    const rateLimit =
+      argv['rate-limit'] ||
+      process.env['QWEN_SERVE_RATE_LIMIT'] === '1' ||
+      process.env['QWEN_SERVE_RATE_LIMIT'] === 'true';
+    let rateLimitPrompt: number | undefined;
+    let rateLimitMutation: number | undefined;
+    let rateLimitRead: number | undefined;
+    let rateLimitWindowMs: number | undefined;
+    if (rateLimit) {
+      const envInt = (key: string): number | undefined => {
+        const v = process.env[key];
+        return v ? Number(v) : undefined;
+      };
+      rateLimitPrompt =
+        argv['rate-limit-prompt'] ?? envInt('QWEN_SERVE_RATE_LIMIT_PROMPT');
+      rateLimitMutation =
+        argv['rate-limit-mutation'] ?? envInt('QWEN_SERVE_RATE_LIMIT_MUTATION');
+      rateLimitRead =
+        argv['rate-limit-read'] ?? envInt('QWEN_SERVE_RATE_LIMIT_READ');
+      rateLimitWindowMs =
+        argv['rate-limit-window-ms'] ??
+        envInt('QWEN_SERVE_RATE_LIMIT_WINDOW_MS');
+
+      for (const [name, value] of [
+        ['--rate-limit-prompt', rateLimitPrompt],
+        ['--rate-limit-mutation', rateLimitMutation],
+        ['--rate-limit-read', rateLimitRead],
+      ] as const) {
+        if (
+          value !== undefined &&
+          (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0)
+        ) {
+          writeStderrLine(`qwen serve: ${name} must be a positive integer.`);
+          process.exit(1);
+        }
+      }
+      if (
+        rateLimitWindowMs !== undefined &&
+        (!Number.isFinite(rateLimitWindowMs) ||
+          !Number.isInteger(rateLimitWindowMs) ||
+          rateLimitWindowMs < 1000)
+      ) {
+        writeStderrLine(
+          'qwen serve: --rate-limit-window-ms must be an integer >= 1000.',
+        );
+        process.exit(1);
+      }
+    }
+
     // Lazy-load the serve module so non-serve invocations don't pay for
     // express + body-parser + qs in their startup path.
     const { runQwenServe } = await import('../serve/index.js');
@@ -293,6 +380,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['channel-idle-timeout-ms'] !== undefined
           ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
           : {}),
+        ...(rateLimit ? { rateLimit: true } : {}),
+        ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),
+        ...(rateLimitMutation !== undefined ? { rateLimitMutation } : {}),
+        ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
+        ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
       });
     } catch (err) {
       writeStderrLine(
