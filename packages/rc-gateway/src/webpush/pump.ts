@@ -9,6 +9,7 @@ import type {
   DaemonEvent,
   DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import type { PolicyEnforcer } from '../policy/enforcer.js';
 
 /**
  * The subset of `PushNotifier` the pump drives. Kept structural so tests
@@ -35,6 +36,11 @@ export interface SessionEventPumpOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Test hook: called after each event is dispatched to the notifier. */
   onDispatch?: (sessionId: string, event: DaemonEvent) => void;
+  /**
+   * Optional policy enforcer. When set, `permission_request` events are first
+   * offered to it; an auto-handled (voted) event is NOT pushed to the notifier.
+   */
+  enforcer?: PolicyEnforcer;
 }
 
 /** Per-session subscription loop state. */
@@ -66,6 +72,7 @@ export class SessionEventPump {
     s: DaemonSessionSummary,
   ) => string | undefined;
   private readonly onDispatch?: (sessionId: string, event: DaemonEvent) => void;
+  private readonly enforcer?: PolicyEnforcer;
 
   private readonly loops = new Map<string, Loop>();
   private workspaceCwd = '';
@@ -84,6 +91,7 @@ export class SessionEventPump {
     this.sleep = opts.sleep ?? defaultSleep;
     this.sessionName = opts.sessionName;
     this.onDispatch = opts.onDispatch;
+    this.enforcer = opts.enforcer;
   }
 
   /** Resolves once the first reconcile has run. Never throws. */
@@ -157,7 +165,23 @@ export class SessionEventPump {
           signal: loop.ctrl.signal,
           lastEventId: loop.lastEventId,
         })) {
+          // Advance the resume cursor first, before any handling branch, so a
+          // reconnect never re-delivers an event we already auto-voted on.
           if (typeof ev.id === 'number') loop.lastEventId = ev.id;
+          // Consult the policy enforcer for permission_request events. An
+          // auto-handled (voted) event is suppressed from push; everything else
+          // — non-permission events and prompt/fail-safe decisions — still
+          // notifies, identical to pre-policy behavior.
+          if (this.enforcer && ev.type === 'permission_request') {
+            const handled = await this.enforcer.handlePermission(s.sessionId, {
+              type: ev.type,
+              data: ev.data,
+            });
+            if (handled) {
+              this.onDispatch?.(s.sessionId, ev);
+              continue;
+            }
+          }
           await this.notifier.notify(
             { type: ev.type, data: ev.data },
             { sessionId: s.sessionId, sessionName: name },

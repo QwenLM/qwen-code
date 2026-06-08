@@ -8,6 +8,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { DaemonClient, type DaemonEvent } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { SessionEventPump } from './pump.js';
+import { PolicyEnforcer } from '../policy/enforcer.js';
+import type { Policy } from '../policy/loader.js';
 
 interface Dispatched {
   e: { type: string; data: unknown };
@@ -171,6 +173,85 @@ describe('SessionEventPump', () => {
     const countAfter = collected.length;
     await new Promise((r) => setTimeout(r, 100));
     expect(collected.length).toBe(countAfter);
+  });
+
+  it('enforcer auto-handles a denied permission_request: notifier NOT called', async () => {
+    const collected: Dispatched[] = [];
+    const denyBash: Policy = {
+      defaults: { action: 'prompt', requireScope: 'approve' },
+      rules: [{ id: 'deny-bash', match: { tool: 'bash' }, action: 'deny' }],
+    };
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      permissionStatus: 200, // vote accepted → auto-handled
+      frames: [
+        {
+          id: 7,
+          type: 'permission_request',
+          data: {
+            requestId: 'r1',
+            toolCall: { name: 'bash' },
+            options: [{ optionId: 'ok' }],
+          },
+        },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const enforcer = new PolicyEnforcer(daemon, denyBash);
+    const dispatched: string[] = [];
+    pump = new SessionEventPump(daemon, fakeNotifier(collected), {
+      pollMs: 20,
+      reconnectMs: 0,
+      sleep: async () => {},
+      enforcer,
+      onDispatch: (id) => dispatched.push(id),
+    });
+    await pump.start();
+
+    // The event is auto-handled → onDispatch fires but notifier.notify does NOT.
+    expect(await waitFor(() => dispatched.length >= 1)).toBe(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(collected).toHaveLength(0);
+  });
+
+  it('empty-policy enforcer falls through: notifier IS called', async () => {
+    const collected: Dispatched[] = [];
+    const emptyPolicy: Policy = {
+      defaults: { action: 'prompt', requireScope: 'approve' },
+      rules: [],
+    };
+    stub = await startStubDaemon({
+      workspaceCwd: '/w',
+      sessions: [{ sessionId: 's1', workspaceCwd: '/w' }],
+      holdOpenMs: 2000,
+      frames: [
+        {
+          id: 7,
+          type: 'permission_request',
+          data: {
+            requestId: 'r1',
+            toolCall: { name: 'bash' },
+            options: [{ optionId: 'ok' }],
+          },
+        },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const enforcer = new PolicyEnforcer(daemon, emptyPolicy);
+    pump = new SessionEventPump(daemon, fakeNotifier(collected), {
+      pollMs: 20,
+      reconnectMs: 0,
+      sleep: async () => {},
+      enforcer,
+    });
+    await pump.start();
+
+    const got = await waitFor(() =>
+      collected.some((d) => d.e.type === 'permission_request'),
+    );
+    expect(got).toBe(true);
   });
 
   it('updates lastEventId from numeric event ids', async () => {
