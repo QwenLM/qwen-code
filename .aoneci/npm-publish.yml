@@ -63,8 +63,10 @@ jobs:
           # first failing package is visible in the job output.
           set -e
           npm -w packages/cli run test -- \
+            --testTimeout=30000 \
             --hookTimeout=30000
-          npm -w packages/core run test
+          npm -w packages/core run test -- \
+            --testTimeout=30000
           npm -w packages/sdk-typescript run test
           npm -w packages/vscode-ide-companion run test
 

@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-channel-base",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Base channel infrastructure for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

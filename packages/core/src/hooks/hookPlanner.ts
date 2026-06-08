@@ -59,6 +59,7 @@ export function getHookMatcherTarget(
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
+    case HookEventName.PostToolBatch:
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
       return undefined;
@@ -68,6 +69,11 @@ export function getHookMatcherTarget(
       return exhaustive;
     }
   }
+}
+
+export function hookEventSupportsMatcher(eventName: HookEventName): boolean {
+  const target = getHookMatcherTarget(eventName);
+  return typeof target === 'object' && target !== null;
 }
 
 /**

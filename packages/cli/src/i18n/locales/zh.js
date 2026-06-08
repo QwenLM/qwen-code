@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
@@ -451,7 +452,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
-  Default: '默认',
+  'Ask permissions': '请求授权',
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
@@ -1311,10 +1312,6 @@ export default {
   // Startup Tips
   // ============================================================================
   'Tips:': '提示：',
-  'Example: ': '示例：',
-  'Example: /language output Português': '示例：/language output Português',
-  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
-    '这是 Beta 版本，个人开发环境实例删除后聊天记录会丢失。',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '对话变长时用 /compress，总结历史并释放上下文。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1348,18 +1345,6 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
-
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 身份确认："帮我确认下在 DataWorks 的身份和权限？"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 任务分析："帮我分析下 dataworks_analyze 这个工作空间最近一周新建的节点有哪些，并分析下具体在做什么？"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 任务治理："在 dataworks_analyze 工作空间中，帮我找出创建时间长但一直没有发布的节点。"',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 问题定位："现在发现 dwd_is_it_software_released_df 和 ads_is_it_sfw_moni_key_released_recycled_df 的数据不一致，他们上游都是 ods_ism_it_software_key_released_df。帮我看一下他们的逻辑有什么不一样？"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ 问题修复："员工信息表 my_project.ods_emp_info_d 中，工号 EMP001 的部门数据为空。请帮我排查原因并提供修复建议。"',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1736,6 +1721,8 @@ export default {
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

@@ -140,9 +140,9 @@ describe('selectTip', () => {
     const ctx = createContext({ sessionCount: 1 });
     const history = createHistory();
     const tip = selectTip('startup', ctx, tipRegistry, history);
-    // DataWorks tips have priority 75, so one of them should be selected
+    // New user tips have priority 70, so one of them should be selected
     expect(tip).not.toBeNull();
-    expect(tip!.priority).toBe(75);
+    expect(tip!.priority).toBe(70);
   });
 
   it('rotates startup tips across sessions via LRU', () => {
@@ -160,12 +160,12 @@ describe('selectTip', () => {
     expect(tip2!.id).not.toBe(tip1!.id);
   });
 
-  it('returns a priority-75 tip for experienced users with insight available', () => {
+  it('returns a priority-70 tip for experienced users with insight available', () => {
     const ctx = createContext({ sessionCount: 25 });
     const history = createHistory();
     const tip = selectTip('startup', ctx, tipRegistry, history);
-    // DataWorks tips have priority 75, so one of them should be selected
+    // insight-command has priority 70, same as other new-user tips
     expect(tip).not.toBeNull();
-    expect(tip!.priority).toBe(75);
+    expect(tip!.priority).toBe(70);
   });
 });

@@ -10,7 +10,7 @@ function ensureBuiltins(): Promise<void> {
         import('@qwen-code/channel-telegram'),
         import('@qwen-code/channel-weixin'),
         import('@qwen-code/channel-dingtalk'),
-        import('@alife/dataworks-qwen-code-channel-feishu'),
+        import('@qwen-code/channel-feishu'),
       ]);
 
       for (const mod of [telegram, weixin, dingtalk, feishu]) {

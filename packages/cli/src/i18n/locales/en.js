@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
+  'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -473,7 +474,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Default',
+  'Ask permissions': 'Ask permissions',
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
@@ -1378,10 +1379,6 @@ export default {
   // Startup Tips
   // ============================================================================
   'Tips:': 'Tips:',
-  'Example: ': 'Example: ',
-  'Example: /language output Português': 'Example: /language output Português',
-  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
-    'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress when the conversation gets long to summarize history and free up context.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1414,18 +1411,6 @@ export default {
     'Context is getting full. Use /compress to free up space.',
   'Long conversation? /compress summarizes history to free context.':
     'Long conversation? /compress summarizes history to free context.',
-
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1914,6 +1899,8 @@ export default {
   'Open the memory manager.': 'Open the memory manager.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Record a CPU profile for Chrome DevTools analysis',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
