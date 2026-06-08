@@ -48,6 +48,9 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
+  InstructionsLoadedInput,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -115,6 +118,40 @@ export class HookEventHandler {
       HookEventName.UserPromptSubmit,
       input,
       undefined,
+      signal,
+    );
+  }
+
+  /**
+   * Fire an InstructionsLoaded event.
+   * Called when instruction/context files are loaded during session startup or
+   * import resolution.
+   */
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: InstructionsLoadedInput = {
+      ...this.createBaseInput(HookEventName.InstructionsLoaded),
+      file_path: filePath,
+      memory_type: memoryType,
+      load_reason: loadReason,
+      trigger_file_path: options.triggerFilePath,
+      parent_file_path: options.parentFilePath,
+    };
+
+    return this.executeHooks(
+      HookEventName.InstructionsLoaded,
+      input,
+      {
+        filePath,
+      },
       signal,
     );
   }

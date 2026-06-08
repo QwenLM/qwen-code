@@ -49,6 +49,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -151,6 +152,29 @@ vi.mock('../hooks/index.js', () => {
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),
+    createInstructionsLoadedCallback:
+      (
+        getHookSystem: () => {
+          fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
+        },
+      ) =>
+      async (notification: {
+        filePath: string;
+        memoryType: string;
+        loadReason: string;
+        triggerFilePath?: string;
+        parentFilePath?: string;
+      }) => {
+        await getHookSystem()?.fireInstructionsLoadedEvent?.(
+          notification.filePath,
+          notification.memoryType,
+          notification.loadReason,
+          {
+            triggerFilePath: notification.triggerFilePath,
+            parentFilePath: notification.parentFilePath,
+          },
+        );
+      },
   };
 });
 
@@ -1455,7 +1479,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
@@ -1483,7 +1507,49 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.[1]).toEqual([explicitDir]);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
+  });
+
+  it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
+    const config = new Config(baseParams);
+    const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    config['hookSystem'] = {
+      fireInstructionsLoadedEvent,
+    } as unknown as HookSystem;
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    const options = lastCall?.at(-1) as
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
+    expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
+
+    await options?.onInstructionsLoaded?.({
+      filePath: '/tmp/project/QWEN.md',
+      memoryType: 'project',
+      loadReason: 'include',
+      triggerFilePath: '/tmp/project/AGENTS.md',
+      parentFilePath: '/tmp/project/AGENTS.md',
+    });
+
+    expect(fireInstructionsLoadedEvent).toHaveBeenCalledWith(
+      '/tmp/project/QWEN.md',
+      'project',
+      'include',
+      {
+        triggerFilePath: '/tmp/project/AGENTS.md',
+        parentFilePath: '/tmp/project/AGENTS.md',
+      },
+    );
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {

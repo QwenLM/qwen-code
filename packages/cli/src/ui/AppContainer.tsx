@@ -43,6 +43,7 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  createInstructionsLoadedCallback,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -1337,6 +1338,12 @@ export const AppContainer = (props: AppContainerProps) => {
           config.isTrustedFolder(),
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
+          {
+            loadReason: 'refresh',
+            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+              config.getHookSystem(),
+            ),
+          },
         );
 
       config.setUserMemory(memoryContent);

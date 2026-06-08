@@ -396,6 +396,7 @@ export * from './hooks/types.js';
 export {
   HookSystem,
   HookRegistry,
+  createInstructionsLoadedCallback,
   hookEventSupportsMatcher,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
