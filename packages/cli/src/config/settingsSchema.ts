@@ -1523,6 +1523,35 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Configuration for skills (SKILL.md-based capabilities) exposed to ' +
+      'the model.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill names to hide. Matched case-insensitively against the skill ' +
+          'name. Hidden skills do not appear in <available_skills> or as ' +
+          '/<name> slash commands. UNION-merged across systemDefaults/user/' +
+          'workspace/system scopes — workspace cannot remove entries defined ' +
+          'in higher scopes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',

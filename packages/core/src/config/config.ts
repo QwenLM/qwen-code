@@ -626,6 +626,22 @@ export interface ConfigParameters {
    */
   disabledSlashCommands?: string[];
   /**
+   * Live-read provider for the set of skill names that should be hidden
+   * from `<available_skills>` and the `/<skill-name>` slash-command
+   * surface. Unlike `disabledSlashCommands` (which is a frozen snapshot),
+   * this is a function so the CLI layer can close over `LoadedSettings`
+   * and have post-`setValue` toggles take effect without restart.
+   *
+   * Must be attached at construction time — `Config.initialize()` calls
+   * `toolRegistry.warmAll()` which instantiates `SkillTool`, and that
+   * tool's constructor immediately calls `refreshSkills()`. A late-attach
+   * provider would let persisted disabled skills leak into the first
+   * `<available_skills>` build.
+   *
+   * Names returned must be lower-cased; consumers compare case-insensitively.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
@@ -930,6 +946,13 @@ const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.SHELL,
 ];
 
+// Shared empty set returned by `Config.getDisabledSkillNames()` when no
+// provider was attached. Frozen so callers cannot accidentally mutate the
+// shared instance and leak state across Config instances.
+const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set<string>(),
+);
+
 // Tracks whether the first Config in this process has claimed the global
 // QWEN_CODE_SESSION_ID env var. Prevents throwaway Config instances from
 // overwriting the real session's ID while still allowing nested qwen-code
@@ -1013,6 +1036,9 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledSkillNamesProvider:
+    | (() => ReadonlySet<string>)
+    | null;
   private readonly disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
@@ -1186,6 +1212,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
@@ -2630,6 +2657,18 @@ export class Config {
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
+  }
+
+  /**
+   * Returns the live set of skill names that are currently disabled.
+   * Unlike `getDisabledSlashCommands()` (frozen snapshot), this delegates
+   * to the provider supplied at construction so the CLI's `LoadedSettings`
+   * mutations are visible without restarting the process.
+   *
+   * Names are lower-cased. Empty set when no provider was supplied.
+   */
+  getDisabledSkillNames(): ReadonlySet<string> {
+    return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
   /**
@@ -4163,7 +4202,7 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy);
+      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

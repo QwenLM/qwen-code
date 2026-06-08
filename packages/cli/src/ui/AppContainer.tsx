@@ -187,6 +187,7 @@ import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
@@ -1074,6 +1075,11 @@ export const AppContainer = (props: AppContainerProps) => {
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
   const {
+    isSkillsManagerDialogOpen,
+    openSkillsManagerDialog,
+    closeSkillsManagerDialog,
+  } = useSkillsManagerDialog();
+  const {
     isExtensionsManagerDialogOpen,
     openExtensionsManagerDialog,
     closeExtensionsManagerDialog,
@@ -1124,6 +1130,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1152,6 +1159,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1175,6 +1183,7 @@ export const AppContainer = (props: AppContainerProps) => {
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    reloadCommands,
   } = useSlashCommandProcessor(
     config,
     settings,
@@ -2313,6 +2322,7 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
+    isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
@@ -3316,6 +3326,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3442,6 +3454,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3513,6 +3527,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      setInputBuffer: buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog
@@ -3589,6 +3608,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog

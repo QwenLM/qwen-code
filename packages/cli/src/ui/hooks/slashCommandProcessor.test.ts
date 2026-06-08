@@ -1455,7 +1455,15 @@ describe('useSlashCommandProcessor', () => {
     it('should reload commands when SkillManager fires a change event', async () => {
       const removeListener = vi.fn();
       const addChangeListener = vi.fn().mockReturnValue(removeListener);
-      const fakeSkillManager = { addChangeListener };
+      // The slashCommandProcessor change-listener calls
+      // `consumeSlashReloadSuppression()` on every fire to honor the
+      // dialog-driven one-shot suppression flag. Tests that drive the
+      // listener directly need this method on the fake; default
+      // (false) just preserves the pre-suppression behavior.
+      const fakeSkillManager = {
+        addChangeListener,
+        consumeSlashReloadSuppression: vi.fn(() => false),
+      };
       const skillManagerSpy = vi
         .spyOn(mockConfig, 'getSkillManager')
         .mockReturnValue(
@@ -1516,10 +1524,77 @@ describe('useSlashCommandProcessor', () => {
       }
     });
 
+    it('should skip reload when consumeSlashReloadSuppression returns true', async () => {
+      const removeListener = vi.fn();
+      const addChangeListener = vi.fn().mockReturnValue(removeListener);
+      const fakeSkillManager = {
+        addChangeListener,
+        consumeSlashReloadSuppression: vi.fn(() => true),
+      };
+      const skillManagerSpy = vi
+        .spyOn(mockConfig, 'getSkillManager')
+        .mockReturnValue(
+          fakeSkillManager as unknown as ReturnType<
+            typeof mockConfig.getSkillManager
+          >,
+        );
+      try {
+        mockBuiltinLoadCommands.mockResolvedValue([]);
+        mockFileLoadCommands.mockResolvedValue([]);
+        mockMcpLoadCommands.mockResolvedValue([]);
+
+        const { unmount } = renderHook(() =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            true,
+            null,
+          ),
+        );
+
+        await waitFor(() => expect(addChangeListener).toHaveBeenCalledTimes(1));
+        await waitFor(() =>
+          expect(BuiltinCommandLoader).toHaveBeenCalledTimes(1),
+        );
+
+        const listener = addChangeListener.mock.calls[0][0] as () => void;
+        await act(async () => {
+          listener();
+        });
+
+        // When suppression is consumed, the listener should NOT trigger
+        // a second load — BuiltinCommandLoader stays at 1 call.
+        expect(BuiltinCommandLoader).toHaveBeenCalledTimes(1);
+
+        unmount();
+      } finally {
+        skillManagerSpy.mockRestore();
+      }
+    });
+
     it('should register SkillManager listener after config initialization', async () => {
       const removeListener = vi.fn();
       const addChangeListener = vi.fn().mockReturnValue(removeListener);
-      const fakeSkillManager = { addChangeListener };
+      // The slashCommandProcessor change-listener calls
+      // `consumeSlashReloadSuppression()` on every fire to honor the
+      // dialog-driven one-shot suppression flag. Tests that drive the
+      // listener directly need this method on the fake; default
+      // (false) just preserves the pre-suppression behavior.
+      const fakeSkillManager = {
+        addChangeListener,
+        consumeSlashReloadSuppression: vi.fn(() => false),
+      };
       let initializedForConfig = false;
       const skillManagerSpy = vi
         .spyOn(mockConfig, 'getSkillManager')

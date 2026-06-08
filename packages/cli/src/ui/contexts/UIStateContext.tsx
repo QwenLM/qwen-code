@@ -159,6 +159,8 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skills manager dialog (`/skills`)
+  isSkillsManagerDialogOpen: boolean;
   // Extensions manager dialog
   isExtensionsManagerDialogOpen: boolean;
   // MCP dialog
