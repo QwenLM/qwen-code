@@ -109,6 +109,31 @@ return 1`;
       stripExportMeta(`export const meta = { name: 'foo }\nreturn 1`),
     ).toThrow(/unbalanced/i);
   });
+
+  // T33 (PR #4732 R4): the regex must anchor at file start, not at every
+  // line start. Without that, a template literal containing
+  // `\nexport const meta = {\n` triggers a false match and the brace-walker
+  // strips content out of the string body, corrupting the script.
+  it('does not strip an export const meta declaration inside a template literal (T33)', () => {
+    const src = `const banner = \`
+export const meta = { name: 'fake' }
+\`;
+return banner;`;
+    expect(stripExportMeta(src)).toBe(src);
+  });
+
+  it('does not strip an export const meta declaration after leading code (T33)', () => {
+    const src = `const x = 1;
+export const meta = { name: 'fake' }
+return x;`;
+    expect(stripExportMeta(src)).toBe(src);
+  });
+
+  // Sanity: leading whitespace at file start is still tolerated.
+  it('strips export const meta even with leading whitespace/newlines (T33)', () => {
+    const src = `\n\n  export const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
+    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  });
 });
 
 describe('createWorkflowSandbox', () => {
@@ -594,6 +619,41 @@ describe('createWorkflowSandbox security', () => {
   // this is still acceptable: the workflow surface returns the timeout
   // error and the vm context becomes unreferenced (GC eventually reclaims
   // it). Documented as a limitation of node:vm.
+
+  // T40 (PR #4732 R4): completing R2's wall-clock defense. When the timer
+  // fires the sandbox rejects, but in-flight subagents (closed over the
+  // dispatch signal) keep running until their internal max_time_minutes
+  // limit. Threading an AbortController through `abortOnTimeout` lets the
+  // caller link wall-clock fires to dispatch-signal aborts.
+  it('aborts the abortOnTimeout controller when wall-clock timeout fires (T40)', async () => {
+    const abortOnTimeout = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100,
+      abortOnTimeout,
+    });
+    expect(abortOnTimeout.signal.aborted).toBe(false);
+    await expect(sandbox.run(`return new Promise(() => {});`)).rejects.toThrow(
+      /timed out after 100 ms wall clock/,
+    );
+    expect(abortOnTimeout.signal.aborted).toBe(true);
+  });
+
+  // T40 sibling: a normal completion must NOT abort the controller — the
+  // caller is responsible for cleanup in its finally block.
+  it('does not abort the abortOnTimeout controller on normal completion (T40)', async () => {
+    const abortOnTimeout = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 5000,
+      abortOnTimeout,
+    });
+    const result = await sandbox.run(`return 42`);
+    expect(result).toBe(42);
+    expect(abortOnTimeout.signal.aborted).toBe(false);
+  });
 
   // T23: env var override is honored when no explicit opt is passed.
   it('QWEN_CODE_MAX_WORKFLOW_SECONDS env var sets the wall-clock cap', async () => {

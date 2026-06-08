@@ -22,7 +22,12 @@
  * supported — model-authored `meta` should avoid them.
  */
 export function stripExportMeta(source: string): string {
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/m;
+  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
+  // doc, `export const meta = {...}` must be the script's FIRST statement.
+  // With `/m`, the regex matched every line-start occurrence — including
+  // inside template literals — and the brace-walker then ripped content
+  // out of the string body, silently corrupting the script.
+  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
   const match = re.exec(source);
   if (!match) return source;
   const exportIdx = match.index;
@@ -199,6 +204,19 @@ export interface SandboxOptions {
    * a wall-clock can catch.
    */
   maxWallClockMs?: number;
+  /**
+   * T40 (PR #4732 R4): completes the R2 wall-clock defense. When the timer
+   * fires, the sandbox `abort()`s this controller BEFORE rejecting. The
+   * caller threads the same controller's `signal` into the dispatch
+   * function (via `createProductionDispatch`) so in-flight subagents see
+   * the abort and stop. Without this, the workflow user-side rejects but
+   * the subagent keeps burning tokens until its own `max_time_minutes`
+   * limit (10 min default).
+   *
+   * The caller is responsible for cleanup on natural completion (call
+   * `abort()` in a `finally` block to cancel any straggler dispatch).
+   */
+  abortOnTimeout?: AbortController;
 }
 
 /**
@@ -596,6 +614,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
+          // in-flight subagents see the cancellation and stop. Order
+          // matters: rejecting first then aborting would race the
+          // caller's finally block.
+          opts.abortOnTimeout?.abort();
           reject(
             new Error(
               `Workflow execution timed out after ${maxWallClockMs} ms wall clock. ` +

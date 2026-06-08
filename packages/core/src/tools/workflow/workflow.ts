@@ -54,7 +54,11 @@ const WORKFLOW_PARAM_SCHEMA = {
       description:
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
-        '`agent(prompt, { label? })` (sequential only in P1), and read `args`. ' +
+        '`agent(prompt, { label? })`, and read `args`. ' +
+        'P1 ships sequential primitives only — `parallel()` and `pipeline()` ' +
+        'arrive in P2. Writing `Promise.all([agent(), agent()])` spawns ' +
+        'concurrent subagents that share Config and may race on file edits; ' +
+        'prefer `await agent(...)` for ordered execution. ' +
         '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
@@ -96,14 +100,26 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
+    // T40 (PR #4732 R4): derive a controller that links the wall-clock
+    // timeout, the caller signal, and the dispatch signal. The sandbox
+    // aborts this controller when wall-clock fires; we abort it in the
+    // finally block to clean up any straggler dispatch on normal
+    // completion. The dispatch closure-captures `dispatchController.signal`
+    // so in-flight subagent.execute() calls see the abort and stop
+    // burning tokens.
+    const dispatchController = new AbortController();
+    const onCallerAbort = () => dispatchController.abort();
+    signal.addEventListener('abort', onCallerAbort, { once: true });
+    if (signal.aborted) dispatchController.abort();
     const dispatch =
       this.toolOptions.dispatch ??
-      createProductionDispatch(this.config, signal);
+      createProductionDispatch(this.config, dispatchController.signal);
     const orchestrator = new WorkflowOrchestrator(dispatch);
     try {
       const outcome = await orchestrator.run({
         script: this.params.script,
         args: this.params.args,
+        abortOnTimeout: dispatchController,
       });
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
@@ -160,6 +176,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // the same way as other execution-time tool errors.
         error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
+    } finally {
+      // T40 (PR #4732 R4): abort the dispatch controller on natural
+      // completion to cancel any straggler subagent the script may have
+      // left running. Also detach the caller signal listener — without
+      // this, every Workflow invocation leaks a listener on the caller
+      // signal until that signal is GC'd. `removeEventListener` is a
+      // no-op if the listener already fired (timeout / caller abort).
+      signal.removeEventListener('abort', onCallerAbort);
+      dispatchController.abort();
     }
   }
 }

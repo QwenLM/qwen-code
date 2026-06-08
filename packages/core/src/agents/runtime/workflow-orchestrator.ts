@@ -68,6 +68,17 @@ export interface WorkflowRunRequest {
   // read by `run()` — cancellation flows through `createProductionDispatch`'s
   // closure-captured signal, not via per-run state. Removed to prevent
   // P2 authors from extending the wrong field.
+  /**
+   * T40 (PR #4732 R4): caller-owned AbortController linked to the wall-clock
+   * timeout. When the sandbox times out, this controller is aborted BEFORE
+   * the rejection propagates — letting in-flight subagent dispatches see
+   * the cancellation and stop burning tokens. The caller (`WorkflowTool`)
+   * also threads this same controller's signal into `createProductionDispatch`
+   * and aborts it in its own `finally` block to clean up on normal completion.
+   * If omitted, the wall-clock still rejects but in-flight subagents continue
+   * until their internal `max_time_minutes` limit.
+   */
+  abortOnTimeout?: AbortController;
 }
 
 export interface WorkflowRunOutcome {
@@ -158,6 +169,9 @@ export class WorkflowOrchestrator {
     const sandbox = createWorkflowSandbox({
       args: req.args,
       dispatch: this.dispatch,
+      // T40 (PR #4732 R4): forward the caller's wall-clock-linked controller
+      // so the sandbox can abort it on timeout fire.
+      abortOnTimeout: req.abortOnTimeout,
     });
     try {
       const result = await sandbox.run(req.script);
