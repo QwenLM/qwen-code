@@ -52,17 +52,21 @@ const getKeychainStorageName = (
   extensionScope: ExtensionScope = ExtensionScope.User,
   workspaceDir?: string,
 ): string => {
+  // Project-scoped extensions get a project-local discriminator so their
+  // secrets never collide with (or leak into) a same-named user-scoped
+  // extension, and stay isolated between projects — mirroring the project-local
+  // .env file. User-scoped keys are left byte-identical to avoid orphaning
+  // existing secrets. This applies to both setting scopes.
+  const projectPrefix =
+    extensionScope === ExtensionScope.Project
+      ? `${ExtensionScope.Project} ${workspaceDir ?? process.cwd()} `
+      : '';
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${process.cwd()}`;
+    return `${base} ${projectPrefix}${process.cwd()}`;
   }
-  // Project-scoped extensions get a project-local keychain key so their secrets
-  // never collide with (or leak into) a same-named user-scoped extension, and
-  // stay isolated between projects — mirroring the project-local .env file.
-  // User-scoped keys are left byte-identical to avoid orphaning existing
-  // secrets.
-  if (extensionScope === ExtensionScope.Project) {
-    return `${base} ${ExtensionScope.Project} ${workspaceDir ?? process.cwd()}`;
+  if (projectPrefix) {
+    return `${base} ${projectPrefix.trimEnd()}`;
   }
   return base;
 };

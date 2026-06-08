@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getExtensionManager, extensionToOutputString } from './utils.js';
+import {
+  getExtensionManager,
+  extensionToOutputString,
+  parseExtensionScope,
+} from './utils.js';
 import {
   ExtensionScope,
   type Extension,
@@ -163,5 +167,32 @@ describe('extensionToOutputString', () => {
     );
     expect(result).not.toContain('alice');
     expect(result).not.toContain('p4ssw0rd');
+  });
+
+  it('includes the extension scope in the output', () => {
+    const userExt = createMockExtension({ scope: ExtensionScope.User });
+    expect(
+      extensionToOutputString(userExt, mockExtensionManager, '/workspace'),
+    ).toContain('Scope: user');
+
+    const projExt = createMockExtension({ scope: ExtensionScope.Project });
+    expect(
+      extensionToOutputString(projExt, mockExtensionManager, '/workspace'),
+    ).toContain('Scope: project');
+  });
+});
+
+describe('parseExtensionScope', () => {
+  it('maps "project" (any case) to the Project scope', () => {
+    expect(parseExtensionScope('project')).toBe(ExtensionScope.Project);
+    expect(parseExtensionScope('Project')).toBe(ExtensionScope.Project);
+    expect(parseExtensionScope('PROJECT')).toBe(ExtensionScope.Project);
+  });
+
+  it('defaults everything else to the User scope', () => {
+    expect(parseExtensionScope('user')).toBe(ExtensionScope.User);
+    expect(parseExtensionScope(undefined)).toBe(ExtensionScope.User);
+    expect(parseExtensionScope('')).toBe(ExtensionScope.User);
+    expect(parseExtensionScope('bogus')).toBe(ExtensionScope.User);
   });
 });

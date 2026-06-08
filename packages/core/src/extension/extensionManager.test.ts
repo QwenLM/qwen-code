@@ -520,6 +520,71 @@ describe('extension tests', () => {
       ).toBeDefined();
       expect(manager.isEnabled('user-only', tempWorkspaceDir)).toBe(true);
     });
+
+    it('does not clobber a surviving same-named extension when removing a shadowed copy', async () => {
+      // Same name at both scopes: user shadows project (only user is loaded).
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'shared',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'shared',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+      // Record an enablement override (shared, name-keyed config).
+      await manager.disableExtension(
+        'shared',
+        SettingScope.User,
+        tempWorkspaceDir,
+      );
+      expect(manager.isEnabled('shared', tempHomeDir)).toBe(false);
+
+      // Remove the shadowed project copy.
+      await manager.uninstallExtension(
+        'shared',
+        false,
+        undefined,
+        ExtensionScope.Project,
+      );
+
+      // Project copy is gone; the user copy survives on disk, in the cache, and
+      // keeps its (name-keyed) enablement override.
+      expect(fs.existsSync(path.join(projectExtensionsDir, 'shared'))).toBe(
+        false,
+      );
+      expect(fs.existsSync(path.join(userExtensionsDir, 'shared'))).toBe(true);
+      const surviving = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'shared');
+      expect(surviving?.scope).toBe(ExtensionScope.User);
+      expect(manager.isEnabled('shared', tempHomeDir)).toBe(false);
+    });
+
+    it('loads a project extension by explicit name only when trusted', async () => {
+      createExtension({
+        extensionsDir: projectExtensionsDir,
+        name: 'named-proj',
+        version: '1.0.0',
+      });
+
+      const trusted = createExtensionManager({ isWorkspaceTrusted: true });
+      await trusted.refreshCache({ names: ['named-proj'] });
+      const loaded = trusted
+        .getLoadedExtensions()
+        .find((e) => e.name === 'named-proj');
+      expect(loaded?.scope).toBe(ExtensionScope.Project);
+
+      const untrusted = createExtensionManager({ isWorkspaceTrusted: false });
+      await untrusted.refreshCache({ names: ['named-proj'] });
+      expect(
+        untrusted.getLoadedExtensions().find((e) => e.name === 'named-proj'),
+      ).toBeUndefined();
+    });
   });
 
   describe('enableExtension / disableExtension', () => {

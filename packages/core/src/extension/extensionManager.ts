@@ -1389,13 +1389,39 @@ export class ExtensionManager {
       force: true,
     });
 
+    // A same-named extension may still be installed at the other scope (the
+    // enablement config and cache are keyed by name only, shared across
+    // scopes). Detect that so we don't evict/clear state that still belongs to
+    // the surviving copy.
+    const otherScope =
+      targetScope === ExtensionScope.Project
+        ? ExtensionScope.User
+        : ExtensionScope.Project;
+    const otherScopeDir =
+      otherScope === ExtensionScope.Project
+        ? new Storage(currentDir).getExtensionsDir()
+        : ExtensionStorage.getUserExtensionsDir();
+    const survivingAtOtherScope = await this.findExtensionByNameInDir(
+      otherScopeDir,
+      extension.name,
+      currentDir,
+      otherScope,
+    );
+
     if (this.extensionCache) {
-      this.extensionCache.delete(extension.name);
+      // Only drop the cache entry if it is the copy we just removed, not a
+      // same-named copy at another scope that was shadowing it.
+      const cached = this.extensionCache.get(extension.name);
+      if (!cached || cached.scope === targetScope) {
+        this.extensionCache.delete(extension.name);
+      }
     }
 
     if (isUpdate) return;
 
-    this.removeEnablementConfig(extension.name);
+    if (!survivingAtOtherScope) {
+      this.removeEnablementConfig(extension.name);
+    }
     await this.refreshTools();
 
     logExtensionUninstall(

@@ -19,6 +19,7 @@ import {
 
 import {
   ExtensionManager,
+  ExtensionScope,
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 
@@ -192,6 +193,58 @@ describe('extensionsCommand', () => {
         expect.any(Number),
       );
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+    });
+
+    it('parses --scope project and installs at project scope', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+      });
+
+      await installAction(
+        mockContext,
+        'https://github.com/test/extension --scope project',
+      );
+
+      // The source is parsed without the flag, and the scope is forwarded as
+      // the 6th argument to installExtension.
+      expect(mockParseInstallSource).toHaveBeenCalledWith(
+        'https://github.com/test/extension',
+      );
+      expect(mockInstallExtension).toHaveBeenCalledWith(
+        expect.any(Object),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ExtensionScope.Project,
+      );
+    });
+
+    it('defaults to user scope when no --scope flag is given', async () => {
+      mockParseInstallSource.mockResolvedValue({
+        type: 'git',
+        source: 'https://github.com/test/extension',
+      });
+      mockInstallExtension.mockResolvedValue({
+        name: 'test-extension',
+        version: '1.0.0',
+      });
+
+      await installAction(mockContext, 'https://github.com/test/extension');
+
+      expect(mockInstallExtension).toHaveBeenCalledWith(
+        expect.any(Object),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ExtensionScope.User,
+      );
     });
 
     it('should redact URL credentials in install progress messages', async () => {
