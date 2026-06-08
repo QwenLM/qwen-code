@@ -3058,7 +3058,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-<<<<<<< HEAD
     async branchSession(sessionId, req, context) {
       if (shuttingDown) throw new Error('AcpSessionBridge is shutting down');
 
@@ -3757,7 +3756,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             writeStderrLine(
               `setSessionApprovalMode: agent returned unknown mode=${JSON.stringify(response.current)}, dropping`,
             );
-            succeeded = true;
+            // Leave succeeded=false so reconcile is skipped — the cache
+            // was not updated, so a reconcile would compare stale cache
+            // against the same unknown value and re-drop it pointlessly.
             return {
               sessionId: entry.sessionId,
               mode: mode as ApprovalMode,
