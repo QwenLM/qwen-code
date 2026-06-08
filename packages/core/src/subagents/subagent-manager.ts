@@ -50,7 +50,6 @@ import {
   COLOR_VALUES,
   isColor,
   isPermissionMode,
-  parseBackground,
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
@@ -602,16 +601,7 @@ export class SubagentManager {
     }
 
     if (config.runConfig) {
-      // When `maxTurns` is promoted to the top level, prune the legacy
-      // `runConfig.max_turns` so the on-disk frontmatter doesn't carry two
-      // sources of truth (the runtime already prefers top-level).
-      const { max_turns: _legacyMaxTurns, ...restRunConfig } =
-        config.runConfig as { max_turns?: number } & Record<string, unknown>;
-      const prunedRunConfig =
-        config.maxTurns !== undefined ? restRunConfig : config.runConfig;
-      if (Object.keys(prunedRunConfig).length > 0) {
-        frontmatter['runConfig'] = prunedRunConfig;
-      }
+      frontmatter['runConfig'] = config.runConfig;
     }
 
     if (config.color && config.color !== 'auto') {
@@ -1165,16 +1155,14 @@ function parseSubagentContent(
       | Record<string, unknown>
       | undefined;
     const colorRaw = frontmatter['color'];
-    // CC silently drops colors outside the allowlist (_Y). qwen-code treats
-    // the legacy `auto` sentinel as "no override" — it parses to undefined,
-    // matches what the CLI `shouldShowColor` / `getColorForDisplay` helpers
-    // already treat 'auto' as, and round-trips cleanly with the serializer's
-    // existing omit-when-auto branch (parse → undefined → no emit → undefined).
+    // CC silently drops colors outside the allowlist (_Y). Preserve the
+    // legacy qwen `auto` sentinel for backward compat with existing files.
     const color =
-      typeof colorRaw === 'string' && isColor(colorRaw) ? colorRaw : undefined;
+      typeof colorRaw === 'string' && (isColor(colorRaw) || colorRaw === 'auto')
+        ? colorRaw
+        : undefined;
     if (
       colorRaw !== undefined &&
-      colorRaw !== 'auto' &&
       color === undefined &&
       typeof colorRaw === 'string'
     ) {
@@ -1183,24 +1171,25 @@ function parseSubagentContent(
       );
     }
     const approvalModeRaw = frontmatter['approvalMode'];
-    // approvalMode follows the same DL7-parity lenient posture as the rest of
-    // the CC declarative-agent fields: warn-and-drop on invalid rather than
-    // throw. This keeps a typo in `approvalMode` from killing the entire file
-    // and lets a valid `permissionMode` still bridge into approvalMode below.
-    const approvalMode =
-      typeof approvalModeRaw === 'string' &&
-      approvalModeRaw !== '' &&
-      APPROVAL_MODES.includes(approvalModeRaw as never)
-        ? approvalModeRaw
-        : undefined;
     if (
       approvalModeRaw !== undefined &&
       approvalModeRaw !== null &&
-      approvalModeRaw !== '' &&
-      approvalMode === undefined
+      typeof approvalModeRaw !== 'string'
     ) {
-      debugLogger.warn(
-        `Agent file ${filePath} has invalid approvalMode '${approvalModeRaw}'. Valid values: ${APPROVAL_MODES.join(', ')}. Dropping field.`,
+      throw new Error(
+        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${APPROVAL_MODES.join(', ')}`,
+      );
+    }
+    const approvalMode =
+      typeof approvalModeRaw === 'string' && approvalModeRaw !== ''
+        ? approvalModeRaw
+        : undefined;
+    if (
+      approvalMode !== undefined &&
+      !APPROVAL_MODES.includes(approvalMode as never)
+    ) {
+      throw new Error(
+        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${APPROVAL_MODES.join(', ')}`,
       );
     }
     const model =
@@ -1211,17 +1200,19 @@ function parseSubagentContent(
           : undefined;
 
     const backgroundRaw = frontmatter['background'];
-    const background = parseBackground(backgroundRaw);
     if (
       backgroundRaw !== undefined &&
-      backgroundRaw !== false &&
+      backgroundRaw !== 'true' &&
       backgroundRaw !== 'false' &&
-      background === undefined
+      backgroundRaw !== true &&
+      backgroundRaw !== false
     ) {
       debugLogger.warn(
         `Agent file ${filePath} has invalid background value '${backgroundRaw}'. Must be 'true', 'false', or omitted.`,
       );
     }
+    const background =
+      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
 
     // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
 

@@ -9,8 +9,6 @@ import {
   PERMISSION_MODE_VALUES,
   COLOR_VALUES,
   claudePermissionModeToApprovalMode,
-  parseStringOrArray,
-  parseBackground,
   parseMaxTurns,
   isPermissionMode,
   isColor,
@@ -69,69 +67,6 @@ describe('agent-frontmatter-schema', () => {
       // `auto-edit` (which auto-approves). This preserves the restrictive
       // intent.
       expect(claudePermissionModeToApprovalMode('dontAsk')).toBe('default');
-    });
-  });
-
-  describe('parseStringOrArray — DL7 lenient parsing', () => {
-    it('returns undefined for undefined / null', () => {
-      expect(parseStringOrArray(undefined)).toBeUndefined();
-      expect(parseStringOrArray(null)).toBeUndefined();
-    });
-
-    it('parses comma-separated string', () => {
-      expect(parseStringOrArray('Read, Edit, Glob')).toEqual([
-        'Read',
-        'Edit',
-        'Glob',
-      ]);
-    });
-
-    it('accepts YAML array as-is', () => {
-      expect(parseStringOrArray(['Read', 'Edit'])).toEqual(['Read', 'Edit']);
-    });
-
-    it('filters empty entries from comma-separated string', () => {
-      expect(parseStringOrArray('Read,,Edit, ')).toEqual(['Read', 'Edit']);
-    });
-
-    it('returns undefined for non-string non-array values', () => {
-      expect(parseStringOrArray(42)).toBeUndefined();
-      expect(parseStringOrArray({})).toBeUndefined();
-      expect(parseStringOrArray(true)).toBeUndefined();
-    });
-
-    it('stringifies array elements', () => {
-      // CC accepts mixed array — coerces to strings
-      expect(parseStringOrArray([1, 'Read', true])).toEqual([
-        '1',
-        'Read',
-        'true',
-      ]);
-    });
-  });
-
-  describe('parseBackground — DL7 boolean-or-string lenience', () => {
-    it('accepts boolean true', () => {
-      expect(parseBackground(true)).toBe(true);
-    });
-
-    it('accepts string "true"', () => {
-      expect(parseBackground('true')).toBe(true);
-    });
-
-    it('returns undefined for boolean false (matches DL7 — only truthy normalises)', () => {
-      expect(parseBackground(false)).toBeUndefined();
-    });
-
-    it('returns undefined for string "false"', () => {
-      expect(parseBackground('false')).toBeUndefined();
-    });
-
-    it('returns undefined for undefined / null / other', () => {
-      expect(parseBackground(undefined)).toBeUndefined();
-      expect(parseBackground(null)).toBeUndefined();
-      expect(parseBackground(42)).toBeUndefined();
-      expect(parseBackground('yes')).toBeUndefined();
     });
   });
 

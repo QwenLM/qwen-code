@@ -79,36 +79,6 @@ export function claudePermissionModeToApprovalMode(
 }
 
 /**
- * Parse a value that may be a comma-separated string OR an array of strings.
- * Returns `undefined` for any other shape. Matches DL7's lenient posture for
- * `tools`, `disallowedTools`, and `skills`.
- */
-export function parseStringOrArray(value: unknown): string[] | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (Array.isArray(value)) {
-    return value.map((entry) => String(entry));
-  }
-  if (typeof value === 'string') {
-    return value
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  }
-  return undefined;
-}
-
-/**
- * Parse a background value. Accepts boolean `true` / string `"true"` and
- * returns `true`. Returns `undefined` for everything else (including `false`
- * and `"false"`) — matching DL7 (`eiH`/`EL8`), which only normalises truthy
- * values to `true`.
- */
-export function parseBackground(value: unknown): true | undefined {
-  if (value === true || value === 'true') return true;
-  return undefined;
-}
-
-/**
  * Parse a maxTurns value. Accepts a positive integer number or numeric string.
  * Returns `undefined` for anything else (matches DL7 `W46`).
  */

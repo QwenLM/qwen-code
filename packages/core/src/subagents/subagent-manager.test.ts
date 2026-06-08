@@ -207,8 +207,6 @@ describe('SubagentManager', () => {
           yaml += `disallowedTools:\n${value.map((t) => `  - ${t}`).join('\n')}\n`;
         } else if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
-        } else if (key === 'skills' && Array.isArray(value)) {
-          yaml += `skills:\n${value.map((s) => `  - ${s}`).join('\n')}\n`;
         } else if (key === 'model') {
           yaml += `model: ${value}\n`;
         } else if (key === 'runConfig' && typeof value === 'object' && value) {
@@ -629,42 +627,6 @@ You are an agent.
       expect(config.permissionMode).toBe('bypassPermissions');
     });
 
-    it('should drop invalid approvalMode (lenient) AND still bridge from valid permissionMode', () => {
-      // Self-violated-invariant fix: approvalMode used to throw on invalid
-      // values, killing the whole file. Now it warns and drops, symmetric
-      // with all the other CC-compatible fields, so a valid permissionMode
-      // can still bridge into approvalMode when the user-typed approvalMode
-      // is invalid.
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        approvalMode: 'tpyo',
-        permissionMode: 'bypassPermissions',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\napprovalMode: tpyo\npermissionMode: bypassPermissions\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.approvalMode).toBe('yolo');
-    });
-
-    it('should not throw on invalid approvalMode without permissionMode', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        approvalMode: 'tpyo',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\napprovalMode: tpyo\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.approvalMode).toBeUndefined();
-      // File still loads — only the invalid field is dropped.
-      expect(config.name).toBe('a');
-    });
-
     it('should drop invalid permissionMode and not bridge', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
@@ -744,24 +706,6 @@ You are an agent.
       });
       const config = manager.parseSubagentContent(
         '---\nname: a\ndescription: d\ncolor: magenta\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.color).toBeUndefined();
-    });
-
-    it('should normalize legacy color: auto sentinel to undefined (round-trip parity)', () => {
-      // 'auto' is the legacy "no override" sentinel. Parser normalizes it to
-      // undefined so that parse → serialize → parse is idempotent: the CLI
-      // helpers `shouldShowColor` / `getColorForDisplay` already treat 'auto'
-      // and undefined identically, so no behavior change downstream.
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        color: 'auto',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\ncolor: auto\n---\nx',
         validConfig.filePath!,
         'project',
       );
@@ -893,44 +837,6 @@ You are an agent.
         maxTurns: 25,
       });
       expect(serialized).toContain('maxTurns: 25');
-    });
-
-    it('should prune legacy runConfig.max_turns when top-level maxTurns is set', () => {
-      // Avoid emitting two sources of truth: when the runtime already
-      // promotes maxTurns to the top level, the on-disk file should not
-      // also retain the legacy nested value.
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        maxTurns: 42,
-        runConfig: { max_turns: 10, max_time_minutes: 5 },
-      });
-      expect(serialized).toContain('maxTurns: 42');
-      expect(serialized).toContain('max_time_minutes: 5');
-      // The nested max_turns should NOT appear (top-level wins).
-      const runConfigSection = serialized.match(
-        /runConfig:[\s\S]*?(?=\n\w|\n---|$)/,
-      );
-      expect(runConfigSection?.[0]).not.toContain('max_turns:');
-    });
-
-    it('should drop empty runConfig when only max_turns was nested', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        maxTurns: 42,
-        runConfig: { max_turns: 10 },
-      });
-      expect(serialized).toContain('maxTurns: 42');
-      expect(serialized).not.toContain('runConfig:');
-    });
-
-    it('should retain nested max_turns when top-level maxTurns is unset', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        runConfig: { max_turns: 10 },
-      });
-      expect(serialized).not.toContain('maxTurns:');
-      expect(serialized).toContain('runConfig:');
-      expect(serialized).toContain('max_turns: 10');
     });
 
     it('should not include new fields when undefined', () => {

@@ -27,10 +27,6 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
-import {
-  parseStringOrArray,
-  claudePermissionModeToApprovalMode,
-} from '../subagents/agent-frontmatter-schema.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -69,12 +65,6 @@ export interface ClaudeAgentConfig {
   model?: string;
   /** Permission mode: default, acceptEdits, dontAsk, bypassPermissions, or plan */
   permissionMode?: string;
-  /**
-   * Optional qwen-style approval mode. Hand-edited CC files may set this
-   * directly; when both `approvalMode` and `permissionMode` are present,
-   * the explicit `approvalMode` wins (matches loader behavior).
-   */
-  approvalMode?: string;
   /** Skills to load into the subagent's context at startup */
   skills?: string[];
   /** Hooks configuration */
@@ -142,21 +132,27 @@ const claudeBuildInToolsTransform = (tools: string[]): string[] => {
 };
 
 /**
- * Frontmatter keys that {@link convertClaudeAgentConfig} owns end-to-end. Any
- * key NOT in this set is passed through verbatim when converting CC agent
- * files so that future CC additions survive install without code changes.
+ * Parses a value that can be either a comma-separated string or an array.
+ * Claude agent config can have tools like 'Glob, Grep, Read' or ['Glob', 'Grep', 'Read']
+ * @param value The value to parse
+ * @returns Array of strings or undefined
  */
-const CONVERTER_OWNED_KEYS = new Set([
-  'name',
-  'description',
-  'tools',
-  'disallowedTools',
-  'model',
-  'permissionMode',
-  'skills',
-  'hooks',
-  'color',
-]);
+function parseStringOrArray(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    return value.map(String);
+  }
+  if (typeof value === 'string') {
+    // Split by comma and trim whitespace
+    return value
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+  return undefined;
+}
 
 /**
  * Converts a Claude agent config to Qwen Code subagent format.
@@ -191,19 +187,24 @@ export function convertClaudeAgentConfig(
     qwenAgent['model'] = claudeAgent.model;
   }
 
-  // Map Claude permissionMode to Qwen ApprovalMode via the shared bridge in
-  // agent-frontmatter-schema.ts. The convert path matches the loader's
-  // precedence: when the source has both `approvalMode` and `permissionMode`,
-  // the explicit qwen-style approvalMode wins (only fall back to the bridge
-  // when approvalMode is unset). Unknown permissionMode values fall back to
-  // the raw string so the user sees an explicit "invalid approvalMode"
-  // downstream rather than silently dropping the field on import.
-  if (claudeAgent.approvalMode) {
-    qwenAgent['approvalMode'] = claudeAgent.approvalMode;
-  } else if (claudeAgent.permissionMode) {
-    qwenAgent['approvalMode'] =
-      claudePermissionModeToApprovalMode(claudeAgent.permissionMode) ??
+  // Map Claude permission mode aliases to Qwen ApprovalMode values.
+  // Note: Claude's `dontAsk` denies any tool call that would prompt the user,
+  // making it restrictive. We map it to `default` (which also requires approval)
+  // rather than `auto-edit` (which auto-approves), preserving the restrictive
+  // intent. `bypassPermissions` is the Claude mode that auto-approves everything.
+  if (claudeAgent.permissionMode) {
+    const claudeToQwenMode: Record<string, string> = {
+      default: 'default',
+      plan: 'plan',
+      acceptEdits: 'auto-edit',
+      dontAsk: 'default',
+      bypassPermissions: 'yolo',
+      auto: 'auto-edit',
+    };
+    const mapped =
+      claudeToQwenMode[claudeAgent.permissionMode] ??
       claudeAgent.permissionMode;
+    qwenAgent['approvalMode'] = mapped;
   }
   if (claudeAgent.hooks) {
     qwenAgent['hooks'] = claudeAgent.hooks;
@@ -214,20 +215,9 @@ export function convertClaudeAgentConfig(
   if (claudeAgent.disallowedTools && claudeAgent.disallowedTools.length > 0) {
     qwenAgent['disallowedTools'] = claudeAgent.disallowedTools;
   }
-  // NOTE: hooks intentionally NOT emitted. The local yaml-parser only formats
-  // one level of nesting and would mangle hooks into '[object Object]' on write.
-  // SubagentManager.serializeSubagent has the same skip rule for the same reason.
 
   return qwenAgent;
 }
-
-/**
- * Frontmatter keys whose values are typically nested objects/arrays that the
- * local yaml-parser cannot round-trip safely. {@link convertAgentFiles} skips
- * them when writing the converted file so a `[object Object]` corruption can't
- * land on disk; users keep the values by editing the source file directly.
- */
-const NESTED_FIELDS_NOT_ROUND_TRIPPABLE = new Set(['mcpServers', 'hooks']);
 
 /**
  * Converts all agent files in a directory from Claude format to Qwen format.
@@ -271,7 +261,6 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         disallowedTools: parseStringOrArray(frontmatter['disallowedTools']),
         model: frontmatter['model'] as string | undefined,
         permissionMode: frontmatter['permissionMode'] as string | undefined,
-        approvalMode: frontmatter['approvalMode'] as string | undefined,
         skills: parseStringOrArray(frontmatter['skills']),
         hooks: frontmatter['hooks'],
         color: frontmatter['color'] as string | undefined,
@@ -281,30 +270,10 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
       // Convert to Qwen format
       const qwenAgent = convertClaudeAgentConfig(claudeAgent);
 
-      // Build new frontmatter (excluding systemPrompt as it goes in body).
-      // Step 1 passes through any CC frontmatter key that the converter does
-      // NOT own (effort, maxTurns, initialPrompt, memory, isolation,
-      // mcpServers, background, …). This keeps drop-in compatibility for
-      // upstream CC fields that the converter has not been taught about yet —
-      // when CC adds a 17th field, it survives plugin install instead of
-      // being silently stripped.
+      // Build new frontmatter (excluding systemPrompt as it goes in body)
       const newFrontmatter: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(frontmatter)) {
-        if (
-          !CONVERTER_OWNED_KEYS.has(key) &&
-          key !== 'systemPrompt' &&
-          !NESTED_FIELDS_NOT_ROUND_TRIPPABLE.has(key) &&
-          value !== undefined
-        ) {
-          newFrontmatter[key] = value;
-        }
-      }
       for (const [key, value] of Object.entries(qwenAgent)) {
-        if (
-          key !== 'systemPrompt' &&
-          !NESTED_FIELDS_NOT_ROUND_TRIPPABLE.has(key) &&
-          value !== undefined
-        ) {
+        if (key !== 'systemPrompt' && value !== undefined) {
           newFrontmatter[key] = value;
         }
       }
