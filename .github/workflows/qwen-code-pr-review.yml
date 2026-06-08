@@ -57,6 +57,9 @@ jobs:
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
+    concurrency:
+      group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
+      cancel-in-progress: true
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'read'
@@ -68,6 +71,13 @@ jobs:
           PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
+          set -euo pipefail
+          IS_FORK="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')"
+          if [ "$IS_FORK" = "true" ]; then
+            echo "Skipping ack: PR #${PR_NUMBER} is a fork PR; review-pr skips forks." >&2
+            exit 0
+          fi
+
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --body "_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
