@@ -99,8 +99,13 @@ export class LoadedMcpApprovals {
     const project: Record<string, McpApprovalRecord> =
       existing && typeof existing === 'object' && !Array.isArray(existing)
         ? existing
-        : {};
-    project[serverName] = { hash: hashMcpServerConfig(config), status };
+        : Object.create(null);
+    Object.defineProperty(project, serverName, {
+      value: { hash: hashMcpServerConfig(config), status },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
     this.file.config[root] = project;
     await saveMcpApprovals(this.file);
   }

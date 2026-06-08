@@ -75,6 +75,30 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     expect(record.hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('persists decisions for server names that match object prototype keys', async () => {
+    await loadMcpApprovals().setState(
+      projectRoot,
+      '__proto__',
+      server,
+      'approved',
+    );
+
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(dir, MCP_APPROVALS_FILENAME), 'utf-8'),
+    );
+    const projectRecord = onDisk[path.resolve(projectRoot)];
+    const record = Object.getOwnPropertyDescriptor(
+      projectRecord,
+      '__proto__',
+    )?.value;
+
+    expect(record.status).toBe('approved');
+    resetMcpApprovalsForTesting();
+    expect(loadMcpApprovals().getState(projectRoot, '__proto__', server)).toBe(
+      'approved',
+    );
+  });
+
   it('recovers when a per-project approvals record is corrupted', async () => {
     const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
     fs.writeFileSync(
