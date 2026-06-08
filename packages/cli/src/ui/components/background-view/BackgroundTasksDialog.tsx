@@ -925,12 +925,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // statusChange (so the pill / AppContainer don't churn under heavy
     // tool / event traffic), so for the detail view we have to re-resolve
     // explicitly:
-    //   - agent: `recentActivities` is reassigned by `appendActivity`,
-    //     which fires `activityChange` (subscribed below).
-    //   - monitor: `eventCount` / `droppedLines` are mutated by
-    //     `emitEvent`, which intentionally does NOT fire `statusChange`
-    //     to avoid per-event refresh churn. The 1s wall-clock tick below
-    //     drives the recompute instead.
+    //   - agent: `recentActivities` is reassigned by `agentAppendActivity`,
+    //     which uses `mutateSilent` and intentionally does NOT fire the
+    //     subscription (to avoid per-activity refresh churn), so the 1s
+    //     wall-clock tick below drives the recompute instead.
+    //   - monitor: `eventCount` / `droppedLines` are mutated by `emitEvent`
+    //     via `mutateSilent`, which likewise does NOT fire the subscription;
+    //     the same 1s wall-clock tick drives the recompute.
     // Shells don't mutate detail-visible fields between statusChange
     // events, so the snapshot stays correct for them.
     if (fromSnapshot.kind === 'agent') {

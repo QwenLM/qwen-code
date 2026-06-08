@@ -154,6 +154,7 @@ describe('runNonInteractive', () => {
     get: ReturnType<typeof vi.fn>;
     register: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    mutateSilent: ReturnType<typeof vi.fn>;
     evict: ReturnType<typeof vi.fn>;
     kill: ReturnType<typeof vi.fn>;
     subscribe: ReturnType<typeof vi.fn>;
@@ -210,7 +211,7 @@ describe('runNonInteractive', () => {
       get: vi.fn(),
       register: vi.fn(),
       update: vi.fn(),
-        mutateSilent: vi.fn(),
+      mutateSilent: vi.fn(),
       evict: vi.fn(),
       kill: vi.fn(),
       subscribe: vi.fn(() => () => {}),
