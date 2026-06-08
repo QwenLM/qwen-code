@@ -1186,6 +1186,26 @@ describe('Gemini Client (client.ts)', () => {
       expect(parts).toContain('<system-reminder>DEFERRED</system-reminder>');
     });
 
+    it('injects the reminder on a Cron turn', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn(SendMessageType.Cron);
+
+      expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+    });
+
     it('does not prepend the reminder before functionResponse parts on Retry', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
@@ -1332,10 +1352,10 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('does NOT inject the reminder on a ToolResult turn', async () => {
-      // The reminder is gated to UserQuery/Cron turns. A ToolResult turn leads
-      // with functionResponse parts that must immediately follow the model's
-      // functionCall, so prepending reminders there would break the call/
-      // response pairing. Guards against moving the push outside that gate.
+      // The reminder is gated to UserQuery/Cron turns and text-only retries.
+      // A ToolResult turn leads with functionResponse parts that must
+      // immediately follow the model's functionCall, so prepending reminders
+      // there would break the call/response pairing.
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
         n === 'tool_search' ? ({} as never) : null,

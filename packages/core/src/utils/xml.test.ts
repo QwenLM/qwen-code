@@ -63,6 +63,12 @@ describe('xml utils', () => {
       );
     });
 
+    it('escapes self-closing system-reminder tags with attributes', () => {
+      expect(escapeSystemReminderTags('<system-reminder data-x="y"/>')).toBe(
+        '&lt;system-reminder data-x=&quot;y&quot;/&gt;',
+      );
+    });
+
     it('does not escape similarly named tags', () => {
       const input =
         '<system-reminderish>keep</system-reminderish>\n<system-reminder-extra />';
