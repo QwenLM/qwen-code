@@ -195,6 +195,8 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
+  compactThinking?: boolean;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
 }
@@ -502,6 +504,7 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  compactThinking,
   markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -512,8 +515,13 @@ export function App({
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
   const customization = useMemo(
-    () => ({ renderToolHeaderExtra, renderWelcomeHeader, markdown }),
-    [renderToolHeaderExtra, renderWelcomeHeader, markdown],
+    () => ({
+      renderToolHeaderExtra,
+      renderWelcomeHeader,
+      compactThinking,
+      markdown,
+    }),
+    [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
   );
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();

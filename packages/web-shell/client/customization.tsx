@@ -47,6 +47,7 @@ export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export interface WebShellCustomization {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  compactThinking?: boolean;
   markdown?: WebShellMarkdownCustomization;
 }
 
