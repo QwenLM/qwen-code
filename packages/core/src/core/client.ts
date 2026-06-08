@@ -125,6 +125,13 @@ export enum SendMessageType {
   Cron = 'cron',
   /** Background agent notification. Display item is added by the drain loop. */
   Notification = 'notification',
+  /**
+   * A message delivered to the leader from a teammate. Behaves like a
+   * fresh top-level interaction (loop-detector reset + interaction span)
+   * but is not a user prompt — it does not bump commit attribution or get
+   * recorded as a user message.
+   */
+  Teammate = 'teammate',
 }
 
 export interface SendMessageOptions {
@@ -1294,7 +1301,8 @@ export class GeminiClient {
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification;
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate;
     if (isTopLevelInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
