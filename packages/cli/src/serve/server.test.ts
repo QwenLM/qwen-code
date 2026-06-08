@@ -173,6 +173,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // on; runtime-active policy is at `/capabilities` body `policy.permission`.
   'permission_mediation',
   'non_blocking_prompt',
+  'session_language',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -200,6 +201,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
+      f !== 'session_language' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks',
@@ -216,6 +218,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'prompt_absolute_deadline',
   'writer_idle_timeout',
   'non_blocking_prompt',
+  'session_language',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',

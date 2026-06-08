@@ -214,6 +214,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   prompt_absolute_deadline: { since: 'v1' },
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
+  session_language: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
