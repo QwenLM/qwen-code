@@ -1,6 +1,8 @@
 name: 'Qwen Triage'
 
 on:
+  issues:
+    types: ['opened']
   pull_request_target:
     types: ['opened']
   issue_comment:
@@ -28,6 +30,7 @@ jobs:
     # mention the phrase in quoted text or mid-sentence descriptions.
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
+        github.event_name == 'issues' ||
         (github.event_name == 'pull_request_target' &&
          github.event.pull_request.head.repo.full_name == github.repository &&
          github.event.pull_request.draft == false) ||

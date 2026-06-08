@@ -335,8 +335,8 @@ jobs:
             ## Scope
 
             If `ISSUE_NUMBER` is set, inspect and process only that issue. This
-            is the normal path for a newly opened issue or explicit maintainer
-            rerun. Do not scan or process unrelated recent issues in this mode.
+            is the normal path for a newly opened issue. Do not scan or process
+            unrelated recent issues in this mode.
 
             If `ISSUE_NUMBER` is empty, this is a scheduled/manual batch run.
             Find and process at most `SCHEDULED_LIMIT` open issues that are
@@ -364,7 +364,6 @@ jobs:
               the Qwen bot itself as existing follow-up. Skip those issues.
             - Skip issues that already have one of these marker comments unless
               this is a manual `workflow_dispatch` run for that exact issue:
-              - `<!-- qwen-triage stage=`
               - `<!-- qwen-issue-bot:invalid -->`
               - `<!-- qwen-issue-bot:needs-info -->`
               - `<!-- qwen-issue-bot:related -->`
