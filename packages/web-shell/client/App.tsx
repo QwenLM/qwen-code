@@ -12,6 +12,7 @@ import {
   useDaemonFollowupSuggestion,
   useSessionNotices,
   useStreamingState,
+  useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
   type DaemonSessionNotice,
@@ -632,6 +633,7 @@ export function App({
     [renderToolHeaderExtra, renderWelcomeHeader, compactThinking, markdown],
   );
   const store = useTranscriptStore();
+  const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
