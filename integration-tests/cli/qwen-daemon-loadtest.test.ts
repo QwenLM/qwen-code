@@ -110,6 +110,21 @@ process.on('exit', () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function pushScenario(
+  name: string,
+  t0: number,
+  result: { status: 'passed' | 'failed'; error?: string },
+  metrics?: Record<string, unknown>,
+): void {
+  snapshot.scenarios.push({
+    name,
+    status: result.status,
+    durationMs: performance.now() - t0,
+    error: result.error,
+    metrics,
+  });
+}
+
 function mockDaemonEnv(mode = 'echo'): Record<string, string> {
   return {
     QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
@@ -208,18 +223,20 @@ async function withDaemon(
       });
 
       const stats = percentiles(latencies);
-      let status: 'passed' | 'failed' = 'passed';
+      const result = {
+        status: 'passed' as 'passed' | 'failed',
+        error: undefined as string | undefined,
+      };
       try {
         expect(stats.p99).toBeLessThan(30_000);
       } catch (err) {
-        status = 'failed';
+        result.status = 'failed';
+        result.error = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
-        snapshot.scenarios.push({
-          name: 'rapid-lifecycle',
-          status,
-          durationMs: performance.now() - t0,
-          metrics: { cycles: LIFECYCLE_CYCLES, ...stats },
+        pushScenario('rapid-lifecycle', t0, result, {
+          cycles: LIFECYCLE_CYCLES,
+          ...stats,
         });
       }
     }, 120_000);
@@ -258,26 +275,28 @@ async function withDaemon(
           }
 
           const result = await consumePromise;
-          evicted = result.evictionReason !== undefined;
+          evicted = result.evicted;
           received = result.received;
 
           await d.client.closeSession(session.sessionId);
         },
       );
 
-      let status: 'passed' | 'failed' = 'passed';
+      const result = {
+        status: 'passed' as 'passed' | 'failed',
+        error: undefined as string | undefined,
+      };
       try {
         expect(received).toBeGreaterThan(0);
         expect(evicted).toBe(true);
       } catch (err) {
-        status = 'failed';
+        result.status = 'failed';
+        result.error = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
-        snapshot.scenarios.push({
-          name: 'sse-slow-consumer-eviction',
-          status,
-          durationMs: performance.now() - t0,
-          metrics: { evicted, received },
+        pushScenario('sse-slow-consumer-eviction', t0, result, {
+          evicted,
+          received,
         });
       }
     }, 120_000);
@@ -326,18 +345,19 @@ async function withDaemon(
         await d.client.closeSession(session.sessionId);
       });
 
-      let status: 'passed' | 'failed' = 'passed';
+      const result = {
+        status: 'passed' as 'passed' | 'failed',
+        error: undefined as string | undefined,
+      };
       try {
         expect(reconnectReceived).toBeGreaterThan(0);
       } catch (err) {
-        status = 'failed';
+        result.status = 'failed';
+        result.error = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
-        snapshot.scenarios.push({
-          name: 'last-event-id-reconnect',
-          status,
-          durationMs: performance.now() - t0,
-          metrics: { reconnectReceived },
+        pushScenario('last-event-id-reconnect', t0, result, {
+          reconnectReceived,
         });
       }
     }, 120_000);
@@ -380,19 +400,21 @@ async function withDaemon(
         },
       );
 
-      let status: 'passed' | 'failed' = 'passed';
+      const result = {
+        status: 'passed' as 'passed' | 'failed',
+        error: undefined as string | undefined,
+      };
       try {
         expect(crashDetected).toBe(true);
         expect(recoverySucceeded).toBe(true);
       } catch (err) {
-        status = 'failed';
+        result.status = 'failed';
+        result.error = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
-        snapshot.scenarios.push({
-          name: 'acp-crash-recovery',
-          status,
-          durationMs: performance.now() - t0,
-          metrics: { crashDetected, recoverySucceeded },
+        pushScenario('acp-crash-recovery', t0, result, {
+          crashDetected,
+          recoverySucceeded,
         });
       }
     }, 90_000);
@@ -430,24 +452,23 @@ async function withDaemon(
       });
 
       const stats = percentiles(latencies);
-      let status: 'passed' | 'failed' = 'passed';
+      const result = {
+        status: 'passed' as 'passed' | 'failed',
+        error: undefined as string | undefined,
+      };
       try {
         expect(failureCount).toBe(0);
         expect(stats.p99).toBeLessThan(60_000);
       } catch (err) {
-        status = 'failed';
+        result.status = 'failed';
+        result.error = err instanceof Error ? err.message : String(err);
         throw err;
       } finally {
-        snapshot.scenarios.push({
-          name: 'burst-concurrent',
-          status,
-          durationMs: performance.now() - t0,
-          metrics: {
-            burstSize: BURST_SESSIONS,
-            successCount,
-            failureCount,
-            ...stats,
-          },
+        pushScenario('burst-concurrent', t0, result, {
+          burstSize: BURST_SESSIONS,
+          successCount,
+          failureCount,
+          ...stats,
         });
       }
     }, 120_000);

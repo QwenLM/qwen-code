@@ -464,6 +464,8 @@ export interface ConsumeSseResult {
   received: number;
   /** The last non-undefined `ev.id` observed (for `Last-Event-ID` reconnect). */
   lastSeenId?: number;
+  /** True when the subscription ended due to a `client_evicted` frame. */
+  evicted: boolean;
   evictedAt?: number;
   evictionReason?: string;
   elapsedMs: number;
@@ -485,6 +487,7 @@ export async function consumeSseEvents(
   const startedAt = Date.now();
   let received = 0;
   let lastSeenId: number | undefined;
+  let evicted = false;
   let evictedAt: number | undefined;
   let evictionReason: string | undefined;
 
@@ -505,6 +508,7 @@ export async function consumeSseEvents(
       received++;
       if (ev.id !== undefined) lastSeenId = ev.id;
       if (ev.type === 'client_evicted') {
+        evicted = true;
         evictedAt = ev.id;
         const data = ev.data as { reason?: string } | undefined;
         evictionReason = data?.reason;
@@ -531,6 +535,7 @@ export async function consumeSseEvents(
   return {
     received,
     lastSeenId,
+    evicted,
     evictedAt,
     evictionReason,
     elapsedMs: Date.now() - startedAt,
