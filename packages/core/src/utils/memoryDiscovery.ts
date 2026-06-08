@@ -379,6 +379,10 @@ function createMemoryTypeClassifier(
       return 'extension';
     }
 
+    if (resolvedPath.startsWith(`${globalQwenDir}${path.sep}`)) {
+      return 'user';
+    }
+
     if (
       resolvedRoot &&
       resolvedPath === path.join(resolvedRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
@@ -390,10 +394,7 @@ function createMemoryTypeClassifier(
       return 'project';
     }
 
-    if (
-      resolvedPath.startsWith(`${globalQwenDir}${path.sep}`) ||
-      path.dirname(resolvedPath) === resolvedHome
-    ) {
+    if (path.dirname(resolvedPath) === resolvedHome) {
       return 'user';
     }
 

@@ -537,6 +537,10 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('classifies home-directory project files as project memory', async () => {
     await createEmptyDir(path.join(homedir, '.git'));
+    const globalFile = await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
     const projectFile = await createTestFile(
       path.join(homedir, DEFAULT_CONTEXT_FILENAME),
       'home project context',
@@ -558,6 +562,11 @@ describe('loadServerHierarchicalMemory', () => {
       },
     );
 
+    expect(notifications).toContainEqual({
+      filePath: globalFile,
+      memoryType: 'user',
+      loadReason: 'session_start',
+    });
     expect(notifications).toContainEqual({
       filePath: projectFile,
       memoryType: 'project',
