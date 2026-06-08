@@ -84,6 +84,7 @@ export function createPushRouter(
           endpoint: r.endpoint,
           createdAt: r.createdAt,
           tokenId: r.tokenId,
+          prefs: r.prefs,
         })),
       });
       return;
@@ -93,6 +94,7 @@ export function createPushRouter(
         id: r.id,
         endpoint: r.endpoint,
         createdAt: r.createdAt,
+        prefs: r.prefs,
       })),
     });
   });
@@ -112,6 +114,39 @@ export function createPushRouter(
       detail: { subscriptionId: rec.id },
     });
     res.status(204).end();
+  });
+
+  // Set per-subscription notification prefs (kind allowlist). Authorization
+  // mirrors DELETE: existence + ownership are checked first (hide existence of
+  // another token's subscription from non-owners with a 404, NOT a 403/400),
+  // and only then is the body validated. `prefs` must be null/absent (clears to
+  // "receive all") OR an array of strings; otherwise 400 invalid_prefs. An
+  // empty array is valid and means "receive nothing".
+  router.patch('/subscriptions/:id', async (req, res) => {
+    const rec = store.get(req.params.id);
+    const isOwnerScope = req.rcClient!.scopes.includes(OWNER);
+    if (!rec || (rec.tokenId !== req.rcClient!.id && !isOwnerScope)) {
+      res.status(404).json({ error: 'Not found', code: 'not_found' });
+      return;
+    }
+    const body = (req.body ?? {}) as { prefs?: unknown };
+    const { prefs } = body;
+    const isValid =
+      prefs === undefined ||
+      prefs === null ||
+      (Array.isArray(prefs) && prefs.every((p) => typeof p === 'string'));
+    if (!isValid) {
+      res.status(400).json({ error: 'Invalid prefs', code: 'invalid_prefs' });
+      return;
+    }
+    const next = Array.isArray(prefs) ? (prefs as string[]) : undefined;
+    await store.setPrefs(rec.id, next);
+    void audit?.record({
+      action: 'push_prefs_updated',
+      actorTokenId: req.rcClient!.id,
+      detail: { subscriptionId: rec.id },
+    });
+    res.status(200).json({ id: rec.id, prefs: next });
   });
 
   // Owner-gated self-test: fan a synthetic task.completed out to the caller's

@@ -216,6 +216,143 @@ describe('push routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('GET /subscriptions includes prefs for each entry (own)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setPrefs(rec.id, ['task.completed']);
+    const res = await fetch(`${url}/rc/push/subscriptions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      subscriptions: Array<{ id: string; prefs?: string[] }>;
+    };
+    expect(body.subscriptions[0].prefs).toEqual(['task.completed']);
+  });
+
+  it('GET /subscriptions?all=true includes prefs (owner)', async () => {
+    client = { id: 'admin', scopes: [SESSION_READ, OWNER] };
+    const url = await mount();
+    const rec = await store.add('tokB', VALID_SUB);
+    await store.setPrefs(rec.id, ['permission.required']);
+    const res = await fetch(`${url}/rc/push/subscriptions?all=true`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      subscriptions: Array<{ id: string; prefs?: string[] }>;
+    };
+    expect(body.subscriptions[0].prefs).toEqual(['permission.required']);
+  });
+
+  it('PATCH own subscription sets prefs -> 200 and GET shows them', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: ['task.completed'] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; prefs?: string[] };
+    expect(body.id).toBe(rec.id);
+    expect(body.prefs).toEqual(['task.completed']);
+
+    const pu = audit.calls.find((c) => c.action === 'push_prefs_updated');
+    expect(pu).toBeDefined();
+    expect(pu!.detail).toEqual({ subscriptionId: rec.id });
+    expect(JSON.stringify(audit.calls)).not.toContain(VALID_SUB.endpoint);
+
+    const list = await fetch(`${url}/rc/push/subscriptions`);
+    const lb = (await list.json()) as {
+      subscriptions: Array<{ id: string; prefs?: string[] }>;
+    };
+    expect(lb.subscriptions[0].prefs).toEqual(['task.completed']);
+  });
+
+  it('PATCH with prefs:null clears prefs (receive-all); body has no prefs', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setPrefs(rec.id, ['task.completed']);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: null }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; prefs?: string[] };
+    expect(body.id).toBe(rec.id);
+    expect('prefs' in body).toBe(false);
+    expect(store.get(rec.id)!.prefs).toBeUndefined();
+  });
+
+  it('PATCH another tokens id as non-owner -> 404 (hide existence)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokB', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: ['task.completed'] }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH another tokens id with a malformed body as non-owner -> 404 (existence hidden before validation)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokB', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: 'not-an-array' }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH another tokens id as owner -> 200', async () => {
+    client = { id: 'admin', scopes: [SESSION_READ, OWNER] };
+    const url = await mount();
+    const rec = await store.add('tokB', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: ['task.completed'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
+  });
+
+  it('PATCH an unknown id -> 404', async () => {
+    const url = await mount();
+    const res = await fetch(`${url}/rc/push/subscriptions/nope`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: [] }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH own subscription with a non-array prefs -> 400 invalid_prefs', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: 'task.completed' }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('invalid_prefs');
+  });
+
+  it('PATCH own subscription with non-string array elements -> 400 invalid_prefs', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: ['ok', 5] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('invalid_prefs');
+  });
+
   it('POST /test as a non-owner returns 403', async () => {
     // client is session:read only (no owner) by default.
     const url = await mount();
