@@ -76,8 +76,8 @@ describe('useMemoryMonitor', () => {
     const compactOldItems = vi.fn();
     memoryUsageSpy.mockReturnValue({
       rss: 1024,
-      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
-      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
@@ -88,8 +88,8 @@ describe('useMemoryMonitor', () => {
     const compactOldItems = vi.fn();
     memoryUsageSpy.mockReturnValue({
       rss: 1024,
-      heapUsed: MEMORY_UI_COMPACT_THRESHOLD - 1,
-      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() - 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
@@ -100,8 +100,8 @@ describe('useMemoryMonitor', () => {
     const compactOldItems = vi.fn();
     memoryUsageSpy.mockReturnValue({
       rss: 1024,
-      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
-      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
 
@@ -123,8 +123,8 @@ describe('useMemoryMonitor', () => {
     // RSS above warning threshold, heap below compaction threshold initially
     memoryUsageSpy.mockReturnValue({
       rss: MEMORY_WARNING_THRESHOLD + 1,
-      heapUsed: MEMORY_UI_COMPACT_THRESHOLD - 1,
-      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() - 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
 
@@ -135,8 +135,8 @@ describe('useMemoryMonitor', () => {
     // Now heap exceeds threshold — compaction should still work
     memoryUsageSpy.mockReturnValue({
       rss: MEMORY_WARNING_THRESHOLD + 1,
-      heapUsed: MEMORY_UI_COMPACT_THRESHOLD + 1,
-      heapTotal: MEMORY_UI_COMPACT_THRESHOLD * 2,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
     } as NodeJS.MemoryUsage);
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
     expect(compactOldItems).toHaveBeenCalledTimes(1);

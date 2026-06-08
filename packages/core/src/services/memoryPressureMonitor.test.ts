@@ -19,6 +19,8 @@ import {
 } from './memoryPressureMonitor.js';
 import type { FileReadCache } from './fileReadCache.js';
 import type { Config } from '../config/config.js';
+import type { Content } from '@google/genai';
+import { MICROCOMPACT_CLEARED_MESSAGE } from './microcompaction/microcompact.js';
 
 // Hoisted so vi.mock can consume it.
 const { mockDebugLogger } = vi.hoisted(() => ({
@@ -1289,11 +1291,12 @@ describe('MemoryPressureMonitor', () => {
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
 
-      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
       monitor.performCheck();
       await drainCleanupMeasurement();
 
-      // Should not throw — the error is caught internally
+      // compact_history error is caught and logged without propagating,
+      // so subsequent cleanup steps (like trigger_gc) can still run.
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
@@ -1306,11 +1309,83 @@ describe('MemoryPressureMonitor', () => {
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
 
-      setMemUsage(10 * 1024 * 1024 * 1024); // hard pressure
+      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
       monitor.performCheck();
       await drainCleanupMeasurement();
 
       expect(setHistory).not.toHaveBeenCalled();
+    });
+
+    it('compacts history and clears fileReadCache when meta is non-null', async () => {
+      const setHistory = vi.fn();
+      const clearCache = vi.fn();
+      // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
+      const toolHistory: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: `/f${i}.ts` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  id: `call_${i}`,
+                  response: { output: `content of f${i}` },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => toolHistory,
+              setHistory,
+            }),
+          },
+          fileReadCache: {
+            clear: clearCache,
+            evictNotAccessedSince: vi.fn().mockReturnValue(0),
+          },
+          clearContextOnIdle: {
+            clearContextMinutes: 60,
+            toolResultsNumToKeep: 5,
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clearCache).toHaveBeenCalled();
+      const compacted = setHistory.mock.calls[0][0] as Content[];
+      // microcompactHistory blanks old tool responses with a cleared message
+      // rather than removing entries — verify some were blanked.
+      const blankedResponses = compacted.filter((entry) =>
+        entry.parts?.some(
+          (p) =>
+            p.functionResponse?.response?.['output'] ===
+            MICROCOMPACT_CLEARED_MESSAGE,
+        ),
+      );
+      expect(blankedResponses.length).toBeGreaterThan(0);
     });
   });
 

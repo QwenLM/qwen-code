@@ -506,6 +506,9 @@ export class MemoryPressureMonitor extends EventEmitter {
         try {
           const client = this.coreConfig.getGeminiClient?.();
           if (!client?.isInitialized?.()) {
+            debugLogger.debug(
+              '[COMPACT_HISTORY] skipped: client not initialized',
+            );
             break;
           }
           const chat = client.getChat();
