@@ -98,6 +98,7 @@ Post a single Stage 1 comment. Be direct — say what you actually think, not wh
 
 ```markdown
 <!-- qwen-triage stage=1 -->
+<!-- qwen-maintain:pr-intake -->
 
 Thanks for the PR!
 
@@ -197,11 +198,14 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` and `<!-- qwen-maintain:pr-intake -->` at the top): code review findings + testing result.
 
 **⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
+<!-- qwen-triage stage=2 -->
+<!-- qwen-maintain:pr-intake -->
+
 ## Before (installed build)
 
 <!-- paste capture-pane output here inside ``` -->
@@ -228,7 +232,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
-**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` and `<!-- qwen-maintain:pr-intake -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 

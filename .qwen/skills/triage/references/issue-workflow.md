@@ -12,19 +12,20 @@ Key points only — no verbose prose.
 
 ```markdown
 <!-- qwen-triage stage=1 -->
+<!-- qwen-issue-bot:needs-info -->
 
 ## Triage
 
-- **Type**: bug | feature | docs | unclear | inadmissible
-- **Labels**: `type/bug`, `scope/cli`, `priority/medium`
-- **Next**: <one-line action>
+- **Type**: unclear
+- **Labels**: `type/support`, `status/need-information`
+- **Next**: Could you share `/about` output and the exact command that failed?
 
 <details>
 <summary>中文说明</summary>
 
-- **类型**: bug
-- **标签**: `type/bug`, `scope/cli`, `priority/medium`
-- **下一步**: <一句话动作>
+- **类型**: 信息不足
+- **标签**: `type/support`, `status/need-information`
+- **下一步**: 请补充 `/about` 输出和失败的完整命令。
 </details>
 
 --- Qwen Code

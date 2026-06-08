@@ -68,11 +68,22 @@ gh label list --repo "$REPO" --limit 300
   workflow Stage 3, assign, edit titles/bodies, delete comments, or remove
   labels.
 
+## Event Ownership
+
+- The issue follow-up bot owns early `issues.opened` follow-up: related issue
+  search, missing-information requests, invalid/spam handling, and lightweight
+  labels.
+- Qwen Triage owns PR intake for `pull_request_target`, explicit
+  `@qwen-code /triage`, and `workflow_dispatch` for issues or PRs that need
+  heavier maintainer triage.
+- Triage may add labels during intake, but does not remove labels. Closed-PR
+  transient label cleanup belongs to a separate deterministic follow-up, not the
+  staged triage run.
+
 ## Duplicate Guard
 
-- Unattended CI events (`GITHUB_EVENT_NAME=issues` or
-  `pull_request_target`) + prior `<!-- qwen-triage stage=N -->` marker in
-  comments: exit
+- Unattended CI events (`GITHUB_EVENT_NAME=pull_request_target`) + prior
+  `<!-- qwen-triage stage=N -->` marker in comments: exit
 - Explicit reruns (`GITHUB_EVENT_NAME=issue_comment` or `workflow_dispatch`):
   run all stages, update prior comments in place
 - Local invocation (no `GITHUB_EVENT_NAME`): run all stages, update prior
