@@ -9,6 +9,8 @@ import { OWNER } from '../scopes.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { VapidStore } from '../webpush/vapid.js';
 import type { PushStore } from '../pushStore.js';
+import type { PushNotifier } from '../webpush/notifier.js';
+import type { PushPayload } from '../webpush/payload.js';
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
@@ -26,6 +28,7 @@ function isNonEmptyString(v: unknown): v is string {
 export function createPushRouter(
   vapid: VapidStore,
   store: PushStore,
+  notifier: PushNotifier,
   audit?: AuditRecorder,
 ): Router {
   const router = Router();
@@ -109,6 +112,35 @@ export function createPushRouter(
       detail: { subscriptionId: rec.id },
     });
     res.status(204).end();
+  });
+
+  // Owner-gated self-test: fan a synthetic task.completed out to the caller's
+  // own subscriptions. The router is mounted under session:read; owner is
+  // required in-handler. `sent` is the number of subscriptions attempted
+  // (delivery is async/best-effort, so success is not reflected here).
+  router.post('/test', async (req, res) => {
+    if (!req.rcClient!.scopes.includes(OWNER)) {
+      res
+        .status(403)
+        .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+      return;
+    }
+    const body = (req.body ?? {}) as { sessionId?: unknown };
+    const sessionId = isNonEmptyString(body.sessionId)
+      ? body.sessionId
+      : 'test';
+    const payload: PushPayload = {
+      v: 1,
+      kind: 'task.completed',
+      sessionId,
+      summary: 'Task finished',
+      url: '/ui/?session=' + encodeURIComponent(sessionId),
+    };
+    // Fire-and-forget: delivery is async/best-effort (send() never throws, so
+    // this floating promise can never reject). Blocking the response on the
+    // retry/backoff sequence would stall it for tens of seconds on a dead sub.
+    void notifier.notifyToken(req.rcClient!.id, payload);
+    res.status(200).json({ sent: store.listFor(req.rcClient!.id).length });
   });
 
   return router;

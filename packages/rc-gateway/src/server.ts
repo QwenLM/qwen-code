@@ -28,6 +28,8 @@ import {
 } from './routes/tokens.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
+import { PushSender } from './webpush/sender.js';
+import { PushNotifier } from './webpush/notifier.js';
 
 export interface GatewayDeps {
   daemon: DaemonClient;
@@ -101,10 +103,12 @@ export function createGatewayApp(deps: GatewayDeps): Express {
   );
 
   if (deps.vapid && deps.pushStore) {
+    const sender = new PushSender(deps.vapid, deps.pushStore, audit);
+    const notifier = new PushNotifier(deps.store, deps.pushStore, sender);
     app.use(
       '/rc/push',
       requireScope(SESSION_READ, audit),
-      createPushRouter(deps.vapid, deps.pushStore, audit),
+      createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
     );
   }
 

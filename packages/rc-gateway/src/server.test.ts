@@ -361,6 +361,44 @@ describe('gateway app', () => {
     expect(listBody.subscriptions).toHaveLength(1);
   });
 
+  it('owner subscribes then POST /rc/push/test returns 200 {sent:1}', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const sub = await fetch(`${url}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://push.example.com/owner-test',
+          keys: { p256dh: 'p', auth: 'a' },
+        },
+      }),
+    });
+    expect(sub.status).toBe(201);
+
+    const test = await fetch(`${url}/rc/push/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ sessionId: 'sess-test' }),
+    });
+    expect(test.status).toBe(200);
+    const body = (await test.json()) as { sent: number };
+    expect(body.sent).toBe(1);
+  });
+
   it('403s the push vapid route for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([OWNER]); // owner lacks session:read

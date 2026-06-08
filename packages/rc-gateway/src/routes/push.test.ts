@@ -16,11 +16,18 @@ import { OWNER, SESSION_READ } from '../scopes.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { VapidStore } from '../webpush/vapid.js';
 import { PushStore } from '../pushStore.js';
+import { TokenStore } from '../tokenStore.js';
+import { PushSender, type PushTransport } from '../webpush/sender.js';
+import { PushNotifier } from '../webpush/notifier.js';
+import type { PushPayload } from '../webpush/payload.js';
 import { createPushRouter } from './push.js';
 
 let server: Server | undefined;
 let vapid: VapidStore;
 let store: PushStore;
+let tokens: TokenStore;
+let notifier: PushNotifier;
+let sent: Array<{ endpoint: string; payload: PushPayload }>;
 let audit: AuditRecorder & { calls: AuditEntry[] };
 let client: { id: string; scopes: RcScope[] };
 
@@ -38,7 +45,22 @@ beforeEach(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rc-pushroute-'));
   vapid = await VapidStore.open(join(dir, 'vapid.json'));
   store = await PushStore.open(join(dir, 'push.json'));
+  tokens = await TokenStore.open(join(dir, 'tokens.json'));
   audit = fakeAudit();
+  sent = [];
+  const transport: PushTransport = async (sub, payloadJson) => {
+    sent.push({
+      endpoint: sub.endpoint,
+      payload: JSON.parse(payloadJson) as PushPayload,
+    });
+    return { statusCode: 201 };
+  };
+  const sender = new PushSender(vapid, store, audit, {
+    transport,
+    backoffMs: [0, 0, 0, 0, 0],
+    sleep: async () => {},
+  });
+  notifier = new PushNotifier(tokens, store, sender);
   client = { id: 'tokA', scopes: [SESSION_READ] };
 });
 
@@ -49,7 +71,7 @@ async function mount(): Promise<string> {
     req.rcClient = client;
     next();
   });
-  app.use('/rc/push', createPushRouter(vapid, store, audit));
+  app.use('/rc/push', createPushRouter(vapid, store, notifier, audit));
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
   });
@@ -192,5 +214,45 @@ describe('push routes', () => {
       method: 'DELETE',
     });
     expect(res.status).toBe(404);
+  });
+
+  it('POST /test as a non-owner returns 403', async () => {
+    // client is session:read only (no owner) by default.
+    const url = await mount();
+    const res = await fetch(`${url}/rc/push/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('insufficient_scope');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('POST /test as owner with 1 sub returns 200 {sent:1} and dispatches a task.completed', async () => {
+    // Mint a real token so notifier.scopesFor(client.id) resolves; the route's
+    // owner gate reads req.rcClient.scopes (separate from the token's scopes).
+    const t = await tokens.issue([SESSION_READ, OWNER], 'owner');
+    client = { id: t.id, scopes: [SESSION_READ, OWNER] };
+    const url = await mount();
+    await store.add(t.id, {
+      endpoint: 'https://push.example.com/owner-sub',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const res = await fetch(`${url}/rc/push/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-9' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sent: number };
+    expect(body.sent).toBe(1);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].endpoint).toBe('https://push.example.com/owner-sub');
+    expect(sent[0].payload.kind).toBe('task.completed');
+    expect(sent[0].payload.sessionId).toBe('sess-9');
   });
 });
