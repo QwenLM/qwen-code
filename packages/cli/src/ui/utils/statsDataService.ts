@@ -93,7 +93,8 @@ function buildHeatmap(
     const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
     let totalTokens = 0;
     for (const m of Object.values(r.models)) {
-      totalTokens += m.totalTokens || m.inputTokens + m.outputTokens;
+      totalTokens +=
+        m.totalTokens || m.inputTokens + m.outputTokens + m.thoughtsTokens;
     }
     heatmap[key] = (heatmap[key] || 0) + totalTokens;
   }
@@ -113,7 +114,8 @@ function buildTokensPerDay(
     const dateKey = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
     for (const [model, m] of Object.entries(r.models)) {
       const key = `${dateKey}|${model}`;
-      const tokens = m.totalTokens || m.inputTokens + m.outputTokens;
+      const tokens =
+        m.totalTokens || m.inputTokens + m.outputTokens + m.thoughtsTokens;
       dayModel.set(key, (dayModel.get(key) || 0) + tokens);
     }
   }
