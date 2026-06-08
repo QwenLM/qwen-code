@@ -12,7 +12,7 @@ import {
   MEMORY_VALUES,
   ISOLATION_VALUES,
   COLOR_VALUES,
-  permissionModeToApprovalMode,
+  claudePermissionModeToApprovalMode,
   parseStringOrArray,
   parseBackground,
   parseMaxTurns,
@@ -72,20 +72,24 @@ describe('agent-frontmatter-schema', () => {
     });
   });
 
-  describe('permissionModeToApprovalMode bridge', () => {
+  describe('claudePermissionModeToApprovalMode bridge', () => {
     it('maps all 6 CC permissionMode values', () => {
-      expect(permissionModeToApprovalMode('default')).toBe('default');
-      expect(permissionModeToApprovalMode('plan')).toBe('plan');
-      expect(permissionModeToApprovalMode('acceptEdits')).toBe('auto-edit');
-      expect(permissionModeToApprovalMode('auto')).toBe('auto-edit');
-      expect(permissionModeToApprovalMode('bypassPermissions')).toBe('yolo');
-      expect(permissionModeToApprovalMode('dontAsk')).toBe('default');
+      expect(claudePermissionModeToApprovalMode('default')).toBe('default');
+      expect(claudePermissionModeToApprovalMode('plan')).toBe('plan');
+      expect(claudePermissionModeToApprovalMode('acceptEdits')).toBe(
+        'auto-edit',
+      );
+      expect(claudePermissionModeToApprovalMode('auto')).toBe('auto-edit');
+      expect(claudePermissionModeToApprovalMode('bypassPermissions')).toBe(
+        'yolo',
+      );
+      expect(claudePermissionModeToApprovalMode('dontAsk')).toBe('default');
     });
 
     it('returns undefined for unknown permissionMode', () => {
-      expect(permissionModeToApprovalMode('not-a-mode')).toBeUndefined();
-      expect(permissionModeToApprovalMode('')).toBeUndefined();
-      expect(permissionModeToApprovalMode(undefined)).toBeUndefined();
+      expect(claudePermissionModeToApprovalMode('not-a-mode')).toBeUndefined();
+      expect(claudePermissionModeToApprovalMode('')).toBeUndefined();
+      expect(claudePermissionModeToApprovalMode(undefined)).toBeUndefined();
     });
 
     it('preserves restrictive intent of dontAsk by mapping to default', () => {
@@ -93,7 +97,7 @@ describe('agent-frontmatter-schema', () => {
       // We map to `default` (which also requires approval) rather than
       // `auto-edit` (which auto-approves). This preserves the restrictive
       // intent.
-      expect(permissionModeToApprovalMode('dontAsk')).toBe('default');
+      expect(claudePermissionModeToApprovalMode('dontAsk')).toBe('default');
     });
   });
 
@@ -218,6 +222,16 @@ describe('agent-frontmatter-schema', () => {
       expect(parseEffort('5.5')).toBeUndefined();
       expect(parseEffort('5abc')).toBeUndefined();
       expect(parseEffort('1e2')).toBeUndefined();
+    });
+
+    it('rejects zero and negative integers (positive-integer per docs)', () => {
+      // Stay symmetric with parseMaxTurns (which already rejects <= 0) and
+      // match the user-facing doc claim that effort accepts a "positive integer".
+      expect(parseEffort(0)).toBeUndefined();
+      expect(parseEffort(-1)).toBeUndefined();
+      expect(parseEffort(-100)).toBeUndefined();
+      expect(parseEffort('0')).toBeUndefined();
+      expect(parseEffort('-5')).toBeUndefined();
     });
 
     it('returns undefined for invalid string', () => {

@@ -948,7 +948,11 @@ You are an agent.
       expect(config.color).toBeUndefined();
     });
 
-    it('should preserve auto color (qwen-code legacy sentinel)', () => {
+    it('should normalize legacy color: auto sentinel to undefined (round-trip parity)', () => {
+      // 'auto' is the legacy "no override" sentinel. Parser normalizes it to
+      // undefined so that parse → serialize → parse is idempotent: the CLI
+      // helpers `shouldShowColor` / `getColorForDisplay` already treat 'auto'
+      // and undefined identically, so no behavior change downstream.
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
         description: 'd',
@@ -959,10 +963,7 @@ You are an agent.
         validConfig.filePath!,
         'project',
       );
-      // 'auto' is the legacy sentinel kept for backward compat with existing
-      // .qwen/agents/*.md files; it is not in COLOR_VALUES but the parser
-      // preserves it for the serializer's omit-when-auto path.
-      expect(config.color).toBe('auto');
+      expect(config.color).toBeUndefined();
     });
   });
 

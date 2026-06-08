@@ -45,7 +45,7 @@ export {
   MEMORY_VALUES,
   ISOLATION_VALUES,
   COLOR_VALUES,
-  permissionModeToApprovalMode,
+  claudePermissionModeToApprovalMode,
   parseStringOrArray,
   parseBackground,
   parseMaxTurns,

@@ -56,7 +56,7 @@ import {
   parseEffort,
   parseMaxTurns,
   parseStringOrArray,
-  permissionModeToApprovalMode,
+  claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
@@ -1188,16 +1188,16 @@ function parseSubagentContent(
       | Record<string, unknown>
       | undefined;
     const colorRaw = frontmatter['color'];
-    // CC silently drops colors outside the allowlist (_Y). qwen-code also
-    // retains the legacy `auto` sentinel so existing .qwen/agents/*.md
-    // files with `color: auto` keep their semantics through the serializer's
-    // omit-when-auto branch.
+    // CC silently drops colors outside the allowlist (_Y). qwen-code treats
+    // the legacy `auto` sentinel as "no override" — it parses to undefined,
+    // matches what the CLI `shouldShowColor` / `getColorForDisplay` helpers
+    // already treat 'auto' as, and round-trips cleanly with the serializer's
+    // existing omit-when-auto branch (parse → undefined → no emit → undefined).
     const color =
-      typeof colorRaw === 'string' && (isColor(colorRaw) || colorRaw === 'auto')
-        ? colorRaw
-        : undefined;
+      typeof colorRaw === 'string' && isColor(colorRaw) ? colorRaw : undefined;
     if (
       colorRaw !== undefined &&
+      colorRaw !== 'auto' &&
       color === undefined &&
       typeof colorRaw === 'string'
     ) {
@@ -1265,7 +1265,7 @@ function parseSubagentContent(
     }
     const bridgedApprovalMode =
       approvalMode === undefined && permissionMode !== undefined
-        ? permissionModeToApprovalMode(permissionMode)
+        ? claudePermissionModeToApprovalMode(permissionMode)
         : undefined;
     const effectiveApprovalMode = approvalMode ?? bridgedApprovalMode;
 

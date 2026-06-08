@@ -119,6 +119,22 @@ describe('convertClaudeAgentConfig', () => {
     });
     expect(result['approvalMode']).toBe('mystery-mode');
   });
+
+  it('should NOT override explicit approvalMode with permissionMode bridge (precedence parity with loader)', () => {
+    // Self-violated-invariant fix: previously the converter ran the bridge
+    // unconditionally, so a hand-edited file with both fields lost the
+    // explicit approvalMode in favor of the bridged value. The loader's rule
+    // is "approvalMode wins over bridge"; the converter now matches.
+    const result = convertClaudeAgentConfig({
+      name: 'a',
+      description: 'd',
+      permissionMode: 'bypassPermissions', // would bridge to 'yolo'
+      approvalMode: 'plan', // explicit — should win
+    });
+    expect(result['approvalMode']).toBeUndefined();
+    // (qwenAgent doesn't emit approvalMode in this case; convertAgentFiles
+    // passes the source approvalMode through verbatim via Loop 1.)
+  });
 });
 
 describe('convertClaudeAgentConfig — non-owned keys are not emitted', () => {

@@ -114,7 +114,7 @@ export interface SubagentConfig {
    * `bypassPermissions`, `default`, `dontAsk`, `plan`). Carried through from
    * frontmatter for parity with `.claude/agents/*.md` files. At parse time it
    * is normalised to {@link approvalMode} via
-   * `permissionModeToApprovalMode()`; if both `permissionMode` and
+   * `claudePermissionModeToApprovalMode()`; if both `permissionMode` and
    * `approvalMode` are present in frontmatter, `approvalMode` wins.
    */
   permissionMode?: string;

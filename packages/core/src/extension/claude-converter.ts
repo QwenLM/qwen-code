@@ -29,7 +29,7 @@ import { normalizeContent } from '../utils/textUtils.js';
 import { substituteHookVariables } from './variables.js';
 import {
   parseStringOrArray,
-  permissionModeToApprovalMode,
+  claudePermissionModeToApprovalMode,
 } from '../subagents/agent-frontmatter-schema.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
@@ -69,6 +69,12 @@ export interface ClaudeAgentConfig {
   model?: string;
   /** Permission mode: default, acceptEdits, dontAsk, bypassPermissions, or plan */
   permissionMode?: string;
+  /**
+   * Optional qwen-style approval mode. Hand-edited CC files may set this
+   * directly; when both `approvalMode` and `permissionMode` are present,
+   * the explicit `approvalMode` wins (matches loader behavior).
+   */
+  approvalMode?: string;
   /** Skills to load into the subagent's context at startup */
   skills?: string[];
   /** Hooks configuration */
@@ -186,12 +192,15 @@ export function convertClaudeAgentConfig(
   }
 
   // Map Claude permissionMode to Qwen ApprovalMode via the shared bridge in
-  // agent-frontmatter-schema.ts. Unknown values fall back to the raw string so
-  // the user sees an explicit "invalid approvalMode" downstream rather than
-  // silently dropping the field on import.
-  if (claudeAgent.permissionMode) {
+  // agent-frontmatter-schema.ts. The convert path matches the loader's
+  // precedence: when the source file has both `approvalMode` and
+  // `permissionMode`, the explicit qwen-style approvalMode wins (only fall
+  // back to the bridge when approvalMode is unset). Unknown permissionMode
+  // values fall back to the raw string so the user sees an explicit
+  // "invalid approvalMode" downstream rather than silently dropping the field.
+  if (claudeAgent.permissionMode && !claudeAgent.approvalMode) {
     qwenAgent['approvalMode'] =
-      permissionModeToApprovalMode(claudeAgent.permissionMode) ??
+      claudePermissionModeToApprovalMode(claudeAgent.permissionMode) ??
       claudeAgent.permissionMode;
   }
   if (claudeAgent.hooks) {
@@ -203,9 +212,20 @@ export function convertClaudeAgentConfig(
   if (claudeAgent.disallowedTools && claudeAgent.disallowedTools.length > 0) {
     qwenAgent['disallowedTools'] = claudeAgent.disallowedTools;
   }
+  // NOTE: hooks intentionally NOT emitted. The local yaml-parser only formats
+  // one level of nesting and would mangle hooks into '[object Object]' on write.
+  // SubagentManager.serializeSubagent has the same skip rule for the same reason.
 
   return qwenAgent;
 }
+
+/**
+ * Frontmatter keys whose values are typically nested objects/arrays that the
+ * local yaml-parser cannot round-trip safely. {@link convertAgentFiles} skips
+ * them when writing the converted file so a `[object Object]` corruption can't
+ * land on disk; users keep the values by editing the source file directly.
+ */
+const NESTED_FIELDS_NOT_ROUND_TRIPPABLE = new Set(['mcpServers', 'hooks']);
 
 /**
  * Converts all agent files in a directory from Claude format to Qwen format.
@@ -249,6 +269,7 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         disallowedTools: parseStringOrArray(frontmatter['disallowedTools']),
         model: frontmatter['model'] as string | undefined,
         permissionMode: frontmatter['permissionMode'] as string | undefined,
+        approvalMode: frontmatter['approvalMode'] as string | undefined,
         skills: parseStringOrArray(frontmatter['skills']),
         hooks: frontmatter['hooks'],
         color: frontmatter['color'] as string | undefined,
@@ -270,13 +291,18 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         if (
           !CONVERTER_OWNED_KEYS.has(key) &&
           key !== 'systemPrompt' &&
+          !NESTED_FIELDS_NOT_ROUND_TRIPPABLE.has(key) &&
           value !== undefined
         ) {
           newFrontmatter[key] = value;
         }
       }
       for (const [key, value] of Object.entries(qwenAgent)) {
-        if (key !== 'systemPrompt' && value !== undefined) {
+        if (
+          key !== 'systemPrompt' &&
+          !NESTED_FIELDS_NOT_ROUND_TRIPPABLE.has(key) &&
+          value !== undefined
+        ) {
           newFrontmatter[key] = value;
         }
       }
