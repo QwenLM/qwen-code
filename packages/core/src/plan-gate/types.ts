@@ -114,3 +114,12 @@ export function maxSeverity(a: GateSeverity, b: GateSeverity): GateSeverity {
 export function isBlockingSeverity(severity: GateSeverity): boolean {
   return severity === 'P1' || severity === 'P2' || severity === 'P3';
 }
+
+/**
+ * Cap-escalation option labels. Shared between the gate orchestrator
+ * (which emits them) and AskUserQuestion (which matches on them).
+ */
+export const CAP_ESCALATION_LABELS = {
+  CONTINUE: 'Continue editing plan',
+  APPROVE: 'Approve execution',
+} as const;

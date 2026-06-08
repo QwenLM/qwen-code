@@ -32,6 +32,8 @@ const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
 export interface ExitPlanModeParams {
   plan: string;
+  originalRequest?: string;
+  researchSummary?: string;
   resolutionSummary?: string;
 }
 
@@ -63,6 +65,16 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
         type: 'string',
         description:
           'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise.',
+      },
+      originalRequest: {
+        type: 'string',
+        description:
+          'The original user request that prompted this plan. Restate it faithfully — it is the primary input for the plan approval gate.',
+      },
+      researchSummary: {
+        type: 'string',
+        description:
+          'A brief summary of the investigation and key findings gathered during plan mode, including important file paths, symbols, and constraints discovered.',
       },
       resolutionSummary: {
         type: 'string',
@@ -162,7 +174,8 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    const { plan, resolutionSummary } = this.params;
+    const { plan, originalRequest, researchSummary, resolutionSummary } =
+      this.params;
     const prePlanMode = this.config.getPrePlanMode();
     const gateState = this.config.getPlanGateState();
 
@@ -184,9 +197,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         }
 
         const bundle: EvidenceBundle = {
-          originalRequest: '', // filled by the conversation layer
+          originalRequest: originalRequest ?? '(not provided)',
           userAdditions: [],
           plan,
+          researchSummary,
           resolutionSummary: gateState.lastResolutionSummary,
           lastFindings:
             gateState.lastFindings.length > 0

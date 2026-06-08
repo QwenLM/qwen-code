@@ -19,6 +19,7 @@ import {
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { CAP_ESCALATION_LABELS } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { InputFormat } from '../output/types.js';
 
@@ -278,17 +279,13 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
     if (source === 'plan_gate_cap') {
       // Cap escalation: the first answer determines the next gate mode.
+      // Match against the canonical labels from CAP_ESCALATION_LABELS.
       const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
 
-      // The option labels used in formatCapEscalationResponse:
-      //   "Continue editing plan" → uncapped
-      //   "Approve execution" → user_override
-      //   Anything else (free-text / Other) → user_takeover
-      const normalised = firstAnswer.toLowerCase().trim();
-      if (normalised.startsWith('continue')) {
+      if (firstAnswer === CAP_ESCALATION_LABELS.CONTINUE) {
         gateState.gateMode = 'uncapped';
         gateState.capEscalationPending = false;
-      } else if (normalised.startsWith('approve')) {
+      } else if (firstAnswer === CAP_ESCALATION_LABELS.APPROVE) {
         gateState.gateMode = 'user_override';
         gateState.capEscalationPending = false;
       } else {
