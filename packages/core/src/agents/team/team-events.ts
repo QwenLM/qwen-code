@@ -48,6 +48,8 @@ export interface TeammateJoinedEvent {
   agentId: string;
   name: string;
   color?: string;
+  /** Resolved model for the teammate, used for the UI tab label. */
+  model?: string;
   timestamp: number;
 }
 

@@ -2644,6 +2644,13 @@ export const useGeminiStream = (
     ) => {
       if (boundManager && boundManager !== manager) {
         boundManager.setLeaderMessageCallback(null);
+        // Drop any messages the old team's teammates queued but that
+        // weren't drained before the swap — they belong to a team that
+        // no longer exists and must not be submitted into the new
+        // team's session. Only fires on a genuine manager swap; a React
+        // remount re-binds the same manager (boundManager is null here)
+        // and preserves the queue.
+        teammateQueueRef.current.length = 0;
       }
       boundManager = manager;
       if (manager) {

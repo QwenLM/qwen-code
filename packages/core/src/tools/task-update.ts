@@ -108,7 +108,25 @@ class TaskUpdateInvocation extends BaseToolInvocation<
 
     // status: 'deleted' → delete the task file.
     if (this.params.status === 'deleted') {
-      const ok = await deleteTask(teamName, taskId);
+      let ok: boolean;
+      try {
+        ok = await deleteTask(
+          teamName,
+          taskId,
+          teammateCallerName !== undefined
+            ? { callerName: teammateCallerName }
+            : undefined,
+        );
+      } catch (err) {
+        if (err instanceof TaskOwnershipError) {
+          return {
+            llmContent: err.message,
+            returnDisplay: err.message,
+            error: { message: err.message },
+          };
+        }
+        throw err;
+      }
       if (!ok) {
         const msg = `Task #${taskId} not found.`;
         return {
@@ -227,8 +245,17 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     // see a consistent graph: A.blocks=[B] implies B.blockedBy=[A]
     // and vice versa. Updating only one side leaves dependents either
     // permanently blocked or runnable too early.
+    //
+    // Exception: when this same call also completes the task, do NOT
+    // mirror addBlocks into the dependents' blockedBy. A completed task
+    // can't block anything, and the primary updateTask's
+    // completion-unblock already ran (before this reciprocal), so it
+    // couldn't clear an edge that didn't exist yet — adding it here
+    // would leave the dependent permanently blocked by an already-
+    // completed task (verified repro: task_update({status:'completed',
+    // addBlocks:['X']}) left X blockedBy the just-completed task).
     const reciprocalUpdates: Array<Promise<unknown>> = [];
-    if (this.params.addBlocks?.length) {
+    if (this.params.addBlocks?.length && this.params.status !== 'completed') {
       for (const blockedId of this.params.addBlocks) {
         if (blockedId === taskId) continue;
         reciprocalUpdates.push(

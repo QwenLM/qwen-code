@@ -184,18 +184,6 @@ export async function consumeUnread(
 }
 
 /**
- * Read and remove all unread messages of a specific type.
- * @deprecated Use `consumeUnread(teamName, agentName, type)` instead.
- */
-export async function consumeUnreadByType(
-  teamName: string,
-  agentName: string,
-  type: MailboxMessageType,
-): Promise<MailboxMessage[]> {
-  return consumeUnread(teamName, agentName, type);
-}
-
-/**
  * Clear an agent's entire inbox (delete the file).
  */
 export async function clearInbox(

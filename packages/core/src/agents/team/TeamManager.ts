@@ -183,7 +183,10 @@ export class TeamManager {
     // idle agents when new tasks appear.
     this.taskUpdateUnsubscribe = onTasksUpdated((teamName) => {
       if (teamName === this.teamFile.name) {
-        void this.scanIdleAgentsForTasks();
+        this.fireAndForget(
+          'scanIdleAgentsForTasks',
+          this.scanIdleAgentsForTasks(),
+        );
       }
     });
   }
@@ -383,6 +386,11 @@ export class TeamManager {
       agentId,
       name,
       color,
+      // Carry the member's model so dynamically-joined teammates show
+      // their real model in the UI, matching the initial-discovery path
+      // (which reads member.model). Without this the join handler would
+      // hardcode 'teammate' regardless of the spawned model.
+      model: member.model,
       timestamp: Date.now(),
     });
 
@@ -488,7 +496,20 @@ export class TeamManager {
       promises.push(this.sendMessage(LEADER_NAME, message, fromName));
     }
 
-    await Promise.all(promises);
+    // allSettled, not all: a single recipient that terminated between
+    // the member snapshot and the send throws (its queue is gone), and
+    // Promise.all would reject the whole broadcast — making the leader
+    // think every recipient failed when the rest were delivered fine.
+    const results = await Promise.allSettled(promises);
+    const failures = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    );
+    if (failures.length > 0) {
+      debug.warn(
+        `Broadcast: ${failures.length}/${results.length} send(s) failed ` +
+          `(recipient likely terminated).`,
+      );
+    }
   }
 
   /**
@@ -557,14 +578,10 @@ export class TeamManager {
     try {
       return await readInbox(this.teamFile.name, LEADER_NAME);
     } catch (err) {
-      if (
-        err &&
-        typeof err === 'object' &&
-        'code' in err &&
-        (err as { code?: string }).code === 'ENOENT'
-      ) {
-        return [];
-      }
+      // readInbox already maps the legitimate "no inbox yet" case
+      // (ENOENT) to []; it only throws on real corruption (parse error)
+      // or an unreadable file. So anything reaching here warrants
+      // quarantine — there is no ENOENT branch to special-case.
       const errMsg = err instanceof Error ? err.message : String(err);
       debug.warn(
         `Quarantining corrupt leader inbox at ${inboxPath}: ${errMsg}`,
@@ -622,7 +639,10 @@ export class TeamManager {
    */
   private ensureLeaderInboxPolling(): void {
     if (this.pollingInterval) return;
-    this.pollingInterval = setInterval(() => void this.pollLeaderInbox(), 500);
+    this.pollingInterval = setInterval(
+      () => this.fireAndForget('pollLeaderInbox', this.pollLeaderInbox()),
+      500,
+    );
   }
 
   /**
@@ -675,9 +695,17 @@ export class TeamManager {
       return;
     }
 
-    this.leaderMessageCallback(
-      this.formatLeaderEnvelope(newMessages).join('\n\n'),
-    );
+    // Re-check after the awaited read: the callback can be detached
+    // (manager swap, team_delete, React unmount) while we were reading
+    // the inbox. Calling a now-null callback throws — and because this
+    // runs inside the setInterval-driven poll, that would become an
+    // unhandled rejection. Dropping the batch is acceptable here: a
+    // detached callback means the leader these messages were bound for
+    // is being torn down or replaced.
+    const callback = this.leaderMessageCallback;
+    if (callback) {
+      callback(this.formatLeaderEnvelope(newMessages).join('\n\n'));
+    }
   }
 
   /**
@@ -973,6 +1001,23 @@ export class TeamManager {
     return this.backend.getAgent?.(agentId);
   }
 
+  /**
+   * Run a fire-and-forget coordination task, logging any rejection
+   * instead of letting it surface as an unhandled promise rejection.
+   * These paths (message flush, task auto-claim, task unassign) hit
+   * file locks and disk I/O that can reject on corrupt files, EACCES,
+   * or lock exhaustion. Without this guard a rejection would crash the
+   * process (or trip the shared-token-manager's unhandledRejection
+   * handler) and bury the cause off stderr — observed as a teammate
+   * silently hanging or a task stuck in_progress with no trail.
+   */
+  private fireAndForget(label: string, work: Promise<unknown>): void {
+    void work.catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      debug.warn(`${label} failed: ${msg}`);
+    });
+  }
+
   // ─── Cleanup ────────────────────────────────────────────
 
   async cleanup(): Promise<void> {
@@ -1030,18 +1075,25 @@ export class TeamManager {
           name: agentName,
           timestamp: Date.now(),
         });
-        void this.flushNextMessage(agentId, agentName);
+        this.fireAndForget(
+          `flushNextMessage(${agentId})`,
+          this.flushNextMessage(agentId, agentName),
+        );
       }
 
       if (isTerminalStatus(event.newStatus)) {
         // Release any in_progress tasks back to pending so
         // other teammates can pick them up.
-        void unassignTeammateTasks(this.teamFile.name, agentId).then(
-          (count) => {
+        this.fireAndForget(
+          `unassignTeammateTasks(${agentId})`,
+          unassignTeammateTasks(this.teamFile.name, agentId).then((count) => {
             if (count > 0) {
-              void this.scanIdleAgentsForTasks();
+              this.fireAndForget(
+                'scanIdleAgentsForTasks',
+                this.scanIdleAgentsForTasks(),
+              );
             }
-          },
+          }),
         );
 
         this.teamEventEmitter.emit(TeamEventType.TEAMMATE_EXITED, {
@@ -1121,7 +1173,10 @@ export class TeamManager {
     // Reconcile: if agent already reached IDLE before we
     // attached, flush now.
     if (agent.getStatus() === AgentStatus.IDLE) {
-      void this.flushNextMessage(agentId, agentName);
+      this.fireAndForget(
+        `flushNextMessage(${agentId})`,
+        this.flushNextMessage(agentId, agentName),
+      );
     }
   }
 
@@ -1287,6 +1342,11 @@ export class TeamManager {
       const agent = this.getAgentFromBackend(member.agentId);
       if (!agent) return false;
       if (agent.getStatus() !== AgentStatus.IDLE) return false;
+      // Don't auto-claim a task for a teammate the leader is shutting
+      // down — it would start work it's about to abandon. flushNextMessage
+      // gates its own auto-claim on the same set; this is the task-update
+      // -triggered path, which reaches tryAutoClaimTask directly.
+      if (this._shutdownPending.has(member.name)) return false;
       const queue = this.pendingMessages.get(member.agentId) ?? [];
       return queue.length === 0;
     });

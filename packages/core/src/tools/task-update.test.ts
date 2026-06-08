@@ -148,4 +148,31 @@ describe('TaskUpdateTool', () => {
     expect(aReloaded?.blockedBy).toContain(b.id);
     expect(bReloaded?.blocks).toContain(a.id);
   });
+
+  it('does not re-block a dependent when completing with addBlocks in the same call', async () => {
+    // Regression (verified repro): task_update({ status:'completed',
+    // addBlocks:['2'] }) merged the edge, ran completion-unblock (a
+    // no-op because the reciprocal blockedBy didn't exist yet), then the
+    // addBlocks reciprocal added blockedBy:['1'] back — leaving task 2
+    // permanently blocked by the already-completed task 1, so auto-claim
+    // would never pick it up. The tool now skips the addBlocks reciprocal
+    // when the same call completes the task.
+    const a = await createTask(TEAM, { subject: 'A', description: 'a' });
+    const b = await createTask(TEAM, { subject: 'B', description: 'b' });
+
+    const invocation = tool.build({
+      taskId: a.id,
+      status: 'completed',
+      addBlocks: [b.id],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+
+    const { getTask } = await import('../agents/team/tasks.js');
+    const aReloaded = await getTask(TEAM, a.id);
+    const bReloaded = await getTask(TEAM, b.id);
+    expect(aReloaded?.status).toBe('completed');
+    // The completed blocker must leave b claimable, not blocked.
+    expect(bReloaded?.blockedBy ?? []).toEqual([]);
+  });
 });

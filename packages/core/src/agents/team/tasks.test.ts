@@ -401,6 +401,51 @@ describe('tasks', () => {
       const upstreamAfter = await getTask('team', upstream.id);
       expect(upstreamAfter?.blocks).toEqual([]);
     });
+
+    it("rejects a teammate caller from deleting another owner's task", async () => {
+      // Regression: status:'deleted' took a separate code path that
+      // skipped the ownership guard updateTask enforces, so any teammate
+      // could delete any task. deleteTask now mirrors that guard.
+      const task = await createTask('team', {
+        subject: 'Alice task',
+        description: '',
+        owner: 'alice',
+      });
+      await expect(
+        deleteTask('team', task.id, { callerName: 'bob' }),
+      ).rejects.toBeInstanceOf(TaskOwnershipError);
+      // The task survives the rejected delete.
+      expect(await getTask('team', task.id)).toBeDefined();
+    });
+
+    it('lets the owner, the leader, and any teammate (unowned) delete', async () => {
+      const owned = await createTask('team', {
+        subject: 'Owned',
+        description: '',
+        owner: 'alice',
+      });
+      // Owner can delete their own task.
+      expect(await deleteTask('team', owned.id, { callerName: 'alice' })).toBe(
+        true,
+      );
+
+      // Leader (no callerName) can delete anyone's task.
+      const bobs = await createTask('team', {
+        subject: 'Bob task',
+        description: '',
+        owner: 'bob',
+      });
+      expect(await deleteTask('team', bobs.id)).toBe(true);
+
+      // A teammate can delete an unowned task.
+      const unowned = await createTask('team', {
+        subject: 'Unowned',
+        description: '',
+      });
+      expect(await deleteTask('team', unowned.id, { callerName: 'bob' })).toBe(
+        true,
+      );
+    });
   });
 
   // ─── listTasks ─────────────────────────────────────────────
@@ -490,6 +535,33 @@ describe('tasks', () => {
       await expect(fs.access(corruptPath)).rejects.toThrow();
       const entries = await fs.readdir(dir);
       expect(entries.some((e) => e.startsWith('999.json.corrupt-'))).toBe(true);
+    });
+
+    it('skips an empty (mid-create) task file without quarantining it', async () => {
+      // Regression: createTask claims the id with O_CREAT|O_EXCL and
+      // writes the content as a second step. A concurrent listTasks
+      // landing in that window read the empty file, failed JSON.parse,
+      // and quarantined it — losing the just-created task and orphaning
+      // its id. An empty file is now treated as a create in flight:
+      // skipped this round, left intact for the next listTasks.
+      const t1 = await createTask('team', {
+        subject: 'Real one',
+        description: 'A',
+      });
+
+      const dir = path.join(tmpDir, 'tasks', 'team');
+      const pendingPath = path.join(dir, '999.json');
+      await fs.writeFile(pendingPath, '', 'utf-8'); // empty, like a mid-create
+
+      const tasks = await listTasks('team');
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.id).toBe(t1.id);
+
+      // The empty file is neither quarantined nor lost.
+      await expect(fs.access(pendingPath)).resolves.toBeUndefined();
+      const entries = await fs.readdir(dir);
+      expect(entries).toContain('999.json');
+      expect(entries.some((e) => e.includes('.corrupt-'))).toBe(false);
     });
   });
 

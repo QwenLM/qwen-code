@@ -272,12 +272,14 @@ export async function updateTask(
     }
 
     // Merge dependency edges first so the completion-unblock below
-    // sees the post-update `task.blocks`. Without this, a single
-    // call like
+    // sees the post-update `task.blocks` and clears any dependent that
+    // was already recorded as blocked by this task. Note this does NOT
+    // cover the freshly-mirrored reciprocal edge for a combined
     //   task_update({taskId:'1', status:'completed', addBlocks:['2']})
-    // would skip unblocking task 2 (still absent from `task.blocks`)
-    // and the reciprocal `addBlockedBy:['1']` from task-update.ts
-    // would leave task 2 blocked by an already-completed task.
+    // call: the dependent's `blockedBy` doesn't contain this task yet
+    // when unblockDependents runs, so the reciprocal would re-block it.
+    // That case is handled in task-update.ts by skipping the addBlocks
+    // reciprocal when the same call completes the task.
     if (updates.addBlocks?.length) {
       const blockSet = new Set(task.blocks);
       for (const id of updates.addBlocks) blockSet.add(id);
@@ -372,6 +374,7 @@ export async function updateTask(
 export async function deleteTask(
   teamName: string,
   taskId: string,
+  opts?: { callerName?: string },
 ): Promise<boolean> {
   // Read the task's edges first so we can clean up reciprocal references
   // before unlinking the file. This is intentionally outside the file
@@ -379,6 +382,19 @@ export async function deleteTask(
   // would risk deadlock against any concurrent multi-task update).
   const existing = await getTask(teamName, taskId);
   if (existing) {
+    // Ownership guard for teammate callers, mirroring `updateTask`. A
+    // teammate (callerName set) may only delete its own tasks or unowned
+    // ones; the leader (callerName undefined) can delete anything.
+    // Without this, `task_update(status:'deleted')` is a hole in the
+    // ownership model — the most destructive operation would bypass the
+    // guard that every other mutation path enforces.
+    if (
+      opts?.callerName !== undefined &&
+      existing.owner &&
+      existing.owner !== opts.callerName
+    ) {
+      throw new TaskOwnershipError(taskId, opts.callerName, existing.owner);
+    }
     const dependentIds = new Set<string>([
       ...existing.blocks,
       ...existing.blockedBy,
@@ -485,6 +501,17 @@ export async function listTasks(
       const filePath = path.join(dir, entry);
       try {
         const raw = await fs.readFile(filePath, 'utf-8');
+        if (raw.trim() === '') {
+          // A task file that exists but is momentarily empty is a
+          // create in flight: `createTask` claims the id with an
+          // O_CREAT|O_EXCL open and then writes the content as a
+          // second step, so a concurrent readdir+readFile can land in
+          // that sub-millisecond window. Skip it WITHOUT quarantining
+          // — the next `listTasks` (after the write lands) will see it.
+          // Quarantining here would rename the file out from under the
+          // in-progress create and lose the task entirely.
+          return undefined;
+        }
         return JSON.parse(raw) as SwarmTask;
       } catch (err) {
         // ENOENT is fine — the file may have been deleted between

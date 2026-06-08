@@ -14,7 +14,6 @@ import {
   readInbox,
   writeMessage,
   consumeUnread,
-  consumeUnreadByType,
   clearInbox,
   clearAllInboxes,
   sendStructuredMessage,
@@ -134,7 +133,7 @@ describe('mailbox', () => {
     expect(unread).toEqual([]);
   });
 
-  // ─── consumeUnreadByType ───────────────────────────────────
+  // ─── consumeUnread (type filter) ───────────────────────────
 
   it('only consumes messages of matching type', async () => {
     await writeMessage(
@@ -151,11 +150,7 @@ describe('mailbox', () => {
       makeMessage({ text: 'task', type: 'task_assignment' }),
     );
 
-    const shutdowns = await consumeUnreadByType(
-      'team',
-      'worker',
-      'shutdown_request',
-    );
+    const shutdowns = await consumeUnread('team', 'worker', 'shutdown_request');
     expect(shutdowns).toHaveLength(1);
     expect(shutdowns[0]!.text).toBe('shutdown');
 

@@ -918,8 +918,17 @@ export async function runNonInteractive(
             ];
           } else {
             currentMessages = [{ role: 'user', parts: [teammatePart] }];
-            isTeammateTurn = true;
           }
+          // Treat BOTH the standalone and the merged-into-tool-response
+          // cases as a teammate turn. Teammate text is fresh external
+          // input, so the loop detector must reset — otherwise a leader
+          // that polls task_list while teammate messages keep merging
+          // into its tool-response turns climbs the identical-tool-call
+          // counter and trips a false LoopDetected. The Teammate send
+          // path prepends nothing to the request, so a merged turn's
+          // leading functionResponse parts stay paired with their
+          // functionCall.
+          isTeammateTurn = true;
         }
         hasUnsentToolResponse = false;
 

@@ -127,7 +127,7 @@ export function useTeamInProcess(
             actionsRef.current.registerAgent(
               event.agentId,
               interactive,
-              'teammate',
+              event.model ?? 'teammate',
               event.color ?? nextColor(),
               event.name,
             );
