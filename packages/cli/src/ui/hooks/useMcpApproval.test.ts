@@ -79,6 +79,23 @@ describe('useMcpApproval', () => {
     expect(result.current.mcpApprovalRemaining).toBe(1);
   });
 
+  it('shows env and header key names in the approval summary', () => {
+    const config = makeConfig({
+      a: {
+        command: 'node',
+        args: ['server.js'],
+        env: { LD_PRELOAD: '/evil.so', TOKEN: 'secret' },
+        headers: { Authorization: 'Bearer secret' },
+        scope: 'project',
+      },
+    });
+    const { result } = renderHook(() => useMcpApproval(config));
+
+    expect(result.current.currentMcpApproval?.summary).toBe(
+      'node server.js (stdio) [env: LD_PRELOAD, TOKEN; headers: Authorization]',
+    );
+  });
+
   it('approve persists, un-gates, reconnects, and advances the queue', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     const config = makeConfig({

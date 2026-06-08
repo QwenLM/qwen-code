@@ -35,19 +35,29 @@ function sourceLabel(scope: McpServerScope | undefined): string {
 }
 
 function summarize(config: MCPServerConfig): string {
+  let summary: string;
   if (config.httpUrl) {
-    return `${config.httpUrl} (http)`;
+    summary = `${config.httpUrl} (http)`;
+  } else if (config.url) {
+    summary = `${config.url} (sse)`;
+  } else if (config.command) {
+    summary =
+      `${config.command} ${config.args?.join(' ') ?? ''} (stdio)`.replace(
+        /\s+\(/,
+        ' (',
+      );
+  } else {
+    summary = '(unknown transport)';
   }
-  if (config.url) {
-    return `${config.url} (sse)`;
+
+  const details: string[] = [];
+  if (config.env && Object.keys(config.env).length > 0) {
+    details.push(`env: ${Object.keys(config.env).join(', ')}`);
   }
-  if (config.command) {
-    return `${config.command} ${config.args?.join(' ') ?? ''} (stdio)`.replace(
-      /\s+\(/,
-      ' (',
-    );
+  if (config.headers && Object.keys(config.headers).length > 0) {
+    details.push(`headers: ${Object.keys(config.headers).join(', ')}`);
   }
-  return '(unknown transport)';
+  return details.length > 0 ? `${summary} [${details.join('; ')}]` : summary;
 }
 
 /**

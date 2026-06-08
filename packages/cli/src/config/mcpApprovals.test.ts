@@ -88,6 +88,32 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
   });
 
+  it('recovers when the approvals file is not a JSON object', () => {
+    const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+    fs.writeFileSync(filePath, '[1, 2, 3]');
+
+    const approvals = loadMcpApprovals();
+
+    expect(approvals.errors).toEqual([
+      {
+        message: 'MCP approvals file is not a valid JSON object.',
+        path: filePath,
+      },
+    ]);
+    expect(approvals.getState(projectRoot, 'slack', server)).toBe('pending');
+  });
+
+  it('recovers when the approvals file contains malformed JSON', () => {
+    const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+    fs.writeFileSync(filePath, '{bad json');
+
+    const approvals = loadMcpApprovals();
+
+    expect(approvals.errors).toHaveLength(1);
+    expect(approvals.errors[0]?.path).toBe(filePath);
+    expect(approvals.getState(projectRoot, 'slack', server)).toBe('pending');
+  });
+
   describe('hash binding (the issue #4615 requirement)', () => {
     it('reverts to pending when the config changes after approval', async () => {
       const approvals = loadMcpApprovals();
