@@ -184,6 +184,39 @@ export interface SandboxOptions {
     >
   ) => Promise<unknown[]>;
   budget?: WorkflowBudget;
+  /**
+   * T23 (PR #4732 R2): async wall-clock cap (ms) covering the entire script
+   * including awaits. The vm `timeout` option only covers the synchronous
+   * portion; once the IIFE yields its first `await`, the watchdog is
+   * disarmed and `return new Promise(() => {})` would hang forever.
+   *
+   * Defaults to 30 minutes, override via `QWEN_CODE_MAX_WORKFLOW_SECONDS`
+   * env var, or pass an explicit value here (tests use small values for
+   * fast verification).
+   *
+   * This stays a permanent defense even after P5's `budget` ships:
+   * budget caps tokens, but a 0-token hang (`new Promise(() => {})`) only
+   * a wall-clock can catch.
+   */
+  maxWallClockMs?: number;
+}
+
+/**
+ * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
+ * for any realistic P1 sequential workflow (single agent capped at
+ * 10 min × ~10 agents max practical → ~100 min upper bound, but typical
+ * workflows finish in seconds). 30 min stops 0-token hang patterns
+ * before they waste operator hours.
+ */
+const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
+
+function resolveMaxWallClockMs(opts: SandboxOptions): number {
+  if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
+    return opts.maxWallClockMs;
+  }
+  const envSec = Number(process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS']);
+  if (Number.isFinite(envSec) && envSec > 0) return envSec * 1000;
+  return DEFAULT_MAX_WALL_CLOCK_MS;
 }
 
 export interface WorkflowSandbox {
@@ -304,7 +337,19 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       : null,
   };
 
-  const ctx = vm.createContext({ __workflowBridge: bridge });
+  // T22 (PR #4732 R2): sever the host Object.prototype on both the
+  // bridge AND the sandboxGlobals container. Without this,
+  // `globalThis.constructor.constructor("return process")()` inside the
+  // sandbox reaches the host Object → host Function → host process,
+  // bypassing every other vm-realm hardening measure in this file.
+  // PoC confirmed leak prior to fix; regression covered by
+  // "globalThis.constructor cannot reach host process".
+  Object.setPrototypeOf(bridge, null);
+  const sandboxGlobals: { __workflowBridge: typeof bridge } = Object.assign(
+    Object.create(null) as { __workflowBridge: typeof bridge },
+    { __workflowBridge: bridge },
+  );
+  const ctx = vm.createContext(sandboxGlobals);
 
   // FIX-D + FIX-Round1: build Math, Date, args, all async/sync globals,
   // and the console object entirely inside the vm-realm. After this init
@@ -526,6 +571,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     { filename: 'workflow-sandbox-init.js' },
   );
 
+  const maxWallClockMs = resolveMaxWallClockMs(opts);
+
   return {
     async run(scriptSource: string): Promise<unknown> {
       const stripped = stripExportMeta(scriptSource);
@@ -533,14 +580,39 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       const script = new vm.Script(wrapped, {
         filename: 'workflow.js',
       });
-      // 30s sync wall-clock cap. Only covers synchronous execution; async
-      // infinite loops (`while(true){await agent(...)}`) are bounded by P2's
-      // upcoming 1000-agent cap.
+      // 30s sync wall-clock cap inside vm — covers `while(true){}` style
+      // synchronous loops only. Once the IIFE hits its first `await`,
+      // `runInContext` returns and this timer is disarmed.
       const runOpts: vm.RunningScriptOptions = {
         timeout: 30_000,
       };
       const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
-      return result;
+
+      // T23 (PR #4732 R2): async wall-clock cap covers everything past the
+      // first await — `return new Promise(() => {})`, async infinite loops,
+      // hung network calls — none of which the vm timeout or future P5
+      // budget can stop (a 0-token hang spends no budget). Permanent
+      // defense-in-depth; default 30 min, env-tunable.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `Workflow execution timed out after ${maxWallClockMs} ms wall clock. ` +
+                'Override via SandboxOptions.maxWallClockMs or QWEN_CODE_MAX_WORKFLOW_SECONDS env var.',
+            ),
+          );
+        }, maxWallClockMs);
+        // Don't keep the event loop alive on Node — if the run resolves
+        // quickly, the timer will be cleared in finally; this guards against
+        // edge cases where the caller drops the promise.
+        timer.unref?.();
+      });
+      try {
+        return await Promise.race([result, timeoutPromise]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],

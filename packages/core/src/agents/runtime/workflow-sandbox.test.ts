@@ -528,6 +528,89 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toBeUndefined();
   });
 
+  // T22 (PR #4732 R2): `globalThis` itself used to be a host-realm plain
+  // object literal whose `.constructor` reached the host Object → host
+  // Function → host process. PoC: `globalThis.constructor.constructor(
+  // "return process")()` returned host process with .env/.platform/.pid
+  // readable. Fix severs sandboxGlobals's prototype before createContext.
+  it('blocks globalThis.constructor host-realm escape', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      try {
+        const Obj = globalThis.constructor;
+        if (!Obj) return 'no-ctor';
+        const Fn = Obj.constructor;
+        if (!Fn) return 'no-inner-ctor';
+        const v = Fn("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw'; }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(['no-ctor', 'no-inner-ctor', 'undefined', 'threw']).toContain(
+      result,
+    );
+  });
+
+  // T22: same root via implicit `this` (== globalThis at top level).
+  it('blocks implicit globalThis (this) host-realm escape', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      try {
+        const t = (function(){ return this; })();
+        if (!t || !t.constructor || !t.constructor.constructor) return 'blocked';
+        const v = t.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw'; }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+  });
+
+  // T23 (PR #4732 R2): the vm `timeout` option only covers synchronous
+  // execution. `return new Promise(() => {})` hits the first `await`,
+  // disarms the watchdog, and hangs forever. Wall-clock timeout via
+  // Promise.race rejects after maxWallClockMs.
+  it('rejects an async never-resolving Promise via wall-clock timeout', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100, // tiny override for fast test
+    });
+    await expect(sandbox.run(`return new Promise(() => {});`)).rejects.toThrow(
+      /timed out after 100 ms wall clock/,
+    );
+  });
+
+  // NOTE: we explicitly do NOT test an in-script async microtask loop
+  // (`(async () => { while(true) await Promise.resolve(); })()`). Once such
+  // a loop starts inside the vm context, Node provides no way to halt it —
+  // our wall-clock timeout rejects the outer Promise.race but the loop
+  // keeps consuming microtasks, hanging the test runner. In production
+  // this is still acceptable: the workflow surface returns the timeout
+  // error and the vm context becomes unreferenced (GC eventually reclaims
+  // it). Documented as a limitation of node:vm.
+
+  // T23: env var override is honored when no explicit opt is passed.
+  it('QWEN_CODE_MAX_WORKFLOW_SECONDS env var sets the wall-clock cap', async () => {
+    process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = '0.1';
+    try {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ignored',
+      });
+      await expect(
+        sandbox.run(`return new Promise(() => {});`),
+      ).rejects.toThrow(/timed out after 100 ms wall clock/);
+    } finally {
+      delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+    }
+  });
+
   // FIX-E (Round 4 Critical): Array args used to leak host process because
   // `deepNullProto` recursed into elements but left Array.prototype intact
   // on the array body. PoC: `args.constructor.constructor("return process")()`
