@@ -41,3 +41,4 @@ export {
 } from './routes/tokens.js';
 export { runServe, type ServeOptions } from './cli.js';
 export { createPermissionVoteRoute } from './routes/permission.js';
+export { createPromptRoute } from './routes/prompt.js';
