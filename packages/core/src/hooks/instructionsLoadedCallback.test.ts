@@ -14,6 +14,7 @@ describe('createInstructionsLoadedCallback', () => {
     const callback = createInstructionsLoadedCallback(
       () =>
         ({
+          hasHooksForEvent: vi.fn().mockReturnValue(true),
           fireInstructionsLoadedEvent,
         }) as unknown as HookSystem,
     );
@@ -37,6 +38,25 @@ describe('createInstructionsLoadedCallback', () => {
     );
   });
 
+  it('skips firing when InstructionsLoaded hooks are not configured', async () => {
+    const fireInstructionsLoadedEvent = vi.fn();
+    const callback = createInstructionsLoadedCallback(
+      () =>
+        ({
+          hasHooksForEvent: vi.fn().mockReturnValue(false),
+          fireInstructionsLoadedEvent,
+        }) as unknown as HookSystem,
+    );
+
+    await callback({
+      filePath: '/repo/QWEN.md',
+      memoryType: 'project',
+      loadReason: 'session_start',
+    });
+
+    expect(fireInstructionsLoadedEvent).not.toHaveBeenCalled();
+  });
+
   it('does nothing when no hook system is available', async () => {
     const callback = createInstructionsLoadedCallback(() => undefined);
 
@@ -54,6 +74,7 @@ describe('createInstructionsLoadedCallback', () => {
     const callback = createInstructionsLoadedCallback(
       () =>
         ({
+          hasHooksForEvent: vi.fn().mockReturnValue(true),
           fireInstructionsLoadedEvent: vi.fn().mockRejectedValue(error),
         }) as unknown as HookSystem,
     );

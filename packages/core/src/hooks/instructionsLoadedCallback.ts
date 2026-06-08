@@ -6,6 +6,7 @@
 
 import type { InstructionsLoadedNotification } from '../utils/memoryDiscovery.js';
 import type { HookSystem } from './hookSystem.js';
+import { HookEventName } from './types.js';
 
 export type InstructionsLoadedCallback = (
   notification: InstructionsLoadedNotification,
@@ -20,7 +21,12 @@ export function createInstructionsLoadedCallback(
   getHookSystem: () => HookSystem | undefined,
 ): InstructionsLoadedCallback {
   return async (notification: InstructionsLoadedNotification) => {
-    await getHookSystem()?.fireInstructionsLoadedEvent(
+    const hookSystem = getHookSystem();
+    if (!hookSystem?.hasHooksForEvent(HookEventName.InstructionsLoaded)) {
+      return;
+    }
+
+    await hookSystem.fireInstructionsLoadedEvent(
       notification.filePath,
       notification.memoryType,
       notification.loadReason,
