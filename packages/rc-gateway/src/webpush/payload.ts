@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { selectAllowOnceOptionId } from '../permissionOptions.js';
+
 /**
  * Metadata-only push payload. Deliberately carries NO tool args, file paths,
  * or prompt text — only enough to render a notification and deep-link back to
@@ -56,8 +58,10 @@ export function buildPayload(
         str(data.toolName) ||
         'a tool call';
       const requestId = str(data.requestId);
-      const options = data.options as Array<{ optionId?: unknown }> | undefined;
-      const approveOptionId = str(options?.[0]?.optionId);
+      // The one-time-approve option (kind 'allow_once'), NOT options[0] (which is
+      // usually 'allow_always' and would persist a standing grant). Absent → the
+      // SW falls back to opening the app instead of casting an inline vote.
+      const approveOptionId = selectAllowOnceOptionId(data.options);
       return {
         v: 1,
         kind: 'permission.required',

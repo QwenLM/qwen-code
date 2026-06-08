@@ -35,7 +35,13 @@ function permEvent(
     data: {
       requestId,
       toolCall: { name: tool, input: args ?? {} },
-      options: withOptions ? [{ optionId: 'ok', label: 'Allow' }] : [],
+      // allow_always at [0] (must NOT be chosen) + the allow_once we expect.
+      options: withOptions
+        ? [
+            { optionId: 'always', kind: 'allow_always', label: 'Always allow' },
+            { optionId: 'ok', kind: 'allow_once', label: 'Allow once' },
+          ]
+        : [],
     },
   };
 }
@@ -120,6 +126,29 @@ describe('PolicyEnforcer', () => {
       's1',
       permEvent('bash', { withOptions: false }),
     );
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('SECURITY: allow but options have ONLY allow_always (no allow_once) → no vote (fail-safe)', async () => {
+    // Auto-voting an allow_always option would persist a standing grant / flip
+    // the session to auto-edit. With no allow_once available we must NOT vote.
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+
+    const handled = await enf.handlePermission('s1', {
+      type: 'permission_request',
+      data: {
+        requestId: 'r1',
+        toolCall: { name: 'bash', input: {} },
+        options: [{ optionId: 'always', kind: 'allow_always' }],
+      },
+    });
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',

@@ -86,7 +86,12 @@ describe('buildPayload', () => {
             args: { command: `curl -H "auth: ${SECRET}"`, path: '/etc/passwd' },
           },
           requestId: 'req-12',
-          options: [{ optionId: 'opt-allow' }, { optionId: 'opt-deny' }],
+          // allow_always at [0] must NOT be chosen; the allow_once one is.
+          options: [
+            { optionId: 'opt-always', kind: 'allow_always' },
+            { optionId: 'opt-allow', kind: 'allow_once' },
+            { optionId: 'opt-deny', kind: 'reject_once' },
+          ],
         },
       },
       { sessionId: 's6' },

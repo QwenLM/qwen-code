@@ -8,6 +8,7 @@ import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import type { Policy } from './loader.js';
 import { evaluate, type ToolCallContext } from './evaluator.js';
+import { selectAllowOnceOptionId } from '../permissionOptions.js';
 
 /** Safe optional read of a string field from an unknown record. */
 function readString(
@@ -83,14 +84,11 @@ export class PolicyEnforcer {
       '';
     const args = toolCall?.['input'] ?? toolCall?.['args'] ?? toolCall ?? {};
     const requestId = readString(data, 'requestId');
-    const options = data['options'];
-    const firstOption = Array.isArray(options) ? options[0] : undefined;
-    const approveOptionId =
-      typeof firstOption === 'object' &&
-      firstOption !== null &&
-      typeof (firstOption as Record<string, unknown>)['optionId'] === 'string'
-        ? ((firstOption as Record<string, unknown>)['optionId'] as string)
-        : undefined;
+    // The ONE-TIME approve option (kind 'allow_once'), never options[0] — that
+    // is typically 'allow_always', which would persist a standing grant / flip
+    // the session to auto-edit, escalating a single policy match into a blanket
+    // bypass of all future gateway evaluation. Absent → we do NOT vote (below).
+    const approveOptionId = selectAllowOnceOptionId(data['options']);
 
     const ctx: ToolCallContext = { tool, args };
     const d = evaluate(this.policy, ctx);
