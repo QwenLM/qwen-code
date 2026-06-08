@@ -7,6 +7,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('AUTO_IMPROVE');
 
 export interface AutoImproveSources {
   githubIssues: boolean;
@@ -214,7 +217,12 @@ export async function readAutoImproveConfig(
     ) {
       return DEFAULT_AUTO_IMPROVE_CONFIG;
     }
-    if (error instanceof SyntaxError) return DEFAULT_AUTO_IMPROVE_CONFIG;
+    if (error instanceof SyntaxError) {
+      debugLogger.warn(
+        `Corrupt auto-improve config at ${getAutoImproveConfigPath(repoRoot)}; using defaults: ${error.message}`,
+      );
+      return DEFAULT_AUTO_IMPROVE_CONFIG;
+    }
     throw error;
   }
 }
@@ -224,11 +232,17 @@ export async function writeAutoImproveConfig(
   config: AutoImproveConfig,
 ): Promise<void> {
   await ensureAutoImproveRoot(repoRoot);
+  // Atomic write (tmp + rename), consistent with writeAutoImproveLoopState and
+  // writeActiveAutoImproveLoop, so a crash mid-write can't truncate config.json
+  // (the reader falls back to defaults on SyntaxError, silently losing config).
+  const configPath = getAutoImproveConfigPath(repoRoot);
+  const tmpPath = `${configPath}.tmp`;
   await fs.writeFile(
-    getAutoImproveConfigPath(repoRoot),
+    tmpPath,
     `${JSON.stringify(normalizeConfig(config), null, 2)}\n`,
     'utf8',
   );
+  await fs.rename(tmpPath, configPath);
 }
 
 export async function readActiveAutoImproveLoop(
@@ -256,7 +270,12 @@ export async function readActiveAutoImproveLoop(
     }
     // A truncated/corrupt active.json (e.g. crash mid-write) must not throw on
     // every subsequent /auto-improve command — treat it as "no active pointer".
-    if (error instanceof SyntaxError) return null;
+    if (error instanceof SyntaxError) {
+      debugLogger.warn(
+        `Corrupt auto-improve active pointer; treating as none: ${error.message}`,
+      );
+      return null;
+    }
     throw error;
   }
 }
@@ -398,10 +417,22 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
     return null;
   }
   const status = value['status'];
+  const isKnownStatus = LOOP_STATUSES.has(String(status));
+  if (status !== undefined && !isKnownStatus) {
+    // An older CLI reading a state file written by a newer one would silently
+    // mark a running loop 'stale' (which startAutoImprove treats as recoverable
+    // and cancels). Surface it so the downgrade is at least diagnosable.
+    debugLogger.warn(
+      `Auto-improve loop ${loopId}: unknown status ${JSON.stringify(status)} coerced to 'stale' (older CLI reading a newer state file?).`,
+    );
+  }
+  // Read deliveryPolicy from the persisted state (validated) instead of
+  // hardcoding, so a future policy value isn't silently dropped on every read.
+  const persistedDeliveryPolicy = value['deliveryPolicy'];
   const state: AutoImproveLoopState = {
     version: 1,
     loopId,
-    status: LOOP_STATUSES.has(String(status))
+    status: isKnownStatus
       ? (status as AutoImproveLoopState['status'])
       : 'stale',
     sessionScoped: true,
@@ -411,7 +442,10 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
     targetBranch:
       typeof value['targetBranch'] === 'string' ? value['targetBranch'] : '',
     repoRoot: typeof value['repoRoot'] === 'string' ? value['repoRoot'] : '',
-    deliveryPolicy: 'source-aware-local-commit',
+    deliveryPolicy:
+      persistedDeliveryPolicy === 'source-aware-local-commit'
+        ? persistedDeliveryPolicy
+        : 'source-aware-local-commit',
     stopRequested: readBoolean(value['stopRequested']),
     sourceSnapshot: normalizeConfig(value['sourceSnapshot']),
     prompt: typeof value['prompt'] === 'string' ? value['prompt'] : '',
@@ -461,7 +495,12 @@ export async function readAutoImproveLoopState(
     ) {
       return null;
     }
-    if (error instanceof SyntaxError) return null;
+    if (error instanceof SyntaxError) {
+      debugLogger.warn(
+        `Corrupt auto-improve loop state for loop ${loopId}; treating as missing: ${error.message}`,
+      );
+      return null;
+    }
     throw error;
   }
 }
@@ -485,7 +524,12 @@ export async function readAutoImproveRunIndex(
     ) {
       return { version: 1, runs: [] };
     }
-    if (error instanceof SyntaxError) return { version: 1, runs: [] };
+    if (error instanceof SyntaxError) {
+      debugLogger.warn(
+        `Corrupt auto-improve run index for loop ${loopId}; using empty index: ${error.message}`,
+      );
+      return { version: 1, runs: [] };
+    }
     throw error;
   }
 }

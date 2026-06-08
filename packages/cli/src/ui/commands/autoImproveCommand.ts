@@ -63,6 +63,29 @@ export function clearRepoRootCache(): void {
   repoRootCache.clear();
 }
 
+// Serialize the state-claiming critical section of ticks per loopId so a manual
+// `/auto-improve tick` racing the cron tick within the same process cannot both
+// pass the active-run checks and write `currentRun`, starting duplicate LLM
+// sessions. (Cross-process races between separate CLI invocations still require
+// on-disk file locking; this closes the common in-process case.)
+const tickMutexes = new Map<string, Promise<unknown>>();
+function withTickMutex<T>(loopId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = tickMutexes.get(loopId) ?? Promise.resolve();
+  // Chain fn after the previous holder regardless of how it settled.
+  const next = prev.then(fn, fn);
+  // Track a rejection-swallowing tail so one failed tick can't poison the lock,
+  // and evict the entry once it is the last in the chain to avoid leaks.
+  const guard = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  tickMutexes.set(loopId, guard);
+  void guard.then(() => {
+    if (tickMutexes.get(loopId) === guard) tickMutexes.delete(loopId);
+  });
+  return next;
+}
+
 type IntervalParseResult =
   | { ok: true; cron: string; cadence: string }
   | { ok: false; error: string };
@@ -800,10 +823,21 @@ async function tickAutoImprove(
   if (!isValidAutoImproveLoopId(loopId)) {
     return message('info', t('Auto-improve tick skipped: loop is not active.'));
   }
+  // Serialize the claim (read → check → re-read → write currentRun) per loopId
+  // so concurrent ticks in this process can't both start a run.
+  return withTickMutex(loopId, () => tickAutoImproveClaim(config, loopId));
+}
+
+async function tickAutoImproveClaim(
+  config: Config,
+  loopId: string,
+): Promise<SlashCommandActionReturn> {
+  debugLogger.info(`tick ${loopId}: starting`);
   let repoRoot: string;
   try {
     repoRoot = await getRepoRoot(config);
   } catch (error) {
+    debugLogger.warn(`tick ${loopId}: skipped — repo root unresolved`, error);
     return message(
       'error',
       t('Auto-improve tick skipped: unable to resolve repo root: {{error}}', {
@@ -813,15 +847,22 @@ async function tickAutoImprove(
   }
   const active = await readActiveAutoImproveLoop(repoRoot);
   if (!active || active.activeLoopId !== loopId) {
+    debugLogger.info(`tick ${loopId}: skipped — loop is not active`);
     return message('info', t('Auto-improve tick skipped: loop is not active.'));
   }
 
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state) {
+    debugLogger.warn(`tick ${loopId}: skipped — state is missing`);
     return message('error', t('Auto-improve tick skipped: state is missing.'));
   }
 
   if (state.stopRequested || state.status !== 'running') {
+    debugLogger.info(
+      `tick ${loopId}: skipped — ${
+        state.stopRequested ? 'stop requested' : `status=${state.status}`
+      }`,
+    );
     return message(
       'info',
       state.stopRequested
@@ -831,6 +872,7 @@ async function tickAutoImprove(
   }
 
   if (isActiveAutoImproveRunRef(state.currentRun)) {
+    debugLogger.info(`tick ${loopId}: skipped — previous run still active`);
     return message(
       'info',
       t('Auto-improve tick skipped: previous run is still active.'),
@@ -838,12 +880,13 @@ async function tickAutoImprove(
   }
 
   // Re-read state to close the TOCTOU window between initial check and write.
-  // This significantly reduces the race window where two concurrent ticks could
-  // both pass the check and start LLM sessions. A full solution would require
-  // file locking or an in-process mutex, but this double-check pattern provides
-  // practical protection for typical usage patterns.
+  // The per-loopId mutex (withTickMutex) serializes ticks in this process; this
+  // re-read additionally guards against changes a concurrent process wrote.
   const freshState = await readAutoImproveLoopState(repoRoot, loopId);
   if (freshState && isActiveAutoImproveRunRef(freshState.currentRun)) {
+    debugLogger.info(
+      `tick ${loopId}: skipped — previous run still active (re-read)`,
+    );
     return message(
       'info',
       t('Auto-improve tick skipped: previous run is still active.'),
@@ -859,12 +902,17 @@ async function tickAutoImprove(
   baseState.repoRoot = repoRoot;
   baseState.currentRun = makePendingRunRef();
   await writeAutoImproveLoopState(repoRoot, baseState);
+  debugLogger.info(`tick ${loopId}: claimed run, submitting prompt`);
 
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(baseState) }],
-    onComplete: (opts?: { errored?: boolean }) =>
-      markRunCompleted(config, repoRoot, loopId, opts),
+    onComplete: (opts?: { errored?: boolean }) => {
+      debugLogger.info(
+        `tick ${loopId}: onComplete (errored=${opts?.errored ?? false})`,
+      );
+      return markRunCompleted(config, repoRoot, loopId, opts);
+    },
   };
 }
 
