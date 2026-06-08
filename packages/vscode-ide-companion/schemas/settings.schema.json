@@ -138,6 +138,11 @@
           "type": "boolean",
           "default": true
         },
+        "preventSystemSleep": {
+          "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
+          "type": "boolean",
+          "default": true
+        },
         "chatRecording": {
           "description": "Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.",
           "type": "boolean",

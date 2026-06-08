@@ -75,6 +75,7 @@ import {
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
+  acquireSleepInhibitor,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -2732,7 +2733,16 @@ export class Session implements SessionContext {
         }
       }
 
-      const toolResult: ToolResult = await invocation.execute(abortSignal);
+      const sleepInhibitorHandle = acquireSleepInhibitor(
+        this.config,
+        `Qwen Code is executing tool ${fc.name}`,
+      );
+      let toolResult: ToolResult;
+      try {
+        toolResult = await invocation.execute(abortSignal);
+      } finally {
+        sleepInhibitorHandle.release();
+      }
 
       // Clean up event listeners
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());

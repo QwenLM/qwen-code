@@ -781,6 +781,8 @@ export interface ConfigParameters {
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
+  /** Prevent the system from sleeping while model or tool work is in flight. */
+  preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
@@ -1149,6 +1151,7 @@ export class Config {
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
+  private readonly preventSystemSleep: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
@@ -1354,6 +1357,7 @@ export class Config {
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
       params.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
+    this.preventSystemSleep = params.preventSystemSleep ?? true;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? true;
     this.shellExecutionConfig = {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
@@ -3455,6 +3459,10 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode();
+  }
+
+  getPreventSystemSleepEnabled(): boolean {
+    return this.preventSystemSleep;
   }
 
   /**

@@ -1383,6 +1383,21 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toBe('');
   });
 
+  it('Config constructor should enable runtime sleep prevention by default', () => {
+    const config = new Config(baseParams);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('Config constructor should store runtime sleep prevention override', () => {
+    const config = new Config({
+      ...baseParams,
+      preventSystemSleep: false,
+    });
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
     const config = new Config(baseParams);
 

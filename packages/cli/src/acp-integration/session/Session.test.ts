@@ -2016,6 +2016,75 @@ describe('Session', () => {
         );
       });
 
+      it('wraps tool execution with the sleep inhibitor (acquire before execute, release after)', async () => {
+        const releaseSpy = vi.fn();
+        const acquireSpy = vi
+          .spyOn(core, 'acquireSleepInhibitor')
+          .mockReturnValue({ release: releaseSpy });
+        try {
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { path: '/tmp/test.txt' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          expect(executeSpy).toHaveBeenCalledTimes(1);
+          expect(acquireSpy).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining('read_file'),
+          );
+          expect(releaseSpy).toHaveBeenCalledTimes(1);
+          // Ordering: acquire → execute → release.
+          expect(acquireSpy.mock.invocationCallOrder[0]).toBeLessThan(
+            executeSpy.mock.invocationCallOrder[0],
+          );
+          expect(executeSpy.mock.invocationCallOrder[0]).toBeLessThan(
+            releaseSpy.mock.invocationCallOrder[0],
+          );
+        } finally {
+          acquireSpy.mockRestore();
+        }
+      });
+
       it('stops tool response follow-up before sending when the session token limit is exceeded', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
