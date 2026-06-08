@@ -190,7 +190,11 @@ export function useHistory(): UseHistoryManagerReturn {
           if (item.type !== 'tool_group') return item;
           // Check for any non-null resultDisplay (covers string, FileDiff,
           // AnsiOutputDisplay, AgentResultDisplay, etc.)
-          const hasOldOutput = item.tools.some((t) => t.resultDisplay != null);
+          const hasOldOutput = item.tools.some(
+            (t) =>
+              t.resultDisplay != null &&
+              t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE,
+          );
           if (!hasOldOutput) return item;
           toolGroupsSeen++;
           if (toolGroupsSeen > toolGroupsToCompact) return item;
@@ -198,7 +202,10 @@ export function useHistory(): UseHistoryManagerReturn {
           return {
             ...item,
             tools: item.tools.map((t) => {
-              if (t.resultDisplay != null) {
+              if (
+                t.resultDisplay != null &&
+                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE
+              ) {
                 return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
               }
               return t;

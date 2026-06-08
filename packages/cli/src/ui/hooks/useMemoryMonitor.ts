@@ -77,7 +77,13 @@ export const useMemoryMonitor = ({
               `compacting UI history`,
           );
         }
-        compactOldItems();
+        try {
+          compactOldItems();
+        } catch (err) {
+          debugLogger.error(
+            `[UI_COMPACT] compactOldItems failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }, MEMORY_DEBUG_INTERVAL);
 
