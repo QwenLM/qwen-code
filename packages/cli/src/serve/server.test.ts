@@ -3423,6 +3423,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ language: 'zh' });
       expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({ error: expect.any(String) });
     });
   });
 
