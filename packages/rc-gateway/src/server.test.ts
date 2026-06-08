@@ -17,6 +17,7 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { createGatewayApp } from './server.js';
+import type { PushNotifier } from './webpush/notifier.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 let gateway: Server | undefined;
@@ -36,6 +37,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   auditPath: string;
   vapid: VapidStore;
   pushStore: PushStore;
+  notifier: PushNotifier | undefined;
 }> {
   stub = await startStubDaemon(stubOpts);
   const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -45,7 +47,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   const pairing = new PairingService();
   const vapid = await VapidStore.open(join(dir, 'vapid.json'));
   const pushStore = await PushStore.open(join(dir, 'push.json'));
-  const app = createGatewayApp({
+  const { app, notifier } = createGatewayApp({
     daemon,
     store,
     pairing,
@@ -65,6 +67,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
     auditPath,
     vapid,
     pushStore,
+    notifier,
   };
 }
 
@@ -225,6 +228,28 @@ describe('gateway app', () => {
     expect(res.status).toBe(200);
     const rows = (await res.json()) as Array<{ action: string }>;
     expect(rows.some((r) => r.action === 'pairing_redeemed')).toBe(true);
+  });
+
+  it('createGatewayApp returns a notifier when push stores are supplied', async () => {
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const dir = mkdtempSync(join(tmpdir(), 'rc-srv-'));
+    const store = await TokenStore.open(join(dir, 'tokens.json'));
+    const pairing = new PairingService();
+    const vapid = await VapidStore.open(join(dir, 'vapid.json'));
+    const pushStore = await PushStore.open(join(dir, 'push.json'));
+
+    const withStores = createGatewayApp({
+      daemon,
+      store,
+      pairing,
+      vapid,
+      pushStore,
+    });
+    expect(withStores.notifier).toBeDefined();
+
+    const withoutStores = createGatewayApp({ daemon, store, pairing });
+    expect(withoutStores.notifier).toBeUndefined();
   });
 
   it('serves the web viewer at /ui/ without auth', async () => {

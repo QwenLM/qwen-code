@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export { createGatewayApp, type GatewayDeps } from './server.js';
+export {
+  createGatewayApp,
+  type GatewayDeps,
+  type GatewayApp,
+} from './server.js';
 export {
   startDaemon,
   type DaemonHandle,

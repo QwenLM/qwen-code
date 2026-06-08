@@ -32,7 +32,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
-  const app = createGatewayApp({
+  const { app } = createGatewayApp({
     daemon: handle.daemon,
     store,
     pairing,

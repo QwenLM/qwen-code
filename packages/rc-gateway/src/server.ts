@@ -45,7 +45,13 @@ export interface GatewayDeps {
   pushStore?: PushStore;
 }
 
-export function createGatewayApp(deps: GatewayDeps): Express {
+export interface GatewayApp {
+  app: Express;
+  /** Present only when both `vapid` and `pushStore` deps are supplied. */
+  notifier?: PushNotifier;
+}
+
+export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const app = express();
   app.use(express.json());
 
@@ -102,9 +108,10 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     createAuditQueryRoute(audit),
   );
 
+  let notifier: PushNotifier | undefined;
   if (deps.vapid && deps.pushStore) {
     const sender = new PushSender(deps.vapid, deps.pushStore, audit);
-    const notifier = new PushNotifier(deps.store, deps.pushStore, sender);
+    notifier = new PushNotifier(deps.store, deps.pushStore, sender);
     app.use(
       '/rc/push',
       requireScope(SESSION_READ, audit),
@@ -112,5 +119,5 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     );
   }
 
-  return app;
+  return { app, notifier };
 }
