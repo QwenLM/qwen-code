@@ -455,6 +455,45 @@ describe('gateway app', () => {
     expect(body.sent).toBe(1);
   });
 
+  it('subscribe then PATCH /rc/push/subscriptions/:id prefs returns 200 via the mounted router', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const sub = await fetch(`${url}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://push.example.com/prefs-target',
+          keys: { p256dh: 'p', auth: 'a' },
+        },
+      }),
+    });
+    expect(sub.status).toBe(201);
+    const subId = ((await sub.json()) as { id: string }).id;
+
+    const patch = await fetch(`${url}/rc/push/subscriptions/${subId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prefs: ['task.completed'] }),
+    });
+    expect(patch.status).toBe(200);
+    const patchBody = (await patch.json()) as { id: string; prefs: string[] };
+    expect(patchBody.prefs).toEqual(['task.completed']);
+  });
+
   it('owner can POST /rc/routing/snooze then GET reports active', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, OWNER]);

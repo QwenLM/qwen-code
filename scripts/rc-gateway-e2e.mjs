@@ -318,6 +318,39 @@ try {
       ? ok('push subscriptions list includes new subscription')
       : bad(`push list ${lr.status} ${JSON.stringify(lb)}`);
 
+    // Per-subscription prefs (cycle 16): PATCH the prefs, then confirm GET
+    // reflects them. Pure gateway state on our own subscription record.
+    const ppr = await fetch(`${gw}/rc/push/subscriptions/${subId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({ prefs: ['task.completed'] }),
+    });
+    const ppb = await ppr.json();
+    ppr.status === 200 &&
+    Array.isArray(ppb.prefs) &&
+    ppb.prefs.length === 1 &&
+    ppb.prefs[0] === 'task.completed'
+      ? ok('push PATCH prefs -> 200 with prefs:[task.completed]')
+      : bad(`push patch prefs ${ppr.status} ${JSON.stringify(ppb)}`);
+
+    const plr = await fetch(`${gw}/rc/push/subscriptions`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const plb = await plr.json();
+    plr.status === 200 &&
+    Array.isArray(plb.subscriptions) &&
+    plb.subscriptions.some(
+      (s) =>
+        s.id === subId &&
+        Array.isArray(s.prefs) &&
+        s.prefs[0] === 'task.completed',
+    )
+      ? ok('push subscriptions list reflects updated prefs')
+      : bad(`push list prefs ${plr.status} ${JSON.stringify(plb)}`);
+
     const dr = await fetch(`${gw}/rc/push/subscriptions/${subId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${userToken}` },
