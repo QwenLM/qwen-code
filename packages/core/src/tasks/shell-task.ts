@@ -454,6 +454,7 @@ export function shellCancel(
   registry: TaskRegistry,
   shellId: string,
   endTime: number,
+  options: { notify?: boolean } = {},
 ): void {
   const entry = registry.get(shellId) as ShellTask | undefined;
   if (!entry || entry.kind !== 'shell' || entry.status !== 'running') return;
@@ -463,7 +464,9 @@ export function shellCancel(
     current.endTime = endTime;
     return current;
   });
-  emitShellNotification(entry);
+  if (options.notify !== false) {
+    emitShellNotification(entry);
+  }
   pruneTerminalEntries(registry);
 }
 
@@ -531,7 +534,7 @@ export function shellAbortAll(registry: TaskRegistry): void {
   const endTime = Date.now();
   for (const entry of registry.getByKind('shell')) {
     if (entry.status === 'running') {
-      shellCancel(registry, entry.shellId, endTime);
+      shellCancel(registry, entry.shellId, endTime, { notify: false });
     }
   }
 }
