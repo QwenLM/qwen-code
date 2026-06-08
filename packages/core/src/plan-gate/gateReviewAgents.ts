@@ -9,37 +9,31 @@ import { ApprovalMode } from '../config/config.js';
 import { ContextState } from '../agents/runtime/agent-headless.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
-import type {
-  GateAgentName,
-  GateAgentResult,
-  EvidenceBundle,
-} from './types.js';
+import type { GateAgentResult, EvidenceBundle } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GATE_REVIEW_AGENTS');
 
-// ── Gate agent prompts ─────────────────────────────────────────────────
+// ── Gate agent prompt ──────────────────────────────────────────────────
 
-function requestFitPrompt(evidence: string): string {
-  return `You are a Plan Design Reviewer (Request Fit). Your job is to check whether the plan fulfills the user's original request, explicit constraints, and preferences.
+function buildReviewPrompt(evidence: string): string {
+  return `You are a Plan Design Reviewer for the Plan Approval Gate. Review the plan across three dimensions:
 
-Focus on:
-- Does the plan address every part of the user's request?
-- Does it respect explicit constraints the user stated?
-- Does it miss any requirements?
-- Does it do anything the user explicitly asked NOT to do?
+1. **Request Fit** — Does the plan fulfill every part of the user's original request and respect all explicit constraints? Does it do anything the user explicitly asked NOT to do?
+2. **System Fit** — Does the plan align with the codebase structure, file paths, function names, permission model, and integration boundaries found during investigation?
+3. **Execution Readiness** — Is each step concrete enough to implement without guessing? Is there a verification/test path? Are risks handled? Are there steps that still need a human decision?
 
-The user's original request and later additions always outrank the plan text. The plan cannot override user constraints with its own wording.
+The user's original request and later additions always outrank the plan text.
 
 ${evidence}
 
 Respond with ONLY a JSON object matching this schema (no markdown fences):
 {
-  "agent": "request_fit",
+  "agent": "plan_reviewer",
   "decision": "pass" | "blocked" | "needs_user" | "unavailable",
   "findings": [
     {
-      "localId": "RF-1",
+      "localId": "GF-1",
       "severity": "P1" | "P2" | "P3",
       "issue": "...",
       "rationale": "...",
@@ -56,83 +50,7 @@ Rules:
 - "blocked" means at least one finding exists.
 - "needs_user" means you need information from the user to make a judgement.
 - "unavailable" only if you truly cannot produce a reliable review.
-- P1: plan clearly violates or ignores the request. P2: missing a key element. P3: minor ambiguity.
-- Do NOT invent confidence scores. If uncertain, use needs_user.`;
-}
-
-function systemFitPrompt(evidence: string): string {
-  return `You are a Plan Design Reviewer (System Fit). Your job is to check whether the plan aligns with the codebase structure, domain model, permission model, and integration boundaries that have been investigated.
-
-Focus on:
-- Does the plan match the actual code architecture found during investigation?
-- Are the file paths, function names, and module boundaries correct?
-- Does it conflict with the permission model or existing patterns?
-- Are there integration boundary issues?
-
-${evidence}
-
-Respond with ONLY a JSON object matching this schema (no markdown fences):
-{
-  "agent": "system_fit",
-  "decision": "pass" | "blocked" | "needs_user" | "unavailable",
-  "findings": [
-    {
-      "localId": "SF-1",
-      "severity": "P1" | "P2" | "P3",
-      "issue": "...",
-      "rationale": "...",
-      "suggestedFix": "..." (optional),
-      "suggestedQuestion": "..." (optional, for needs_user)
-    }
-  ],
-  "limitations": ["..."],
-  "reviewedEvidence": ["..."]
-}
-
-Rules:
-- "pass" means no findings at all.
-- "blocked" means at least one finding exists.
-- "needs_user" means you need user input to judge correctness.
-- "unavailable" only if you truly cannot produce a reliable review.
-- P1: plan contradicts the code in a dangerous way. P2: plan misses key structural elements. P3: minor mismatch.
-- Do NOT invent confidence scores. If uncertain, use needs_user.`;
-}
-
-function executionReadinessPrompt(evidence: string): string {
-  return `You are a Plan Design Reviewer (Execution Readiness). Your job is to check whether the plan is specific enough to be executed autonomously without further human guidance.
-
-Focus on:
-- Is each step concrete enough to implement without guessing?
-- Is there a verification/test path described?
-- Are risks identified and handled?
-- Are there steps that still need a human decision?
-
-${evidence}
-
-Respond with ONLY a JSON object matching this schema (no markdown fences):
-{
-  "agent": "execution_readiness",
-  "decision": "pass" | "blocked" | "needs_user" | "unavailable",
-  "findings": [
-    {
-      "localId": "ER-1",
-      "severity": "P1" | "P2" | "P3",
-      "issue": "...",
-      "rationale": "...",
-      "suggestedFix": "..." (optional),
-      "suggestedQuestion": "..." (optional, for needs_user)
-    }
-  ],
-  "limitations": ["..."],
-  "reviewedEvidence": ["..."]
-}
-
-Rules:
-- "pass" means the plan is ready for autonomous execution.
-- "blocked" means execution would be unreliable.
-- "needs_user" means a human decision is still required.
-- "unavailable" only if you truly cannot produce a reliable review.
-- P1: execution would go dangerously wrong. P2: missing critical design or verification. P3: minor vagueness.
+- P1: plan clearly violates the request or would lead to dangerous/wrong execution. P2: missing key design/verification elements. P3: minor ambiguity.
 - Do NOT invent confidence scores. If uncertain, use needs_user.`;
 }
 
@@ -181,34 +99,25 @@ export function formatEvidence(bundle: EvidenceBundle): string {
   return sections.join('\n\n');
 }
 
-// ── Prompt selection ───────────────────────────────────────────────────
-
-const PROMPT_BY_ROLE: Record<GateAgentName, (evidence: string) => string> = {
-  request_fit: requestFitPrompt,
-  system_fit: systemFitPrompt,
-  execution_readiness: executionReadinessPrompt,
-};
-
 // ── Single-agent runner ────────────────────────────────────────────────
 
 /**
- * Runs one gate review agent via `createAgentHeadless`. The agent operates
+ * Runs the gate review agent via `createAgentHeadless`. The agent operates
  * under a forced-PLAN config override and cannot spawn nested agents.
  *
  * Returns the parsed `GateAgentResult`, or throws on unrecoverable failure.
  */
 export async function runGateAgent(
   config: Config,
-  role: GateAgentName,
   bundle: EvidenceBundle,
   signal: AbortSignal,
 ): Promise<GateAgentResult> {
   const evidence = formatEvidence(bundle);
-  const taskPrompt = PROMPT_BY_ROLE[role](evidence);
+  const taskPrompt = buildReviewPrompt(evidence);
 
   const subagentConfig = {
-    name: `plan-gate-${role}`,
-    description: `Plan Approval Gate: ${role} reviewer`,
+    name: 'plan-gate-reviewer',
+    description: 'Plan Approval Gate: design reviewer',
     systemPrompt:
       'You are a design review agent for the Plan Approval Gate. Follow the instructions in the user message exactly. Respond with valid JSON only.',
     level: 'session' as const,
@@ -242,11 +151,11 @@ export async function runGateAgent(
       rawText.trim().length === 0
     ) {
       throw new Error(
-        `Gate agent ${role} terminated with mode=${terminateMode} and no usable output`,
+        `Gate agent terminated with mode=${terminateMode} and no usable output`,
       );
     }
 
-    return parseGateAgentResult(rawText, role);
+    return parseGateAgentResult(rawText);
   } finally {
     cleanup();
   }
@@ -254,11 +163,7 @@ export async function runGateAgent(
 
 // ── JSON parsing / validation ──────────────────────────────────────────
 
-export function parseGateAgentResult(
-  raw: string,
-  expectedRole: GateAgentName,
-): GateAgentResult {
-  // Strip markdown code fences if present
+export function parseGateAgentResult(raw: string): GateAgentResult {
   let jsonText = raw.trim();
   if (jsonText.startsWith('```')) {
     jsonText = jsonText
@@ -270,16 +175,13 @@ export function parseGateAgentResult(
   try {
     parsed = JSON.parse(jsonText);
   } catch {
-    throw new Error(
-      `Gate agent ${expectedRole} returned invalid JSON: ${raw.slice(0, 200)}`,
-    );
+    throw new Error(`Gate agent returned invalid JSON: ${raw.slice(0, 200)}`);
   }
 
   const obj = parsed as Record<string, unknown>;
 
-  // Validate required shape
   if (typeof obj !== 'object' || obj === null) {
-    throw new Error(`Gate agent ${expectedRole} returned non-object JSON`);
+    throw new Error('Gate agent returned non-object JSON');
   }
 
   const validDecisions = new Set([
@@ -290,7 +192,7 @@ export function parseGateAgentResult(
   ]);
   if (!validDecisions.has(obj['decision'] as string)) {
     throw new Error(
-      `Gate agent ${expectedRole} returned invalid decision: ${String(obj['decision'])}`,
+      `Gate agent returned invalid decision: ${String(obj['decision'])}`,
     );
   }
 
@@ -303,11 +205,10 @@ export function parseGateAgentResult(
     : [];
 
   return {
-    agent: expectedRole,
+    agent: 'plan_reviewer',
     decision: obj['decision'] as GateAgentResult['decision'],
     findings: findings.map((f: Record<string, unknown>, i: number) => ({
-      localId:
-        (f['localId'] as string) ?? `${expectedRole.toUpperCase()}-${i + 1}`,
+      localId: (f['localId'] as string) ?? `GF-${i + 1}`,
       severity: validateSeverity(f['severity'] as string),
       issue: String(f['issue'] ?? ''),
       rationale: String(f['rationale'] ?? ''),
