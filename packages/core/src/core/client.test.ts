@@ -1952,6 +1952,68 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('initializes Hook microcompaction from the last API completion timestamp', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = null;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-init',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('does not microcompact Hook continuations when the checkpoint is recent', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-recent',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
     it('falls back to a blanket clear when blanked reads cannot be linked to a path (id-less provider)', async () => {

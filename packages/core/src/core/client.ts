@@ -1602,8 +1602,9 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages, preserving the original
-        // user-idle semantics.
+        // Runs on user and cron messages, not tool result submissions
+        // or retries/hooks, so model latency during a tool-call loop
+        // does not count as user idle time.
         await this.microcompactIdleHistory(this.lastApiCompletionTimestamp);
         this.lastHookMicrocompactionTimestamp = Date.now();
       } else if (messageType === SendMessageType.Hook) {
