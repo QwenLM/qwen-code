@@ -101,13 +101,8 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    // T40 (PR #4732 R4): derive a child controller from the caller signal.
-    // `createChildAbortController` handles parent-signal forwarding,
-    // already-aborted fast path, WeakRef on the parent, and auto-removal
-    // of the parent listener when the child fires. The dispatch closure-
-    // captures the child's signal so in-flight subagent.execute() calls
-    // see the abort (caller-driven OR wall-clock-driven, see sandbox.ts
-    // setTimeout handler) and stop burning tokens.
+    // T40 (PR #4732 R4): child controller so dispatch sees caller aborts
+    // AND sandbox.ts wall-clock aborts (see setTimeout handler).
     const dispatchController = createChildAbortController(signal);
     const dispatch =
       this.toolOptions.dispatch ??
@@ -175,10 +170,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     } finally {
-      // T40 (PR #4732 R4): abort the child controller on natural completion
-      // to cancel any straggler subagent. `createChildAbortController`'s
-      // child-fired listener auto-removes the parent listener, so no manual
-      // signal cleanup needed.
+      // T40: cancel any straggler subagent on natural completion.
       dispatchController.abort();
     }
   }
