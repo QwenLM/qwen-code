@@ -15,7 +15,7 @@ import { startStubDaemon, type StubDaemon } from './testing/stubDaemon.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { createGatewayApp } from './server.js';
-import { OWNER, SESSION_READ, APPROVE } from './scopes.js';
+import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -254,5 +254,48 @@ describe('gateway app', () => {
       body: JSON.stringify({ outcome: 'cancelled' }),
     });
     expect(vote.status).toBe(200);
+  });
+
+  it('routes a write-scoped prompt to the daemon', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer' }),
+    });
+    const writeToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${writeToken}`,
+      },
+      body: JSON.stringify({ prompt: 'hi' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).stopReason).toBe('end_turn');
+  });
+
+  it('403s a prompt from a session:read-only token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const readToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${readToken}`,
+      },
+      body: JSON.stringify({ prompt: 'hi' }),
+    });
+    expect(res.status).toBe(403);
   });
 });
