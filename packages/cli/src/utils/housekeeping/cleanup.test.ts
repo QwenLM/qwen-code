@@ -178,6 +178,10 @@ describe('cleanupOldFileHistoryBackups', () => {
       // chmod 0o500 (r-x, no write) on the bad dir means rm cannot unlink
       // its child snapshot file, so rm({ recursive: true }) fails for it.
       // Other dirs are unaffected.
+      // Skip on root — chmod can't prevent deletion when running as root.
+      const isRoot = process.getuid?.() === 0;
+      if (isRoot) return;
+
       fs.chmodSync(badDir, 0o500);
 
       try {
@@ -187,7 +191,7 @@ describe('cleanupOldFileHistoryBackups', () => {
         expect(fs.readdirSync(fileHistoryRoot)).toEqual(['bad']);
       } finally {
         // Restore so afterEach can rm the temp tree.
-        fs.chmodSync(badDir, 0o700);
+        if (fs.existsSync(badDir)) fs.chmodSync(badDir, 0o700);
       }
     },
   );
