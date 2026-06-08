@@ -17,7 +17,8 @@ function createChild(pid: number | undefined = 4242): ChildProcess {
   });
   // A real successful spawn has a numeric pid synchronously; a failed spawn
   // (e.g. ENOENT) leaves it undefined. Tests pass `undefined` to model that.
-  child.pid = pid;
+  // `pid` is readonly on ChildProcess, so define it rather than assign.
+  Object.defineProperty(child, 'pid', { value: pid });
   child.kill = vi.fn(() => {
     killed = true;
     return true;
@@ -229,7 +230,7 @@ describe('SleepInhibitor', () => {
     const spawn = vi.fn(() => {
       const child = new EventEmitter() as ChildProcess;
       Object.defineProperty(child, 'killed', { get: () => false });
-      child.pid = 4242;
+      Object.defineProperty(child, 'pid', { value: 4242 });
       child.kill = vi.fn(() => {
         throw new Error('ESRCH');
       });
@@ -259,7 +260,7 @@ describe('SleepInhibitor', () => {
       // Pidless child: spawn returned but the process never started (ENOENT).
       const child = new EventEmitter() as ChildProcess;
       Object.defineProperty(child, 'killed', { get: () => false });
-      child.pid = undefined;
+      Object.defineProperty(child, 'pid', { value: undefined });
       child.kill = vi.fn(() => true);
       children.push(child);
       return child;
