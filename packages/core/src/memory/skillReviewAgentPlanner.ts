@@ -239,7 +239,9 @@ export function createSkillScopedAgentConfig(
   return scopedConfig;
 }
 
-const SKILL_REVIEW_SYSTEM_PROMPT = [
+// Exported for tests so the `auto-skill-` prefix instruction stays asserted
+// at the system-prompt layer too, not just in `buildTaskPrompt`.
+export const SKILL_REVIEW_SYSTEM_PROMPT = [
   'You are reviewing this conversation to extract reusable skills.',
   '',
   'Review the conversation above and consider saving or updating a skill if appropriate.',

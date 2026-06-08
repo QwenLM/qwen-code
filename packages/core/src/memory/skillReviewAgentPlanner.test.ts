@@ -23,6 +23,7 @@ import {
   buildTaskPrompt,
   createSkillScopedAgentConfig,
   listExistingSkillDirNames,
+  SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -361,5 +362,19 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain(AUTO_SKILL_DIR_PREFIX);
     expect(prompt).toContain(`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`);
     expect(prompt).toMatch(/mandatory/i);
+  });
+});
+
+describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
+  it('requires the auto-skill- directory prefix for new skills (#4837)', () => {
+    // The system prompt and buildTaskPrompt carry the prefix instruction on
+    // two independent string arrays. buildTaskPrompt is asserted above; this
+    // guards the parallel system-prompt line so an edit to one can't silently
+    // drop the prefix mandate from the other.
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toContain(AUTO_SKILL_DIR_PREFIX);
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toContain(
+      `.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`,
+    );
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toMatch(/MUST use/i);
   });
 });
