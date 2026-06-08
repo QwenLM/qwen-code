@@ -853,6 +853,10 @@ export class SubagentManager {
 
     const runConfig: RunConfig = {
       ...config.runConfig,
+      // Top-level CC-style `maxTurns` wins over legacy nested
+      // `runConfig.max_turns`. Both are kept for backward compatibility, but
+      // when both are set, the top-level field is the authoritative source.
+      ...(config.maxTurns !== undefined ? { max_turns: config.maxTurns } : {}),
     };
 
     let toolConfig: ToolConfig | undefined;

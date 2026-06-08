@@ -1862,6 +1862,38 @@ System prompt 3`);
 
         expect(runtimeConfig.modelConfig).toEqual({});
       });
+
+      // --- CC 2.1.168 maxTurns top-level promotion ---
+
+      it('should populate runConfig.max_turns from top-level maxTurns', async () => {
+        const cfg: SubagentConfig = { ...validConfig, maxTurns: 42 };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(42);
+      });
+
+      it('should prefer top-level maxTurns over nested runConfig.max_turns', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          maxTurns: 99,
+          runConfig: { max_turns: 5 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(99);
+      });
+
+      it('should fall back to nested runConfig.max_turns when maxTurns is unset', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          runConfig: { max_turns: 7 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(7);
+      });
+
+      it('should leave max_turns undefined when neither is set', async () => {
+        const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
+        expect(runtimeConfig.runConfig.max_turns).toBeUndefined();
+      });
     });
 
     describe('mergeConfigurations', () => {
