@@ -20,7 +20,7 @@ function getModeIndicator(
   }
 }
 
-export function StatusBar() {
+export function StatusBar({ escapeHint }: { escapeHint?: boolean }) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
   const currentModel = connection.currentModel ?? '';
@@ -35,7 +35,9 @@ export function StatusBar() {
   return (
     <div className={styles.bar}>
       <div className={styles.left}>
-        {modeIndicator ? (
+        {escapeHint ? (
+          <span className={styles.escapeHint}>{t('editor.escClearHint')}</span>
+        ) : modeIndicator ? (
           <>
             <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
               {modeIndicator.label}

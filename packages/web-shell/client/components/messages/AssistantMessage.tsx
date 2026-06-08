@@ -16,6 +16,29 @@ interface AssistantMessageProps {
   thinking?: string;
 }
 
+function getRenderedLineCount(element: HTMLElement): number {
+  const tops: number[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node.textContent?.trim()) continue;
+
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.width === 0 || rect.height === 0) continue;
+      const top = Math.round(rect.top);
+      if (!tops.some((value) => Math.abs(value - top) <= 1)) {
+        tops.push(top);
+      }
+    }
+    range.detach();
+  }
+
+  return tops.length;
+}
+
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   thinking,
@@ -25,26 +48,33 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const thinkingExpandedRef = useRef(thinkingExpanded);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const collapsed = compactThinking && !thinkingExpanded;
-  thinkingExpandedRef.current = thinkingExpanded;
 
   useEffect(() => {
-    const el = bodyRef.current;
-    if (!el || !compactThinking) return;
+    const contentEl = contentRef.current;
+    if (!contentEl || !compactThinking) return;
 
     const check = () => {
-      if (thinkingExpandedRef.current) return;
-      setOverflowing(el.scrollHeight > el.clientHeight);
+      setOverflowing(getRenderedLineCount(contentEl) > 5);
     };
 
     check();
 
-    const observer = new ResizeObserver(check);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [compactThinking]);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedCheck = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(check, 150);
+    };
+
+    const observer = new ResizeObserver(debouncedCheck);
+    observer.observe(contentEl);
+    return () => {
+      observer.disconnect();
+      if (timer) clearTimeout(timer);
+    };
+  }, [compactThinking, thinking]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
@@ -58,26 +88,37 @@ export const AssistantMessage = memo(function AssistantMessage({
           <div className={styles.thinkingBody}>
             <div
               ref={bodyRef}
-              className={
-                collapsed
-                  ? overflowing
-                    ? `${styles.thinkingCollapsed} ${styles.thinkingCollapsedMask}`
-                    : styles.thinkingCollapsed
-                  : undefined
-              }
+              className={collapsed ? styles.thinkingCollapsed : undefined}
             >
-              <Markdown content={thinking} source="thinking" />
+              <div ref={contentRef}>
+                <Markdown
+                  content={thinking}
+                  source="thinking"
+                  trailingInline={
+                    compactThinking && thinkingExpanded ? (
+                      <button
+                        className={styles.expandToggle}
+                        onClick={handleToggle}
+                        aria-expanded={true}
+                        aria-label="Collapse thinking details"
+                      >
+                        ▲
+                      </button>
+                    ) : null
+                  }
+                />
+              </div>
+              {compactThinking && collapsed && overflowing && (
+                <button
+                  className={styles.expandToggle}
+                  onClick={handleToggle}
+                  aria-expanded={false}
+                  aria-label="Expand thinking details"
+                >
+                  ... ▼
+                </button>
+              )}
             </div>
-            {compactThinking && (overflowing || thinkingExpanded) && (
-              <button
-                className={styles.expandToggle}
-                onClick={handleToggle}
-                aria-expanded={!collapsed}
-                aria-label="Toggle thinking details"
-              >
-                {collapsed ? '···' : '▲'}
-              </button>
-            )}
           </div>
         </div>
       )}

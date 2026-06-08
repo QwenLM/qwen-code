@@ -1,7 +1,7 @@
 .list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 0;
+  padding: 12px 24px;
   scrollbar-width: thin;
   scrollbar-color: var(--border-color) transparent;
   min-height: 0;

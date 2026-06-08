@@ -1638,7 +1638,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('converts error blocks to system messages with error variant', () => {
+  it('converts error blocks to system error messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
         id: 'err-1',
@@ -2027,8 +2027,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
     expect(messages[1]).toMatchObject({
       role: 'system',
-      variant: 'error',
       content: 'Connection lost',
+      variant: 'error',
     });
     expect(messages[2]).toMatchObject({
       role: 'assistant',

@@ -628,14 +628,10 @@ export function DaemonSessionProvider({
                 reason: 'stream_ended',
               });
             }
-            store.dispatch({
-              type: 'status',
-              text: 'SSE stream ended',
-            });
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
-              error: 'SSE stream ended',
+              error: undefined,
             }));
           }
         } catch (error) {

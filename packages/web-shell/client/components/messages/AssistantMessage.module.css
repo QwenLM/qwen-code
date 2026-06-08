@@ -57,13 +57,9 @@
 }
 
 .thinkingCollapsed {
+  position: relative;
   max-height: calc(5 * 1.5em);
   overflow: hidden;
-}
-
-.thinkingCollapsedMask {
-  mask-image: linear-gradient(to bottom, #000 60%, transparent);
-  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
 }
 
 .expandToggle {
@@ -75,6 +71,14 @@
   cursor: pointer;
   padding: 0 4px;
   margin-top: 2px;
+}
+
+.thinkingCollapsed .expandToggle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  background: var(--bg-primary);
+  padding-left: 4px;
 }
 
 .expandToggle:hover {

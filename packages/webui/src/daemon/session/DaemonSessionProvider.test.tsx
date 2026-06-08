@@ -1130,10 +1130,7 @@ describe('DaemonSessionProvider', () => {
       sdkMocks.MockDaemonSessionClient.createOrAttach,
     ).toHaveBeenCalledTimes(1);
     expect(events).toHaveBeenCalledTimes(2);
-    expect(blocks).toMatchObject([
-      { kind: 'assistant', text: 'hello' },
-      { kind: 'status', text: 'SSE stream ended' },
-    ]);
+    expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
   it('does not inject replay snapshot again after a normal SSE stream end', async () => {
@@ -1220,7 +1217,6 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'replayed prompt' },
       { kind: 'assistant', text: 'replayed answer', streaming: false },
-      { kind: 'status', text: 'SSE stream ended' },
     ]);
   });
 
@@ -1868,7 +1864,7 @@ describe('DaemonSessionProvider', () => {
     ).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces SSE stream end and clears the session when reconnect is disabled', async () => {
+  it('clears the session when reconnect is disabled after SSE stream end', async () => {
     const session = createMockSession({ events: createClosedEvents() });
     sdkMocks.sessions.push(session);
     let actions: DaemonUiSessionActions | undefined;
@@ -1893,9 +1889,7 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(connection).toMatchObject({ status: 'disconnected' });
-    expect(blocks).toMatchObject([
-      { kind: 'status', text: 'SSE stream ended' },
-    ]);
+    expect(blocks).toEqual([]);
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
         'Daemon session is not connected',

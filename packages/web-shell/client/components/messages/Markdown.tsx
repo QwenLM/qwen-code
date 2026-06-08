@@ -16,6 +16,7 @@ import styles from './Markdown.module.css';
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
+  trailingInline?: ReactNode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -442,6 +443,7 @@ const components: Components = {
 export const Markdown = memo(function Markdown({
   content,
   source,
+  trailingInline,
 }: MarkdownProps) {
   const { markdown } = useWebShellCustomization();
 
@@ -452,9 +454,30 @@ export const Markdown = memo(function Markdown({
     source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const trailingComponents: Components | undefined = trailingInline
+    ? {
+        p({ children, node }: { children?: ReactNode; node?: unknown }) {
+          const position = (
+            node as { position?: { end?: { offset?: number } } } | undefined
+          )?.position;
+          const isLastParagraph =
+            typeof position?.end?.offset === 'number' &&
+            position.end.offset >= renderedContent.length;
+          return (
+            <p>
+              {children}
+              {isLastParagraph ? trailingInline : null}
+            </p>
+          );
+        },
+      }
+    : undefined;
   const renderedComponents = sourceMarkdown?.components
     ? { ...components, ...sourceMarkdown.components }
     : components;
+  const finalComponents = trailingComponents
+    ? { ...renderedComponents, ...trailingComponents }
+    : renderedComponents;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
     ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
     : [remarkGfm, remarkMath];
@@ -470,7 +493,7 @@ export const Markdown = memo(function Markdown({
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
-        components={renderedComponents}
+        components={finalComponents}
       >
         {renderedContent}
       </ReactMarkdown>
