@@ -10,57 +10,99 @@ import React from 'react';
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
 
-export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
+function hasMeaningfulText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+export interface AtAGlanceTargetSections {
+  wins: boolean;
+  friction: boolean;
+  features: boolean;
+  horizon: boolean;
+}
+
+export function AtAGlance({
+  qualitative,
+  targetSections,
+}: {
+  qualitative: QualitativeData;
+  targetSections: AtAGlanceTargetSections;
+}) {
   const { atAGlance } = qualitative;
   if (!atAGlance) return null;
+
+  const sections = [
+    {
+      key: 'wins',
+      label: "What's working:",
+      body: atAGlance.whats_working,
+      href: '#section-wins',
+      link: 'Impressive Things You Did →',
+      showLink: targetSections.wins,
+    },
+    {
+      key: 'friction',
+      label: "What's hindering you:",
+      body: atAGlance.whats_hindering,
+      href: '#section-friction',
+      link: 'Where Things Go Wrong →',
+      showLink: targetSections.friction,
+    },
+    {
+      key: 'features',
+      label: 'Quick wins to try:',
+      body: atAGlance.quick_wins,
+      href: '#section-features',
+      link: 'Features to Try →',
+      showLink: targetSections.features,
+    },
+    {
+      key: 'horizon',
+      label: 'Ambitious workflows:',
+      body: atAGlance.ambitious_workflows,
+      href: '#section-horizon',
+      link: 'On the Horizon →',
+      showLink: targetSections.horizon,
+    },
+  ].filter((section) => hasMeaningfulText(section.body));
+
+  if (sections.length === 0) return null;
 
   return (
     <div className="at-a-glance">
       <div className="glance-title">At a Glance</div>
       <div className="glance-sections">
-        <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
-          <MarkdownText>{atAGlance.whats_working}</MarkdownText>
-          <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
-          </a>
-        </div>
-        <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
-          <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
-          <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
-          </a>
-        </div>
-        <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
-          <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
-          <a href="#section-features" className="see-more">
-            Features to Try →
-          </a>
-        </div>
-        <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
-          <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
-          <a href="#section-horizon" className="see-more">
-            On the Horizon →
-          </a>
-        </div>
+        {sections.map((section) => (
+          <div key={section.key} className="glance-section">
+            <strong>{section.label}</strong>{' '}
+            <MarkdownText>{section.body}</MarkdownText>
+            {section.showLink && (
+              <a href={section.href} className="see-more">
+                {section.link}
+              </a>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-export function NavToc() {
+export interface NavTocSection {
+  href: string;
+  label: string;
+}
+
+export function NavToc({ sections }: { sections: NavTocSection[] }) {
+  if (sections.length === 0) return null;
+
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      {sections.map((section) => (
+        <a key={section.href} href={section.href}>
+          {section.label}
+        </a>
+      ))}
     </nav>
   );
 }
@@ -176,12 +218,11 @@ export function ImpressiveWorkflows({
   primarySuccess,
   outcomes,
 }: {
-  qualitative: QualitativeData;
+  qualitative?: QualitativeData;
   primarySuccess: Record<string, number>;
   outcomes: Record<string, number>;
 }) {
-  const { impressiveWorkflows } = qualitative;
-  if (!impressiveWorkflows) return null;
+  const impressiveWorkflows = qualitative?.impressiveWorkflows;
 
   return (
     <>
@@ -191,22 +232,24 @@ export function ImpressiveWorkflows({
       >
         Impressive Things You Did
       </h2>
-      {impressiveWorkflows.intro && (
+      {impressiveWorkflows?.intro && (
         <p className="section-intro">
           <MarkdownText>{impressiveWorkflows.intro}</MarkdownText>
         </p>
       )}
-      <div className="big-wins">
-        {Array.isArray(impressiveWorkflows.impressive_workflows) &&
-          impressiveWorkflows.impressive_workflows.map((win, idx) => (
-            <div key={idx} className="big-win">
-              <div className="big-win-title">{win.title}</div>
-              <div className="big-win-desc">
-                <MarkdownText>{win.description}</MarkdownText>
+      {impressiveWorkflows && (
+        <div className="big-wins">
+          {Array.isArray(impressiveWorkflows.impressive_workflows) &&
+            impressiveWorkflows.impressive_workflows.map((win, idx) => (
+              <div key={idx} className="big-win">
+                <div className="big-win-title">{win.title}</div>
+                <div className="big-win-desc">
+                  <MarkdownText>{win.description}</MarkdownText>
+                </div>
               </div>
-            </div>
-          ))}
-      </div>
+            ))}
+        </div>
+      )}
 
       <div
         style={{
@@ -277,7 +320,9 @@ function HorizontalBarChart({
   if (!data || Object.keys(data).length === 0) return null;
 
   // Filter and sort entries
-  let entries = Object.entries(data);
+  let entries = Object.entries(data).filter(
+    ([, count]) => Number.isFinite(count) && count !== 0,
+  );
   if (allowedKeys) {
     entries = entries.filter(([key]) => allowedKeys.includes(key));
   }
@@ -400,12 +445,11 @@ export function FrictionPoints({
   satisfaction,
   friction,
 }: {
-  qualitative: QualitativeData;
+  qualitative?: QualitativeData;
   satisfaction?: Record<string, number>;
   friction?: Record<string, number>;
 }) {
-  const { frictionPoints } = qualitative;
-  if (!frictionPoints) return null;
+  const frictionPoints = qualitative?.frictionPoints;
 
   return (
     <>
@@ -415,31 +459,33 @@ export function FrictionPoints({
       >
         Where Things Go Wrong
       </h2>
-      {frictionPoints.intro && (
+      {frictionPoints?.intro && (
         <p className="section-intro">
           <MarkdownText>{frictionPoints.intro}</MarkdownText>
         </p>
       )}
-      <div className="friction-categories">
-        {Array.isArray(frictionPoints.categories) &&
-          frictionPoints.categories.map((cat, idx) => (
-            <div key={idx} className="friction-category">
-              <div className="friction-title">{cat.category}</div>
-              <div className="friction-desc">
-                <MarkdownText>{cat.description}</MarkdownText>
+      {frictionPoints && (
+        <div className="friction-categories">
+          {Array.isArray(frictionPoints.categories) &&
+            frictionPoints.categories.map((cat, idx) => (
+              <div key={idx} className="friction-category">
+                <div className="friction-title">{cat.category}</div>
+                <div className="friction-desc">
+                  <MarkdownText>{cat.description}</MarkdownText>
+                </div>
+                {Array.isArray(cat.examples) && cat.examples.length > 0 && (
+                  <ul className="friction-examples">
+                    {cat.examples.map((ex, i) => (
+                      <li key={i}>
+                        <MarkdownText>{ex}</MarkdownText>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              {Array.isArray(cat.examples) && cat.examples.length > 0 && (
-                <ul className="friction-examples">
-                  {cat.examples.map((ex, i) => (
-                    <li key={i}>
-                      <MarkdownText>{ex}</MarkdownText>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))}
-      </div>
+            ))}
+        </div>
+      )}
 
       {/* Facets Data Charts */}
       <div
@@ -566,81 +612,106 @@ export function Improvements({
   const { improvements } = qualitative;
   if (!improvements) return null;
 
+  const hasFeatureSuggestions =
+    (Array.isArray(improvements.Qwen_md_additions) &&
+      improvements.Qwen_md_additions.length > 0) ||
+    (Array.isArray(improvements.features_to_try) &&
+      improvements.features_to_try.length > 0);
+  const hasUsagePatterns =
+    Array.isArray(improvements.usage_patterns) &&
+    improvements.usage_patterns.length > 0;
+
+  if (!hasFeatureSuggestions && !hasUsagePatterns) return null;
+
   return (
     <>
-      <h2
-        id="section-features"
-        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
-      >
-        Existing Qwen Code Features to Try
-      </h2>
+      {hasFeatureSuggestions && (
+        <>
+          <h2
+            id="section-features"
+            className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+          >
+            Existing Qwen Code Features to Try
+          </h2>
 
-      {/* QWEN.md Additions */}
-      {Array.isArray(improvements.Qwen_md_additions) &&
-        improvements.Qwen_md_additions.length > 0 && (
-          <QwenMdAdditionsSection additions={improvements.Qwen_md_additions} />
-        )}
+          {/* QWEN.md Additions */}
+          {Array.isArray(improvements.Qwen_md_additions) &&
+            improvements.Qwen_md_additions.length > 0 && (
+              <QwenMdAdditionsSection
+                additions={improvements.Qwen_md_additions}
+              />
+            )}
 
-      <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll set it up for you.
-      </p>
+          <p className="text-xs text-slate-500 mb-3">
+            Just copy this into Qwen Code and it&apos;ll set it up for you.
+          </p>
 
-      {/* Features to Try */}
-      <div className="features-section">
-        {Array.isArray(improvements.features_to_try) &&
-          improvements.features_to_try.map((feat, idx) => (
-            <div key={idx} className="feature-card">
-              <div className="feature-title">{feat.feature}</div>
-              <div className="feature-oneliner">
-                <MarkdownText>{feat.one_liner}</MarkdownText>
-              </div>
-              <div className="feature-why">
-                <strong>Why for you:</strong>{' '}
-                <MarkdownText>{feat.why_for_you}</MarkdownText>
-              </div>
-              <div className="feature-examples">
-                <div className="feature-example">
-                  <div className="example-code-row">
-                    <code className="example-code">{feat.example_code}</code>
-                    <CopyButton text={feat.example_code} />
+          {/* Features to Try */}
+          <div className="features-section">
+            {Array.isArray(improvements.features_to_try) &&
+              improvements.features_to_try.map((feat, idx) => (
+                <div key={idx} className="feature-card">
+                  <div className="feature-title">{feat.feature}</div>
+                  <div className="feature-oneliner">
+                    <MarkdownText>{feat.one_liner}</MarkdownText>
+                  </div>
+                  <div className="feature-why">
+                    <strong>Why for you:</strong>{' '}
+                    <MarkdownText>{feat.why_for_you}</MarkdownText>
+                  </div>
+                  <div className="feature-examples">
+                    <div className="feature-example">
+                      <div className="example-code-row">
+                        <code className="example-code">
+                          {feat.example_code}
+                        </code>
+                        <CopyButton text={feat.example_code} />
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
-          ))}
-      </div>
+              ))}
+          </div>
+        </>
+      )}
 
-      <h2
-        id="section-patterns"
-        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
-      >
-        New Ways to Use Qwen Code
-      </h2>
-      <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll walk you through it.
-      </p>
+      {hasUsagePatterns && (
+        <>
+          <h2
+            id="section-patterns"
+            className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+          >
+            New Ways to Use Qwen Code
+          </h2>
+          <p className="text-xs text-slate-500 mb-3">
+            Just copy this into Qwen Code and it&apos;ll walk you through it.
+          </p>
 
-      <div className="patterns-section">
-        {Array.isArray(improvements.usage_patterns) &&
-          improvements.usage_patterns.map((pat, idx) => (
-            <div key={idx} className="pattern-card">
-              <div className="pattern-title">{pat.title}</div>
-              <div className="pattern-summary">
-                <MarkdownText>{pat.suggestion}</MarkdownText>
-              </div>
-              <div className="pattern-detail">
-                <MarkdownText>{pat.detail}</MarkdownText>
-              </div>
-              <div className="copyable-prompt-section">
-                <div className="prompt-label">Paste into Qwen Code:</div>
-                <div className="copyable-prompt-row">
-                  <code className="copyable-prompt">{pat.copyable_prompt}</code>
-                  <CopyButton text={pat.copyable_prompt} />
+          <div className="patterns-section">
+            {Array.isArray(improvements.usage_patterns) &&
+              improvements.usage_patterns.map((pat, idx) => (
+                <div key={idx} className="pattern-card">
+                  <div className="pattern-title">{pat.title}</div>
+                  <div className="pattern-summary">
+                    <MarkdownText>{pat.suggestion}</MarkdownText>
+                  </div>
+                  <div className="pattern-detail">
+                    <MarkdownText>{pat.detail}</MarkdownText>
+                  </div>
+                  <div className="copyable-prompt-section">
+                    <div className="prompt-label">Paste into Qwen Code:</div>
+                    <div className="copyable-prompt-row">
+                      <code className="copyable-prompt">
+                        {pat.copyable_prompt}
+                      </code>
+                      <CopyButton text={pat.copyable_prompt} />
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          ))}
-      </div>
+              ))}
+          </div>
+        </>
+      )}
     </>
   );
 }

@@ -43,6 +43,7 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  createInstructionsLoadedCallback,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -120,7 +121,10 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -187,6 +191,7 @@ import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
@@ -207,6 +212,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './utils/historyUtils.js';
+import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -519,6 +525,21 @@ export const AppContainer = (props: AppContainerProps) => {
       // the profile captures the full MCP timeline without holding back
       // the user-facing TTI.
 
+      // Phase D-1: when launched with --worktree, gemini.tsx stashes a
+      // one-shot notice on Config. Consume it here so it surfaces in the
+      // transcript AND gets injected into the next user prompt. This
+      // wins over the Phase C resume-restore path below — startup beats
+      // resume on the same prompt.
+      const startupWorktreeNotice =
+        config.consumePendingStartupWorktreeNotice();
+      if (startupWorktreeNotice) {
+        historyManager.addItem(
+          { type: MessageType.INFO, text: startupWorktreeNotice },
+          Date.now(),
+        );
+        pendingWorktreeNoticeRef.current = startupWorktreeNotice;
+      }
+
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const historyItems = buildResumedHistoryItems(
@@ -560,32 +581,39 @@ export const AppContainer = (props: AppContainerProps) => {
         // Restore worktree context (shared logic — headless and ACP use
         // the same helper). Stale sidecars get cleaned up; live ones
         // produce an INFO message the model sees on the next turn.
-        try {
-          const sessionPath = config
-            .getSessionService()
-            .getWorktreeSessionPath(config.getSessionId());
-          const restored = await restoreWorktreeContext(sessionPath, (err) => {
-            // eslint-disable-next-line no-console
-            console.debug('worktree session restore warning:', err);
-          });
-          if (restored.contextMessage) {
-            // UI: show the notice in the transcript so the user knows.
-            historyManager.addItem(
-              { type: MessageType.INFO, text: restored.contextMessage },
-              Date.now(),
+        // Skipped when Phase D-1 already injected a --worktree startup
+        // notice above (startup wins over resume on the same prompt).
+        if (!startupWorktreeNotice) {
+          try {
+            const sessionPath = config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId());
+            const restored = await restoreWorktreeContext(
+              sessionPath,
+              (err) => {
+                // eslint-disable-next-line no-console
+                console.debug('worktree session restore warning:', err);
+              },
             );
-            // Model: queue the notice for one-shot injection into the
-            // next user prompt (consumed by handleFinalSubmit). The INFO
-            // history item alone is UI-only — the model never sees it,
-            // so without this it could resume editing the parent
-            // checkout despite the user seeing the worktree path.
-            pendingWorktreeNoticeRef.current = restored.contextMessage;
+            if (restored.contextMessage) {
+              // UI: show the notice in the transcript so the user knows.
+              historyManager.addItem(
+                { type: MessageType.INFO, text: restored.contextMessage },
+                Date.now(),
+              );
+              // Model: queue the notice for one-shot injection into the
+              // next user prompt (consumed by handleFinalSubmit). The INFO
+              // history item alone is UI-only — the model never sees it,
+              // so without this it could resume editing the parent
+              // checkout despite the user seeing the worktree path.
+              pendingWorktreeNoticeRef.current = restored.contextMessage;
+            }
+          } catch (error) {
+            // Best-effort: failures here only affect UI hint visibility,
+            // not the resumed conversation itself.
+            // eslint-disable-next-line no-console
+            console.debug('worktree session restore failed:', error);
           }
-        } catch (error) {
-          // Best-effort: failures here only affect UI hint visibility,
-          // not the resumed conversation itself.
-          // eslint-disable-next-line no-console
-          console.debug('worktree session restore failed:', error);
         }
       }
     })();
@@ -820,10 +848,23 @@ export const AppContainer = (props: AppContainerProps) => {
     setHistoryRemountKey((prev) => prev + 1);
   }, []);
 
+  // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
+  // region via ink 7 native overflow clipping. Writing clearTerminal /
+  // cursorTo+eraseDown would be a wasted flash and would also corrupt the
+  // in-app scroll position. The remount-key bump is also a near-no-op for
+  // VP: nothing in the VP render path is keyed by historyRemountKey, so
+  // the only reason to bump it is to keep the legacy `<Static>` branch in
+  // sync if the user toggles `useTerminalBuffer` off mid-session. The
+  // visible refresh in VP mode comes for free from the React tree
+  // re-reading `mergedHistory` / `allVirtualItems` on whatever state
+  // change triggered refreshStatic (Ctrl+O, model change, etc.).
+  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const refreshStatic = useCallback(() => {
-    stdout.write(ansiEscapes.clearTerminal);
+    if (!useTerminalBuffer) {
+      stdout.write(ansiEscapes.clearTerminal);
+    }
     remountStaticHistory();
-  }, [remountStaticHistory, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Targeted repaint for resize events: move cursor to top-left and erase
   // downward instead of a full clearTerminal, avoiding the full-screen
@@ -831,10 +872,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // changes (tmux split, fullscreen toggle, font size change) we must
   // explicitly re-emit the static history at the new width — otherwise
   // header content stays at the old width and visibly tears.
+  // VP mode handles resize via ink's reflow + its own overflow clipping, so
+  // the physical write is unnecessary there too.
   const repaintStaticViewport = useCallback(() => {
-    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    if (!useTerminalBuffer) {
+      stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    }
     remountStaticHistory();
-  }, [remountStaticHistory, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Track previous terminal width across renders so we only repaint when
   // the width actually changes. Initialized to the current width to avoid
@@ -1022,7 +1067,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { toggleVimEnabled } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
 
   const {
     isSubagentCreateDialogOpen,
@@ -1034,6 +1080,11 @@ export const AppContainer = (props: AppContainerProps) => {
     openAgentsManagerDialog,
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
+  const {
+    isSkillsManagerDialogOpen,
+    openSkillsManagerDialog,
+    closeSkillsManagerDialog,
+  } = useSkillsManagerDialog();
   const {
     isExtensionsManagerDialogOpen,
     openExtensionsManagerDialog,
@@ -1085,6 +1136,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1113,6 +1165,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openSkillsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
@@ -1136,6 +1189,7 @@ export const AppContainer = (props: AppContainerProps) => {
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    reloadCommands,
   } = useSlashCommandProcessor(
     config,
     settings,
@@ -1152,6 +1206,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    historyManager.updateItem,
     setSessionName,
   );
 
@@ -1284,6 +1339,12 @@ export const AppContainer = (props: AppContainerProps) => {
           config.isTrustedFolder(),
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
+          {
+            loadReason: 'refresh',
+            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+              config.getHookSystem(),
+            ),
+          },
         );
 
       config.setUserMemory(memoryContent);
@@ -2085,10 +2146,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Use curated history to avoid invalid/empty entries causing API errors
-      const fullHistory = geminiClient.getChat().getHistory(true);
-      const conversationHistory =
-        fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      // Only clone the tail — full structuredClone of a large resumed session
+      // causes transient heap peaks that trigger OOM (#4624).
+      const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
       })
@@ -2188,6 +2248,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const [compactInline] = useState<boolean>(
+    settings.merged.ui?.compactInline ?? false,
+  );
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -2271,6 +2334,7 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
+    isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
@@ -2281,7 +2345,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
     bgTasksDialogOpen ||
-    showWorktreeExitDialog;
+    showWorktreeExitDialog ||
+    !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
@@ -2328,7 +2393,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
+    terminalHeight -
+      controlsHeight -
+      staticExtraHeight -
+      MAIN_CONTENT_HEIGHT_RESERVATION -
+      tabBarHeight,
   );
 
   config.setShellExecutionConfig({
@@ -2440,7 +2509,7 @@ export const AppContainer = (props: AppContainerProps) => {
             apiTruncateIndex = computeApiTruncationIndex(
               historyManager.history,
               userItem.id,
-              geminiClient.getHistory(),
+              geminiClient.getHistoryShallow(),
             );
             if (apiTruncateIndex < 0) {
               historyManager.addItem(
@@ -2873,6 +2942,14 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
+        // the Esc to switch to NORMAL mode. Without this guard, both handlers
+        // fire on the same keypress — vim switches mode AND AppContainer
+        // shows "Press Esc again to clear" or cancels the stream.
+        if (vimEnabled && vimMode === 'INSERT') {
+          return;
+        }
+
         // Dismiss or cancel btw side-question on Escape,
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
@@ -3094,6 +3171,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
+      vimEnabled,
+      vimMode,
     ],
   );
 
@@ -3240,6 +3319,7 @@ export const AppContainer = (props: AppContainerProps) => {
       currentModel,
       contextFileNames,
       availableTerminalHeight,
+      useTerminalBuffer,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -3272,6 +3352,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3363,6 +3445,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showAutoAcceptIndicator,
       contextFileNames,
       availableTerminalHeight,
+      useTerminalBuffer,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -3397,6 +3480,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skills manager dialog (`/skills`)
+      isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
       // MCP dialog
@@ -3468,6 +3553,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      setInputBuffer: buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog
@@ -3544,6 +3634,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Skills manager dialog (`/skills`)
+      openSkillsManagerDialog,
+      closeSkillsManagerDialog,
+      reloadCommands,
+      buffer.setText,
       // Extensions manager dialog
       closeExtensionsManagerDialog,
       // MCP dialog
@@ -3583,8 +3678,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, setCompactMode }),
-    [compactMode, setCompactMode],
+    () => ({ compactMode, compactInline, setCompactMode }),
+    [compactMode, compactInline, setCompactMode],
   );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),

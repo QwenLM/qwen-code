@@ -492,18 +492,32 @@ export class BackgroundAgentResumeService {
 
     const bgAbortController = new AbortController();
 
-    registry.register({
-      ...existing,
-      status: 'running',
-      abortController: bgAbortController,
-      endTime: undefined,
-      result: undefined,
-      error: undefined,
-      resumeBlockedReason: undefined,
-      stats: undefined,
-      recentActivities: [],
-      pendingMessages: [...(existing.pendingMessages ?? [])],
-    });
+    try {
+      registry.register({
+        ...existing,
+        status: 'running',
+        abortController: bgAbortController,
+        endTime: undefined,
+        result: undefined,
+        error: undefined,
+        resumeBlockedReason: undefined,
+        stats: undefined,
+        recentActivities: [],
+        pendingMessages: [...(existing.pendingMessages ?? [])],
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      debugLogger.warn(
+        `[BackgroundAgentResume] Cannot resume background agent ${agentId}: ${errorMessage}`,
+      );
+      patchAgentMeta(metaPath, {
+        lastError: errorMessage,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+      this.restorePausedEntry(agentId, { error: errorMessage });
+      return undefined;
+    }
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
     let cleanupJsonl: (() => void) | undefined;
@@ -561,7 +575,9 @@ export class BackgroundAgentResumeService {
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
         : [
-            ...(await getInitialChatHistory(bgConfig as Config)),
+            ...(await getInitialChatHistory(bgConfig as Config, undefined, {
+              includeDeferredToolsReminder: false,
+            })),
             ...recovery.history,
           ];
       const promptMessages = [...operation.continuationMessages];

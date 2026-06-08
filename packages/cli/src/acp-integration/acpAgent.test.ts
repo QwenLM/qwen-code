@@ -145,7 +145,20 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
+vi.mock('./authMethods.js', () => {
+  const buildAuthMethods = vi.fn();
+  return {
+    buildAuthMethods,
+    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
+      const authMethods = buildAuthMethods();
+      if (!selectedType) return authMethods;
+      const matched = authMethods.filter(
+        (method: { id: string }) => method.id === selectedType,
+      );
+      return matched.length ? matched : authMethods;
+    }),
+  };
+});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -153,7 +166,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
   buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
@@ -195,6 +211,7 @@ import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { SERVE_STATUS_EXT_METHODS } from '../serve/status.js';
+import { buildAuthMethods } from './authMethods.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -792,6 +809,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
+    vi.mocked(buildAuthMethods).mockReturnValue([
+      {
+        id: 'openai',
+        name: 'Use OpenAI API key',
+        description: 'Requires setting OPENAI_API_KEY',
+      },
+    ]);
+
+    const innerConfig = makeInnerConfig();
+    vi.mocked(innerConfig.getModelsConfig).mockReturnValue({
+      getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
+    } as unknown as ReturnType<Config['getModelsConfig']>);
+    vi.mocked(innerConfig.refreshAuth).mockRejectedValue(
+      new Error('qwen-oauth token expired'),
+    );
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('test-session-id'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toMatchObject({
+      authMethods: [
+        expect.objectContaining({
+          id: 'openai',
+        }),
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   function makeInnerConfig() {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -844,6 +919,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
         captureHistorySnapshot: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -1658,6 +1734,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
     });
     vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
@@ -2361,6 +2438,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -2489,6 +2567,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
         installRewriter: ReturnType<typeof vi.fn>;
+        dispose: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -2616,6 +2695,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;
       return sessionMock as unknown as InstanceType<typeof Session>;
@@ -2709,6 +2789,37 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession disposes the existing session when reloading the same sessionId', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+      },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    // First loadSession creates a session
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock;
+    expect(firstSession).toBeDefined();
+    expect(firstSession!.dispose).not.toHaveBeenCalled();
+
+    // Second loadSession with the same sessionId should dispose the first
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    expect(firstSession!.dispose).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

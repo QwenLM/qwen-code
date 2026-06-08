@@ -441,3 +441,50 @@ describe('Configuration Integration Tests', () => {
     });
   });
 });
+
+describe('buildDisabledSkillNamesProvider', async () => {
+  const { buildDisabledSkillNamesProvider } = await import('./config.js');
+
+  function fakeSettings(disabled: unknown) {
+    return { merged: { skills: { disabled } } } as never;
+  }
+
+  it('returns a normalized set from a normal array', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['Foo', ' BAR ', 'baz']),
+    );
+    const result = provider();
+    expect(result).toEqual(new Set(['foo', 'bar', 'baz']));
+  });
+
+  it('returns empty set for non-array values (string)', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings('all'));
+    expect(provider()).toEqual(new Set());
+  });
+
+  it('returns empty set for non-array values (number)', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings(42));
+    expect(provider()).toEqual(new Set());
+  });
+
+  it('returns empty set for null/undefined', () => {
+    const provider = buildDisabledSkillNamesProvider(fakeSettings(null));
+    expect(provider()).toEqual(new Set());
+    const provider2 = buildDisabledSkillNamesProvider(fakeSettings(undefined));
+    expect(provider2()).toEqual(new Set());
+  });
+
+  it('filters non-string elements from a mixed-type array', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings([42, null, 'valid', undefined, true, '  TRIMMED  ']),
+    );
+    expect(provider()).toEqual(new Set(['valid', 'trimmed']));
+  });
+
+  it('excludes empty-after-trim strings', () => {
+    const provider = buildDisabledSkillNamesProvider(
+      fakeSettings(['  ', '', 'keep']),
+    );
+    expect(provider()).toEqual(new Set(['keep']));
+  });
+});

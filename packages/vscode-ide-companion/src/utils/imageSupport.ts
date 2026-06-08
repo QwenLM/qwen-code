@@ -28,7 +28,7 @@ export const MAX_TOTAL_IMAGE_SIZE = 20 * 1024 * 1024;
 
 // ---------- Path escaping ----------
 
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
 
 export function escapePath(filePath: string): string {
   let result = '';

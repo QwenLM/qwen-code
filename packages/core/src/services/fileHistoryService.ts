@@ -99,7 +99,7 @@ export interface TurnDiff {
 }
 
 const MAX_SNAPSHOTS = 100;
-const FILE_HISTORY_DIR = 'file-history';
+export const FILE_HISTORY_DIR = 'file-history';
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
  *  so 500 files ≈ 1000 concurrent opens — safely under the typical 4096 fd
  *  ceiling and well below `ulimit -n` defaults on Linux/macOS. */

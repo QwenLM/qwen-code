@@ -359,6 +359,9 @@ describe('<ToolGroupMessage />', () => {
     });
 
     it('gives focus to only the first running subagent when multiple are running', () => {
+      // A non-agent sibling prevents isPureParallelAgentGroup from
+      // routing the group to InlineParallelAgentsDisplay, so the
+      // expanded path (and its focus routing) is exercised.
       const { lastFrame } = renderWithProviders(
         <ToolGroupMessage
           {...baseProps}
@@ -374,6 +377,12 @@ describe('<ToolGroupMessage />', () => {
               name: 'agent',
               status: ToolCallStatus.Executing,
               resultDisplay: createRunningSubagentDisplay('second'),
+            }),
+            createToolCall({
+              callId: 'read-sibling',
+              name: 'read_file',
+              description: 'read helper.ts',
+              status: ToolCallStatus.Success,
             }),
           ]}
         />,
@@ -585,7 +594,7 @@ describe('<ToolGroupMessage />', () => {
     const renderCompact = (component: React.ReactElement, compactMode = true) =>
       render(
         <ConfigContext.Provider value={mockConfig}>
-          <CompactModeProvider value={{ compactMode }}>
+          <CompactModeProvider value={{ compactMode, compactInline: false }}>
             {component}
           </CompactModeProvider>
         </ConfigContext.Provider>,

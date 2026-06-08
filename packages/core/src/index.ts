@@ -88,7 +88,10 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
-export { buildSkillLlmContent } from './tools/skill-utils.js';
+export {
+  buildSkillLlmContent,
+  applySkillAllowedTools,
+} from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -137,6 +140,10 @@ export * from './providers/index.js';
 // Services
 // ============================================================================
 
+export {
+  computeThresholds,
+  type CompactionThresholds,
+} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
@@ -149,6 +156,7 @@ export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
+export * from './services/sleepInhibitor.js';
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
@@ -285,6 +293,7 @@ export * from './followup/index.js';
 // Utilities
 // ============================================================================
 
+export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
@@ -384,7 +393,12 @@ export * from './test-utils/index.js';
 // ============================================================================
 
 export * from './hooks/types.js';
-export { HookSystem, HookRegistry } from './hooks/index.js';
+export {
+  HookSystem,
+  HookRegistry,
+  createInstructionsLoadedCallback,
+  hookEventSupportsMatcher,
+} from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,

@@ -45,20 +45,26 @@ const StickyTodoListComponent: React.FC<StickyTodoListProps> = ({
   width,
   maxVisibleItems = STICKY_TODO_MAX_VISIBLE_ITEMS,
 }) => {
-  const orderedTodos = useMemo(() => getOrderedStickyTodos(todos), [todos]);
+  const orderedOpenTodos = useMemo(
+    () =>
+      getOrderedStickyTodos(todos).filter(
+        (todo) => todo.status !== 'completed',
+      ),
+    [todos],
+  );
   const todoNumberById = useMemo(
     () =>
       new Map(todos.map((todo, index) => [todo.id, `${index + 1}.`] as const)),
     [todos],
   );
 
-  if (todos.length === 0) {
+  if (orderedOpenTodos.length === 0) {
     return null;
   }
 
   const visibleTodoCount = clampVisibleTodoCount(maxVisibleItems);
-  const visibleTodos = orderedTodos.slice(0, visibleTodoCount);
-  const hiddenTodoCount = orderedTodos.length - visibleTodos.length;
+  const visibleTodos = orderedOpenTodos.slice(0, visibleTodoCount);
+  const hiddenTodoCount = orderedOpenTodos.length - visibleTodos.length;
   const numberColumnWidth =
     Math.max(
       ...visibleTodos.map(

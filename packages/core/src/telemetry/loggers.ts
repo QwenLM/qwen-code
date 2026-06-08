@@ -30,6 +30,7 @@ import {
   EVENT_CHAT_COMPRESSION,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_API_RETRY,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
   EVENT_EXTENSION_INSTALL,
@@ -57,6 +58,7 @@ import {
   recordChatCompressionMetrics,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   recordFileOperationMetric,
   recordInvalidChunk,
   recordModelSlashCommand,
@@ -93,6 +95,7 @@ import type {
   ChatCompressionEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ApiRetryEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
   ExtensionDisableEvent,
@@ -756,6 +759,38 @@ export function logContentRetryFailure(
   recordContentRetryFailure(config);
 }
 
+/**
+ * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
+ * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
+ * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ *
+ * Three-sink fan-out, matching the `logContentRetry` shape exactly:
+ *   1. QwenLogger RUM ingestion (Aliyun internal stats)
+ *   2. OTel log signal via `logger.emit()` — picked up by LogToSpanProcessor
+ *      and bridged to a span sibling under the caller's active span (typically
+ *      interaction or tool, NOT the failed LLM span — that span has already
+ *      ended by the time onRetry fires).
+ *   3. `recordApiRetry` Counter increment for per-model retry-rate dashboards.
+ */
+export function logApiRetry(config: Config, event: ApiRetryEvent): void {
+  QwenLogger.getInstance(config)?.logApiRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_API_RETRY,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `API retry attempt ${event.attempt_number} for ${event.model} (status ${event.status_code ?? 'unknown'}).`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordApiRetry(config, { model: event.model });
+}
+
 export function logSubagentExecution(
   config: Config,
   event: SubagentExecutionEvent,
@@ -956,6 +991,7 @@ export function logAuth(config: Config, event: AuthEvent): void {
 }
 
 export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
+  QwenLogger.getInstance(config)?.logSkillLaunchEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {

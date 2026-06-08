@@ -9,8 +9,10 @@
  *   Stage 1 (fast):  shouldBlock-only output, max_tokens=32, thinking off.
  *                    Allow path returns immediately (~300ms).
  *   Stage 2 (review): full output { thinking, shouldBlock, reason },
- *                     max_tokens=4096, thinking on. Reviews stage-1 blocks
- *                     to reduce false positives.
+ *                     max_tokens=4096. API thinking is off by default but can
+ *                     be enabled via settings. Reviews stage-1 blocks to
+ *                     reduce false positives. (`thinking` is a plain output
+ *                     field unless API thinking is explicitly enabled.)
  *
  * Fail-closed: any non-abort failure (API error, timeout, schema failure,
  * context overflow) returns shouldBlock=true with unavailable=true.
@@ -33,10 +35,20 @@ import { buildClassifierContents } from './classifier-transcript.js';
 // the underlying API / timeout / context-overflow error.
 const debugLogger = createDebugLogger('CLASSIFIER');
 
-/** Stage-1 timeout: fast model p99 is ~1.5s; 3s catches stuck cases. */
-export const STAGE1_TIMEOUT_MS = 3_000;
-/** Stage-2 timeout: thinking takes longer; 10s caps infrastructure failure. */
-export const STAGE2_TIMEOUT_MS = 10_000;
+// A timeout is fail-closed (action BLOCKED as "unavailable"), so too tight a
+// budget turns transient slowness into spurious blocks. The fast model's p99
+// is ~1.5s but the tail is long under load, so budgets are kept generous —
+// better to wait than fail closed on a healthy call.
+/** Stage-1 timeout: generous headroom over the fast model's p99 (~1.5s). */
+export const STAGE1_TIMEOUT_MS = 10_000;
+/** Stage-2 timeout: review stage runs a larger prompt; cap infra failure. */
+export const STAGE2_TIMEOUT_MS = 30_000;
+
+interface ClassifierSettings {
+  stage1TimeoutMs: number;
+  stage2TimeoutMs: number;
+  stage2ThinkingEnabled: boolean;
+}
 
 /** Token usage attributed to a single classifier call. */
 export interface ClassifierUsage {
@@ -152,11 +164,12 @@ export async function classifyAction(
     );
   }
   const stage1SystemPrompt = baseSystemPrompt + STAGE1_SUFFIX;
+  const classifierSettings = resolveClassifierSettings(input.config);
 
   // Stage 1 ──────────────────────────────────────────────────────────────
   const stage1Signal = AbortSignal.any([
     input.signal,
-    AbortSignal.timeout(STAGE1_TIMEOUT_MS),
+    AbortSignal.timeout(classifierSettings.stage1TimeoutMs),
   ]);
 
   let stage1: Stage1Response;
@@ -204,7 +217,7 @@ export async function classifyAction(
   // Stage 2 ──────────────────────────────────────────────────────────────
   const stage2Signal = AbortSignal.any([
     input.signal,
-    AbortSignal.timeout(STAGE2_TIMEOUT_MS),
+    AbortSignal.timeout(classifierSettings.stage2TimeoutMs),
   ]);
 
   let stage2: Stage2Response;
@@ -219,7 +232,13 @@ export async function classifyAction(
       config: {
         temperature: 0,
         maxOutputTokens: 4096,
-        thinkingConfig: { includeThoughts: true },
+        // API thinking stays off by default: this gate is latency-sensitive
+        // and a reasoning budget can worsen fail-closed timeouts. The
+        // `thinking` output field still carries the model's plain-text
+        // reasoning unless API thinking is explicitly enabled.
+        thinkingConfig: {
+          includeThoughts: classifierSettings.stage2ThinkingEnabled,
+        },
       },
     })) as Stage2Response;
   } catch (err) {
@@ -258,6 +277,37 @@ export async function classifyAction(
     durationMs: Date.now() - overallStart,
     stage: 'thinking',
   };
+}
+
+function resolveClassifierSettings(config: Config): ClassifierSettings {
+  const classifier = config.getAutoModeSettings().classifier;
+  return {
+    stage1TimeoutMs: resolveTimeoutMs(
+      classifier?.timeouts?.stage1Ms,
+      STAGE1_TIMEOUT_MS,
+    ),
+    stage2TimeoutMs: resolveTimeoutMs(
+      classifier?.timeouts?.stage2Ms,
+      STAGE2_TIMEOUT_MS,
+    ),
+    stage2ThinkingEnabled: classifier?.thinking?.stage2Enabled === true,
+  };
+}
+
+function resolveTimeoutMs(value: number | undefined, fallback: number): number {
+  if (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 1000
+  ) {
+    debugLogger.warn(
+      `Classifier timeout ${value}ms below 1000ms floor, using default ${fallback}ms`,
+    );
+  }
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1000
+    ? value
+    : fallback;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

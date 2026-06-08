@@ -32,6 +32,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
+   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * and proxy matches.
    *
@@ -70,6 +71,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         hostname.endsWith('.dashscope.aliyuncs.com') ||
         hostname.endsWith('.dashscope-intl.aliyuncs.com'));
 
+    const isTokenPlanOrigin =
+      hostname !== null &&
+      hostname.startsWith('token-plan.') &&
+      hostname.endsWith('.maas.aliyuncs.com');
+
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
     const isInternalOrigin =
@@ -90,6 +96,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
+      !isTokenPlanOrigin &&
       !isInternalOrigin &&
       !isProxyMatch
     ) {
@@ -104,7 +111,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       );
     }
 
-    return isDashscopeOrigin || isInternalOrigin || isProxyMatch;
+    return (
+      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+    );
   }
 
   override buildHeaders(): Record<string, string | undefined> {
@@ -351,6 +360,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     'qwen-vl', // qwen-vl-max, qwen-vl-max-latest, etc.
     'qwen3-vl-plus', // qwen3-vl-plus variants
     'qwen3.5-plus', // qwen3.5-plus (has built-in vision capabilities)
+    'qwen3.6-plus', // qwen3.6-plus (multimodal)
+    'qwen3.7-plus', // qwen3.7-plus (multimodal)
   ];
 
   private isVisionModel(model: string | undefined): boolean {

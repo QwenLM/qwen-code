@@ -20,12 +20,12 @@ import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
-import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import {
   ApprovalMode,
+  type Config,
   Storage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -56,6 +56,7 @@ import {
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
+import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -153,12 +154,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
     pillFocused: bgPillFocused,
+    livePanelFocused,
+    livePanelSelectedIndex,
   } = useBackgroundTaskViewState();
-  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
+  const {
+    setLivePanelFocused,
+    setLivePanelSelectedIndex,
+    enterDetailFromPanel: enterBgDetailFromPanel,
+    setSelectedIndex: setBgSelectedIndex,
+  } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const bgAgentCount = useMemo(
+    () => bgEntries.filter((e) => e.kind === 'agent').length,
+    [bgEntries],
+  );
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
@@ -169,7 +181,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ),
     [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
   );
-  const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
+  const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
+    null,
+  );
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -223,6 +237,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const exportCompletion = useExportCompletion(buffer, slashCommands);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
+  const isHistoryRestoredText =
+    historyRestoredText !== null && buffer.text === historyRestoredText;
 
   const completion = useCommandCompletion(
     buffer,
@@ -231,10 +247,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandContext,
     reverseSearchActive,
     config,
-    // Suppress completion when history navigation just occurred
-    !justNavigatedHistory,
+    // Suppress completion for history-restored text until the user edits it.
+    !isHistoryRestoredText,
     recentSlashCommands,
   );
+  const showCompletionSuggestions =
+    completion.showSuggestions && !isHistoryRestoredText;
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
   const midInputGhostTextRef = useRef<{
@@ -404,9 +422,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       buffer.setText(newText);
-      setJustNavigatedHistory(true);
+      setHistoryRestoredText(newText);
     },
-    [buffer, setJustNavigatedHistory],
+    [buffer],
   );
 
   const inputHistory = useInputHistory({
@@ -432,20 +450,27 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     prevHasAgentsRef.current = hasAgents;
   }, [hasAgents, inputHistory]);
 
-  // Effect to reset completion if history navigation just occurred and set the text
+  // History-restored input should not immediately open completion menus and
+  // steal Up/Down from continued history navigation. Editing the text clears
+  // this marker and lets completions appear again.
   useEffect(() => {
-    if (justNavigatedHistory) {
+    if (historyRestoredText === null) {
+      return;
+    }
+
+    if (buffer.text === historyRestoredText) {
       resetCompletionState();
       resetReverseSearchCompletionState();
       resetCommandSearchCompletionState();
       setExpandedSuggestionIndex(-1);
-      setJustNavigatedHistory(false);
+      return;
     }
+
+    setHistoryRestoredText(null);
   }, [
-    justNavigatedHistory,
+    historyRestoredText,
     buffer.text,
     resetCompletionState,
-    setJustNavigatedHistory,
     resetReverseSearchCompletionState,
     resetCommandSearchCompletionState,
   ]);
@@ -498,6 +523,54 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Printable characters fall through to BaseTextInput's default
       // handler so the first keystroke appears in the input immediately
       // (each surface's own handler releases focus on the same event).
+      // LiveAgentPanel keyboard navigation: ↓/↑ move selection,
+      // Enter opens dialog for selected agent, Esc/↑-at-top returns
+      // focus to composer. Printable chars type through (auto-unfocus).
+      if (livePanelFocused) {
+        if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
+          if (livePanelSelectedIndex < maxIdx) {
+            setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          }
+          return true;
+        }
+        if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
+          if (livePanelSelectedIndex <= 0) {
+            setLivePanelFocused(false);
+          } else {
+            setLivePanelSelectedIndex(livePanelSelectedIndex - 1);
+          }
+          return true;
+        }
+        if (key.name === 'return') {
+          if (livePanelSelectedIndex === 0) {
+            setLivePanelFocused(false);
+          } else {
+            const agentIdx = livePanelSelectedIndex - 1;
+            if (agentIdx < bgAgentCount) {
+              setBgSelectedIndex(agentIdx);
+              enterBgDetailFromPanel();
+            }
+            setLivePanelFocused(false);
+          }
+          return true;
+        }
+        if (key.name === 'escape') {
+          setLivePanelFocused(false);
+          return true;
+        }
+        if (
+          key.sequence &&
+          key.sequence.length === 1 &&
+          !key.ctrl &&
+          !key.meta
+        ) {
+          setLivePanelFocused(false);
+          return false;
+        }
+        return true;
+      }
+
       if (agentTabBarFocused || bgPillFocused) {
         if (
           key.sequence &&
@@ -622,7 +695,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '!' &&
         buffer.text === '' &&
-        !completion.showSuggestions
+        !showCompletionSuggestions
       ) {
         // Hide shortcuts when toggling shell mode
         if (showShortcuts && onToggleShortcuts) {
@@ -637,7 +710,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.sequence === '?' &&
         buffer.text === '' &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         onToggleShortcuts
       ) {
         onToggleShortcuts();
@@ -688,7 +761,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
-        if (completion.showSuggestions) {
+        if (showCompletionSuggestions) {
           completion.resetCompletionState();
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
@@ -819,7 +892,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
-      if (exportCompletion.handleExportInput(key, completion)) {
+      if (
+        !isHistoryRestoredText &&
+        exportCompletion.handleExportInput(key, completion)
+      ) {
         return true;
       }
 
@@ -845,7 +921,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
         if (
-          completion.showSuggestions &&
+          showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
           exportCompletion.navigatedTextRef.current === buffer.text &&
           acceptActiveCompletionSuggestion()
@@ -865,7 +941,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.paste &&
         !key.shift &&
         buffer.text.length === 0 &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         !reverseSearchActive &&
         !commandSearchActive &&
         followup.state.isVisible &&
@@ -888,7 +964,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      if (completion.showSuggestions) {
+      if (showCompletionSuggestions) {
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -909,7 +985,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+          // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
+          // mutates the buffer/index. When the suggestion's command opted
+          // into `submitOnAccept` (a leaf command whose bare action takes
+          // no further arg, e.g. `/skills`), submit `/<value>` directly
+          // instead of just filling the buffer and waiting for a second
+          // Enter. This makes `/skil<Enter>` land in the dialog in one
+          // keystroke.
+          const targetIndex =
+            completion.activeSuggestionIndex === -1
+              ? 0
+              : completion.activeSuggestionIndex;
+          const accepted =
+            targetIndex >= 0 && targetIndex < completion.suggestions.length
+              ? completion.suggestions[targetIndex]
+              : undefined;
           acceptActiveCompletionSuggestion();
+          // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
+          // matches BOTH Tab and Enter (see keyBindings.ts and the
+          // identical caveat at lines 861-862). Without the
+          // `key.name === 'return'` gate, `/skil<Tab>` would auto-submit
+          // and open the dialog, breaking the standard shell convention
+          // where Tab means "complete without executing." The implicit
+          // contract `submitOnAccept` was designed for is "press Enter on
+          // the highlighted suggestion, no second Enter needed."
+          if (accepted?.submitOnAccept && key.name === 'return') {
+            handleSubmitAndClear(`/${accepted.value}`);
+          }
           return true;
         }
       }
@@ -919,7 +1021,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         key.name === 'tab' &&
         !key.paste &&
         !key.shift &&
-        !completion.showSuggestions &&
+        !showCompletionSuggestions &&
         midInputGhostTextRef.current?.acceptText
       ) {
         buffer.insert(midInputGhostTextRef.current.acceptText);
@@ -1049,7 +1151,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             return true;
           }
           if (hasBgAgents) {
-            setBgPillFocused(true);
+            setLivePanelFocused(true);
             return true;
           }
           return true;
@@ -1086,17 +1188,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             return true;
           }
           // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks pill
-          // (if any bg agents) → otherwise stay put. The pill itself
-          // opens the dialog on Enter; the tab bar re-routes Down into
-          // the pill once it has focus, so both surfaces remain reachable
-          // in sequence.
+          // team tab bar (if any Arena agents) → Background tasks
+          // dialog (if any bg agents) → otherwise stay put.
           if (hasAgents) {
             setAgentTabBarFocused(true);
             return true;
           }
           if (hasBgAgents) {
-            setBgPillFocused(true);
+            setLivePanelFocused(true);
             return true;
           }
           return true;
@@ -1293,10 +1392,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
-      setBgPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      livePanelFocused,
+      livePanelSelectedIndex,
+      bgAgentCount,
+      enterBgDetailFromPanel,
+      setBgSelectedIndex,
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,
+      isHistoryRestoredText,
+      showCompletionSuggestions,
     ],
   );
 
@@ -1420,7 +1527,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const activeCompletion = getActiveCompletion();
   const shouldUseExportSuggestions =
-    !commandSearchActive && !reverseSearchActive;
+    !commandSearchActive && !reverseSearchActive && !isHistoryRestoredText;
   const suggestionDisplayProps =
     shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
       ? exportCompletion.suggestionDisplayProps
@@ -1432,7 +1539,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         };
   const shouldShowSuggestions =
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
-    activeCompletion.showSuggestions;
+    (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
+      ? activeCompletion.showSuggestions
+      : false);
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
@@ -1472,22 +1581,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
   }, [promptSuggestion]);
 
-  const showAutoAcceptStyling =
-    !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;
-  const showYoloStyling =
-    !shellModeActive && approvalMode === ApprovalMode.YOLO;
+  const approvalModePromptStyle = !shellModeActive
+    ? getApprovalModePromptStyle(approvalMode)
+    : undefined;
 
   let statusColor: string | undefined;
   let statusText = '';
   if (shellModeActive) {
     statusColor = theme.ui.symbol;
     statusText = t('Shell mode');
-  } else if (showYoloStyling) {
-    statusColor = theme.status.errorDim;
-    statusText = t('YOLO mode');
-  } else if (showAutoAcceptStyling) {
-    statusColor = theme.status.warningDim;
-    statusText = t('Accepting edits');
+  } else if (approvalModePromptStyle?.color) {
+    statusColor = approvalModePromptStyle.color;
+    if (approvalMode === ApprovalMode.YOLO) {
+      statusText = t('YOLO mode');
+    } else if (approvalMode === ApprovalMode.AUTO_EDIT) {
+      statusText = t('Accepting edits');
+    } else if (approvalMode === ApprovalMode.AUTO) {
+      statusText = t('Auto mode');
+    }
   }
 
   const borderColor =
@@ -1510,13 +1621,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         )
       ) : commandSearchActive ? (
         <Text color={theme.text.accent}>(r:) </Text>
-      ) : showYoloStyling ? (
-        '*'
+      ) : approvalModePromptStyle ? (
+        approvalModePromptStyle.prefix
       ) : (
         '>'
       )}{' '}
     </Text>
   );
+
+  // Calculate prefix width for physical cursor positioning
+  const prefixWidth = shellModeActive
+    ? reverseSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : 2 // "! " = 2 chars
+    : commandSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : 2; // "> " or "* " = 2 chars
 
   return (
     <>
@@ -1548,6 +1668,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : placeholder
         }
         prefix={prefixNode}
+        prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}
