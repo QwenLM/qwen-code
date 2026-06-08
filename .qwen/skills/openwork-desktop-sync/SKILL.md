@@ -9,8 +9,7 @@ Use this skill to sync desktop changes between this qwen-code repo and an
 OpenWork checkout. The repository script owns the Git mechanics:
 
 ```bash
-cd packages/desktop
-OPENWORK_DIR=/path/to/openwork bun run oss:sync --mode export
+OPENWORK_DIR=/path/to/openwork bun run desktop-openwork-sync --mode export
 ```
 
 Default overlay is `README.md`. Overlay paths are excluded from migrated
@@ -49,8 +48,8 @@ base. The first sync needs an explicit source base when no previous sync trailer
 exists:
 
 ```bash
-bun run oss:sync --mode export --source-base <qwen-code-ref>
-bun run oss:sync --mode import --source-base <openwork-ref>
+bun run desktop-openwork-sync --mode export --source-base <qwen-code-ref>
+bun run desktop-openwork-sync --mode import --source-base <openwork-ref>
 ```
 
 ## Modes
@@ -73,10 +72,9 @@ bun run oss:sync --mode import --source-base <openwork-ref>
 2. Run the requested direction:
 
    ```bash
-   cd packages/desktop
    OPENWORK_DIR=/path/to/openwork \
    OPENWORK_OVERLAY_PATHS='README.md' \
-   bun run oss:sync --mode export --source-base <qwen-code-ref>
+   bun run desktop-openwork-sync --mode export --source-base <qwen-code-ref>
    ```
 
 3. If Git reports conflicts, resolve only the conflicted hunks, preserving

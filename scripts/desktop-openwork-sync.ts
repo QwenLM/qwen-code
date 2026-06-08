@@ -25,7 +25,7 @@ type Options = {
 };
 
 const desktopPrefix = 'packages/desktop';
-const repoRoot = resolve(import.meta.dir, '..', '..', '..');
+const repoRoot = resolve(import.meta.dir, '..');
 
 function timestamp(): string {
   return new Date().toISOString().replace(/[-:.TZ]/g, '');
@@ -71,7 +71,7 @@ function defaultBranch(mode: Exclude<SyncMode, 'auto'>): string {
 }
 
 function printHelp(): void {
-  console.log(`Usage: bun run scripts/oss-sync.ts --openwork-dir /path/to/openwork [options]
+  console.log(`Usage: bun run desktop-openwork-sync --openwork-dir /path/to/openwork [options]
 
 Commit-migrate changes between qwen-code packages/desktop and OpenWork.
 

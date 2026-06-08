@@ -119,7 +119,6 @@
     "bump-desktop-version": "bun run scripts/bump-desktop-version.ts",
     "check-release-version": "bun run scripts/check-release-version.ts",
     "check-version": "bun run scripts/check-version.ts",
-    "oss:sync": "bun run scripts/oss-sync.ts",
     "prepare": "husky"
   },
   "devDependencies": {
