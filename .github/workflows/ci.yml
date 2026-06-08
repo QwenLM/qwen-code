@@ -35,7 +35,7 @@ defaults:
     shell: 'bash'
 
 env:
-  ACTIONLINT_VERSION: '1.7.7'
+  ACTIONLINT_VERSION: '1.7.12'
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
 
