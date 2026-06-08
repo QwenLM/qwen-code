@@ -42,3 +42,4 @@ export {
 export { runServe, type ServeOptions } from './cli.js';
 export { createPermissionVoteRoute } from './routes/permission.js';
 export { createPromptRoute } from './routes/prompt.js';
+export { VapidStore, type VapidKeys } from './webpush/vapid.js';
