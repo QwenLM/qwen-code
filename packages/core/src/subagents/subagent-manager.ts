@@ -52,6 +52,7 @@ import {
   isIsolation,
   isMemory,
   isPermissionMode,
+  parseBackground,
   parseEffort,
   parseMaxTurns,
   parseStringOrArray,
@@ -1234,19 +1235,17 @@ function parseSubagentContent(
           : undefined;
 
     const backgroundRaw = frontmatter['background'];
+    const background = parseBackground(backgroundRaw);
     if (
       backgroundRaw !== undefined &&
-      backgroundRaw !== 'true' &&
+      backgroundRaw !== false &&
       backgroundRaw !== 'false' &&
-      backgroundRaw !== true &&
-      backgroundRaw !== false
+      background === undefined
     ) {
       debugLogger.warn(
         `Agent file ${filePath} has invalid background value '${backgroundRaw}'. Must be 'true', 'false', or omitted.`,
       );
     }
-    const background =
-      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
 
     // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
 
