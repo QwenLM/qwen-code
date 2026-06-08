@@ -119,6 +119,14 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   const actual = await vi.importActual('../contexts/VimModeContext.js');
   return {
     ...actual,
+    useVimModeState: () => ({
+      vimEnabled: false,
+      vimMode: 'INSERT' as const,
+    }),
+    useVimModeActions: () => ({
+      toggleVimEnabled: mockToggleVimEnabled,
+      setVimMode: mockSetVimMode,
+    }),
     useVimMode: () => ({
       vimEnabled: false,
       vimMode: 'INSERT' as const,
@@ -134,6 +142,7 @@ vi.mock('../contexts/CompactModeContext.js', async () => {
     ...actual,
     useCompactMode: () => ({
       compactMode: false,
+      compactInline: false,
       setCompactMode: mockSetCompactMode,
     }),
   };

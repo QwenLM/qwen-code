@@ -62,6 +62,10 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
+  buildAddedMcpToolsReminder,
+  getInitialChatHistory,
+} from '../utils/environmentContext.js';
+import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
   setActiveGoal,
@@ -172,6 +176,52 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
     ]),
   };
 });
+vi.mock('../utils/environmentContext', () => ({
+  SYSTEM_REMINDER_OPEN: '<system-reminder>',
+  getEnvironmentContext: vi
+    .fn()
+    .mockResolvedValue([{ text: 'Mocked env context' }]),
+  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
+    {
+      role: 'user',
+      parts: [
+        { text: '<system-reminder>\nMocked env context\n</system-reminder>' },
+      ],
+    },
+    ...(extraHistory ?? []),
+  ]),
+  buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
+    tools.length === 0
+      ? null
+      : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
+  ),
+  getStartupContextLength: vi.fn((history) => {
+    const first = history?.[0];
+    if (first?.role !== 'user') return 0;
+    const text = first.parts?.[0]?.text;
+    if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
+      return 1;
+    }
+    // Legacy format: [user(env), model("Got it. Thanks for the context!")].
+    if (
+      history?.[1]?.role === 'model' &&
+      history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
+    ) {
+      return 2;
+    }
+    return 0;
+  }),
+  isSystemReminderContent: vi.fn((content) => {
+    const parts = content?.parts;
+    if (!parts || parts.length === 0) return false;
+    return parts.every(
+      (part: { text?: string }) =>
+        typeof part.text === 'string' &&
+        part.text.startsWith('<system-reminder>') &&
+        part.text.includes('</system-reminder>'),
+    );
+  }),
+}));
 vi.mock('../utils/generateContentResponseUtilities', () => ({
   getResponseText: (result: GenerateContentResponse) =>
     result.candidates?.[0]?.content?.parts?.map((part) => part.text).join('') ||
@@ -340,6 +390,7 @@ describe('Gemini Client (client.ts)', () => {
       revealDeferredTool: vi.fn(),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getTool: vi.fn().mockReturnValue(null),
+      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
     const fileService = new FileDiscoveryService('/test/dir');
     const contentGeneratorConfig: ContentGeneratorConfig = {
@@ -875,13 +926,9 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('re-applies SessionStart additionalContext after refreshing the system instruction', async () => {
-      // startChat() now calls getCoreSystemPrompt twice: once for the
-      // initial GeminiChat construction and once via the trailing
-      // `setTools()` (which rebuilds the system instruction so progressive
-      // MCP tools land in the prompt). The third call is the
-      // refreshSystemInstruction under test.
+      // startChat() calls getCoreSystemPrompt for the initial GeminiChat
+      // construction. The second call is refreshSystemInstruction under test.
       vi.mocked(getCoreSystemPrompt)
-        .mockReturnValueOnce('Base instruction')
         .mockReturnValueOnce('Base instruction')
         .mockReturnValueOnce('Updated instruction');
       const hookSystem = {
@@ -927,6 +974,75 @@ describe('Gemini Client (client.ts)', () => {
         'test-model',
         PermissionMode.AutoEdit,
       );
+    });
+  });
+
+  describe('refreshStartupContextReminder', () => {
+    it('removes the startup entry when rebuilding produces no reminder parts', async () => {
+      const currentHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nold deferred reminder\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      const mockChat: Partial<GeminiChat> = {
+        getHistory: vi.fn().mockReturnValue(currentHistory),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([]);
+
+      await client.refreshStartupContextReminder();
+
+      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+    });
+
+    it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
+      // Restored pre-PR sessions store startup context as a
+      // [user(env), model("Got it. Thanks for the context!")] pair, so
+      // getStartupContextLength returns 2. A hardcoded slice(1) would leave
+      // the orphaned model ack behind; slicing by the detected length removes
+      // both legacy entries before re-prepending the fresh prelude.
+      const legacyEnv: Content = {
+        role: 'user',
+        parts: [{ text: 'This is the environment context.' }],
+      };
+      const legacyAck: Content = {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      };
+      const currentHistory: Content[] = [
+        legacyEnv,
+        legacyAck,
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      const newPrelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      const mockChat: Partial<GeminiChat> = {
+        getHistory: vi.fn().mockReturnValue(currentHistory),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([newPrelude]);
+
+      await client.refreshStartupContextReminder();
+
+      // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
+      expect(mockChat.setHistory).toHaveBeenCalledWith([
+        newPrelude,
+        ...currentHistory.slice(2),
+      ]);
     });
   });
 
@@ -1004,21 +1120,7 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  describe('setTools — system instruction refresh', () => {
-    // Regression coverage for the progressive-MCP wiring bug: when MCP
-    // discovery completes AFTER startChat() (the new default), `setTools()`
-    // is the only hook that can teach the model about the freshly-registered
-    // MCP tools. Because MCP tools are `shouldDefer=true`, they never appear
-    // in `tools` declarations — the model only learns of them via the
-    // system prompt's "Deferred Tools" listing. So `setTools()` MUST
-    // rebuild the system instruction with the up-to-date deferred summary,
-    // not just update `chat.tools`.
-    //
-    // `prompts.ts` is auto-mocked at module scope (line ~99), so the
-    // assertions below inspect the `deferredTools` argument passed to
-    // `getCoreSystemPrompt` rather than the rendered string. The contract
-    // "freshly-registered MCP tool reaches the prompt" reduces to "it
-    // appears in the deferredTools arg".
+  describe('setTools — progressive MCP reminders', () => {
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         getFunctionDeclarations: ReturnType<typeof vi.fn>;
@@ -1030,72 +1132,134 @@ describe('Gemini Client (client.ts)', () => {
       };
     }
 
-    function lastDeferredArg():
-      | Array<{ name: string; description: string }>
-      | undefined {
-      const mock = vi.mocked(getCoreSystemPrompt);
-      const lastCall = mock.mock.calls[mock.mock.calls.length - 1];
-      // signature: (userMemory, model, appendInstruction, deferredTools)
-      return lastCall?.[3] as
-        | Array<{ name: string; description: string }>
-        | undefined;
+    async function runTurn(
+      type: SendMessageType = SendMessageType.UserQuery,
+    ): Promise<void> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hello' }],
+        new AbortController().signal,
+        `prompt-${type}`,
+        { type },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
     }
 
-    it('rebuilds systemInstruction so newly-registered MCP tools land in the prompt', async () => {
+    it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
-      // ToolSearch IS available — this is the standard case (the only
-      // path that fails before this fix). MCP discovery has now finished,
-      // so a freshly-arrived MCP tool appears in the deferred summary.
       reg.getTool.mockImplementation((n: string) =>
         n === 'tool_search' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
-        { name: 'mcp__addition-server__add', description: 'Add two numbers' },
+        {
+          name: 'mcp__addition-server__add',
+          description: 'Add two numbers',
+          serverName: 'addition-server',
+        },
       ]);
 
       const setSystemInstructionSpy = vi
         .spyOn(client.getChat(), 'setSystemInstruction')
         .mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
       vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
 
-      expect(setSystemInstructionSpy).toHaveBeenCalledTimes(1);
-      const passedDeferred = lastDeferredArg();
-      expect(passedDeferred).toEqual([
-        { name: 'mcp__addition-server__add', description: 'Add two numbers' },
+      expect(setSystemInstructionSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(getCoreSystemPrompt)).not.toHaveBeenCalled();
+      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      await runTurn();
+
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
+        {
+          name: 'mcp__addition-server__add',
+          description: 'Add two numbers',
+          serverName: 'addition-server',
+        },
       ]);
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+          },
+        ],
+      });
     });
 
-    it('omits already-revealed deferred tools from the rendered listing', async () => {
-      // Tools the model has already revealed via ToolSearch are in the
-      // declaration list; advertising them again as "reachable via
-      // ToolSearch" would invite redundant lookup calls.
+    it('omits already-revealed deferred tools from added reminders', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
         n === 'tool_search' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
-        { name: 'mcp__server__alpha', description: 'a' },
-        { name: 'mcp__server__beta', description: 'b' },
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
       ]);
       reg.isDeferredToolRevealed.mockImplementation(
         (n: string) => n === 'mcp__server__alpha',
       );
 
-      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
-        () => {},
-      );
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
 
-      const passedDeferred = lastDeferredArg();
-      expect(passedDeferred).toEqual([
-        { name: 'mcp__server__beta', description: 'b' },
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      await runTurn();
+
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
       ]);
+      expect(addHistorySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__flaky__do',
+        description: 'd',
+        serverName: 'flaky',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      // Initial registration → announced.
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+
+      // Server disconnects: removeMcpToolsByServer() drops it from the
+      // deferred set. queueAddedMcpToolsReminder must prune the stale
+      // announced name here.
+      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      await client.setTools();
+      await runTurn();
+
+      // Server reconnects with the same tool. Without the prune the name
+      // would still be in announcedDeferredToolNames and be skipped, so
+      // the user would never get a "new tools available" reminder.
+      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1108,13 +1272,15 @@ describe('Gemini Client (client.ts)', () => {
       const reg = getRegistryMock();
       reg.getTool.mockReturnValue(null); // ToolSearch absent.
       reg.getDeferredToolSummary.mockReturnValue([
-        { name: 'mcp__server__alpha', description: 'a' },
-        { name: 'mcp__server__beta', description: 'b' },
+        { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
+        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
       ]);
       reg.revealDeferredTool.mockClear();
 
-      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
-        () => {},
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      const setSystemInstructionSpy = vi.spyOn(
+        client.getChat(),
+        'setSystemInstruction',
       );
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
       vi.mocked(getCoreSystemPrompt).mockClear();
@@ -1123,30 +1289,81 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__beta');
-      // When ToolSearch is absent we render the prompt WITHOUT the
-      // deferred-tools listing (those tools are now in `tools`), so the
-      // deferredTools arg must be `undefined`, not an empty array.
-      expect(lastDeferredArg()).toBeUndefined();
+      expect(setSystemInstructionSpy).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
-    it('preserves SessionStart additionalContext when refreshing via setTools', async () => {
-      // Regression for #4166 review (chiga0 P1): setTools's
-      // setSystemInstruction rewrites the chat's systemInstruction wholesale.
-      // A SessionStart hook's additionalContext applied by startChat (or a
-      // prior Compact) lives inside that systemInstruction, so a naive
-      // rewrite would silently drop it on every progressive-MCP refresh
-      // (which fires once per MCP server completion via AppContainer's
-      // batch-flush, plus a trailing call after waitForMcpReady). setTools
-      // MUST re-apply lastSessionStartContext after the rewrite, mirroring
-      // refreshSystemInstruction's contract.
-      //
-      // Three mockReturnValueOnce because startChat invokes
-      // getCoreSystemPrompt twice (initial chat + trailing setTools), and
-      // the explicit setTools call below is the third invocation.
-      vi.mocked(getCoreSystemPrompt)
-        .mockReturnValueOnce('Base instruction')
-        .mockReturnValueOnce('Base instruction')
-        .mockReturnValueOnce('Refreshed instruction');
+    it('does not append the same added MCP reminder twice', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        {
+          name: 'mcp__addition-server__add',
+          description: 'Add two numbers',
+          serverName: 'addition-server',
+        },
+      ]);
+
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+      await runTurn();
+      addHistorySpy.mockClear();
+      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('does not drain queued MCP reminders on tool-result turns', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        {
+          name: 'mcp__addition-server__add',
+          description: 'Add two numbers',
+          serverName: 'addition-server',
+        },
+      ]);
+
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+      await runTurn(SendMessageType.ToolResult);
+
+      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      await runTurn();
+
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
+        {
+          name: 'mcp__addition-server__add',
+          description: 'Add two numbers',
+          serverName: 'addition-server',
+        },
+      ]);
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('preserves SessionStart additionalContext because setTools does not rewrite the system instruction', async () => {
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
           createHookOutput('SessionStart', {
@@ -1163,10 +1380,20 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       await client.startChat(undefined, SessionStartSource.Startup);
+      const systemInstructionBefore =
+        client.getChat()['generationConfig'].systemInstruction;
+      const setSystemInstructionSpy = vi.spyOn(
+        client.getChat(),
+        'setSystemInstruction',
+      );
       await client.setTools();
 
+      expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(client.getChat()['generationConfig'].systemInstruction).toBe(
-        'Refreshed instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nHookCtx\n</qwen:session-start-context>',
+        systemInstructionBefore,
+      );
+      expect(systemInstructionBefore).toContain(
+        'SessionStart additional context:\nHookCtx',
       );
     });
   });
@@ -2013,11 +2240,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(client.getHistory()).toEqual([
         {
           role: 'user',
-          parts: [{ text: 'Mocked env context' }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the context!' }],
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
         },
         ...compressedHistory,
       ]);
@@ -2126,6 +2353,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2177,6 +2405,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2235,6 +2464,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2275,6 +2505,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2324,6 +2555,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2406,6 +2638,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2420,6 +2653,62 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {
+      // Auto-compaction replaces history in place inside
+      // chat.sendMessageStream and never routes through startChat, so the
+      // startup prelude consumed into the summary must be rebuilt here or
+      // env/tool/MCP context is lost for the rest of the session.
+      const compactedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      const setHistory = vi.fn();
+      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(compactedHistory),
+        setHistory,
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-restore',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalledWith([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
+        },
+        ...compactedHistory,
+      ]);
     });
   });
 
@@ -5758,7 +6047,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5790,7 +6078,6 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
-        undefined,
       );
     });
 
@@ -5822,7 +6109,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({

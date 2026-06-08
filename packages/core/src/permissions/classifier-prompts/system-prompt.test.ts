@@ -10,6 +10,8 @@ import {
   BUILTIN_ALLOW,
   BUILTIN_DENY,
   BUILTIN_ENVIRONMENT,
+  BUILTIN_HARD_DENY,
+  BUILTIN_SOFT_DENY,
   STAGE1_SUFFIX,
   STAGE2_SUFFIX,
 } from './system-prompt.js';
@@ -137,6 +139,100 @@ describe('buildClassifierSystemPrompt', () => {
     // descriptive context, not directives — verify the principle is in
     // the prompt.
     expect(prompt).toMatch(/user hint.*adversarial prompt injection/s);
+  });
+
+  it('defines self-modification as a built-in SOFT BLOCK category', () => {
+    expect(
+      BUILTIN_SOFT_DENY.some((entry) => entry.includes('Self-modification')),
+    ).toBe(true);
+
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    expect(prompt).toContain('Self-modification');
+    expect(prompt).toContain('.qwen/settings');
+    expect(prompt).toContain('QWEN.local.md');
+    expect(prompt).toContain('.qwen/rules/');
+    expect(prompt).toContain('.mcp.json');
+    // Keep wildcard allow-rule widening in the protected self-edit category.
+    expect(prompt).toContain('adding or widening permission allow rules');
+  });
+
+  it('defines AUTO-mode bypass and data exfiltration as built-in HARD BLOCK categories', () => {
+    expect(
+      BUILTIN_HARD_DENY.some((entry) => entry.includes('AUTO-mode bypass')),
+    ).toBe(true);
+    expect(
+      BUILTIN_HARD_DENY.some((entry) => entry.includes('Data exfiltration')),
+    ).toBe(true);
+
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    expect(prompt).toContain('AUTO-mode bypass');
+    expect(prompt).toContain('Data exfiltration');
+  });
+
+  it('renders the four classifier sections (allow / soft / hard / environment)', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    expect(prompt).toContain('## Default ALLOW');
+    expect(prompt).toContain('## Default SOFT BLOCK');
+    expect(prompt).toContain('## Default HARD BLOCK');
+    expect(prompt).toContain('## Environment');
+    // Keep the classifier sections in their intended order.
+    const allowIdx = prompt.indexOf('## Default ALLOW');
+    const softIdx = prompt.indexOf('## Default SOFT BLOCK');
+    const hardIdx = prompt.indexOf('## Default HARD BLOCK');
+    const envIdx = prompt.indexOf('## Environment');
+    expect(allowIdx).toBeLessThan(softIdx);
+    expect(softIdx).toBeLessThan(hardIdx);
+    expect(hardIdx).toBeLessThan(envIdx);
+  });
+
+  it('combined BUILTIN_DENY export equals SOFT + HARD for backward compatibility', () => {
+    // Keep the combined export stable for callers that do not need severity.
+    expect([...BUILTIN_DENY]).toEqual([
+      ...BUILTIN_SOFT_DENY,
+      ...BUILTIN_HARD_DENY,
+    ]);
+  });
+
+  it('renders legacy `hints.deny` under the User SOFT BLOCK section', () => {
+    // Preserve legacy `hints.deny` as a soft block alias.
+    const prompt = buildClassifierSystemPrompt(
+      makeConfig({ hints: { deny: ['Legacy deny hint'] } }),
+    );
+    expect(prompt).toContain('## User SOFT BLOCK');
+    expect(prompt).toContain('- user hint: "Legacy deny hint"');
+  });
+
+  it('renders `hints.hardDeny` under the User HARD BLOCK section', () => {
+    const prompt = buildClassifierSystemPrompt(
+      makeConfig({ hints: { hardDeny: ['Never touch production billing'] } }),
+    );
+    expect(prompt).toContain('## User HARD BLOCK');
+    expect(prompt).toContain('- user hint: "Never touch production billing"');
+  });
+
+  it('renders `hints.softDeny` before legacy `hints.deny` in the User SOFT BLOCK section', () => {
+    const prompt = buildClassifierSystemPrompt(
+      makeConfig({
+        hints: {
+          softDeny: ['Modern soft entry'],
+          deny: ['Legacy entry'],
+        },
+      }),
+    );
+    expect(prompt).toContain('- user hint: "Modern soft entry"');
+    expect(prompt).toContain('- user hint: "Legacy entry"');
+    expect(prompt.indexOf('Modern soft entry')).toBeLessThan(
+      prompt.indexOf('Legacy entry'),
+    );
+  });
+
+  it('omits empty User sections entirely', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    // With no user hints, the User sections must NOT appear — empty headings
+    // would dilute the classifier's attention budget for no information.
+    expect(prompt).not.toContain('## User ALLOW');
+    expect(prompt).not.toContain('## User SOFT BLOCK');
+    expect(prompt).not.toContain('## User HARD BLOCK');
   });
 
   it('a hint containing tag-shaped payloads cannot escape its encoded form', () => {

@@ -552,7 +552,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands

@@ -107,7 +107,43 @@ export default {
     'Analyse le projet et crée un fichier QWEN.md personnalisé.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Lister les outils Qwen Code disponibles. Utilisation : /tools [desc]',
-  'List available skills.': 'Lister les compétences disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Ouvrir le panneau des compétences (parcourir, rechercher, activer, choisir).',
+  'Manage Skills': 'Gérer les compétences',
+  'Skills configuration saved.': 'Configuration des compétences enregistrée.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Configuration des compétences enregistrée, mais le rafraîchissement a échoué : {{error}}. Redémarrez pour garantir l’application du nouvel état.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'L’espace de travail n’est pas approuvé ; les paramètres de l’espace de travail sont ignorés par la configuration fusionnée. Exécutez d’abord /trust, ou modifiez directement ~/.qwen/settings.json pour gérer les compétences au niveau utilisateur.',
+  'SkillManager not available.': 'SkillManager non disponible.',
+  'Loading skills…': 'Chargement des compétences…',
+  'Failed to load skills: {{error}}':
+    'Échec du chargement des compétences : {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "Échec de l'enregistrement de la configuration des compétences : {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Toutes les compétences disponibles sont désactivées. Modifiez ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) pour les réactiver.',
+  'Press esc to close.': 'Appuyez sur Échap pour fermer.',
+  '{{count}} skills · ': '{{count}} compétences · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} compétences · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Espace bascule · Entrée choisir (remplit l’entrée) · Échap enregistrer & quitter · portée espace de travail',
+  'Search:': 'Recherche :',
+  'type to filter…': 'tapez pour filtrer…',
+  'No skills are currently available.':
+    'Aucune compétence n’est actuellement disponible.',
+  'All available skills are locked at a higher scope (see below).':
+    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
+  'No skills match the search.':
+    'Aucune compétence ne correspond à la recherche.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'higher scope': 'portée supérieure',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [verrouillée : {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ naviguer · Retour modifie la recherche',
+  Bundled: 'Intégrée',
   'Available Qwen Code CLI tools:': 'Outils Qwen Code CLI disponibles :',
   'No tools available': 'Aucun outil disponible',
   'View or change the approval mode for tool usage':
@@ -192,8 +228,8 @@ export default {
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
   'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Copier le dernier résultat ou extrait de code dans le presse-papiers',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copier la dernière réponse IA dans le presse-papiers (/copy N pour la Nième)',
 
   // ============================================================================
   // Commandes - Agents
@@ -824,6 +860,24 @@ export default {
   'Resume a previous session': 'Reprendre une session précédente',
   'Fork the current conversation into a new session':
     'Créer une branche de la conversation actuelle dans une nouvelle session',
+  'Spawn a background agent that inherits the full conversation':
+    'Lancer un agent en arrière-plan qui hérite de toute la conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Veuillez fournir une directive. Utilisation : /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
+  'Cannot fork before the first conversation turn.':
+    'Impossible de créer un fork avant le premier tour de conversation.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'La commande /fork nécessite le feature gate fork. Définissez QWEN_CODE_ENABLE_FORK_SUBAGENT=1 pour l’activer.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'outil agent est indisponible ; impossible de créer un fork.",
+  'Failed to launch fork: {{error}}':
+    'Échec du lancement du fork : {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'utilisateur a lancé un fork en arrière-plan via /fork : {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "Fork lancé dans un agent en arrière-plan. Il hérite de cette conversation et s'exécute sans bloquer — suivez-le dans le panneau des tâches en arrière-plan ; il fera un rapport une fois terminé.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "Impossible de créer une branche pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'No conversation to branch.':
