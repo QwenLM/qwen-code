@@ -17,6 +17,7 @@ import {
 import { AppContext } from '../contexts/AppContext.js';
 import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
+import { ToolCallStatus } from '../types.js';
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
@@ -599,7 +600,7 @@ describe('<MainContent />', () => {
               callId: 'a1',
               name: 'bash',
               description: 'run ls',
-              status: 'completed' as const,
+              status: ToolCallStatus.Success,
               resultDisplay: undefined,
               confirmationDetails: undefined,
             },
@@ -613,7 +614,7 @@ describe('<MainContent />', () => {
               callId: 'b1',
               name: 'bash',
               description: 'run wc',
-              status: 'completed' as const,
+              status: ToolCallStatus.Success,
               resultDisplay: undefined,
               confirmationDetails: undefined,
             },
