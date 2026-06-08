@@ -14,11 +14,25 @@ const desktopRoot = join(import.meta.dir, '..');
 const defaultRepoRoot = join(desktopRoot, '..', '..');
 const electronDir = join(desktopRoot, 'apps', 'electron');
 const vendorDir = join(electronDir, 'vendor', 'qwen-code');
+const qwenCodePackageName = '@qwen-code/qwen-code';
+const qwenCodeMetadataUrl = `https://registry.npmjs.org/${encodeURIComponent(qwenCodePackageName)}`;
 
 interface DesktopPackageJson {
   qwenCodeRuntime?: {
     version?: string;
   };
+}
+
+interface NpmPackageMetadata {
+  'dist-tags'?: Record<string, string>;
+  versions?: Record<
+    string,
+    {
+      dist?: {
+        tarball?: string;
+      };
+    }
+  >;
 }
 
 function npmCommand(): string {
@@ -106,17 +120,59 @@ async function vendorLocalCheckout(repoRoot: string): Promise<void> {
   console.log(`Vendored local Qwen Code CLI into ${vendorDir}`);
 }
 
-async function vendorNpmVersion(version: string): Promise<void> {
-  console.log(`Downloading Qwen Code ${version} from npm...`);
+async function readNpmPackageMetadata(): Promise<NpmPackageMetadata> {
+  const response = await fetch(qwenCodeMetadataUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Failed to read ${qwenCodePackageName} metadata from npm: HTTP ${response.status}`,
+    );
+  }
+  return (await response.json()) as NpmPackageMetadata;
+}
+
+async function resolveNpmVersionOrTag(
+  versionOrTag: string,
+): Promise<{ tarballUrl: string; version: string }> {
+  const requested = versionOrTag.trim();
+  if (!requested) {
+    throw new Error('Qwen Code npm version or dist-tag is required.');
+  }
+
+  const metadata = await readNpmPackageMetadata();
+  const version = metadata.versions?.[requested]
+    ? requested
+    : metadata['dist-tags']?.[requested];
+  if (!version) {
+    throw new Error(
+      `Could not resolve ${qwenCodePackageName}@${requested} from npm.`,
+    );
+  }
+
+  const tarballUrl = metadata.versions?.[version]?.dist?.tarball;
+  if (!tarballUrl) {
+    throw new Error(
+      `Could not find npm tarball for ${qwenCodePackageName}@${version}.`,
+    );
+  }
+
+  return { tarballUrl, version };
+}
+
+async function vendorNpmVersion(versionOrTag: string): Promise<void> {
+  const { tarballUrl, version } = await resolveNpmVersionOrTag(versionOrTag);
+  const sourceLabel =
+    versionOrTag === version ? version : `${versionOrTag} (${version})`;
+  console.log(`Downloading Qwen Code ${sourceLabel} from npm...`);
 
   const tempDir = mkdtempSync(join(tmpdir(), 'qwen-code-vendor-'));
   const tarballPath = join(tempDir, `qwen-code-${version}.tgz`);
-  const url = `https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${version}.tgz`;
 
   try {
-    const response = await fetch(url);
+    const response = await fetch(tarballUrl);
     if (!response.ok) {
-      throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+      throw new Error(
+        `Failed to download ${tarballUrl}: HTTP ${response.status}`,
+      );
     }
     await Bun.write(tarballPath, await response.arrayBuffer());
 
@@ -130,7 +186,7 @@ async function vendorNpmVersion(version: string): Promise<void> {
     );
 
     verifyVendoredCli();
-    console.log(`Vendored @qwen-code/qwen-code@${version} into ${vendorDir}`);
+    console.log(`Vendored ${qwenCodePackageName}@${version} into ${vendorDir}`);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
