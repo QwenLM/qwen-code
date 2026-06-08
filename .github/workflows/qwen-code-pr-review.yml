@@ -50,6 +50,7 @@ jobs:
        github.event.pull_request.author_association == 'MEMBER' ||
        github.event.pull_request.author_association == 'COLLABORATOR')
     runs-on: 'ubuntu-latest'
+    # Configured in repo settings with a 10-minute wait timer.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false
@@ -81,8 +82,43 @@ jobs:
           fi
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
+  authorize-review-request:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'review_requested' &&
+      github.event.requested_reviewer.login == 'qwen-code-ci-bot' &&
+      github.event.pull_request.state == 'open' &&
+      !github.event.pull_request.draft
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    outputs:
+      should_review: '${{ steps.sender_permission.outputs.should_review }}'
+    steps:
+      - name: 'Check requester permission'
+        id: 'sender_permission'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REQUESTER: '${{ github.event.sender.login }}'
+        run: |-
+          set -euo pipefail
+          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission' 2>/dev/null || true)"
+          case "$permission" in
+            admin|maintain|write)
+              echo "should_review=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Skipping requested review: ${REQUESTER} lacks write permission or permission check failed." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_review=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   review-pr:
-    needs: ['delay-automatic-review']
+    needs: ['delay-automatic-review', 'authorize-review-request']
+    # pull_request_target routing:
+    # - review_requested uses authorize-review-request and skips delay
+    # - opened/synchronize uses delay-automatic-review
+    # - reopened/ready_for_review runs immediately for trusted PR authors
     if: |-
       always() &&
       (github.event_name == 'workflow_dispatch' ||
@@ -90,7 +126,8 @@ jobs:
        github.event.pull_request.state == 'open' &&
        !github.event.pull_request.draft &&
        ((github.event.action == 'review_requested' &&
-         github.event.requested_reviewer.login == 'qwen-code-ci-bot') ||
+         github.event.requested_reviewer.login == 'qwen-code-ci-bot' &&
+         needs.authorize-review-request.outputs.should_review == 'true') ||
         (github.event.action != 'review_requested' &&
          ((github.event.action != 'opened' &&
            github.event.action != 'synchronize') ||
