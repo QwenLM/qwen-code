@@ -882,6 +882,25 @@ export default {
   'Resume a previous session': 'Resume a previous session',
   'Fork the current conversation into a new session':
     'Fork the current conversation into a new session',
+  'Spawn a background agent that inherits the full conversation':
+    'Spawn a background agent that inherits the full conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Please provide a directive. Usage: /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork before the first conversation turn.':
+    'Cannot fork before the first conversation turn.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
+  'The agent tool is unavailable; cannot fork.':
+    'The agent tool is unavailable; cannot fork.',
+  'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
+  'the background agent could not be started.':
+    'the background agent could not be started.',
+  'User launched a background fork via /fork: {{directive}}':
+    'User launched a background fork via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'No conversation to branch.': 'No conversation to branch.',
