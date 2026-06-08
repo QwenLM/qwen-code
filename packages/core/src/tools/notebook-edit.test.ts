@@ -720,7 +720,7 @@ describe('NotebookEditTool', () => {
         edit_mode: 'insert',
         new_source: 'x = 1',
       }),
-    ).toThrow(/\.qwenignore\/\.agentignore\/\.aiignore/);
+    ).toThrow(/\.qwenignore, \.agentignore, \.aiignore/);
   });
 
   it('returns a notebook diff for confirmation', async () => {
