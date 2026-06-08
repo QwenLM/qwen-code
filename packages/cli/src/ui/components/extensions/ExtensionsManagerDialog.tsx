@@ -179,7 +179,11 @@ export function ExtensionsManagerDialog({
           </Text>
         )}
 
-        <Text color={theme.text.secondary}>{footerHint(activeTab)}</Text>
+        <Text color={theme.text.secondary}>
+          {tabLocked
+            ? t('Enter to select · Esc to go back')
+            : footerHint(activeTab)}
+        </Text>
       </Box>
     </Box>
   );

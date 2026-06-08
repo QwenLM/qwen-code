@@ -156,6 +156,42 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(lastFrame()).toContain('installed');
   });
 
+  it('opens a CC-style plugin detail with an inline scope selector on Enter', async () => {
+    const discovered: DiscoveredPlugin[] = [
+      {
+        marketplaceName: 'claude-plugins-official',
+        name: '42crunch-api-security-testing',
+        description: 'Automate API security directly in your workflow.',
+        author: '42Crunch',
+        homepage: 'https://example.com/42crunch',
+        components: { skills: ['42crunch-audit', '42crunch-scan'] },
+        installSource: 'owner/repo:42crunch-api-security-testing',
+        installed: false,
+      },
+    ];
+    const { stdin, lastFrame } = renderDialog(
+      createConfig(createManager({ discovered })),
+    );
+    await waitFor(() => {
+      expect(lastFrame()).toContain('42crunch-api-security-testing');
+    });
+    stdin.write('\r'); // Enter -> detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Plugin details');
+    });
+    const frame = lastFrame();
+    expect(frame).toContain('from claude-plugins-official');
+    expect(frame).toContain('By: 42Crunch');
+    expect(frame).toContain('Will install:');
+    expect(frame).toContain('42crunch-audit');
+    // Inline action selector with the three CC scopes + homepage + back.
+    expect(frame).toContain('Install for you (user scope)');
+    expect(frame).toContain('project scope');
+    expect(frame).toContain('local scope');
+    expect(frame).toContain('Open homepage');
+    expect(frame).toContain('Back to plugin list');
+  });
+
   it('prompts to add a marketplace when none discovered', async () => {
     const { lastFrame } = renderDialog(createConfig(createManager()));
     await waitFor(() => {

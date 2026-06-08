@@ -145,6 +145,32 @@ describe('discoverPlugins', () => {
     expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
   });
 
+  it('surfaces declared components and lastUpdated for the detail view', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Skills', [
+        {
+          name: 'pdf',
+          version: '1.0.0',
+          source: 'anthropics/skills',
+          skills: ['pdf-audit', 'pdf-scan'],
+          mcpServers: { 'pdf-server': { command: 'node' } },
+          // Arbitrary marketplace metadata field, read best-effort.
+          lastUpdated: 'Jun 5, 2026',
+        } as never,
+      ]),
+    );
+
+    const [plugin] = await discoverPlugins(
+      [{ name: 'Skills', source: 'anthropics/skills', type: 'github' }],
+      new Set(),
+    );
+
+    expect(plugin.components?.skills).toEqual(['pdf-audit', 'pdf-scan']);
+    expect(plugin.components?.mcpServers).toEqual(['pdf-server']);
+    expect(plugin.components?.commands).toBeUndefined();
+    expect(plugin.lastUpdated).toBe('Jun 5, 2026');
+  });
+
   it('derives install source from per-plugin source for http marketplaces', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [

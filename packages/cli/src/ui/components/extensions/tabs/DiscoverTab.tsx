@@ -66,10 +66,6 @@ export const DiscoverTab = ({
   const [cursor, setCursor] = useState(0);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [view, setView] = useState<DiscoverView>('list');
-  // Where Esc from the scope-select view should return to.
-  const [scopeReturnView, setScopeReturnView] = useState<'list' | 'detail'>(
-    'list',
-  );
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
 
@@ -116,23 +112,18 @@ export const DiscoverTab = ({
     return [];
   }, [plugins, selectedKeys, selected]);
 
-  const beginInstall = useCallback(
-    (from: 'list' | 'detail') => {
-      if (pendingInstall().length === 0) {
-        onStatus({ type: 'info', text: t('No installable plugins selected.') });
-        return;
-      }
-      setScopeReturnView(from);
-      setView('scope-select');
-      onLockChange(true);
-    },
-    [pendingInstall, onLockChange, onStatus],
-  );
+  const beginInstall = useCallback(() => {
+    if (pendingInstall().length === 0) {
+      onStatus({ type: 'info', text: t('No installable plugins selected.') });
+      return;
+    }
+    setView('scope-select');
+    onLockChange(true);
+  }, [pendingInstall, onLockChange, onStatus]);
 
-  const installWithScope = useCallback(
-    async (scope: ExtensionScope) => {
-      if (!extensionManager) return;
-      const targets = pendingInstall();
+  const runInstall = useCallback(
+    async (targets: DiscoveredPlugin[], scope: ExtensionScope) => {
+      if (!extensionManager || targets.length === 0) return;
       setInstalling(true);
       let installed = 0;
       const errors: string[] = [];
@@ -184,7 +175,12 @@ export const DiscoverTab = ({
       onInstalled();
       goToList();
     },
-    [extensionManager, pendingInstall, onStatus, load, onInstalled, goToList],
+    [extensionManager, onStatus, load, onInstalled, goToList],
+  );
+
+  const installWithScope = useCallback(
+    (scope: ExtensionScope) => void runInstall(pendingInstall(), scope),
+    [runInstall, pendingInstall],
   );
 
   const openHomepage = useCallback(
@@ -212,6 +208,60 @@ export const DiscoverTab = ({
     [onStatus],
   );
 
+  // Inline action selector on the detail page (mirrors Claude Code).
+  type DetailAction = ExtensionScope | 'homepage' | 'back';
+  const handleDetailAction = useCallback(
+    (action: DetailAction) => {
+      if (action === 'back') {
+        goToList();
+      } else if (action === 'homepage') {
+        if (selected) void openHomepage(selected);
+      } else if (selected) {
+        void runInstall([selected], action);
+      }
+    },
+    [selected, goToList, openHomepage, runInstall],
+  );
+
+  const detailActionItems = useCallback(() => {
+    const items: Array<{ key: string; label: string; value: DetailAction }> =
+      [];
+    if (selected && !selected.installed) {
+      items.push(
+        {
+          key: 'user',
+          label: t('Install for you (user scope)'),
+          value: 'user',
+        },
+        {
+          key: 'project',
+          label: t(
+            'Install for all collaborators on this repository (project scope)',
+          ),
+          value: 'project',
+        },
+        {
+          key: 'local',
+          label: t('Install for you, in this repo only (local scope)'),
+          value: 'local',
+        },
+      );
+    }
+    if (selected?.homepage) {
+      items.push({
+        key: 'homepage',
+        label: t('Open homepage'),
+        value: 'homepage',
+      });
+    }
+    items.push({
+      key: 'back',
+      label: t('Back to plugin list'),
+      value: 'back',
+    });
+    return items;
+  }, [selected]);
+
   // List keyboard.
   useKeypress(
     (key) => {
@@ -230,7 +280,7 @@ export const DiscoverTab = ({
           return next;
         });
       } else if (key.sequence === 'i' && !key.ctrl && !key.meta) {
-        beginInstall('list');
+        beginInstall();
       } else if (key.name === 'return') {
         if (selected) {
           onStatus(null);
@@ -242,31 +292,21 @@ export const DiscoverTab = ({
     { isActive: isActive && view === 'list' },
   );
 
-  // Detail keyboard (Open homepage / install / back).
+  // Detail: Escape goes back; the action selector (RadioButtonSelect) owns Enter.
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
         goToList();
-      } else if (key.sequence === 'h' && !key.ctrl && !key.meta) {
-        if (selected) void openHomepage(selected);
-      } else if (key.sequence === 'i' && !key.ctrl && !key.meta) {
-        if (selected && !selected.installed) {
-          beginInstall('detail');
-        }
       }
     },
     { isActive: isActive && view === 'detail' },
   );
 
-  // Scope-select escape returns to wherever it was opened from.
+  // Scope-select (batch install from the list) escape returns to the list.
   useKeypress(
     (key) => {
       if (key.name === 'escape' && !installing) {
-        if (scopeReturnView === 'detail') {
-          setView('detail');
-        } else {
-          goToList();
-        }
+        goToList();
       }
     },
     { isActive: isActive && view === 'scope-select' },
@@ -302,10 +342,28 @@ export const DiscoverTab = ({
   }
 
   if (view === 'detail' && selected) {
+    const comps = selected.components;
+    const componentLines: Array<{ label: string; names: string[] }> = [];
+    if (comps?.skills?.length)
+      componentLines.push({ label: t('Skills'), names: comps.skills });
+    if (comps?.commands?.length)
+      componentLines.push({ label: t('Commands'), names: comps.commands });
+    if (comps?.agents?.length)
+      componentLines.push({ label: t('Agents'), names: comps.agents });
+    if (comps?.mcpServers?.length)
+      componentLines.push({
+        label: t('MCP servers'),
+        names: comps.mcpServers,
+      });
+
     return (
       <Box flexDirection="column" gap={1}>
+        <Text color={theme.text.primary} bold>
+          {t('Plugin details')}
+        </Text>
+
         <Box flexDirection="column">
-          <Text color={theme.text.accent} bold>
+          <Text color={theme.text.primary} bold>
             {selected.name}
           </Text>
           <Text color={theme.text.secondary}>
@@ -313,26 +371,54 @@ export const DiscoverTab = ({
               marketplace: selected.marketplaceName,
             })}
           </Text>
+          {selected.lastUpdated ? (
+            <Text color={theme.text.secondary}>
+              {t('Last updated: {{date}}', { date: selected.lastUpdated })}
+            </Text>
+          ) : selected.version ? (
+            <Text color={theme.text.secondary}>
+              {t('Version: {{v}}', { v: selected.version })}
+            </Text>
+          ) : null}
         </Box>
+
         {selected.description ? <Text>{selected.description}</Text> : null}
-        {selected.version ? (
-          <Text color={theme.text.secondary}>
-            {t('Version: {{v}}', { v: selected.version })}
-          </Text>
-        ) : null}
+
         {selected.author ? (
           <Text color={theme.text.secondary}>
-            {t('Author: {{a}}', { a: selected.author })}
+            {t('By: {{a}}', { a: selected.author })}
           </Text>
         ) : null}
-        {selected.homepage ? (
-          <Text color={theme.text.link}>{selected.homepage}</Text>
+
+        {componentLines.length > 0 ? (
+          <Box flexDirection="column">
+            <Text color={theme.text.primary} bold>
+              {t('Will install:')}
+            </Text>
+            {componentLines.map((line) => (
+              <Text key={line.label} color={theme.text.secondary}>
+                {`· ${line.label}: ${line.names.join(', ')}`}
+              </Text>
+            ))}
+          </Box>
         ) : null}
-        <Text color={theme.text.secondary}>
-          {selected.installed
-            ? t('Already installed.')
-            : t('i to install · h to open homepage · Esc to go back')}
+
+        <Text color={theme.text.secondary} italic>
+          {t(
+            '⚠ Make sure you trust a plugin before installing, updating, or using it. We cannot verify what MCP servers, files, or other software a plugin includes, or that it works as intended. See the plugin homepage for more information.',
+          )}
         </Text>
+
+        {installing ? (
+          <Text color={theme.text.secondary}>{t('Installing...')}</Text>
+        ) : (
+          <RadioButtonSelect
+            items={detailActionItems()}
+            isFocused={isActive}
+            showNumbers={false}
+            onSelect={handleDetailAction}
+          />
+        )}
       </Box>
     );
   }

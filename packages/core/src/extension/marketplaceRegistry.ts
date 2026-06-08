@@ -35,6 +35,14 @@ export interface MarketplaceSource {
 /**
  * A single installable plugin surfaced by the Discover view.
  */
+/** Components a plugin declares in its marketplace entry ("Will install"). */
+export interface DiscoveredPluginComponents {
+  skills?: string[];
+  commands?: string[];
+  agents?: string[];
+  mcpServers?: string[];
+}
+
 export interface DiscoveredPlugin {
   /** Name of the marketplace this plugin came from. */
   marketplaceName: string;
@@ -44,10 +52,51 @@ export interface DiscoveredPlugin {
   author?: string;
   homepage?: string;
   category?: string;
+  /** Best-effort last-updated string when the marketplace entry provides one. */
+  lastUpdated?: string;
+  /** Components the plugin declares (for the "Will install" summary). */
+  components?: DiscoveredPluginComponents;
   /** Source string suitable for `parseInstallSource`. */
   installSource: string;
   /** Whether an extension with this name is already installed. */
   installed: boolean;
+}
+
+function asNameList(
+  value: string | string[] | undefined,
+): string[] | undefined {
+  return Array.isArray(value) && value.length > 0 ? value : undefined;
+}
+
+function asMcpNames(
+  value: string | Record<string, unknown> | undefined,
+): string[] | undefined {
+  if (value && typeof value === 'object') {
+    const names = Object.keys(value);
+    return names.length > 0 ? names : undefined;
+  }
+  return undefined;
+}
+
+function pluginComponents(
+  plugin: ClaudeMarketplacePluginConfig,
+): DiscoveredPluginComponents | undefined {
+  const components: DiscoveredPluginComponents = {
+    skills: asNameList(plugin.skills),
+    commands: asNameList(plugin.commands),
+    agents: asNameList(plugin.agents),
+    mcpServers: asMcpNames(plugin.mcpServers),
+  };
+  return Object.values(components).some(Boolean) ? components : undefined;
+}
+
+function pluginLastUpdated(
+  plugin: ClaudeMarketplacePluginConfig,
+): string | undefined {
+  const record = plugin as unknown as Record<string, unknown>;
+  const value =
+    record['lastUpdated'] ?? record['updatedAt'] ?? record['updated'];
+  return typeof value === 'string' ? value : undefined;
 }
 
 /**
@@ -123,6 +172,8 @@ function pluginsFromConfig(
     author: plugin.author?.name,
     homepage: plugin.homepage,
     category: plugin.category,
+    lastUpdated: pluginLastUpdated(plugin),
+    components: pluginComponents(plugin),
     installSource: resolveInstallSource(marketplace, plugin),
     installed: installedNames.has(plugin.name),
   }));
