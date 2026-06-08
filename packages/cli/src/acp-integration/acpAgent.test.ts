@@ -1906,6 +1906,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/getCore redacts hook env/header secrets', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: 'notify',
+              env: { SLACK_TOKEN: 'xoxb-realsecret' },
+            },
+          ],
+        },
+      ],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = await agent.extMethod('qwen/settings/getCore', {});
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('xoxb-realsecret');
+    expect(serialized).toContain('__redacted__');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setHook restores a redacted hook secret instead of persisting the sentinel', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: 'notify',
+              env: { SLACK_TOKEN: 'xoxb-realsecret' },
+            },
+          ],
+        },
+      ],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // Client echoes back the masked env while editing the command in place.
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PreToolUse',
+      index: 0,
+      hook: {
+        hooks: [
+          {
+            type: 'command',
+            command: 'notify --loud',
+            env: { SLACK_TOKEN: '__redacted__' },
+          },
+        ],
+      },
+    });
+
+    const persisted = vi
+      .mocked(settings.setValue)
+      .mock.calls.find((call) => call[1] === 'hooks')?.[2] as {
+      PreToolUse: Array<{ hooks: Array<{ env: Record<string, string> }> }>;
+    };
+    expect(persisted.PreToolUse[0]!.hooks[0]!.env['SLACK_TOKEN']).toBe(
+      'xoxb-realsecret',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/setMcpServer rejects a missing name and persists a valid one', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
@@ -2040,6 +2112,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ]),
       }),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setHook replaces in place at a valid index and appends for out-of-range', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'original' }] }],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // In-place replace at index 0.
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PreToolUse',
+      index: 0,
+      hook: { hooks: [{ type: 'command', command: 'replaced' }] },
+    });
+    let persisted = vi
+      .mocked(settings.setValue)
+      .mock.calls.filter((call) => call[1] === 'hooks')
+      .at(-1)?.[2] as {
+      PreToolUse: Array<{ hooks: Array<{ command: string }> }>;
+    };
+    expect(persisted.PreToolUse).toHaveLength(1);
+    expect(persisted.PreToolUse[0]!.hooks[0]!.command).toBe('replaced');
+
+    // Out-of-range index appends instead of creating a sparse hole.
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PreToolUse',
+      index: 99,
+      hook: { hooks: [{ type: 'command', command: 'appended' }] },
+    });
+    persisted = vi
+      .mocked(settings.setValue)
+      .mock.calls.filter((call) => call[1] === 'hooks')
+      .at(-1)?.[2] as {
+      PreToolUse: Array<{ hooks: Array<{ command: string }> }>;
+    };
+    expect(persisted.PreToolUse).toHaveLength(2);
+    expect(persisted.PreToolUse[1]!.hooks[0]!.command).toBe('appended');
+    // No null holes from a sparse assignment.
+    expect(persisted.PreToolUse.every((entry) => entry != null)).toBe(true);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2347,6 +2464,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ],
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {
+    mockConfig.getSkillManager = vi.fn().mockReturnValue({
+      parseSkillContent: vi.fn(),
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+    });
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    for (const sourceUrl of [
+      'http://github.com/owner/repo/blob/main/skills/x/SKILL.md',
+      'https://evil.com/owner/repo/blob/main/skills/x/SKILL.md',
+      'https://github.com.attacker.com/owner/repo/blob/main/SKILL.md',
+    ]) {
+      await expect(
+        agent.extMethod('qwen/skills/install', {
+          skill: { id: 'x', slug: 'x', name: 'X', sourceUrl },
+        }),
+      ).rejects.toThrow();
+    }
 
     mockConnectionState.resolve();
     await agentPromise;

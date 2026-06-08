@@ -847,7 +847,9 @@ export async function extractFilesFromTarGz(
 const ALLOWED_REDIRECT_HOST_SUFFIXES = [
   '.githubusercontent.com',
   '.github.com',
-  '.github.io',
+  // Note: '.github.io' is intentionally excluded — *.github.io are
+  // user-controlled GitHub Pages sites, so allowing redirects there would
+  // reopen the SSRF/exfiltration surface this allowlist exists to close.
 ];
 
 function isAllowedSkillFetchHost(hostname: string): boolean {
@@ -1571,7 +1573,7 @@ export function normalizeCoreSettingValue(
       // system instruction — where an embedded newline could forge a new
       // instruction line (persistent prompt injection).
       // eslint-disable-next-line no-control-regex
-      const controlChars = /[\u0000-\u001f\u007f]/g;
+      const controlChars = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
       return value.replace(controlChars, ' ').trim();
     }
     default:
@@ -1818,6 +1820,79 @@ function restoreRedactedMcpSecrets(
   };
 }
 
+function redactSecretRecord(
+  record: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  return record
+    ? Object.fromEntries(
+        Object.keys(record).map((key) => [key, REDACTED_MCP_SECRET]),
+      )
+    : record;
+}
+
+function restoreSecretRecord(
+  incoming: Record<string, string> | undefined,
+  prior: unknown,
+): Record<string, string> | undefined {
+  if (!incoming) return incoming;
+  const priorRecord = toRecord(prior);
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== REDACTED_MCP_SECRET) {
+      result[key] = value;
+      continue;
+    }
+    const priorValue = priorRecord[key];
+    if (typeof priorValue === 'string') result[key] = priorValue;
+  }
+  return result;
+}
+
+// Hooks carry the same secret classes as MCP servers — command-hook `env`
+// (tokens passed to scripts) and http-hook `headers` (auth). Mask them in the
+// settings response and restore them on write, mirroring the MCP scheme.
+function redactHookSecrets(hook: QwenHookDefinition): QwenHookDefinition {
+  return {
+    ...hook,
+    hooks: hook.hooks.map((config) => ({
+      ...config,
+      ...(config.env ? { env: redactSecretRecord(config.env) } : {}),
+      ...(config.headers
+        ? { headers: redactSecretRecord(config.headers) }
+        : {}),
+    })),
+  };
+}
+
+function restoreRedactedHookSecrets(
+  hook: QwenHookDefinition,
+  prior: Record<string, unknown>,
+): QwenHookDefinition {
+  const priorHooks = Array.isArray(prior['hooks'])
+    ? (prior['hooks'] as unknown[])
+    : [];
+  return {
+    ...hook,
+    hooks: hook.hooks.map((config, i) => {
+      const priorConfig = toRecord(priorHooks[i]);
+      return {
+        ...config,
+        ...(config.env
+          ? { env: restoreSecretRecord(config.env, priorConfig['env']) }
+          : {}),
+        ...(config.headers
+          ? {
+              headers: restoreSecretRecord(
+                config.headers,
+                priorConfig['headers'],
+              ),
+            }
+          : {}),
+      };
+    }),
+  };
+}
+
 function readMcpServers(
   source: Record<string, unknown>,
   scope: QwenSettingsScope | 'extension',
@@ -1955,7 +2030,7 @@ function readHooks(
           event,
           scope,
           index,
-          hook: normalizeHookDefinition(hookValue),
+          hook: redactHookSecrets(normalizeHookDefinition(hookValue)),
           extensionName,
         });
       } catch (error) {
@@ -4373,19 +4448,26 @@ class QwenAgent implements Agent {
         const eventHooks = Array.isArray(hooksRoot[event])
           ? [...(hooksRoot[event] as unknown[])]
           : [];
-        const hook = normalizeHookDefinition(params['hook']);
+        const incomingHook = normalizeHookDefinition(params['hook']);
         const index = params['index'];
         // Only replace when the index points at an existing entry. An
         // out-of-range index would create sparse-array holes that serialize to
         // `null` in settings.json and corrupt hook loading, so treat it (and a
         // missing/negative index) as an append.
-        if (
+        const isReplace =
           typeof index === 'number' &&
           Number.isInteger(index) &&
           index >= 0 &&
-          index < eventHooks.length
-        ) {
-          eventHooks[index] = hook;
+          index < eventHooks.length;
+        // Restore any `__redacted__` env/header values the client echoed back
+        // from getCore against the hook being replaced, so masking on read
+        // never persists the sentinel over a real secret.
+        const hook = restoreRedactedHookSecrets(
+          incomingHook,
+          isReplace ? toRecord(eventHooks[index as number]) : {},
+        );
+        if (isReplace) {
+          eventHooks[index as number] = hook;
         } else {
           // Missing/negative/non-integer index → append. (A non-integer like
           // 1.5 would otherwise create a sparse, non-integer array property
@@ -4470,8 +4552,10 @@ class QwenAgent implements Agent {
           async () => value,
           extScope,
         );
-        // `setValue` already persisted to disk and recomputed the in-memory
-        // merged view, so reloading from disk here is redundant I/O.
+        // Unlike the sibling core-setting handlers, this persists through
+        // `updateSetting` (extension settings store), not `settings.setValue`,
+        // so `settings` here is just the snapshot loaded above and is reused to
+        // build the response.
         this.settings = settings;
         return this.buildCoreSettings(settings, cwd);
       }

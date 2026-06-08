@@ -1522,12 +1522,18 @@ export class Session implements SessionContext {
           sessionId: this.sessionId,
         },
       );
-      const messages = Array.isArray(response['messages'])
-        ? response['messages'].filter(
-            (message): message is string =>
-              typeof message === 'string' && message.trim().length > 0,
-          )
-        : [];
+      // A client may legally resolve with `result: null` (passed through
+      // unwrapped by the ACP SDK); guard the object access so that doesn't
+      // throw a TypeError and get misclassified as a transient drain error.
+      const messages =
+        response &&
+        typeof response === 'object' &&
+        Array.isArray(response['messages'])
+          ? response['messages'].filter(
+              (message): message is string =>
+                typeof message === 'string' && message.trim().length > 0,
+            )
+          : [];
 
       return messages.map((message) => ({
         text: `\n[User message received during tool execution]: ${message}`,
