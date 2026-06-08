@@ -208,14 +208,20 @@ async function withDaemon(
       });
 
       const stats = percentiles(latencies);
-      snapshot.scenarios.push({
-        name: 'rapid-lifecycle',
-        status: 'passed',
-        durationMs: performance.now() - t0,
-        metrics: { cycles: LIFECYCLE_CYCLES, ...stats },
-      });
-
-      expect(stats.p99).toBeLessThan(30_000);
+      let status: 'passed' | 'failed' = 'passed';
+      try {
+        expect(stats.p99).toBeLessThan(30_000);
+      } catch (err) {
+        status = 'failed';
+        throw err;
+      } finally {
+        snapshot.scenarios.push({
+          name: 'rapid-lifecycle',
+          status,
+          durationMs: performance.now() - t0,
+          metrics: { cycles: LIFECYCLE_CYCLES, ...stats },
+        });
+      }
     }, 120_000);
 
     // Scenario 2: SSE slow consumer triggers eviction
@@ -259,17 +265,21 @@ async function withDaemon(
         },
       );
 
-      snapshot.scenarios.push({
-        name: 'sse-slow-consumer-eviction',
-        status: 'passed',
-        durationMs: performance.now() - t0,
-        metrics: { evicted, received },
-      });
-
-      // Whether eviction fires depends on ring size vs consumer speed.
-      // The catastrophic bound: the consumer received at least one event
-      // and the daemon survived the prompt flood without crashing.
-      expect(received).toBeGreaterThan(0);
+      let status: 'passed' | 'failed' = 'passed';
+      try {
+        expect(received).toBeGreaterThan(0);
+        expect(evicted).toBe(true);
+      } catch (err) {
+        status = 'failed';
+        throw err;
+      } finally {
+        snapshot.scenarios.push({
+          name: 'sse-slow-consumer-eviction',
+          status,
+          durationMs: performance.now() - t0,
+          metrics: { evicted, received },
+        });
+      }
     }, 120_000);
 
     // Scenario 3: Last-Event-ID reconnect under concurrent load
@@ -316,14 +326,20 @@ async function withDaemon(
         await d.client.closeSession(session.sessionId);
       });
 
-      snapshot.scenarios.push({
-        name: 'last-event-id-reconnect',
-        status: 'passed',
-        durationMs: performance.now() - t0,
-        metrics: { reconnectReceived },
-      });
-
-      expect(reconnectReceived).toBeGreaterThan(0);
+      let status: 'passed' | 'failed' = 'passed';
+      try {
+        expect(reconnectReceived).toBeGreaterThan(0);
+      } catch (err) {
+        status = 'failed';
+        throw err;
+      } finally {
+        snapshot.scenarios.push({
+          name: 'last-event-id-reconnect',
+          status,
+          durationMs: performance.now() - t0,
+          metrics: { reconnectReceived },
+        });
+      }
     }, 120_000);
 
     // Scenario 4: ACP child crash → session error recovery
@@ -347,15 +363,16 @@ async function withDaemon(
             crashDetected = true;
           }
 
-          // Poll for daemon recovery instead of fixed sleep.
+          // Poll for daemon recovery, then verify it can serve new work.
           const deadline = Date.now() + 5_000;
           while (Date.now() < deadline) {
             try {
-              const health = await d.client.health();
-              if (health !== undefined) {
-                recoverySucceeded = true;
-                break;
-              }
+              await d.client.health();
+              const recoverySession = await d.client.createOrAttachSession({
+                sessionScope: 'thread',
+              });
+              recoverySucceeded = recoverySession.sessionId !== undefined;
+              break;
             } catch {
               await sleep(200);
             }
@@ -363,15 +380,21 @@ async function withDaemon(
         },
       );
 
-      snapshot.scenarios.push({
-        name: 'acp-crash-recovery',
-        status: 'passed',
-        durationMs: performance.now() - t0,
-        metrics: { crashDetected, recoverySucceeded },
-      });
-
-      expect(crashDetected).toBe(true);
-      expect(recoverySucceeded).toBe(true);
+      let status: 'passed' | 'failed' = 'passed';
+      try {
+        expect(crashDetected).toBe(true);
+        expect(recoverySucceeded).toBe(true);
+      } catch (err) {
+        status = 'failed';
+        throw err;
+      } finally {
+        snapshot.scenarios.push({
+          name: 'acp-crash-recovery',
+          status,
+          durationMs: performance.now() - t0,
+          metrics: { crashDetected, recoverySucceeded },
+        });
+      }
     }, 90_000);
 
     // Scenario 5: burst concurrent sessions
@@ -407,20 +430,26 @@ async function withDaemon(
       });
 
       const stats = percentiles(latencies);
-      snapshot.scenarios.push({
-        name: 'burst-concurrent',
-        status: 'passed',
-        durationMs: performance.now() - t0,
-        metrics: {
-          burstSize: BURST_SESSIONS,
-          successCount,
-          failureCount,
-          ...stats,
-        },
-      });
-
-      expect(failureCount).toBe(0);
-      expect(stats.p99).toBeLessThan(60_000);
+      let status: 'passed' | 'failed' = 'passed';
+      try {
+        expect(failureCount).toBe(0);
+        expect(stats.p99).toBeLessThan(60_000);
+      } catch (err) {
+        status = 'failed';
+        throw err;
+      } finally {
+        snapshot.scenarios.push({
+          name: 'burst-concurrent',
+          status,
+          durationMs: performance.now() - t0,
+          metrics: {
+            burstSize: BURST_SESSIONS,
+            successCount,
+            failureCount,
+            ...stats,
+          },
+        });
+      }
     }, 120_000);
 
     // Report
