@@ -165,6 +165,10 @@ jobs:
         needs.resolve.outputs.trigger_type == 'review_only'
       )
     timeout-minutes: 45
+    # 10-minute wait timer prevents reviewing rapid consecutive pushes.
+    # Only applies to auto-triggered PRs; comment/dispatch triggers skip the wait.
+    environment:
+      name: '${{ needs.resolve.outputs.trigger_type == ''full'' && ''qwen-pr-review-delay'' || '''' }}'
     concurrency:
       group: 'qwen-pr-triage-review-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
@@ -174,7 +178,7 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     outputs:
-      verdict: '${{ steps.run.outputs.verdict }}'
+      verdict: '${{ steps.verdict.outputs.verdict }}'
     steps:
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -225,8 +229,25 @@ jobs:
             --output-format stream-json \
             || true
 
-          # Review skill posts comments directly; verdict defaults to pass
-          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+      - name: 'Check review verdict'
+        id: 'verdict'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        run: |
+          # Check if the review posted REQUEST_CHANGES
+          REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json latestReviews --jq '
+              [.latestReviews[] | select(.authorAssociation == "NONE" or .author.login == "qwen-code-ci-bot")] |
+              if length > 0 then .[0].state else "NONE" end
+            ' 2>/dev/null || echo "NONE")
+
+          if [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review requested changes — skipping tmux testing"
+          else
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          fi
 
   # ─── Stage 2b: Tmux Testing (after review, internal PRs only) ───────
   # Runs AFTER review — no point testing if code has critical issues.
@@ -234,6 +255,7 @@ jobs:
     needs: ['resolve', 'product-decision', 'review']
     if: >-
       needs.review.result == 'success' &&
+      needs.review.outputs.verdict == 'pass' &&
       needs.resolve.outputs.is_fork == 'false'
     timeout-minutes: 20
     concurrency:
