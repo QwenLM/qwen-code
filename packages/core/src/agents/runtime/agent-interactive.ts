@@ -348,6 +348,8 @@ export class AgentInteractive {
   private settleRoundStatus(): void {
     if (this.lastRoundError && !this.roundCancelledByUser) {
       this.setStatus(AgentStatus.FAILED);
+    } else if (this.config.completeOnIdle) {
+      this.setStatus(AgentStatus.COMPLETED);
     } else {
       this.setStatus(AgentStatus.IDLE);
     }
