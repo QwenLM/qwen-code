@@ -1365,7 +1365,10 @@ export function asKnownDaemonEvent(
         : undefined;
     case 'settings_changed':
       return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<'settings_changed', Record<string, unknown>>)
+        ? (event as DaemonEventEnvelope<
+            'settings_changed',
+            Record<string, unknown>
+          >)
         : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
@@ -2549,6 +2552,8 @@ function isSessionBranchedData(
     isNonEmptyString(value['newSessionId']) &&
     isNonEmptyString(value['displayName'])
   );
+}
+
 function isSessionSnapshotData(
   value: unknown,
 ): value is DaemonSessionSnapshotData {
