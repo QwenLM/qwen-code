@@ -22,7 +22,10 @@ import * as path from 'node:path';
 import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
-import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
+import {
+  stripDisplayControlChars,
+  stripTerminalControlSequences,
+} from '../utils/terminalSafe.js';
 import type { TaskBase, TaskRegistration } from './types.js';
 import type { TaskRegistry } from './registry.js';
 import type { Task } from './dispatcher.js';
@@ -171,7 +174,10 @@ const agentNotificationCallbacks = new Map<
   string,
   MonitorNotificationCallback
 >();
-const agentLifecycleCallbacks = new Map<string, MonitorOwnerLifecycleCallback>();
+const agentLifecycleCallbacks = new Map<
+  string,
+  MonitorOwnerLifecycleCallback
+>();
 
 export function setMonitorNotificationCallback(
   cb: MonitorNotificationCallback | undefined,
@@ -356,12 +362,7 @@ export function monitorComplete(
   const entry = registry.get(monitorId) as MonitorTask | undefined;
   if (!entry || entry.kind !== 'monitor' || entry.status !== 'running') return;
 
-  settle(
-    registry,
-    entry,
-    'completed',
-    exitCode !== null ? { exitCode } : {},
-  );
+  settle(registry, entry, 'completed', exitCode !== null ? { exitCode } : {});
   debugLogger.info(
     `Monitor completed: ${monitorId} (exit ${exitCode}, ${entry.eventCount} events)`,
   );
@@ -614,12 +615,23 @@ function clearIdleTimer(entry: MonitorTask): void {
   }
 }
 
+/**
+ * Sanitize monitor-derived text before it reaches a notification surface.
+ * `stripTerminalControlSequences` removes ANSI/OSC/CSI escape sequences and
+ * C0/C1 controls but NOT Unicode bidi override/isolate characters;
+ * `stripDisplayControlChars` strips the bidi ranges that enable "Trojan
+ * Source" (CVE-2021-42574) reordering. Both background notification surfaces
+ * (shell + monitor) feed the same Session notification queue, so they must
+ * apply the same defense — `shell-task.ts` strips bidi too.
+ */
+function sanitizeForNotification(text: string): string {
+  return stripDisplayControlChars(stripTerminalControlSequences(text));
+}
+
 /** Emit a streaming event notification (status=running, includes stdout line). */
 function emitEventNotification(entry: MonitorTask, eventLine: string): void {
-  const desc = stripTerminalControlSequences(
-    truncateDescription(entry.description),
-  );
-  const safeEventLine = stripTerminalControlSequences(eventLine);
+  const desc = sanitizeForNotification(truncateDescription(entry.description));
+  const safeEventLine = sanitizeForNotification(eventLine);
   const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${safeEventLine}`;
 
   const xmlParts: string[] = [
@@ -658,9 +670,7 @@ function emitTerminalNotification(entry: MonitorTask, detail?: string): void {
         ? 'failed'
         : 'was cancelled';
 
-  const desc = stripTerminalControlSequences(
-    truncateDescription(entry.description),
-  );
+  const desc = sanitizeForNotification(truncateDescription(entry.description));
   const droppedSuffix =
     entry.droppedLines > 0
       ? `, ${entry.droppedLines} lines dropped due to throttling`
@@ -682,7 +692,7 @@ function emitTerminalNotification(entry: MonitorTask, detail?: string): void {
   );
   if (detail) {
     xmlParts.push(
-      `<result>${escapeXml(stripTerminalControlSequences(detail))}</result>`,
+      `<result>${escapeXml(sanitizeForNotification(detail))}</result>`,
     );
   }
   xmlParts.push('</task-notification>');

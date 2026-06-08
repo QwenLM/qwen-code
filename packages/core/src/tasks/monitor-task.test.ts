@@ -4,14 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CONCURRENT_MONITORS,
   type MonitorTask,
@@ -87,9 +80,9 @@ describe('monitor-task', () => {
       for (let i = 0; i < MAX_CONCURRENT_MONITORS; i++) {
         monitorRegister(registry, makeReg(`mon_${i}`));
       }
-      expect(() =>
-        monitorRegister(registry, makeReg('mon_overflow')),
-      ).toThrow(/maximum concurrent monitors/);
+      expect(() => monitorRegister(registry, makeReg('mon_overflow'))).toThrow(
+        /maximum concurrent monitors/,
+      );
     });
 
     it('counts only running monitors toward the cap (terminal entries free a slot)', () => {
@@ -171,11 +164,12 @@ describe('monitor-task', () => {
       expect(entry?.endTime).toBeDefined();
       // Notification fires once with terminal status. Each call is
       // (displayText, modelText, meta).
-      const terminalCalls = (notify as ReturnType<typeof vi.fn>).mock.calls
-        .filter((c) => {
-          const m = c[2] as { status?: string };
-          return m?.status === 'completed';
-        });
+      const terminalCalls = (
+        notify as ReturnType<typeof vi.fn>
+      ).mock.calls.filter((c) => {
+        const m = c[2] as { status?: string };
+        return m?.status === 'completed';
+      });
       expect(terminalCalls).toHaveLength(1);
     });
 
@@ -190,6 +184,29 @@ describe('monitor-task', () => {
   });
 
   describe('monitorComplete / monitorFail', () => {
+    it('strips Unicode bidi (Trojan Source) characters from terminal notifications', () => {
+      const notify: MonitorNotificationCallback = vi.fn();
+      setMonitorNotificationCallback(notify);
+      // U+202E RIGHT-TO-LEFT OVERRIDE + U+2066 LEFT-TO-RIGHT ISOLATE — a
+      // malicious monitored process could emit these in its description or
+      // output to visually reorder adjacent text (CVE-2021-42574). They are
+      // not removed by stripTerminalControlSequences alone.
+      const bidi = '\u202Eevil\u2066';
+      monitorRegister(
+        registry,
+        makeReg('mon_1', { description: `deploy ${bidi}` }),
+      );
+      monitorFail(registry, 'mon_1', `failure ${bidi}`);
+
+      const calls = (notify as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const bidiRange = /[\u202a-\u202e\u2066-\u2069]/;
+      for (const [displayText, modelText] of calls) {
+        expect(displayText).not.toMatch(bidiRange);
+        expect(modelText).not.toMatch(bidiRange);
+      }
+    });
+
     it('fires the change listener exactly ONCE per terminal transition', () => {
       monitorRegister(registry, makeReg('mon_1'));
       const listener = vi.fn();
@@ -296,18 +313,9 @@ describe('monitor-task', () => {
 
   describe('owner-scoped routing', () => {
     it('monitorHasRunningForOwner filters by ownerAgentId + status=running', () => {
-      monitorRegister(
-        registry,
-        makeReg('mon_A1', { ownerAgentId: 'agent-A' }),
-      );
-      monitorRegister(
-        registry,
-        makeReg('mon_A2', { ownerAgentId: 'agent-A' }),
-      );
-      monitorRegister(
-        registry,
-        makeReg('mon_B1', { ownerAgentId: 'agent-B' }),
-      );
+      monitorRegister(registry, makeReg('mon_A1', { ownerAgentId: 'agent-A' }));
+      monitorRegister(registry, makeReg('mon_A2', { ownerAgentId: 'agent-A' }));
+      monitorRegister(registry, makeReg('mon_B1', { ownerAgentId: 'agent-B' }));
       monitorComplete(registry, 'mon_A2', 0);
 
       expect(monitorHasRunningForOwner(registry, 'agent-A')).toBe(true);
@@ -315,18 +323,9 @@ describe('monitor-task', () => {
     });
 
     it('monitorCancelRunningForOwner cancels every running monitor owned by the agent', () => {
-      monitorRegister(
-        registry,
-        makeReg('mon_A1', { ownerAgentId: 'agent-A' }),
-      );
-      monitorRegister(
-        registry,
-        makeReg('mon_A2', { ownerAgentId: 'agent-A' }),
-      );
-      monitorRegister(
-        registry,
-        makeReg('mon_B1', { ownerAgentId: 'agent-B' }),
-      );
+      monitorRegister(registry, makeReg('mon_A1', { ownerAgentId: 'agent-A' }));
+      monitorRegister(registry, makeReg('mon_A2', { ownerAgentId: 'agent-A' }));
+      monitorRegister(registry, makeReg('mon_B1', { ownerAgentId: 'agent-B' }));
 
       monitorCancelRunningForOwner(registry, 'agent-A', { notify: false });
 
@@ -360,10 +359,7 @@ describe('monitor-task', () => {
       setMonitorAgentLifecycleCallback('agent-A', wakeA);
       const notifA: MonitorNotificationCallback = vi.fn();
       setMonitorAgentNotificationCallback('agent-A', notifA);
-      monitorRegister(
-        registry,
-        makeReg('mon_A1', { ownerAgentId: 'agent-A' }),
-      );
+      monitorRegister(registry, makeReg('mon_A1', { ownerAgentId: 'agent-A' }));
       monitorRegister(registry, makeReg('mon_top1'));
 
       monitorAbortAll(registry, { notify: false });
@@ -390,10 +386,7 @@ describe('monitor-task', () => {
     it('aborts running monitors and clears the module-level owner-callback Maps', () => {
       const wakeA = vi.fn();
       setMonitorAgentLifecycleCallback('agent-A', wakeA);
-      monitorRegister(
-        registry,
-        makeReg('mon_A1', { ownerAgentId: 'agent-A' }),
-      );
+      monitorRegister(registry, makeReg('mon_A1', { ownerAgentId: 'agent-A' }));
       const ac = getMonitorTask(registry, 'mon_A1')!.abortController;
 
       monitorReset(registry);
