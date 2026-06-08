@@ -11,6 +11,7 @@ import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
+import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import { loadPolicyFile } from './policy/loader.js';
@@ -35,12 +36,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
+  const snooze = await SnoozeStore.open(
+    join(homedir(), '.qwen', 'rc', 'snooze.state'),
+  );
   const { app, notifier, audit } = createGatewayApp({
     daemon: handle.daemon,
     store,
     pairing,
     vapid,
     pushStore,
+    snooze,
   });
 
   // Load the policy fail-closed: absent file → default-prompt (auto-votes

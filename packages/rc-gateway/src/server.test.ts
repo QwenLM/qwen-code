@@ -16,6 +16,7 @@ import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
+import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import type { PushNotifier } from './webpush/notifier.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
@@ -47,6 +48,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   const pairing = new PairingService();
   const vapid = await VapidStore.open(join(dir, 'vapid.json'));
   const pushStore = await PushStore.open(join(dir, 'push.json'));
+  const snooze = await SnoozeStore.open(join(dir, 'snooze.state'));
   const { app, notifier } = createGatewayApp({
     daemon,
     store,
@@ -54,6 +56,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
     auditPath,
     vapid,
     pushStore,
+    snooze,
   }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -450,6 +453,57 @@ describe('gateway app', () => {
     expect(test.status).toBe(200);
     const body = (await test.json()) as { sent: number };
     expect(body.sent).toBe(1);
+  });
+
+  it('owner can POST /rc/routing/snooze then GET reports active', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const post = await fetch(`${url}/rc/routing/snooze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ durationSec: 60 }),
+    });
+    expect(post.status).toBe(200);
+    const postBody = (await post.json()) as { until: number; scope: string };
+    expect(postBody.scope).toBe('all');
+
+    const get = await fetch(`${url}/rc/routing/snooze`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(get.status).toBe(200);
+    const getBody = (await get.json()) as { active: boolean };
+    expect(getBody.active).toBe(true);
+  });
+
+  it('403s POST /rc/routing/snooze for a session:read-only token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]); // no owner
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/routing/snooze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ durationSec: 60 }),
+    });
+    expect(res.status).toBe(403);
   });
 
   it('403s the push vapid route for a token lacking session:read', async () => {

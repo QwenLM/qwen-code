@@ -28,8 +28,10 @@ import {
 } from './routes/tokens.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
+import { createRoutingRouter } from './routes/routing.js';
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
+import type { SnoozeStore } from './routing/snooze.js';
 
 export interface GatewayDeps {
   daemon: DaemonClient;
@@ -43,6 +45,8 @@ export interface GatewayDeps {
   vapid?: VapidStore;
   /** Token-bound push subscription store. Push routes mount only when both this and vapid are set. */
   pushStore?: PushStore;
+  /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
+  snooze?: SnoozeStore;
 }
 
 export interface GatewayApp {
@@ -113,11 +117,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   let notifier: PushNotifier | undefined;
   if (deps.vapid && deps.pushStore) {
     const sender = new PushSender(deps.vapid, deps.pushStore, audit);
-    notifier = new PushNotifier(deps.store, deps.pushStore, sender);
+    notifier = new PushNotifier(
+      deps.store,
+      deps.pushStore,
+      sender,
+      deps.snooze,
+      audit,
+    );
     app.use(
       '/rc/push',
       requireScope(SESSION_READ, audit),
       createPushRouter(deps.vapid, deps.pushStore, notifier, audit),
+    );
+  }
+
+  if (deps.snooze) {
+    app.use(
+      '/rc/routing',
+      requireScope(OWNER, audit),
+      createRoutingRouter(deps.snooze, audit),
     );
   }
 
