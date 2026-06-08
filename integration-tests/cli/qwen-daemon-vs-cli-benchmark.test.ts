@@ -18,23 +18,35 @@
  * directory, similar to `qwen-serve-baseline.test.ts`.
  */
 
-import { spawn, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { DaemonHttpError } from '@qwen-code/sdk';
 import {
   spawnDaemon,
-  getRssMB,
-  countDescendants,
   percentiles,
-  DEFAULT_CLI_BIN,
+  gitHead,
+  makeTempWorkspace,
+  sleep,
   type SpawnedDaemon,
   type Percentiles,
 } from './_daemon-harness.js';
+import {
+  spawnDaemonWithTime,
+  spawnCliWithTime,
+  measureProcessTreeRss,
+  measureCliStartupWithProfiler,
+  type ProcessResourceMetrics,
+  type ProcessTreeRss,
+  type StartupPhasesResult,
+} from './_daemon-benchmark-helpers.js';
+import {
+  resolveOutputDir,
+  formatPercentiles,
+  writeSnapshotArtifacts,
+  collectPlatformInfo,
+} from './_daemon-perf-report.js';
 
 // ---------------------------------------------------------------------------
 // Skip logic
@@ -67,8 +79,6 @@ const CHURN_ROUNDS = Number(
   process.env['BENCHMARK_CHURN_ROUNDS'] ?? ITERATIONS * 4,
 );
 
-const CLI_BIN = DEFAULT_CLI_BIN;
-
 const PROMPT_CREDENTIAL_ENV_KEYS = [
   'DASHSCOPE_API_KEY',
   'OPENAI_API_KEY',
@@ -84,12 +94,7 @@ const HAS_MODEL_KEY =
   );
 const SKIP_PROMPT = !HAS_MODEL_KEY;
 
-const IS_DARWIN = process.platform === 'darwin';
-
-const RUN_TS = new Date().toISOString().replace(/[:.]/g, '').replace(/Z$/, '');
-const OUTPUT_DIR =
-  process.env['INTEGRATION_TEST_FILE_DIR'] ??
-  path.join(process.cwd(), '.integration-tests', `benchmark-${RUN_TS}`);
+const OUTPUT_DIR = resolveOutputDir('benchmark');
 
 const THRESH = {
   cliColdStartP99MaxMs: 10_000,
@@ -102,13 +107,6 @@ const THRESH = {
 // ---------------------------------------------------------------------------
 // Snapshot accumulator
 // ---------------------------------------------------------------------------
-
-interface ProcessTreeRss {
-  daemonRssMB: number;
-  acpChildRssMB: number;
-  mcpChildrenRssMB: number;
-  totalRssMB: number;
-}
 
 interface BenchmarkSnapshot {
   version: 1;
@@ -191,11 +189,7 @@ const snapshot: BenchmarkSnapshot = {
   version: 1,
   capturedAt: new Date().toISOString(),
   gitCommit: gitHead(),
-  platform: {
-    os: process.platform,
-    arch: process.arch,
-    nodeVersion: process.version,
-  },
+  platform: collectPlatformInfo(),
   notes: [
     'CLI cold start uses -p mode with QWEN_CODE_PROFILE_STARTUP=1 to ' +
       'measure full initialization (Node startup + ESM + config + MCP ' +
@@ -217,427 +211,6 @@ const snapshot: BenchmarkSnapshot = {
     heavy: HEAVY,
   },
 };
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-function gitHead(): string | null {
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      timeout: 5_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-function makeTempWorkspace(label: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `qwen-bench-${label}-`));
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-interface ProcessResourceMetrics {
-  peakRssMB: number | null;
-  userTimeMs: number | null;
-  sysTimeMs: number | null;
-  voluntaryCtxSwitches: number | null;
-  involuntaryCtxSwitches: number | null;
-  pageFaults: number | null;
-  pageReclaims: number | null;
-  instructionsRetired: number | null;
-  cyclesElapsed: number | null;
-}
-
-interface CliResult extends ProcessResourceMetrics {
-  wallClockMs: number;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
-
-function parseTimeOutput(stderr: string): ProcessResourceMetrics {
-  const metrics: ProcessResourceMetrics = {
-    peakRssMB: null,
-    userTimeMs: null,
-    sysTimeMs: null,
-    voluntaryCtxSwitches: null,
-    involuntaryCtxSwitches: null,
-    pageFaults: null,
-    pageReclaims: null,
-    instructionsRetired: null,
-    cyclesElapsed: null,
-  };
-
-  if (IS_DARWIN) {
-    // macOS /usr/bin/time -l format:
-    //   0.02 real  0.00 user  0.00 sys
-    //   1228800  maximum resident set size
-    //   ...
-    const timeLineMatch = stderr.match(
-      /(\d+\.\d+)\s+real\s+(\d+\.\d+)\s+user\s+(\d+\.\d+)\s+sys/,
-    );
-    if (timeLineMatch) {
-      metrics.userTimeMs = Math.round(Number(timeLineMatch[2]) * 1000);
-      metrics.sysTimeMs = Math.round(Number(timeLineMatch[3]) * 1000);
-    }
-
-    const rssMatch = stderr.match(/(\d+)\s+maximum resident set size/);
-    if (rssMatch)
-      metrics.peakRssMB =
-        Math.round((Number(rssMatch[1]) / 1024 / 1024) * 10) / 10;
-
-    const volCtx = stderr.match(/(\d+)\s+voluntary context switches/);
-    if (volCtx) metrics.voluntaryCtxSwitches = Number(volCtx[1]);
-
-    const involCtx = stderr.match(/(\d+)\s+involuntary context switches/);
-    if (involCtx) metrics.involuntaryCtxSwitches = Number(involCtx[1]);
-
-    const pageFaults = stderr.match(/(\d+)\s+page faults/);
-    if (pageFaults) metrics.pageFaults = Number(pageFaults[1]);
-
-    const pageReclaims = stderr.match(/(\d+)\s+page reclaims/);
-    if (pageReclaims) metrics.pageReclaims = Number(pageReclaims[1]);
-
-    const instructions = stderr.match(/(\d+)\s+instructions retired/);
-    if (instructions) metrics.instructionsRetired = Number(instructions[1]);
-
-    const cycles = stderr.match(/(\d+)\s+cycles elapsed/);
-    if (cycles) metrics.cyclesElapsed = Number(cycles[1]);
-  } else {
-    // Linux /usr/bin/time -v format:
-    //   User time (seconds): 0.00
-    //   System time (seconds): 0.00
-    //   Maximum resident set size (kbytes): 1234
-    //   ...
-    const userTime = stderr.match(/User time.*?:\s*(\d+\.\d+)/);
-    if (userTime) metrics.userTimeMs = Math.round(Number(userTime[1]) * 1000);
-
-    const sysTime = stderr.match(/System time.*?:\s*(\d+\.\d+)/);
-    if (sysTime) metrics.sysTimeMs = Math.round(Number(sysTime[1]) * 1000);
-
-    const rss = stderr.match(/Maximum resident set size.*?:\s*(\d+)/);
-    if (rss) metrics.peakRssMB = Math.round((Number(rss[1]) / 1024) * 10) / 10;
-
-    const volCtx = stderr.match(/Voluntary context switches.*?:\s*(\d+)/);
-    if (volCtx) metrics.voluntaryCtxSwitches = Number(volCtx[1]);
-
-    const involCtx = stderr.match(/Involuntary context switches.*?:\s*(\d+)/);
-    if (involCtx) metrics.involuntaryCtxSwitches = Number(involCtx[1]);
-
-    const majorFaults = stderr.match(/Major.*?page faults.*?:\s*(\d+)/);
-    if (majorFaults) metrics.pageFaults = Number(majorFaults[1]);
-
-    const minorFaults = stderr.match(/Minor.*?page faults.*?:\s*(\d+)/);
-    if (minorFaults) metrics.pageReclaims = Number(minorFaults[1]);
-  }
-
-  return metrics;
-}
-
-/**
- * Spawn a command with `/usr/bin/time` wrapper to capture resource metrics.
- * macOS: `/usr/bin/time -l` reports RSS, CPU, context switches, page faults,
- *        instructions, cycles.
- * Linux: `/usr/bin/time -v` reports similar fields in a different format.
- */
-function spawnCliWithTime(
-  args: string[],
-  opts?: { cwd?: string; env?: Record<string, string> },
-): Promise<CliResult> {
-  return new Promise((resolve) => {
-    const t0 = performance.now();
-
-    const timeArgs = IS_DARWIN ? ['-l'] : ['-v'];
-    const child = spawn(
-      '/usr/bin/time',
-      [...timeArgs, process.execPath, CLI_BIN, ...args],
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        cwd: opts?.cwd,
-        env: opts?.env ? { ...process.env, ...opts.env } : undefined,
-      },
-    );
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (c: Buffer) => {
-      stdout += c.toString();
-    });
-    child.stderr?.on('data', (c: Buffer) => {
-      stderr += c.toString();
-    });
-
-    child.once('exit', (code) => {
-      const wallClockMs = performance.now() - t0;
-      const metrics = parseTimeOutput(stderr);
-      resolve({ wallClockMs, exitCode: code, stdout, stderr, ...metrics });
-    });
-  });
-}
-
-function measureProcessTreeRss(daemonPid: number): ProcessTreeRss {
-  const daemonRss = getRssMB(daemonPid);
-  const desc = countDescendants(daemonPid);
-
-  let acpChildRss = 0;
-  for (const pid of desc.acpChildren) {
-    const rss = getRssMB(pid);
-    if (!Number.isNaN(rss)) acpChildRss += rss;
-  }
-
-  let mcpChildrenRss = 0;
-  for (const pid of desc.mcpGrandchildren) {
-    const rss = getRssMB(pid);
-    if (!Number.isNaN(rss)) mcpChildrenRss += rss;
-  }
-
-  return {
-    daemonRssMB: Number.isNaN(daemonRss) ? 0 : daemonRss,
-    acpChildRssMB: acpChildRss,
-    mcpChildrenRssMB: mcpChildrenRss,
-    totalRssMB:
-      (Number.isNaN(daemonRss) ? 0 : daemonRss) + acpChildRss + mcpChildrenRss,
-  };
-}
-
-interface StartupPhasesResult {
-  moduleLoadMs: number | null;
-  configInitMs: number | null;
-  mcpSettledMs: number | null;
-  fullStartupMs: number | null;
-  wallClockMs: number;
-  peakRssMB: number | null;
-}
-
-/**
- * Spawn CLI in non-interactive mode with the startup profiler enabled.
- * Parses the profiler JSON output from ~/.qwen/startup-perf/ to extract
- * phase breakdowns. Uses `-p "x"` so the full init path runs (config,
- * MCP, auth). The prompt itself may fail without a model key — we only
- * care about the initialization phases.
- */
-async function measureCliStartupWithProfiler(opts?: {
-  cwd?: string;
-}): Promise<StartupPhasesResult> {
-  const perfDir = path.join(os.homedir(), '.qwen', 'startup-perf');
-  const beforeFiles = new Set<string>();
-  try {
-    for (const f of fs.readdirSync(perfDir)) beforeFiles.add(f);
-  } catch {
-    /* dir might not exist yet */
-  }
-
-  const result = await spawnCliWithTime(
-    ['-p', 'x', '--output-format', 'text'],
-    {
-      cwd: opts?.cwd,
-      env: {
-        QWEN_CODE_PROFILE_STARTUP: '1',
-        QWEN_CODE_PROFILE_STARTUP_OUTER: '1',
-      },
-    },
-  );
-
-  // Find the new profiler file
-  const profileData: StartupPhasesResult = {
-    moduleLoadMs: null,
-    configInitMs: null,
-    mcpSettledMs: null,
-    fullStartupMs: null,
-    wallClockMs: result.wallClockMs,
-    peakRssMB: result.peakRssMB,
-  };
-
-  try {
-    const afterFiles = fs.readdirSync(perfDir);
-    const newFile = afterFiles.find((f) => !beforeFiles.has(f));
-    if (newFile) {
-      const report = JSON.parse(
-        fs.readFileSync(path.join(perfDir, newFile), 'utf-8'),
-      );
-      const dp = report.derivedPhases ?? {};
-      profileData.moduleLoadMs = report.processUptimeAtT0Ms ?? null;
-      profileData.configInitMs = dp.config_initialize_dur ?? null;
-      profileData.mcpSettledMs = dp.mcp_all_settled ?? null;
-      profileData.fullStartupMs =
-        report.processUptimeAtT0Ms != null && report.totalMs != null
-          ? Math.round((report.processUptimeAtT0Ms + report.totalMs) * 10) / 10
-          : null;
-      // Clean up profiler file
-      try {
-        fs.unlinkSync(path.join(perfDir, newFile));
-      } catch {
-        /* best-effort */
-      }
-    }
-  } catch {
-    /* profiler output not available — fall back to wall-clock only */
-  }
-
-  return profileData;
-}
-
-/**
- * Spawn a daemon wrapped in `/usr/bin/time` so we capture resource metrics
- * (CPU, context switches, page faults) for its entire lifecycle. Returns
- * a modified SpawnedDaemon whose `dispose()` also parses the time output.
- */
-async function spawnDaemonWithTime(
-  opts: Parameters<typeof spawnDaemon>[0] = {},
-): Promise<
-  SpawnedDaemon & { getResourceMetrics: () => ProcessResourceMetrics }
-> {
-  const token = opts.token ?? 'integration-test-token';
-  const cliBin = opts.cliBin ?? DEFAULT_CLI_BIN;
-  const bootTimeoutMs = opts.bootTimeoutMs ?? 10_000;
-  const extraArgs = opts.extraArgs ?? [];
-
-  const daemonArgs = [
-    cliBin,
-    'serve',
-    '--port',
-    '0',
-    '--token',
-    token,
-    '--hostname',
-    '127.0.0.1',
-    '--workspace',
-    opts.workspaceCwd ?? process.cwd(),
-    ...extraArgs,
-  ];
-
-  const timeArgs = IS_DARWIN ? ['-l'] : ['-v'];
-  const child = spawn(
-    '/usr/bin/time',
-    [...timeArgs, process.execPath, ...daemonArgs],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...opts.env },
-    },
-  );
-
-  const stdoutBuf = { value: '' };
-  const stderrBuf = { value: '' };
-  child.stdout?.on('data', (chunk: Buffer) => {
-    stdoutBuf.value += chunk.toString();
-  });
-  child.stderr?.on('data', (chunk: Buffer) => {
-    stderrBuf.value += chunk.toString();
-  });
-
-  const LISTENING_RE = /listening on http:\/\/127\.0\.0\.1:(\d+)/;
-  const port = await new Promise<number>((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      child.stdout?.off('data', onData);
-      child.off('exit', onExit);
-      clearTimeout(bootTimer);
-    };
-    const fail = (err: Error, kill = false) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (kill && child.exitCode === null) child.kill('SIGTERM');
-      reject(err);
-    };
-    const bootTimer = setTimeout(() => {
-      fail(
-        new Error(
-          `daemon boot timeout after ${bootTimeoutMs}ms:\n` +
-            `stdout=${stdoutBuf.value}\nstderr=${stderrBuf.value}`,
-        ),
-        true,
-      );
-    }, bootTimeoutMs);
-    const onData = () => {
-      const m = stdoutBuf.value.match(LISTENING_RE);
-      if (m && !settled) {
-        settled = true;
-        cleanup();
-        resolve(Number(m[1]));
-      }
-    };
-    const onExit = (code: number | null) => {
-      fail(
-        new Error(
-          `daemon exited with ${code} before listening:\n` +
-            `stdout=${stdoutBuf.value}\nstderr=${stderrBuf.value}`,
-        ),
-      );
-    };
-    child.stdout!.on('data', onData);
-    child.once('exit', onExit);
-  });
-
-  const { DaemonClient } = await import('@qwen-code/sdk');
-  const base = `http://127.0.0.1:${port}`;
-  const client = new DaemonClient({ baseUrl: base, token });
-
-  const dispose = async () => {
-    if (child.exitCode !== null) return;
-    // Send SIGTERM to the inner node process (not /usr/bin/time itself),
-    // so /usr/bin/time observes the child exit and prints resource stats.
-    try {
-      const innerPids = execFileSync('pgrep', ['-P', String(child.pid!)], {
-        encoding: 'utf8',
-        timeout: 2_000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      })
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map(Number);
-      for (const pid of innerPids) {
-        try {
-          process.kill(pid, 'SIGTERM');
-        } catch {
-          /* already gone */
-        }
-      }
-    } catch {
-      // pgrep failed or no children — fall back to killing /usr/bin/time
-      child.kill('SIGTERM');
-    }
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* gone */
-        }
-        resolve();
-      }, 8_000);
-      child.once('exit', () => {
-        clearTimeout(t);
-        resolve();
-      });
-    });
-    // Brief pause to ensure stderr pipe drains /usr/bin/time output.
-    await sleep(200);
-  };
-
-  const getResourceMetrics = (): ProcessResourceMetrics =>
-    parseTimeOutput(stderrBuf.value);
-
-  return {
-    client,
-    daemon: child,
-    port,
-    base,
-    workspaceCwd: opts.workspaceCwd ?? process.cwd(),
-    token,
-    stdoutBuf,
-    stderrBuf,
-    dispose,
-    getResourceMetrics,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1615,16 +1188,12 @@ async function spawnDaemonWithTime(
 
       console.log('[benchmark] ---- end summary ----\n');
 
-      // Write artifacts
-      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-      const jsonPath = path.join(OUTPUT_DIR, 'daemon-vs-cli-benchmark.json');
-      fs.writeFileSync(jsonPath, JSON.stringify(snapshot, null, 2));
-      fs.writeFileSync(
-        path.join(OUTPUT_DIR, 'daemon-vs-cli-benchmark.md'),
+      writeSnapshotArtifacts(
+        OUTPUT_DIR,
+        'daemon-vs-cli-benchmark',
+        snapshot,
         renderMarkdown(snapshot),
-      );
-      console.log(
-        `[benchmark] daemon-vs-cli-benchmark.json written to ${jsonPath}`,
+        'benchmark',
       );
     });
   },
@@ -1635,10 +1204,7 @@ async function spawnDaemonWithTime(
 // ---------------------------------------------------------------------------
 
 function renderMarkdown(s: BenchmarkSnapshot): string {
-  const fmtP = (p: Percentiles | null | undefined): string =>
-    p && p.count > 0
-      ? `p50=${p.p50.toFixed(0)} p90=${p.p90.toFixed(0)} p99=${p.p99.toFixed(0)} mean=${p.mean.toFixed(0)} (n=${p.count})`
-      : 'n/a';
+  const fmtP = formatPercentiles;
 
   const fmtTree = (r: ProcessTreeRss | null): string =>
     r
