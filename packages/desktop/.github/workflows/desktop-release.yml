@@ -170,13 +170,13 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
-            command: bun run dist:mac
+            command: bun run dist:mac:no-publish
           - name: Windows
             os: windows-latest
-            command: bun run dist:win
+            command: bun run dist:win:no-publish
           - name: Linux
             os: ubuntu-22.04
-            command: bun run dist:linux
+            command: bun run dist:linux:no-publish
 
     steps:
       - name: Check out source
@@ -319,6 +319,9 @@ jobs:
           append_env "SENTRY_ELECTRON_INGEST_URL" "$SENTRY_ELECTRON_INGEST_URL_SECRET"
 
       - name: Build desktop installer
+        # Build jobs only produce artifacts. The publish job below owns GitHub
+        # Release creation/upload so dry-run, draft, prerelease, and replace
+        # behavior stays centralized.
         run: ${{ matrix.command }}
 
       - name: Upload installer artifacts
