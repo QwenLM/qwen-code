@@ -138,6 +138,35 @@ describe('extensionToOutputString', () => {
     expect(resultWithoutInline).toEqual(resultWithInlineFalse);
   });
 
+  it('should include description when present', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 'A helpful test extension',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Description:');
+    expect(result).toContain('A helpful test extension');
+  });
+
+  it('should not include description line when absent', () => {
+    const extension = createMockExtension();
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
   it('should redact URL credentials in install source output', () => {
     const extension = createMockExtension({
       installMetadata: {

@@ -53,6 +53,9 @@ export function extensionToOutputString(
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
+  if (extension.config.description) {
+    output += `\n ${t('Description:')} ${extension.config.description}`;
+  }
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;

@@ -43,6 +43,31 @@ describe('extensionConsentString', () => {
     expect(result).toContain('Installing extension "test-extension".');
   });
 
+  it('should include description when present', () => {
+    const config: ExtensionConfig = {
+      name: 'test-extension',
+      version: '1.0.0',
+      description: 'A helpful test extension',
+    };
+
+    const result = extensionConsentString(config);
+
+    expect(result).toContain('A helpful test extension');
+  });
+
+  it('should not include description when absent', () => {
+    const config: ExtensionConfig = {
+      name: 'test-extension',
+      version: '1.0.0',
+    };
+
+    const result = extensionConsentString(config);
+
+    const lines = result.split('\n');
+    expect(lines[0]).toContain('Installing extension "test-extension".');
+    expect(lines[1]).toContain('Extensions may introduce unexpected behavior');
+  });
+
   it('should include warning message', () => {
     const config: ExtensionConfig = {
       name: 'test-extension',

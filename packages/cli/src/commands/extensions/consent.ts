@@ -164,6 +164,9 @@ export function extensionConsentString(
   output.push(
     t('Installing extension "{{name}}".', { name: extensionConfig.name }),
   );
+  if (extensionConfig.description) {
+    output.push(extensionConfig.description);
+  }
   output.push(
     t(
       '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**',
