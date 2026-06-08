@@ -955,9 +955,15 @@ export class ChatRecordingService {
     // Headless/one-shot CLI flows (`qwen -p "…"`, cron, CI scripts) run a
     // single prompt and throw the session away. Spending fast-model tokens
     // on a title no one will ever resume is pure waste; skip entirely.
-    // Checked before `getFastModel()` because it's strictly cheaper (a bool
-    // field read vs. a method that looks up available models).
-    if (!this.config.isInteractive()) return;
+    // Daemon (ACP) sessions are long-lived and user-resumable, so they
+    // DO need auto-titles even though `isInteractive()` returns false
+    // (the ACP child is spawned with pipe stdio, not a TTY).
+    if (
+      !this.config.isInteractive() &&
+      !this.config.getExperimentalZedIntegration()
+    ) {
+      return;
+    }
     const fastModel = this.config.getFastModel();
     if (!fastModel) return;
 
