@@ -29,7 +29,7 @@ export interface SkillParams {
 
 // Re-export for backward compatibility
 export { buildSkillLlmContent } from './skill-utils.js';
-import { buildSkillLlmContent } from './skill-utils.js';
+import { buildSkillLlmContent, applySkillAllowedTools } from './skill-utils.js';
 
 /**
  * Skill tool that enables the model to access skill definitions.
@@ -557,6 +557,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
       this.onSkillLoaded(this.params.skill);
+
+      // Auto-approve the skill's declared allowedTools for the rest of the session.
+      applySkillAllowedTools(
+        this.config.getPermissionManager(),
+        skill.allowedTools,
+      );
 
       // Register skill hooks if present
       debugLogger.debug('Skill hooks check:', {

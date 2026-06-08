@@ -78,9 +78,12 @@ import {
 
 // Utilities
 import {
+  buildAddedMcpToolsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
+  getStartupContextLength,
 } from '../utils/environmentContext.js';
+import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
@@ -194,6 +197,8 @@ export class GeminiClient {
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
+  private announcedDeferredToolNames = new Set<string>();
+  private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -503,32 +508,11 @@ export class GeminiClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
-    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
+    const deferredTools = this.resolveDeferredToolsForReminder();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
-    // Rebuild the system instruction so its "Deferred Tools" section
-    // matches the registry's current state. Without this refresh, MCP
-    // tools that land in the registry after startChat() (progressive
-    // discovery — see Config.startMcpDiscoveryInBackground) stay invisible
-    // to the model: they're filtered out of `toolDeclarations` by
-    // `shouldDefer`, and the prompt's deferred listing was frozen at the
-    // built-in-only snapshot taken inside startChat(). The model then has
-    // no signal that an MCP tool exists and never invokes ToolSearch to
-    // reveal it — silently regressing non-interactive `--prompt` runs.
-    this.getChat().setSystemInstruction(
-      this.getMainSessionSystemInstruction(deferredTools),
-    );
-    // setSystemInstruction overwrites the chat's systemInstruction wholesale,
-    // dropping any SessionStart additionalContext that startChat() (or a
-    // prior Compact) appended via applySessionStartContext. Re-apply it so
-    // a SessionStart hook's context survives the progressive-MCP refresh.
-    if (this.lastSessionStartContext && this.lastSessionStartSource) {
-      this.getChat().applySessionStartContext(
-        this.lastSessionStartContext,
-        this.lastSessionStartSource,
-      );
-    }
+    this.queueAddedMcpToolsReminder(deferredTools ?? []);
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -629,9 +613,7 @@ export class GeminiClient {
     return this.cachedGitStatus;
   }
 
-  private getMainSessionSystemInstruction(
-    deferredTools?: Array<{ name: string; description: string }>,
-  ): string {
+  private getMainSessionSystemInstruction(): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -642,7 +624,6 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
-        deferredTools,
       );
       return gitStatus ? base + '\n\n' + gitStatus : base;
     }
@@ -651,9 +632,61 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
-      deferredTools,
     );
     return gitStatus ? base + '\n\n' + gitStatus : base;
+  }
+
+  async refreshStartupContextReminder(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const currentHistory = this.getChat().getHistory();
+    const startupLength = getStartupContextLength(currentHistory);
+    if (startupLength === 0) {
+      return;
+    }
+
+    // Slice by the detected prelude length, not a hardcoded 1: a restored
+    // legacy session stores startup context as a [user(env), model("Got
+    // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
+    // the orphaned model-ack entry behind when re-prepending the prelude.
+    const remaining = currentHistory.slice(startupLength);
+    const [startupContext] = await getInitialChatHistory(this.config);
+    this.getChat().setHistory(
+      startupContext ? [startupContext, ...remaining] : remaining,
+    );
+  }
+
+  /**
+   * Re-prepend a fresh startup-context prelude after auto-compaction.
+   *
+   * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
+   * (`setHistory([summary, ack, ...kept])`) and does NOT route through
+   * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
+   * startup prelude at history[0] is consumed into the summary and never
+   * rebuilt. Without this, workspace/env context, deferred-tool metadata,
+   * and MCP server instructions are lost for the rest of the session (before
+   * this PR they lived in the system instruction and survived compaction).
+   *
+   * Unlike `refreshStartupContextReminder` (which replaces an existing
+   * prelude and no-ops when absent), this prepends when absent. No-ops if a
+   * prelude is already present so it can't double-prepend.
+   */
+  async restoreStartupContextAfterCompaction(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const currentHistory = this.getChat().getHistory();
+    if (getStartupContextLength(currentHistory) !== 0) {
+      return;
+    }
+
+    const [startupContext] = await getInitialChatHistory(this.config);
+    if (startupContext) {
+      this.getChat().setHistory([startupContext, ...currentHistory]);
+    }
   }
 
   /**
@@ -670,10 +703,7 @@ export class GeminiClient {
       return;
     }
     await this.config.getToolRegistry().warmAll();
-    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
-    this.chat.setSystemInstruction(
-      this.getMainSessionSystemInstruction(deferredTools),
-    );
+    this.chat.setSystemInstruction(this.getMainSessionSystemInstruction());
     if (this.lastSessionStartContext && this.lastSessionStartSource) {
       this.chat.applySessionStartContext(
         this.lastSessionStartContext,
@@ -683,10 +713,8 @@ export class GeminiClient {
   }
 
   /**
-   * Computes the deferred-tools list passed to the system prompt. Shared by
-   * {@link startChat}, {@link setTools}, and {@link refreshSystemInstruction}
-   * so all three render the same "Deferred Tools" section for a given
-   * registry state.
+   * Computes the deferred-tools list that should be announced through
+   * user-role system reminders.
    *
    * Caller MUST `await toolRegistry.warmAll()` first — this method only
    * inspects the registry's eager state and would otherwise miss factory-
@@ -699,13 +727,10 @@ export class GeminiClient {
    * `undefined` is returned in that branch) — a silent disappearance that's
    * harder to diagnose than seeing the tool name absent from `/mcp` output.
    *
-   * Returns `undefined` when ToolSearch is unavailable: the prompt's
-   * deferred-tools section must not advertise tools the model has no way to
-   * load on demand.
+   * Returns `undefined` when ToolSearch is unavailable: reminders must not
+   * advertise tools the model has no way to load on demand.
    */
-  private resolveDeferredToolsForSystemPrompt():
-    | Array<{ name: string; description: string }>
-    | undefined {
+  private resolveDeferredToolsForReminder(): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
     const deferredSummary = toolRegistry.getDeferredToolSummary();
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
@@ -720,6 +745,65 @@ export class GeminiClient {
     return deferredSummary.filter(
       (t) => !toolRegistry.isDeferredToolRevealed(t.name),
     );
+  }
+
+  private rememberAnnouncedDeferredTools(
+    deferredTools: readonly DeferredToolSummary[] | undefined,
+  ): void {
+    this.announcedDeferredToolNames = new Set(
+      (deferredTools ?? []).map((tool) => tool.name),
+    );
+    this.pendingAddedMcpTools.clear();
+  }
+
+  private queueAddedMcpToolsReminder(
+    deferredTools: readonly DeferredToolSummary[],
+  ): void {
+    const currentDeferredNames = new Set(
+      deferredTools.map((tool) => tool.name),
+    );
+    for (const name of this.pendingAddedMcpTools.keys()) {
+      if (!currentDeferredNames.has(name)) {
+        this.pendingAddedMcpTools.delete(name);
+      }
+    }
+
+    // Drop announced names that are no longer deferred (e.g. an MCP server
+    // disconnected and removeMcpToolsByServer() pruned its tools). Without
+    // this, a tool that reconnects later is still in announcedDeferredToolNames
+    // and gets silently skipped below, so the user never sees the "new tools
+    // available" reminder even though setTools() re-declared the tool.
+    for (const name of this.announcedDeferredToolNames) {
+      if (!currentDeferredNames.has(name)) {
+        this.announcedDeferredToolNames.delete(name);
+      }
+    }
+
+    for (const tool of deferredTools) {
+      if (tool.serverName && !this.announcedDeferredToolNames.has(tool.name)) {
+        this.pendingAddedMcpTools.set(tool.name, tool);
+      }
+      this.announcedDeferredToolNames.add(tool.name);
+    }
+  }
+
+  private drainPendingAddedMcpToolsReminder(): void {
+    if (this.pendingAddedMcpTools.size === 0) {
+      return;
+    }
+
+    const addedMcpTools = Array.from(this.pendingAddedMcpTools.values());
+    const reminder = buildAddedMcpToolsReminder(addedMcpTools);
+    this.pendingAddedMcpTools.clear();
+
+    if (!reminder) {
+      return;
+    }
+
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
   }
 
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
@@ -774,14 +858,11 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
-    const history = await getInitialChatHistory(this.config, extraHistory);
+    let history: Content[] = [];
 
     try {
-      // Warm the tool registry before building the system prompt so we know
-      // which tools are marked `shouldDefer`. The deferred list is appended to
-      // the prompt so the model knows which tools are reachable via
-      // ToolSearch. warmAll() is idempotent — setTools() below reuses the
-      // warmed state. Revealed-deferred state is NOT cleared here because
+      // Warm the tool registry before building startup reminders and tool
+      // declarations. Revealed-deferred state is NOT cleared here because
       // startChat is also taken by the compression path (which preserves the
       // session); `/clear` clears the revealed set via resetChat() before
       // calling us.
@@ -792,14 +873,14 @@ export class GeminiClient {
       // the declaration list. Without this, the model sees history like
       // "I called foo_tool, got result" but the API rejects a follow-up
       // call to foo_tool because the schema is absent. This must happen
-      // BEFORE `resolveDeferredToolsForSystemPrompt()` runs so the resumed
-      // tools are correctly filtered out of the deferred-summary list.
-      if (history.length > 0) {
+      // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
+      // are correctly filtered out of the startup reminder built below.
+      if (extraHistory && extraHistory.length > 0) {
         const deferredNames = new Set(
           toolRegistry.getDeferredToolSummary().map((t) => t.name),
         );
         if (deferredNames.size > 0) {
-          for (const entry of history) {
+          for (const entry of extraHistory) {
             for (const part of entry.parts ?? []) {
               const callName = part.functionCall?.name;
               if (callName && deferredNames.has(callName)) {
@@ -809,9 +890,10 @@ export class GeminiClient {
           }
         }
       }
-      const deferredTools = this.resolveDeferredToolsForSystemPrompt();
-      const systemInstruction =
-        this.getMainSessionSystemInstruction(deferredTools);
+      const deferredTools = this.resolveDeferredToolsForReminder();
+      this.rememberAnnouncedDeferredTools(deferredTools);
+      history = await getInitialChatHistory(this.config, extraHistory);
+      const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(
         this.config,
@@ -1590,6 +1672,14 @@ export class GeminiClient {
         }
       }
 
+      if (
+        !hasPendingToolCall &&
+        (messageType === SendMessageType.UserQuery ||
+          messageType === SendMessageType.Cron)
+      ) {
+        this.drainPendingAddedMcpToolsReminder();
+      }
+
       const turn = new Turn(this.getChat(), prompt_id);
 
       // Determine the model to use for this turn
@@ -1727,6 +1817,18 @@ export class GeminiClient {
         // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          // Auto-compaction summarized away the startup prelude. Rebuild it
+          // before the next turn so env/tool/MCP context isn't lost for the
+          // rest of the session (manual /compress gets this via startChat).
+          try {
+            await this.restoreStartupContextAfterCompaction();
+          } catch (error) {
+            this.config
+              .getDebugLogger()
+              .warn(
+                `Failed to restore startup context after compaction: ${error}`,
+              );
+          }
           void this.fireSessionStartHook(SessionStartSource.Compact)
             .then((compactAdditionalContext) => {
               if (!compactAdditionalContext || !this.chat) {

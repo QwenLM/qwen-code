@@ -16,7 +16,6 @@ export const dreamCommand: SlashCommand = {
     return t('Consolidate managed auto-memory topic files.');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'acp'] as const,
   action: async (context) => {
     const config = context.services.config;
     if (!config) {
@@ -27,45 +26,25 @@ export const dreamCommand: SlashCommand = {
       };
     }
 
-    try {
-      const projectRoot = config.getProjectRoot();
-      const memoryRoot = getAutoMemoryRoot(projectRoot);
-      const transcriptDir = path.join(
-        new Storage(projectRoot).getProjectDir(),
-        'chats',
-      );
+    const projectRoot = config.getProjectRoot();
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const transcriptDir = path.join(
+      new Storage(projectRoot).getProjectDir(),
+      'chats',
+    );
 
-      const prompt = config
-        .getMemoryManager()
-        .buildConsolidationPrompt(memoryRoot, transcriptDir);
+    const prompt = config
+      .getMemoryManager()
+      .buildConsolidationPrompt(memoryRoot, transcriptDir);
 
-      const recordDream = async () =>
-        config
+    return {
+      type: 'submit_prompt',
+      content: prompt,
+      onComplete: async () => {
+        await config
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());
-
-      // In ACP mode, onComplete is never invoked — record eagerly.
-      if (context.executionMode === 'acp') {
-        try {
-          await recordDream();
-        } catch {
-          // Best-effort: dream dedup recording must not block prompt submission.
-        }
-      }
-
-      return {
-        type: 'submit_prompt',
-        content: prompt,
-        onComplete: recordDream,
-      };
-    } catch (error) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Failed to process /dream: {{message}}', {
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      };
-    }
+      },
+    };
   },
 };

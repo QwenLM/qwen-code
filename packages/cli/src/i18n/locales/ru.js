@@ -227,8 +227,8 @@ export default {
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
   'Connect an LLM provider': 'Подключить провайдера LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Копирование последнего результата или фрагмента кода в буфер обмена',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Копировать последний ответ ИИ в буфер обмена (/copy N для N-го с конца)',
 
   // ============================================================================
   // Команды - Агенты
@@ -808,6 +808,24 @@ export default {
   'Resume a previous session': 'Продолжить предыдущую сессию',
   'Fork the current conversation into a new session':
     'Создать ветку текущего разговора в новой сессии',
+  'Spawn a background agent that inherits the full conversation':
+    'Запустить фонового агента, который наследует весь разговор',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Укажите инструкцию. Использование: /fork <инструкция>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Нельзя создать fork, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
+  'Cannot fork before the first conversation turn.':
+    'Нельзя создать fork до первого сообщения в разговоре.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'Команде /fork требуется feature gate fork. Установите QWEN_CODE_ENABLE_FORK_SUBAGENT=1, чтобы включить его.',
+  'The agent tool is unavailable; cannot fork.':
+    'Инструмент агента недоступен; fork создать нельзя.',
+  'Failed to launch fork: {{error}}':
+    'Не удалось запустить fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'Пользователь запустил фоновый fork через /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Создан fork в фоновом агенте. Он наследует этот разговор и работает без блокировки — отслеживайте его на панели фоновых задач; он сообщит результат после завершения.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Нельзя создать ветку, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   'No conversation to branch.': 'Нет разговора для создания ветки.',

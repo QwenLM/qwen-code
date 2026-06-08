@@ -68,6 +68,10 @@ describe('BackgroundAgentResumeService', () => {
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
     const monitorRegistry = {
       setAgentNotificationCallback: vi.fn(),

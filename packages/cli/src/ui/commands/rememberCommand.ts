@@ -19,7 +19,6 @@ export const rememberCommand: SlashCommand = {
     return t('Save a durable memory to the memory system.');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'acp'] as const,
   action: (context: CommandContext, args): SlashCommandActionReturn | void => {
     const fact = args.trim();
     if (!fact) {
@@ -31,17 +30,17 @@ export const rememberCommand: SlashCommand = {
     }
 
     const config = context.services.config;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
+    const useManagedMemory = config?.getManagedAutoMemoryEnabled() ?? false;
 
-    if (config.getManagedAutoMemoryEnabled()) {
-      const memoryDir = getAutoMemoryRoot(config.getProjectRoot());
-      const dirHint = ` Save it to \`${memoryDir}\`.`;
+    if (useManagedMemory) {
+      // In managed auto-memory mode the save_memory tool is not registered.
+      // Submit a prompt so the main agent writes the per-entry file directly,
+      // choosing the appropriate type (user / feedback / project / reference)
+      // based on the content, following the instructions in buildManagedAutoMemoryPrompt.
+      const memoryDir = config
+        ? getAutoMemoryRoot(config.getProjectRoot())
+        : undefined;
+      const dirHint = memoryDir ? ` Save it to \`${memoryDir}\`.` : '';
       return {
         type: 'submit_prompt',
         content: `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${fact}`,
