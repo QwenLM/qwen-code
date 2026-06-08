@@ -120,6 +120,7 @@ function createMockConfig(
     clearContextOnIdle?: {
       clearContextMinutes: number;
       toolResultsNumToKeep: number;
+      toolResultsThresholdMinutes?: number;
     };
   } = {},
 ): Config {
@@ -1386,6 +1387,187 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+    });
+
+    it('overrides positive toolResultsThresholdMinutes to 0', async () => {
+      const setHistory = vi.fn();
+      // 7 tool results with threshold=60 → overridden to 0, all get compacted
+      const toolHistory: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: `/f${i}.ts` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  id: `call_${i}`,
+                  response: { output: `content of f${i}` },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => toolHistory,
+              setHistory,
+            }),
+          },
+          fileReadCache: {
+            clear: vi.fn(),
+            evictNotAccessedSince: vi.fn().mockReturnValue(0),
+          },
+          clearContextOnIdle: {
+            clearContextMinutes: 60,
+            toolResultsNumToKeep: 5,
+            toolResultsThresholdMinutes: 60,
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      // Positive value overridden to 0 → compaction runs
+      expect(setHistory).toHaveBeenCalled();
+    });
+
+    it('preserves negative toolResultsThresholdMinutes (-1), skipping compaction', async () => {
+      const setHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: `/f${i}.ts` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  id: `call_${i}`,
+                  response: { output: `content of f${i}` },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => toolHistory,
+              setHistory,
+            }),
+          },
+          fileReadCache: {
+            clear: vi.fn(),
+            evictNotAccessedSince: vi.fn().mockReturnValue(0),
+          },
+          clearContextOnIdle: {
+            clearContextMinutes: 60,
+            toolResultsNumToKeep: 5,
+            toolResultsThresholdMinutes: -1,
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      // Negative value preserved → microcompactHistory skips compaction
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+
+    it('defaults undefined toolResultsThresholdMinutes to 0', async () => {
+      const setHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { path: `/f${i}.ts` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  id: `call_${i}`,
+                  response: { output: `content of f${i}` },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          geminiClient: {
+            isInitialized: () => true,
+            getChat: () => ({
+              getHistoryShallow: () => toolHistory,
+              setHistory,
+            }),
+          },
+          fileReadCache: {
+            clear: vi.fn(),
+            evictNotAccessedSince: vi.fn().mockReturnValue(0),
+          },
+          clearContextOnIdle: {
+            clearContextMinutes: 60,
+            toolResultsNumToKeep: 5,
+          },
+          // toolResultsThresholdMinutes not set → undefined → defaults to 0
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
+      );
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      // Undefined defaults to 0 → compaction runs
+      expect(setHistory).toHaveBeenCalled();
     });
   });
 
