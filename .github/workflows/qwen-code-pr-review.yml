@@ -39,6 +39,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  review-config:
+    runs-on: 'ubuntu-latest'
+    permissions: {}
+    outputs:
+      bot_login: '${{ steps.values.outputs.bot_login }}'
+    steps:
+      - name: 'Set review constants'
+        id: 'values'
+        run: |-
+          echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
+
   delay-automatic-review:
     if: |-
       github.event_name == 'pull_request_target' &&
@@ -83,10 +94,11 @@ jobs:
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize-review-request:
+    needs: ['review-config']
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == 'qwen-code-ci-bot' &&
+      github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft
     runs-on: 'ubuntu-latest'
@@ -114,7 +126,8 @@ jobs:
           esac
 
   review-pr:
-    needs: ['delay-automatic-review', 'authorize-review-request']
+    needs:
+      ['review-config', 'delay-automatic-review', 'authorize-review-request']
     # pull_request_target routing:
     # - review_requested uses authorize-review-request and skips delay
     # - opened/synchronize uses delay-automatic-review
@@ -126,7 +139,7 @@ jobs:
        github.event.pull_request.state == 'open' &&
        !github.event.pull_request.draft &&
        ((github.event.action == 'review_requested' &&
-         github.event.requested_reviewer.login == 'qwen-code-ci-bot' &&
+         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
          needs.authorize-review-request.outputs.should_review == 'true') ||
         (github.event.action != 'review_requested' &&
          ((github.event.action != 'opened' &&
