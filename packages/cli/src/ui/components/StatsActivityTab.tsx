@@ -239,7 +239,7 @@ export const ActivityTab: React.FC<{
           />
           {data.report.projects.slice(0, 5).map((proj) => {
             const name = proj.path.split('/').pop() || proj.path;
-            const tokens = proj.totalInputTokens + proj.totalOutputTokens;
+            const tokens = proj.totalTokens;
             return (
               <TableRow
                 key={proj.path}

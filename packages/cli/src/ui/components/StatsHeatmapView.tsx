@@ -97,7 +97,7 @@ export const HeatmapView: React.FC<{
             key={level}
             backgroundColor={level > 0 ? HEATMAP_COLORS[level] : undefined}
           >
-            {'  '}
+            {level === 0 ? '\u00B7\u00B7' : '  '}
           </Text>
         ))}
         <Text color={theme.text.secondary}> {t('More')}</Text>

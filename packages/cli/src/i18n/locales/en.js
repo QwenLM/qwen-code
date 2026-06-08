@@ -2018,6 +2018,8 @@ export default {
   Cache: 'Cache',
   Latency: 'Latency',
   'Code Impact': 'Code Impact',
+  'Failed to load stats. Press r to retry.':
+    'Failed to load stats. Press r to retry.',
   net: 'net',
   streak: 'streak',
   best: 'best',

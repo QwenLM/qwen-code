@@ -88,6 +88,7 @@ function buildHeatmap(
   const heatmap: Record<string, number> = {};
   for (const r of records) {
     if (r.timestamp < start.getTime() || r.timestamp > end.getTime()) continue;
+    if (!r.models) continue;
     const ts = new Date(r.timestamp);
     const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
     let totalTokens = 0;
@@ -108,6 +109,7 @@ function buildTokensPerDay(
   for (const r of records) {
     const ts = new Date(r.timestamp);
     if (r.timestamp < start.getTime() || r.timestamp > end.getTime()) continue;
+    if (!r.models) continue;
     const dateKey = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
     for (const [model, m] of Object.entries(r.models)) {
       const key = `${dateKey}|${model}`;
@@ -136,9 +138,8 @@ export function getPreviousRangeBounds(
         now.getMonth(),
         now.getDate(),
       );
-      const yesterdayStart = new Date(
-        todayStart.getTime() - 24 * 60 * 60 * 1000,
-      );
+      const yesterdayStart = new Date(todayStart);
+      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
       return { start: yesterdayStart, end: todayStart };
     }
     case 'week': {

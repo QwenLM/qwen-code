@@ -262,7 +262,6 @@ export function buildBrailleLineChart(
   const pixelH = chartHeight * 4;
 
   const sorted = [...data].sort((a, b) => a.date.localeCompare(b.date));
-  if (sorted.length === 0) return null;
 
   const peak = Math.max(...sorted.map((p) => p.value));
   if (peak === 0) return null;

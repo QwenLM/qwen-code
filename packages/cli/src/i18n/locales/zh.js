@@ -1390,6 +1390,7 @@ export default {
   Latency: '延迟',
   'In/Out': '输入/输出',
   'Code Impact': '代码变更',
+  'Failed to load stats. Press r to retry.': '加载统计失败，按 r 重试。',
   net: '净增',
   streak: '连续',
   best: '最长',

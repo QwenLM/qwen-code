@@ -1233,6 +1233,7 @@ export default {
   Latency: '延遲',
   'In/Out': '輸入/輸出',
   'Code Impact': '代碼變更',
+  'Failed to load stats. Press r to retry.': '載入統計失敗，按 r 重試。',
   net: '淨增',
   streak: '連續',
   best: '最長',

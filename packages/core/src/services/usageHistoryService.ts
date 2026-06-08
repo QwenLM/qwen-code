@@ -90,8 +90,7 @@ export interface AggregatedReport {
     path: string;
     sessionCount: number;
     totalDurationMs: number;
-    totalInputTokens: number;
-    totalOutputTokens: number;
+    totalTokens: number;
   }>;
 }
 
@@ -326,8 +325,7 @@ export function aggregateUsage(
     {
       sessionCount: number;
       totalDurationMs: number;
-      totalInputTokens: number;
-      totalOutputTokens: number;
+      totalTokens: number;
     }
   >();
 
@@ -374,24 +372,20 @@ export function aggregateUsage(
       }
     }
 
-    let sessionInput = 0;
-    let sessionOutput = 0;
+    let sessionTokens = 0;
     for (const m of Object.values(r.models)) {
-      sessionInput += m.inputTokens;
-      sessionOutput += m.outputTokens;
+      sessionTokens += m.totalTokens;
     }
     const proj = projectMap.get(r.project);
     if (proj) {
       proj.sessionCount++;
       proj.totalDurationMs += r.durationMs;
-      proj.totalInputTokens += sessionInput;
-      proj.totalOutputTokens += sessionOutput;
+      proj.totalTokens += sessionTokens;
     } else {
       projectMap.set(r.project, {
         sessionCount: 1,
         totalDurationMs: r.durationMs,
-        totalInputTokens: sessionInput,
-        totalOutputTokens: sessionOutput,
+        totalTokens: sessionTokens,
       });
     }
   }
@@ -403,12 +397,7 @@ export function aggregateUsage(
 
   const projects = [...projectMap.entries()]
     .map(([p, stats]) => ({ path: p, ...stats }))
-    .sort(
-      (a, b) =>
-        b.totalInputTokens +
-        b.totalOutputTokens -
-        (a.totalInputTokens + a.totalOutputTokens),
-    );
+    .sort((a, b) => b.totalTokens - a.totalTokens);
 
   return {
     timeRange: range,
