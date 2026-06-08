@@ -8,6 +8,8 @@ import type { RcScope } from '../scopes.js';
 import { APPROVE, SESSION_READ } from '../scopes.js';
 import type { TokenStore } from '../tokenStore.js';
 import type { PushStore } from '../pushStore.js';
+import type { AuditRecorder } from '../auditLog.js';
+import type { SnoozeStore } from '../routing/snooze.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 
@@ -31,6 +33,8 @@ export class PushNotifier {
     private readonly tokens: TokenStore,
     private readonly store: PushStore,
     private readonly sender: PushSender,
+    private readonly snooze?: SnoozeStore,
+    private readonly audit?: AuditRecorder,
   ) {}
 
   /** Fan a daemon event out to all scope-eligible subscriptions. */
@@ -40,6 +44,17 @@ export class PushNotifier {
   ): Promise<void> {
     const payload = buildPayload(event, ctx);
     if (!payload) return;
+    // Routing gate: a snooze suppresses the WHOLE fan-out once, before any
+    // send (snooze is event-global, not per-subscription). The /test path
+    // (notifyToken) is deliberately NOT gated.
+    if (this.snooze?.isSnoozed(payload.kind)) {
+      void this.audit?.record({
+        action: 'push_suppressed',
+        target: ctx.sessionId,
+        detail: { kind: payload.kind, reason: 'snoozed' },
+      });
+      return;
+    }
     const need = KIND_SCOPE[payload.kind];
     if (!need) return;
     await Promise.all(

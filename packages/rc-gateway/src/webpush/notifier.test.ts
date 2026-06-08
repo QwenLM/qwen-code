@@ -16,6 +16,7 @@ import { PushSender, type PushTransport } from './sender.js';
 import { PushNotifier } from './notifier.js';
 import type { PushPayload } from './payload.js';
 import { SESSION_READ, APPROVE } from '../scopes.js';
+import { SnoozeStore } from '../routing/snooze.js';
 
 let tokens: TokenStore;
 let store: PushStore;
@@ -120,6 +121,79 @@ describe('PushNotifier', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].endpoint).toBe('https://push.example.com/owner');
     expect(sent[0].payload.kind).toBe('task.completed');
+  });
+
+  it('suppresses the whole fan-out once when snoozed for all, auditing push_suppressed', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const snoozeDir = mkdtempSync(join(tmpdir(), 'rc-notifier-snooze-'));
+    const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
+    await snooze.snooze(60, 'all');
+    // A SEPARATE notifier-owned audit sink (the sender has its own `audit`).
+    const notifierAudit = fakeAudit();
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      snooze,
+      notifierAudit,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+
+    // Suppressed before any send.
+    expect(sent).toHaveLength(0);
+    expect(notifierAudit.calls).toHaveLength(1);
+    expect(notifierAudit.calls[0].action).toBe('push_suppressed');
+    expect(notifierAudit.calls[0].target).toBe('s1');
+    expect(notifierAudit.calls[0].detail).toMatchObject({
+      kind: 'permission.required',
+      reason: 'snoozed',
+    });
+  });
+
+  it('still sends when the snooze is scoped to a different kind', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+
+    const snoozeDir = mkdtempSync(join(tmpdir(), 'rc-notifier-snooze-'));
+    const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
+    await snooze.snooze(60, 'task.completed'); // not permission.required
+    const notifierAudit = fakeAudit();
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      snooze,
+      notifierAudit,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('permission.required');
+    expect(
+      notifierAudit.calls.some((c) => c.action === 'push_suppressed'),
+    ).toBe(false);
   });
 
   it('notifyToken skips a token lacking the required scope (no audit noise)', async () => {
