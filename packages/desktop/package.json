@@ -1,8 +1,17 @@
 {
-  "name": "craft-agent",
+  "name": "openwork",
   "version": "0.0.1",
   "license": "Apache-2.0",
-  "description": "Qwen-backed agent for Craft documents",
+  "description": "OpenWork desktop and headless agent workspace from Model Studio AI",
+  "author": {
+    "name": "Model Studio AI",
+    "url": "https://github.com/modelstudioai"
+  },
+  "homepage": "https://github.com/modelstudioai/openwork",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modelstudioai/openwork.git"
+  },
   "type": "module",
   "private": true,
   "qwenCodeRuntime": {
