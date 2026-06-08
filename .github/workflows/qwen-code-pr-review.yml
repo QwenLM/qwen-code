@@ -126,7 +126,7 @@ jobs:
             echo "Failed to check permission for ${REQUESTER}." >&2
             echo "Failed to check permission for ${REQUESTER}." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
-            exit 1
+            exit 0
           fi
           case "$permission" in
             admin|maintain|write)
