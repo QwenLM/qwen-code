@@ -9,13 +9,15 @@ import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
+import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  createStreamableHttpCompatibilityFetch,
   createTransport,
   getAllMCPServerStatuses,
   getMCPServerStatus,
@@ -31,6 +33,12 @@ import {
 import type { ToolRegistry } from './tool-registry.js';
 
 const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
 const ORIGINAL_ENV = process.env;
 
 vi.mock('node:fs', () => ({
@@ -41,8 +49,15 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js');
 vi.mock('@google/genai');
 vi.mock('../mcp/oauth-provider.js');
 vi.mock('../mcp/oauth-token-storage.js');
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
 
 describe('mcp-client', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
@@ -57,6 +72,7 @@ describe('mcp-client', () => {
         getStatus: vi.fn(),
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -91,6 +107,38 @@ describe('mcp-client', () => {
       expect(mockedMcpToTool).toHaveBeenCalledOnce();
     });
 
+    it('stores server instructions returned during initialization', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn().mockReturnValue('Use concise replies.'),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'test-server',
+        {
+          command: 'test-command',
+        },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+
+      expect(client.getInstructions()).toBe('Use concise replies.');
+    });
+
     it('should not skip tools even if a parameter is missing a type', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -100,6 +148,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         tool: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -160,6 +209,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('Test error')),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -205,6 +255,7 @@ describe('mcp-client', () => {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('tools/list crashed')),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -273,6 +324,8 @@ describe('mcp-client', () => {
         expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((transport as any)._url).toEqual(new URL('http://test-server'));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
 
       it('with headers', async () => {
@@ -292,6 +345,186 @@ describe('mcp-client', () => {
         expect((transport as any)._requestInit?.headers).toEqual({
           Authorization: 'derp',
         });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
+      });
+
+      it('treats 400 from optional GET SSE stream as unsupported', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad method', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'spring-ai',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(405);
+        expect(response.statusText).toBe('Method Not Allowed');
+        expect(await response.text()).toBe('');
+      });
+
+      it('omits response body diagnostics when the fallback body is empty', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response(null, { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'empty-body',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.not.stringContaining('Response body:'),
+        );
+      });
+
+      it('truncates Streamable HTTP GET SSE error body diagnostics', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('x'.repeat(1024), { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'large-error-body',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `Response body: ${JSON.stringify(`${'x'.repeat(512)}...`)}`,
+          ),
+        );
+        expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('x'.repeat(600)),
+        );
+      });
+
+      it('treats parameterized GET SSE Accept headers as unsupported', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad method', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'spring-ai',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json, text/event-stream; charset=utf-8',
+          },
+        });
+
+        expect(response.status).toBe(405);
+      });
+
+      it('does not hide Streamable HTTP GET SSE server errors', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('server exploded', { status: 502 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'server-error',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(502);
+      });
+
+      it('does not rewrite the SDK-native GET SSE unsupported sentinel', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(
+            new Response('method not allowed', { status: 405 }),
+          );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'native-unsupported',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        expect(response.status).toBe(405);
+        expect(await response.text()).toBe('method not allowed');
+      });
+
+      it('does not rewrite resumable GET SSE errors with Last-Event-ID', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(
+            new Response('{"error":"invalid cursor"}', { status: 400 }),
+          );
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'resume-error',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            'Last-Event-ID': 'event-123',
+          },
+        });
+
+        expect(response.status).toBe(400);
+        expect(await response.text()).toBe('{"error":"invalid cursor"}');
+      });
+
+      it('does not rewrite non-SSE GET responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad request', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'plain-get',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        expect(response.status).toBe(400);
+      });
+
+      it('does not rewrite POST responses', async () => {
+        const fetchFn = vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(new Response('bad request', { status: 400 }));
+        const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+          'post-test',
+          fetchFn,
+        );
+
+        const response = await fetchWithFallback('http://test-server/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+        expect(response.status).toBe(400);
       });
     });
 
@@ -474,6 +707,8 @@ describe('mcp-client', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const authProvider = (transport as any)._authProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
 
       it('should use GoogleCredentialProvider with SSE transport', async () => {
@@ -510,6 +745,56 @@ describe('mcp-client', () => {
         ).rejects.toThrow(
           'URL must be provided in the config for Google Credentials provider',
         );
+      });
+    });
+
+    describe('authenticated Streamable HTTP compatibility fetch', () => {
+      it('wires the compatibility fetch for OAuth httpUrl transports', async () => {
+        const getValidToken = vi.fn().mockResolvedValue('oauth-token');
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        const transport = await createTransport(
+          'oauth-test-server',
+          {
+            httpUrl: 'http://test-server',
+            oauth: {
+              enabled: true,
+              clientId: 'client-id',
+            },
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          enabled: true,
+          clientId: 'client-id',
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
+      });
+
+      it('wires the compatibility fetch for service account httpUrl transports', async () => {
+        const transport = await createTransport(
+          'service-account-test-server',
+          {
+            httpUrl: 'http://test-server',
+            authProviderType: AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION,
+            targetAudience: 'client.apps.googleusercontent.com',
+            targetServiceAccount:
+              'service-account@example-project.iam.gserviceaccount.com',
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._fetch).toEqual(expect.any(Function));
       });
     });
   });
@@ -617,6 +902,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -663,6 +949,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,

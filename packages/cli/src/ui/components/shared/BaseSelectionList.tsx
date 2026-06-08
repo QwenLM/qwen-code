@@ -35,6 +35,17 @@ export interface BaseSelectionListProps<
   renderItem: (item: TItem, context: RenderItemContext) => React.ReactNode;
 }
 
+function getScrollOffsetForIndex(
+  activeIndex: number,
+  itemCount: number,
+  maxItemsToShow: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(activeIndex - maxItemsToShow + 1, itemCount - maxItemsToShow),
+  );
+}
+
 /**
  * Base component for selection lists that provides common UI structure
  * and keyboard navigation logic via the useSelectionList hook.
@@ -73,13 +84,16 @@ export function BaseSelectionList<
     showNumbers,
   });
 
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(() =>
+    getScrollOffsetForIndex(activeIndex, items.length, maxItemsToShow),
+  );
 
   // Handle scrolling for long lists
   useEffect(() => {
-    const newScrollOffset = Math.max(
-      0,
-      Math.min(activeIndex - maxItemsToShow + 1, items.length - maxItemsToShow),
+    const newScrollOffset = getScrollOffsetForIndex(
+      activeIndex,
+      items.length,
+      maxItemsToShow,
     );
     if (activeIndex < scrollOffset) {
       setScrollOffset(activeIndex);

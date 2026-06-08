@@ -79,7 +79,10 @@ import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
-import { loadCliConfig } from '../config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+} from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
   formatAcpModelId,
@@ -248,6 +251,7 @@ export async function runAcpAgent(
 
     // Fire SessionEnd hook for all active sessions (aligned with core path)
     await fireSessionEndOnce(SessionEndReason.Other);
+    agentInstance?.disposeSessions();
 
     try {
       process.stdin.destroy();
@@ -276,6 +280,7 @@ export async function runAcpAgent(
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
   await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+  agentInstance?.disposeSessions();
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -312,6 +317,13 @@ class QwenAgent implements Agent {
 
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  disposeSessions(): void {
+    for (const session of this.sessions.values()) {
+      session.dispose();
+    }
+    this.sessions.clear();
   }
 
   constructor(
@@ -1849,6 +1861,13 @@ class QwenAgent implements Agent {
         userHooks: this.settings.getUserHooks(),
         projectHooks: this.settings.getProjectHooks(),
       },
+      // CRITICAL: close over `this.settings` (LoadedSettings instance), NOT
+      // over the local `settings` snapshot built above. `LoadedSettings.
+      // setValue` replaces `_merged`, so a closure over the snapshot would
+      // never see workspace toggles applied during the session. ACP/Zed
+      // sessions otherwise leak persisted disabled skills into the first
+      // <available_skills> at cold start.
+      buildDisabledSkillNamesProvider(this.settings),
     );
     // PR 14b fix #2 (codex review round 1): register the MCP guardrail
     // budget-event callback BEFORE `config.initialize()`. Pre-fix the
@@ -1979,6 +1998,8 @@ class QwenAgent implements Agent {
     if (needsInitialize) {
       await geminiClient.initialize();
     }
+
+    this.sessions.get(sessionId)?.dispose();
 
     const session = new Session(
       sessionId,

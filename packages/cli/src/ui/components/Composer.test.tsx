@@ -16,9 +16,19 @@ import {
 import { ConfigContext } from '../contexts/ConfigContext.js';
 // Mock VimModeContext hook
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: vi.fn(() => ({
+    vimEnabled: false,
+    vimMode: 'NORMAL',
+  })),
+  useVimModeActions: vi.fn(() => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
+  })),
   useVimMode: vi.fn(() => ({
     vimEnabled: false,
     vimMode: 'NORMAL',
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
   })),
 }));
 import { ApprovalMode } from '@qwen-code/qwen-code-core';

@@ -5,7 +5,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 describe('ComputerUseClient', () => {
   it('is constructible', () => {
     const client = new ComputerUseClient({
-      packageSpec: 'open-computer-use@latest',
+      packageSpec: '@qwen-code/open-computer-use@latest',
       onProgress: vi.fn(),
     });
     expect(client).toBeDefined();
@@ -13,7 +13,7 @@ describe('ComputerUseClient', () => {
 
   it('reports not-started before start() is called', () => {
     const client = new ComputerUseClient({
-      packageSpec: 'open-computer-use@latest',
+      packageSpec: '@qwen-code/open-computer-use@latest',
       onProgress: vi.fn(),
     });
     expect(client.isStarted()).toBe(false);
@@ -129,7 +129,7 @@ class ReconnectTestClient extends ComputerUseClient {
 
 function makeClient(): ReconnectTestClient {
   const c = new ReconnectTestClient({
-    packageSpec: 'open-computer-use@latest',
+    packageSpec: '@qwen-code/open-computer-use@latest',
   });
   // Pre-seed the started state so callTool guard passes.
   (c as unknown as { client: object }).client = { __fake: true };

@@ -16,6 +16,7 @@ import type {
   HookInput,
   HookExecutionResult,
   UserPromptSubmitInput,
+  UserPromptExpansionInput,
   StopInput,
   SessionStartInput,
   SessionEndInput,
@@ -25,6 +26,8 @@ import type {
   PreToolUseInput,
   PostToolUseInput,
   PostToolUseFailureInput,
+  PostToolBatchInput,
+  PostToolBatchToolCall,
   PreCompactInput,
   PreCompactTrigger,
   PostCompactInput,
@@ -45,6 +48,9 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
+  InstructionsLoadedInput,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -112,6 +118,65 @@ export class HookEventHandler {
       HookEventName.UserPromptSubmit,
       input,
       undefined,
+      signal,
+    );
+  }
+
+  /**
+   * Fire an InstructionsLoaded event.
+   * Called when instruction/context files are loaded during session startup or
+   * import resolution.
+   */
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: InstructionsLoadedInput = {
+      ...this.createBaseInput(HookEventName.InstructionsLoaded),
+      file_path: filePath,
+      memory_type: memoryType,
+      load_reason: loadReason,
+      trigger_file_path: options.triggerFilePath,
+      parent_file_path: options.parentFilePath,
+    };
+
+    return this.executeHooks(
+      HookEventName.InstructionsLoaded,
+      input,
+      {
+        filePath,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a UserPromptExpansion event
+   * Called when a slash command expands into a prompt.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: UserPromptExpansionInput = {
+      ...this.createBaseInput(HookEventName.UserPromptExpansion),
+      command_name: commandName,
+      command_args: commandArgs,
+      prompt,
+    };
+
+    return this.executeHooks(
+      HookEventName.UserPromptExpansion,
+      input,
+      { commandName },
       signal,
     );
   }
@@ -306,6 +371,29 @@ export class HookEventHandler {
       {
         trigger,
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostToolBatch event
+   * Called once after every tool call in a batch has resolved
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolBatchInput = {
+      ...this.createBaseInput(HookEventName.PostToolBatch),
+      permission_mode: permissionMode,
+      tool_calls: toolCalls,
+    };
+
+    return this.executeHooks(
+      HookEventName.PostToolBatch,
+      input,
+      undefined,
       signal,
     );
   }

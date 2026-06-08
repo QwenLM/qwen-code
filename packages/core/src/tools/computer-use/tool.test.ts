@@ -13,6 +13,7 @@ import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { saveInstallState, isPackageSpecApproved } from './install-state.js';
 import { resolveComputerUsePackageSpec } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import { ApprovalMode, type Config } from '../../config/config.js';
 import type { Part } from '@google/genai';
 
 function makeFakeClient(
@@ -370,6 +371,82 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     const packageSpec = resolveComputerUsePackageSpec();
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
     expect(approved).toBe(true);
+  });
+
+  // Every approval mode where the scheduler auto-approves the tool call and
+  // bypasses the confirmation dialog — so its onConfirm never records install
+  // approval. With QWEN_COMPUTER_USE_AUTO_APPROVE unset, the bootstrap fallback
+  // used to refuse and surface "install declined by user":
+  //   - YOLO       → needsConfirmation() returns false, dialog never built.
+  //   - AUTO_EDIT  → isAutoEditApproved() approves info-type tools, skips onConfirm.
+  //   - AUTO       → classifier-approved calls skip onConfirm.
+  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.AUTO])(
+    'execute() under %s auto-approves install instead of declining (no dialog, no env var)',
+    async (mode) => {
+      const fake = makeFakeClient(async () => ({
+        content: [{ type: 'text', text: '[]' }],
+        isError: false,
+      }));
+      ComputerUseClient.setSharedForTest(fake);
+
+      const config = {
+        getApprovalMode: () => mode,
+      } as unknown as Config;
+
+      const tool = new ComputerUseTool(
+        'list_apps',
+        COMPUTER_USE_SCHEMAS.list_apps,
+        config,
+      );
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
+      // Approval persisted so later (interactive) calls also skip the prompt.
+      const approved = await isPackageSpecApproved(
+        tmpHome,
+        resolveComputerUsePackageSpec(),
+      );
+      expect(approved).toBe(true);
+    },
+  );
+
+  it('execute() under DEFAULT mode does NOT auto-approve install (still gated)', async () => {
+    // Negative guard for the false-branch of autoApproveInstall: DEFAULT (and
+    // PLAN) must NOT be auto-approved — DEFAULT shows the install dialog. If the
+    // condition were ever widened (e.g. `mode !== ApprovalMode.PLAN`), DEFAULT
+    // would silently auto-install a desktop-control binary; this test locks
+    // that lower boundary so such a regression fails CI.
+    delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
+    const fake = makeFakeClient(async () => ({
+      content: [{ type: 'text', text: '[]' }],
+      isError: false,
+    }));
+    ComputerUseClient.setSharedForTest(fake);
+
+    const config = {
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    } as unknown as Config;
+
+    const tool = new ComputerUseTool(
+      'list_apps',
+      COMPUTER_USE_SCHEMAS.list_apps,
+      config,
+    );
+    const invocation = tool.build({});
+
+    // No install state + no env var → bootstrap's headless fallback refuses
+    // rather than auto-approving.
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).rejects.toThrow(/declined/i);
+    expect(fake.callTool).not.toHaveBeenCalled();
+    const approved = await isPackageSpecApproved(
+      tmpHome,
+      resolveComputerUsePackageSpec(),
+    );
+    expect(approved).toBe(false);
   });
 });
 

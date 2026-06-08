@@ -29,6 +29,7 @@ import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
 } from '../services/chatCompressionService.js';
+import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -109,6 +110,35 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   },
 }));
 
+const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
+  () => ({
+    mockAcquireSleepInhibitor: vi.fn(),
+    mockSleepInhibitorRelease: vi.fn(),
+  }),
+);
+
+vi.mock('../services/sleepInhibitor.js', () => ({
+  acquireSleepInhibitor: mockAcquireSleepInhibitor,
+}));
+
+const { mockDebugLoggerWarn } = vi.hoisted(() => ({
+  mockDebugLoggerWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: mockDebugLoggerWarn,
+      error: vi.fn(),
+    }),
+  };
+});
+
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
@@ -117,6 +147,9 @@ describe('GeminiChat', async () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAcquireSleepInhibitor.mockReturnValue({
+      release: mockSleepInhibitorRelease,
+    });
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
     mockContentGenerator = {
       generateContent: vi.fn(),
@@ -320,6 +353,67 @@ describe('GeminiChat', async () => {
   });
 
   describe('sendMessageStream', () => {
+    it('releases the sleep inhibitor after the stream is consumed', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-sleep-inhibitor',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(mockAcquireSleepInhibitor).toHaveBeenCalledWith(
+        mockConfig,
+        'Qwen Code is streaming a model response',
+      );
+      expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the sleep inhibitor when the stream errors', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'partial' }] },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('stream aborted');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'fail' },
+        'prompt-id-stream-error',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* consume stream */
+          }
+        })(),
+      ).rejects.toThrow('stream aborted');
+
+      expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
@@ -1408,6 +1502,82 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('coalesces startup reminders with the first user prompt for provider requests', async () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-startup-coalesce',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+      ]);
+      expect(chat.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nstartup context\n</system-reminder>',
+            },
+            { text: 'hello' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+    });
+
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'prior question' }] },
@@ -1503,6 +1673,133 @@ describe('GeminiChat', async () => {
 
       // The global uiTelemetryService must NOT be called by subagent chats
       expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['NaN', NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['-Infinity', Number.NEGATIVE_INFINITY],
+      ['negative', -100],
+      ['null', null],
+      ['undefined', undefined],
+      ['string', '42' as unknown as number],
+    ])(
+      'coerces hostile-provider %s promptTokenCount so the compaction gate is not poisoned',
+      async (_label, badValue) => {
+        const response = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'response' }],
+                  role: 'model',
+                },
+                finishReason: 'STOP',
+                index: 0,
+                safetyRatings: [],
+              },
+            ],
+            text: () => 'response',
+            // Both prompt and total are hostile here. With coercion both go
+            // to 0, so the per-chat counter stays at its initial 0 and the
+            // global telemetry is NOT called (the `if (lastPromptTokenCount)`
+            // guard skips the zero case).
+            usageMetadata: {
+              promptTokenCount: badValue,
+              totalTokenCount: badValue,
+              candidatesTokenCount: 15,
+            },
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          response,
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          `prompt-id-hostile-${_label}`,
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // Per-chat counter must not be poisoned (stays at initial 0).
+        expect(chat.getLastPromptTokenCount()).toBe(0);
+        // Global telemetry must not receive a hostile value either.
+        expect(
+          uiTelemetryService.setLastPromptTokenCount,
+        ).not.toHaveBeenCalled();
+
+        // `coerceUsageCount` warns on hostile, defined values so operators can
+        // diagnose silent coercion. `null` / `undefined` (the "field omitted"
+        // case) is expected and must stay silent.
+        const warnCalls = mockDebugLoggerWarn.mock.calls;
+        if (badValue == null) {
+          // No warn should mention prompt/total — provider simply omitted them.
+          const tokenWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              (args[0].includes('promptTokenCount') ||
+                args[0].includes('totalTokenCount')),
+          );
+          expect(tokenWarn).toBeUndefined();
+        } else {
+          const promptWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile promptTokenCount'),
+          );
+          const totalWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile totalTokenCount'),
+          );
+          expect(promptWarn).toBeDefined();
+          expect(totalWarn).toBeDefined();
+          // The hostile value must be embedded so logs are actionable.
+          expect(promptWarn?.[0]).toContain(String(badValue));
+        }
+      },
+    );
+
+    it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+          text: () => 'response',
+          usageMetadata: {
+            promptTokenCount: NaN,
+            totalTokenCount: 73,
+            candidatesTokenCount: 15,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-hostile-fallback',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(chat.getLastPromptTokenCount()).toBe(73);
+      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
+        73,
+      );
     });
 
     it('should keep parts with thoughtSignature when consolidating history', async () => {
@@ -4956,6 +5253,79 @@ describe('GeminiChat', async () => {
           role: 'model',
           parts: [{ functionCall: { name: 'tool', args: {} } }],
         },
+      ]);
+    });
+
+    it('preserves the startup reminder when stripping a failed first prompt', () => {
+      const startupReminder: Content = {
+        role: 'user',
+        parts: [{ text: `${SYSTEM_REMINDER_OPEN}\nctx\n</system-reminder>` }],
+      };
+      chat.setHistory([
+        startupReminder,
+        { role: 'user', parts: [{ text: 'failed first prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([startupReminder]);
+    });
+
+    it('preserves a mid-history MCP added-tool reminder when a later prompt fails', () => {
+      // drainPendingAddedMcpToolsReminder injects a system-reminder user
+      // entry; if the following prompt fails, popping it must NOT also pop
+      // the reminder — the announcement can't be re-queued (the tool is
+      // already in announcedDeferredToolNames) so it would be lost forever.
+      const mcpReminder: Content = {
+        role: 'user',
+        parts: [
+          { text: `${SYSTEM_REMINDER_OPEN}\nadded: foo\n</system-reminder>` },
+        ],
+      };
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+        { role: 'user', parts: [{ text: 'failed prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+      ]);
+    });
+
+    it('pops a failed turn whose reminder shares a Content with the prompt', () => {
+      // In plan mode (and with subagent/memory reminders) the per-turn
+      // reminder is prepended as an extra part to the SAME user Content as the
+      // prompt — sendMessageStream records [<system-reminder>…, prompt] as one
+      // entry. A failed turn leaves that combined entry trailing. Matching
+      // parts[0] alone would treat it as structural and preserve the user's
+      // prompt text, which then leaks into the next turn via
+      // appendCuratedContent. It must be popped because not every part is a
+      // reminder.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
+            },
+            { text: 'the actual user prompt' },
+          ],
+        },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
       ]);
     });
 

@@ -31,6 +31,13 @@ interface MockSpanRecord {
   statuses: Array<{ code: number; message?: string }>;
   ended: boolean;
   parentContext?: unknown;
+  /** True iff `startSpan` was called with `{ root: true }` (linked-root path). */
+  root?: boolean;
+  /** Span links captured from the `startSpan` opts. */
+  links?: Array<{
+    context: { spanId: string; traceId: string };
+    attributes?: Record<string, unknown>;
+  }>;
 }
 
 const mockSpans: MockSpanRecord[] = [];
@@ -43,7 +50,15 @@ vi.mock('@opentelemetry/api', async () => {
 
   function createMockSpan(
     name: string,
-    opts?: { kind?: number; attributes?: Record<string, unknown> },
+    opts?: {
+      kind?: number;
+      attributes?: Record<string, unknown>;
+      root?: boolean;
+      links?: Array<{
+        context: { spanId: string; traceId: string };
+        attributes?: Record<string, unknown>;
+      }>;
+    },
     parentCtx?: unknown,
   ): MockSpanRecord & {
     spanContext: () => { spanId: string; traceId: string; traceFlags: number };
@@ -59,6 +74,8 @@ vi.mock('@opentelemetry/api', async () => {
       statuses: [],
       ended: false,
       parentContext: parentCtx,
+      root: opts?.root,
+      links: opts?.links,
     };
     mockSpans.push(record);
     const spanId = Math.random().toString(16).slice(2, 18).padEnd(16, '0');
@@ -136,6 +153,9 @@ import {
   endToolBlockedOnUserSpan,
   startHookSpan,
   endHookSpan,
+  startSubagentSpan,
+  endSubagentSpan,
+  runInSubagentSpanContext,
   getActiveInteractionSpan,
   clearSessionTracingForTesting,
   runTTLSweepForTesting,
@@ -521,33 +541,42 @@ describe('session-tracing', () => {
         durationMs: 1000,
       });
 
-      // sampling_ms = duration - ttft - (requestSetup ?? 0) = 1000 - 200 - 0
+      // sampling_ms = duration - ttft = 1000 - 200 (setup is NOT subtracted —
+      // duration_ms only covers ttft + sampling, never the setup phase that
+      // precedes the span. See Phase 4b commit fixing the formula bug.)
       expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
     });
 
-    it('endLLMRequestSpan derives sampling_ms accounting for requestSetupMs (Phase 4b populates this)', () => {
+    it('endLLMRequestSpan does NOT subtract requestSetupMs from sampling_ms (Phase 4b bug fix)', () => {
+      // Phase 4a's formula `duration - ttft - setup` double-counted setup
+      // because duration_ms ALREADY excludes setup (span starts after setup).
+      // Phase 4b populates requestSetupMs with cumulative retry overhead —
+      // if the formula still subtracted setup, sampling_ms would clamp to 0
+      // for every retried request, wiping output-throughput data.
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
         ttftMs: 200,
-        requestSetupMs: 300,
+        requestSetupMs: 300, // would yield 500 under old formula; we want 800
         durationMs: 1000,
       });
 
-      // sampling_ms = 1000 - 200 - 300
-      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(500);
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+      // request_setup_ms is still emitted as its own attribute — operators can
+      // see the retry overhead AND the sampling time independently.
+      expect(mockSpans[0]!.attributes['request_setup_ms']).toBe(300);
     });
 
-    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft + setup exceed duration (clock skew)', () => {
+    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft exceeds duration (clock skew)', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
-        ttftMs: 800,
-        requestSetupMs: 500,
+        ttftMs: 1500,
         durationMs: 1000,
       });
 
-      // Math.max(0, 1000 - 800 - 500) = 0
+      // Math.max(0, 1000 - 1500) = 0 — only triggers when ttft > duration,
+      // which in practice means clock drift or a measurement bug.
       expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
     });
 
@@ -985,6 +1014,30 @@ describe('session-tracing', () => {
       endToolSpan(toolSpan, { success: true });
     });
 
+    it('records shouldStop/hasAdditionalContext on PostToolBatch', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolBatch',
+        toolName: 'batch',
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+        postBatchStop: true,
+        postBatchStopReason: 'policy halt',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
+      expect(hookRecord?.statuses).toHaveLength(0);
+    });
+
     it('marks status ERROR only when the hook itself threw', () => {
       const toolSpan = startToolSpan('Bash');
       let hookSpan!: ReturnType<typeof startHookSpan>;
@@ -1192,6 +1245,32 @@ describe('session-tracing', () => {
       mockState.throwOnSetAttributes = false;
       endToolSpan(toolSpan, { success: true });
     });
+
+    it('endSubagentSpan: end() runs and activeSpans is cleared when setAttributes throws', () => {
+      const span = startSubagentSpan({
+        agentId: 'Explore-err',
+        subagentName: 'Explore',
+        invocationKind: 'foreground',
+        isBuiltIn: true,
+        depth: 0,
+        sessionId: 'session-uuid',
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      mockState.throwOnSetAttributes = true;
+      endSubagentSpan(span, { status: 'completed' });
+
+      // The attribute write threw, but the span must still be ended so the
+      // WeakRef registry doesn't leak it. Mirrors the endLLMRequestSpan /
+      // endToolSpan resilience tests. #4410 review.
+      expect(record.ended).toBe(true);
+
+      // No leak: spanCtx was removed from activeSpans, so a second call
+      // short-circuits and records no recovery status.
+      mockState.throwOnSetAttributes = false;
+      endSubagentSpan(span, { status: 'completed' });
+      expect(record.statuses).toHaveLength(0);
+    });
   });
 
   describe('TTL safety net (#4321 review)', () => {
@@ -1302,6 +1381,535 @@ describe('session-tracing', () => {
       // directly with a regex that matches a high surrogate NOT
       // followed by a low surrogate.
       expect(truncated).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    });
+  });
+
+  describe('subagent spans (#3731 Phase 3)', () => {
+    const baseOpts = {
+      agentId: 'Explore-abc123',
+      subagentName: 'Explore',
+      isBuiltIn: true,
+      depth: 0,
+      sessionId: 'session-uuid',
+    } as const;
+
+    it('foreground invocation creates a child span (no root flag, no links)', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent');
+
+      expect(record).toBeDefined();
+      expect(record!.root).toBeUndefined();
+      expect(record!.links).toBeUndefined();
+      // Dual-emit: spec + vendor keys for id and name.
+      expect(record!.attributes['gen_ai.agent.id']).toBe('Explore-abc123');
+      expect(record!.attributes['gen_ai.agent.name']).toBe('Explore');
+      expect(record!.attributes['qwen-code.subagent.id']).toBe(
+        'Explore-abc123',
+      );
+      expect(record!.attributes['qwen-code.subagent.name']).toBe('Explore');
+      // Required spec attrs.
+      expect(record!.attributes['gen_ai.operation.name']).toBe('invoke_agent');
+      expect(record!.attributes['gen_ai.provider.name']).toBe('qwen-code');
+      expect(record!.attributes['gen_ai.conversation.id']).toBe('session-uuid');
+      // Vendor concept attrs.
+      expect(record!.attributes['qwen-code.subagent.invocation_kind']).toBe(
+        'foreground',
+      );
+      expect(record!.attributes['qwen-code.subagent.is_built_in']).toBe(true);
+      expect(record!.attributes['qwen-code.subagent.depth']).toBe(0);
+
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('fork invocation creates a linked-root span (root: true + Link to invoker)', () => {
+      const fakeInvokerSpanContext = {
+        spanId: 'invoker-span-id1',
+        traceId: 'invoker-trace-id-00000000000000',
+        traceFlags: 1,
+      };
+
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'fork',
+        invokerSpanContext:
+          fakeInvokerSpanContext as unknown as import('@opentelemetry/api').SpanContext,
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent');
+
+      expect(record!.root).toBe(true);
+      expect(record!.links).toBeDefined();
+      expect(record!.links).toHaveLength(1);
+      expect(record!.links![0].context.spanId).toBe('invoker-span-id1');
+      expect(record!.links![0].attributes?.['qwen-code.link.kind']).toBe(
+        'invoker',
+      );
+      expect(record!.attributes['qwen-code.subagent.invocation_kind']).toBe(
+        'fork',
+      );
+
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('background invocation is also linked-root', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'background',
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent');
+      expect(record!.root).toBe(true);
+      // No links because invokerSpanContext was omitted — still root.
+      expect(record!.attributes['qwen-code.subagent.invocation_kind']).toBe(
+        'background',
+      );
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('captures optional attrs: parentAgentId, invokingRequestId, modelOverride', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+        parentAgentId: 'parent-agent-456',
+        invokingRequestId: 'req-789',
+        modelOverride: 'qwen-coder-7b',
+        depth: 2,
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      expect(record.attributes['qwen-code.subagent.parent_agent_id']).toBe(
+        'parent-agent-456',
+      );
+      expect(record.attributes['qwen-code.subagent.invoking_request_id']).toBe(
+        'req-789',
+      );
+      expect(record.attributes['gen_ai.request.model']).toBe('qwen-coder-7b');
+      expect(record.attributes['qwen-code.subagent.depth']).toBe(2);
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('endSubagentSpan: completed → SpanStatus OK + duration recorded', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      endSubagentSpan(span, { status: 'completed' });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      expect(record.ended).toBe(true);
+      expect(record.statuses).toContainEqual({ code: SpanStatusCode.OK });
+      expect(record.attributes['qwen-code.subagent.status']).toBe('completed');
+      expect(
+        record.attributes['qwen-code.subagent.duration_ms'] as number,
+      ).toBeGreaterThanOrEqual(0);
+    });
+
+    it('endSubagentSpan: failed → SpanStatus ERROR + exception.message + error.type', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      endSubagentSpan(span, {
+        status: 'failed',
+        error: 'something broke',
+        errorType: 'TypeError',
+      });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      expect(record.statuses[0].code).toBe(SpanStatusCode.ERROR);
+      expect(record.statuses[0].message).toBe('something broke');
+      expect(record.attributes['exception.message']).toBe('something broke');
+      expect(record.attributes['error.type']).toBe('TypeError');
+      expect(record.attributes['qwen-code.subagent.status']).toBe('failed');
+    });
+
+    it('endSubagentSpan: failed without explicit error → generic "subagent failed" SpanStatus message', () => {
+      // Coverage for the fallback in endSubagentSpan's ERROR branch:
+      // `metadata.error ? truncateSpanError(metadata.error) : 'subagent failed'`.
+      // Every prior failure test passes an explicit error; this verifies
+      // the generic fallback so a regression that drops it would be
+      // caught. wenshao @ #4410 DeepSeek 3293036600.
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      endSubagentSpan(span, { status: 'failed' });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      expect(record.statuses[0].code).toBe(SpanStatusCode.ERROR);
+      expect(record.statuses[0].message).toBe('subagent failed');
+      expect(record.attributes['exception.message']).toBeUndefined();
+      expect(record.attributes['error.type']).toBeUndefined();
+    });
+
+    it.each(['cancelled', 'aborted'] as const)(
+      'endSubagentSpan: %s → SpanStatus UNSET (Phase 2 cancellation convention)',
+      (status) => {
+        const span = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        endSubagentSpan(span, { status });
+        const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+        // No SpanStatus calls means UNSET stays UNSET.
+        expect(record.statuses).toHaveLength(0);
+        expect(record.attributes['qwen-code.subagent.status']).toBe(status);
+      },
+    );
+
+    it('endSubagentSpan is idempotent (second call is a no-op)', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      endSubagentSpan(span, { status: 'completed' });
+      endSubagentSpan(span, { status: 'failed', error: 'should not record' });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      // Only the first end ran — status is still OK, not ERROR.
+      expect(record.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+      expect(record.attributes['qwen-code.subagent.status']).toBe('completed');
+    });
+
+    it('runInSubagentSpanContext wraps fn in context.with', async () => {
+      // Our mocked context.with just runs fn (line 119). The behavioral
+      // assertion is "fn was called and its result returned"; the parent-
+      // context behavior is covered by the integration test in
+      // agent.test.ts where real OTel context propagation matters.
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      const result = await runInSubagentSpanContext(span, async () => 42);
+      expect(result).toBe(42);
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('returns NOOP_SPAN when SDK is uninitialized', () => {
+      mockState.sdkInitialized = false;
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      // NOOP_SPAN has all-zero traceId/spanId per OTel convention.
+      expect(span.spanContext().traceId).toBe('0'.repeat(32));
+      // No mockSpans entry was created (NOOP returns before tracer.startSpan).
+      expect(
+        mockSpans.find((s) => s.name === 'qwen-code.subagent'),
+      ).toBeUndefined();
+      // endSubagentSpan on NOOP_SPAN is a safe no-op.
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('error message is truncated via truncateSpanError', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      const oversized = 'a'.repeat(2000);
+      endSubagentSpan(span, { status: 'failed', error: oversized });
+
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+      const recorded = record.attributes['exception.message'] as string;
+      expect(recorded.length).toBeLessThan(oversized.length);
+      expect(recorded.endsWith('…[truncated]')).toBe(true);
+    });
+
+    it('TTL: fork subagent at 30 min stays alive (4h window)', () => {
+      startSubagentSpan({ ...baseOpts, invocationKind: 'fork' });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      // 31 min — past default TTL, well within fork's 4h.
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+      expect(record.ended).toBe(false);
+
+      // 4h + 1 min — past fork's 4h TTL.
+      runTTLSweepForTesting(Date.now() + (4 * 60 + 1) * 60 * 1000);
+      expect(record.ended).toBe(true);
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBe(true);
+      expect(record.attributes['qwen-code.subagent.status']).toBe('aborted');
+      expect(record.attributes['qwen-code.subagent.terminate_reason']).toBe(
+        'ttl_swept',
+      );
+      // TTL sweep stamps the subagent-namespaced duration_ms key so
+      // dashboards querying that namespace include swept spans (the
+      // generic qwen-code.span.duration_ms is asserted above).
+      // wenshao @ #4410 DeepSeek 3292560017.
+      expect(
+        record.attributes['qwen-code.subagent.duration_ms'] as number,
+      ).toBeGreaterThan(0);
+    });
+
+    it('TTL: background subagent at 30 min stays alive (4h window)', () => {
+      // Mirror of the fork test — wenshao @ #4410 DeepSeek 3291876056.
+      // Catches the regression where someone trims
+      // LONG_TTL_SUBAGENT_KINDS and drops `'background'` silently.
+      startSubagentSpan({ ...baseOpts, invocationKind: 'background' });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+      expect(record.ended).toBe(false);
+
+      runTTLSweepForTesting(Date.now() + (4 * 60 + 1) * 60 * 1000);
+      expect(record.ended).toBe(true);
+      expect(record.attributes['qwen-code.subagent.status']).toBe('aborted');
+      expect(record.attributes['qwen-code.subagent.terminate_reason']).toBe(
+        'ttl_swept',
+      );
+    });
+
+    it('TTL: foreground subagent at 31 min IS swept (default 30 min TTL)', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        invocationKind: 'foreground',
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+      expect(record.ended).toBe(true);
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBe(true);
+
+      // Defensive: endSubagentSpan after TTL is a no-op (already ended).
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    describe('child span parenting (#4410 DeepSeek 3290820352)', () => {
+      // Regression: foreground subagent's child LLM/tool/hook spans were
+      // parenting to the OUTER interaction span instead of the subagent
+      // span because `resolveParentContext` always prefers
+      // `interactionContext.getStore()` over the active OTel span. The
+      // fix introduces `subagentContext` ALS, which child startXSpan
+      // calls now check before falling back to interactionContext.
+      it('startLLMRequestSpan inside runInSubagentSpanContext parents under the subagent span', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+        });
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        expect(llmRecord).toBeDefined();
+        // mock trace.setSpan stamps __parentSpan onto the context object.
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBeDefined();
+        // The LLM span MUST parent to the subagent span, NOT the
+        // interaction span.
+        expect(parentSpan).toBe(subagentRecord);
+        // Regression guard for the `llm_request.context` tri-state:
+        // subagent-parented LLM calls MUST stamp 'subagent' (not
+        // 'interaction') so dashboards classify them correctly.
+        // wenshao @ #4410 DeepSeek 3293036596.
+        expect(llmRecord!.attributes['llm_request.context']).toBe('subagent');
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('startToolSpan inside runInSubagentSpanContext parents under the subagent span', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startToolSpan('read_file');
+        });
+
+        const toolRecord = mockSpans.find((s) => s.name === 'qwen-code.tool');
+        expect(toolRecord).toBeDefined();
+        const parentSpan = (
+          toolRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(subagentRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('startHookSpan inside runInSubagentSpanContext (no inner tool) parents under the subagent span', async () => {
+        // Regression: startHookSpan reads tool > subagent > interaction.
+        // The AGENT tool's own toolContext was leaking into the subagent
+        // body and mis-parenting SubagentStart/Stop hooks. Fix at
+        // runInSubagentSpanContext clears toolContext for the body's
+        // duration. wenshao @ #4410 DeepSeek 3291876051 / 3291876055.
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+        const subagentRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.subagent',
+        )!;
+
+        await runInSubagentSpanContext(subagentSpan, async () => {
+          startHookSpan({
+            hookEvent: 'PreToolUse',
+            toolName: 'read_file',
+          });
+        });
+
+        const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+        expect(hookRecord).toBeDefined();
+        const parentSpan = (
+          hookRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(subagentRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('startHookSpan OUTSIDE runInSubagentSpanContext but inside a tool context parents under the tool span (documented bg SubagentStart asymmetry)', async () => {
+        // Regression guard for the documented bg-vs-fg SubagentStart
+        // parenting asymmetry (see design doc Edge Cases table). The
+        // background path fires SubagentStart BEFORE wrapping in
+        // runInSubagentSpanContext, so it sees the outer AGENT tool's
+        // toolContext and parents to the tool span — not the subagent.
+        // If a future refactor changes this (or implements the deferred
+        // fix), this test trips. wenshao @ #4410 DeepSeek 3293174101.
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        // Simulate the outer AGENT tool context active.
+        const agentToolSpan = startToolSpan('agent');
+        const agentToolRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.tool',
+        )!;
+        // Open a subagent span as if a bg invocation will eventually
+        // wrap its body. Note we do NOT call runInSubagentSpanContext —
+        // mirroring the bg path where SubagentStart fires BEFORE the
+        // wrapper.
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'background',
+        });
+
+        await runInToolSpanContext(agentToolSpan, async () => {
+          // Hook fires here, inside the AGENT tool's toolContext but
+          // OUTSIDE runInSubagentSpanContext.
+          startHookSpan({
+            hookEvent: 'PreToolUse',
+            toolName: 'subagent',
+          });
+        });
+
+        const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+        expect(hookRecord).toBeDefined();
+        const parentSpan = (
+          hookRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        // Locks in the asymmetry: parent is the AGENT tool, NOT the
+        // subagent span (even though the subagent span exists in
+        // activeSpans). Documented in design doc Edge Cases.
+        expect(parentSpan).toBe(agentToolRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endToolSpan(agentToolSpan);
+        endInteractionSpan('ok');
+      });
+
+      it('nested subagent: innermost subagent shadows outer for child parenting', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const outerSubagent = startSubagentSpan({
+          ...baseOpts,
+          agentId: 'outer',
+          subagentName: 'outer-agent',
+          invocationKind: 'foreground',
+        });
+        const innerSubagent = startSubagentSpan({
+          ...baseOpts,
+          agentId: 'inner',
+          subagentName: 'inner-agent',
+          invocationKind: 'foreground',
+        });
+        const innerRecord = mockSpans.find(
+          (s) =>
+            s.name === 'qwen-code.subagent' &&
+            s.attributes['qwen-code.subagent.id'] === 'inner',
+        )!;
+
+        await runInSubagentSpanContext(outerSubagent, async () => {
+          await runInSubagentSpanContext(innerSubagent, async () => {
+            startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+          });
+        });
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        expect(parentSpan).toBe(innerRecord);
+        endSubagentSpan(innerSubagent, { status: 'completed' });
+        endSubagentSpan(outerSubagent, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
+
+      it('after runInSubagentSpanContext exits, child spans go back to interactionContext', async () => {
+        const config = createMockConfig();
+        startInteractionSpan(config, {
+          messageType: 'userQuery',
+          promptId: 'prompt-1',
+          model: 'test-model',
+        });
+        const interactionRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.interaction',
+        )!;
+        const subagentSpan = startSubagentSpan({
+          ...baseOpts,
+          invocationKind: 'foreground',
+        });
+
+        await runInSubagentSpanContext(subagentSpan, async () => {});
+        // Now outside the subagent ALS frame.
+        startLLMRequestSpan('qwen3-coder-plus', 'prompt-1');
+
+        const llmRecord = mockSpans.find(
+          (s) => s.name === 'qwen-code.llm_request',
+        );
+        const parentSpan = (
+          llmRecord!.parentContext as { __parentSpan?: unknown } | undefined
+        )?.__parentSpan;
+        // Parented under interaction span, NOT subagent (ALS frame exited).
+        expect(parentSpan).toBe(interactionRecord);
+        endSubagentSpan(subagentSpan, { status: 'completed' });
+        endInteractionSpan('ok');
+      });
     });
   });
 });

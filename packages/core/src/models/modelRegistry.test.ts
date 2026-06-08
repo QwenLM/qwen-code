@@ -219,6 +219,56 @@ describe('ModelRegistry', () => {
       const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3-coder-plus');
       expect(model?.generationConfig.modalities).toEqual({});
     });
+
+    it('populates MiniMax-M3 metadata when provider entries omit generationConfig', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'MiniMax-M3',
+            name: '[MiniMax] MiniMax-M3',
+            baseUrl: 'https://api.minimaxi.com/v1',
+            envKey: 'MINIMAX_API_KEY',
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3');
+      expect(model?.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+
+      const available = registry
+        .getModelsForAuthType(AuthType.USE_OPENAI)
+        .find((m) => m.id === 'MiniMax-M3');
+      expect(available?.contextWindowSize).toBe(1000000);
+      expect(available?.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
+    it('normalizes stale MiniMax-M3 provider modalities to image + video', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'MiniMax-M3',
+            name: '[MiniMax] MiniMax-M3',
+            baseUrl: 'https://api.minimaxi.com/v1',
+            envKey: 'MINIMAX_API_KEY',
+            generationConfig: {
+              modalities: { image: true },
+            },
+          },
+        ],
+      });
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3');
+      expect(model?.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+    });
   });
 
   describe('hasModel', () => {

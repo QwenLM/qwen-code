@@ -309,6 +309,7 @@ function toCommandSuggestion(
     matchedAlias,
     supportedModes: command.supportedModes,
     modelInvocable: command.modelInvocable,
+    submitOnAccept: command.submitOnAccept,
   };
 }
 
