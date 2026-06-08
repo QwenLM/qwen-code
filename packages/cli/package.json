@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,13 +37,13 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
-    "@google/genai": "1.30.0",
+    "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
@@ -62,7 +62,7 @@
     "fzf": "^0.5.2",
     "glob": "^10.5.0",
     "highlight.js": "^11.11.1",
-    "ink": "^7.0.3",
+    "ink": "7.0.3",
     "ink-gradient": "^3.0.0",
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",
@@ -77,6 +77,7 @@
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
+    "tar": "^7.5.2",
     "undici": "^6.22.0",
     "update-notifier": "^7.3.1",
     "wrap-ansi": "^10.0.0",

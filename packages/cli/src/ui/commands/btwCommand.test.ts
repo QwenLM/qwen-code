@@ -176,6 +176,11 @@ describe('btwCommand', () => {
           .mockReturnValue([
             { role: 'user', parts: [{ text: '杭州天气如何？' }] },
           ]),
+        getHistoryTail: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          ]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({
             systemInstruction: 'You are helpful',
@@ -226,6 +231,10 @@ describe('btwCommand', () => {
 
       const geminiClient = {
         getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
+        ]),
+        getHistoryTail: vi.fn().mockReturnValue([
           { role: 'user', parts: [{ text: '杭州天气如何？' }] },
           { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
         ]),

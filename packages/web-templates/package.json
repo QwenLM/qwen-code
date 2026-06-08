@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-templates",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Web templates bundled as embeddable JS/CSS strings",
   "repository": {
     "type": "git",
@@ -24,8 +24,8 @@
   ],
   "dependencies": {},
   "devDependencies": {
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.2.0",
     "autoprefixer": "^10.4.22",
     "postcss": "^8.5.6",

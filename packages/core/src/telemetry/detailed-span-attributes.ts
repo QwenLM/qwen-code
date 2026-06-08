@@ -13,8 +13,8 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 const MAX_CONTENT_SIZE = 60 * 1024; // 60KB
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 
-// Process-global; intentionally never cleared in production. Bounded by the
-// number of unique system prompts + tool schemas seen in one session.
+// Process-global dedup set. Cleared on chat compression so post-compaction
+// spans re-emit full system prompts and tool schemas.
 const seenHashes = new Set<string>();
 
 function isEnabled(config: Config): boolean {

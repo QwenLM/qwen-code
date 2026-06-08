@@ -17,9 +17,14 @@ import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 
 let mockCurrentSessionId: string | undefined = undefined;
+let mockIsInNativeSubagentSpan = false;
 
 vi.mock('./session-context.js', () => ({
   getCurrentSessionId: () => mockCurrentSessionId,
+}));
+
+vi.mock('./session-tracing.js', () => ({
+  isInNativeSubagentSpan: () => mockIsInNativeSubagentSpan,
 }));
 
 interface ExportedSpan {
@@ -750,6 +755,64 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].spanContext().traceId).toBe(
       deriveTraceId('fresh-session'),
     );
+  });
+
+  describe('bridge skip-list (#3731 Phase 3)', () => {
+    it('skips qwen-code.subagent_execution when native subagent span is active', async () => {
+      mockIsInNativeSubagentSpan = true;
+      const logRecord = {
+        body: 'subagent started',
+        hrTime: [2000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'Explore',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      expect(exportedSpans).toHaveLength(0);
+      mockIsInNativeSubagentSpan = false;
+    });
+
+    it('bridges subagent_execution when no native span is active (e.g. runForkedAgent)', async () => {
+      mockIsInNativeSubagentSpan = false;
+      const logRecord = {
+        body: 'forked agent started',
+        hrTime: [2500, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'dreamAgent',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.subagent_execution');
+    });
+
+    it('still bridges other events normally (e.g. qwen-code.tool_call)', async () => {
+      const logRecord = {
+        body: 'tool call',
+        hrTime: [3000, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.tool_call',
+          tool_name: 'read_file',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      // Sanity check: skip list is narrow — non-listed events still bridge.
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.tool_call');
+    });
   });
 
   describe('export failure diagnostics', () => {
