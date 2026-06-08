@@ -649,7 +649,7 @@ export class GeminiClient {
    * takes effect on the next turn without restarting the session. No-op if
    * no chat has been started yet.
    */
-  async refreshSystemInstruction(): Promise<void> {
+  refreshSystemInstruction(): void {
     if (!this.chat) {
       return;
     }
