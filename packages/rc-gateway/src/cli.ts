@@ -12,6 +12,7 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { createGatewayApp } from './server.js';
+import { SessionEventPump } from './webpush/pump.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 export interface ServeOptions {
@@ -32,7 +33,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const pushStore = await PushStore.open(
     join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
   );
-  const { app } = createGatewayApp({
+  const { app, notifier } = createGatewayApp({
     daemon: handle.daemon,
     store,
     pairing,
@@ -61,7 +62,18 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
   });
 
+  // Hold the gateway's own daemon subscriptions so push fires with no browser
+  // open. Best-effort: start() always resolves, even if the daemon is unhappy.
+  let pump: SessionEventPump | undefined;
+  if (notifier) {
+    pump = new SessionEventPump(handle.daemon, notifier);
+    await pump.start();
+    // eslint-disable-next-line no-console
+    console.log('push pump: started');
+  }
+
   const shutdown = async () => {
+    if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
   };
