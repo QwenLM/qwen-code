@@ -62,3 +62,12 @@ export {
   type SessionEventPumpOptions,
   type PumpNotifier,
 } from './webpush/pump.js';
+export {
+  loadPolicy,
+  loadPolicyFile,
+  PolicyError,
+  type Policy,
+  type PolicyRule,
+  type PolicyRuleMatch,
+  type PolicyAction,
+} from './policy/loader.js';
