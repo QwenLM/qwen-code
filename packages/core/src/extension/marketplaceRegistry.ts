@@ -54,6 +54,8 @@ export interface DiscoveredPlugin {
   category?: string;
   /** Best-effort last-updated string when the marketplace entry provides one. */
   lastUpdated?: string;
+  /** Best-effort install/download count when the marketplace entry provides one. */
+  installs?: number;
   /** Components the plugin declares (for the "Will install" summary). */
   components?: DiscoveredPluginComponents;
   /** Source string suitable for `parseInstallSource`. */
@@ -97,6 +99,17 @@ function pluginLastUpdated(
   const value =
     record['lastUpdated'] ?? record['updatedAt'] ?? record['updated'];
   return typeof value === 'string' ? value : undefined;
+}
+
+function pluginInstalls(
+  plugin: ClaudeMarketplacePluginConfig,
+): number | undefined {
+  const record = plugin as unknown as Record<string, unknown>;
+  const value =
+    record['installs'] ?? record['installCount'] ?? record['downloads'];
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 /**
@@ -173,6 +186,7 @@ function pluginsFromConfig(
     homepage: plugin.homepage,
     category: plugin.category,
     lastUpdated: pluginLastUpdated(plugin),
+    installs: pluginInstalls(plugin),
     components: pluginComponents(plugin),
     installSource: resolveInstallSource(marketplace, plugin),
     installed: installedNames.has(plugin.name),

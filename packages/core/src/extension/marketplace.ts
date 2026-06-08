@@ -119,27 +119,40 @@ function isGitUrl(source: string): boolean {
   );
 }
 
+/** Max time to wait for a single marketplace network request. */
+const MARKETPLACE_FETCH_TIMEOUT_MS = 10000;
+
 /**
- * Fetch content from a URL
+ * Fetch content from a URL. Resolves to null on non-200, error, or timeout so a
+ * slow/unreachable marketplace can never hang discovery indefinitely.
  */
 function fetchUrl(
   url: string,
   headers: Record<string, string>,
 ): Promise<string | null> {
   return new Promise((resolve) => {
-    https
-      .get(url, { headers }, (res) => {
-        if (res.statusCode !== 200) {
-          resolve(null);
-          return;
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          resolve(Buffer.concat(chunks).toString());
-        });
-      })
-      .on('error', () => resolve(null));
+    let settled = false;
+    const done = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const req = https.get(url, { headers }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume(); // drain so the socket can be freed
+        done(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => done(Buffer.concat(chunks).toString()));
+      res.on('error', () => done(null));
+    });
+    req.on('error', () => done(null));
+    req.setTimeout(MARKETPLACE_FETCH_TIMEOUT_MS, () => {
+      req.destroy();
+      done(null);
+    });
   });
 }
 

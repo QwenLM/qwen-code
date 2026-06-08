@@ -318,6 +318,7 @@ export class ExtensionManager {
   private readonly workspaceDir: string;
   private readonly preferencesStore: ExtensionPreferencesStore;
   private readonly marketplaceRegistryStore: MarketplaceRegistryStore;
+  private discoverCache: DiscoveredPlugin[] | null = null;
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
@@ -564,11 +565,16 @@ export class ExtensionManager {
       addedAt: new Date().toISOString(),
     };
     this.marketplaceRegistryStore.add(entry);
+    this.discoverCache = null; // sources changed -> refetch on next discover
     return entry;
   }
 
   removeMarketplace(name: string): boolean {
-    return this.marketplaceRegistryStore.remove(name);
+    const removed = this.marketplaceRegistryStore.remove(name);
+    if (removed) {
+      this.discoverCache = null;
+    }
+    return removed;
   }
 
   loadMarketplace(source: string): Promise<ClaudeMarketplaceConfig | null> {
@@ -577,13 +583,28 @@ export class ExtensionManager {
 
   /**
    * Discovers all installable plugins across configured marketplaces, marking
-   * which are already installed.
+   * which are already installed. The fetched listing is cached for the session;
+   * pass `{ refresh: true }` to force a re-fetch. The cheap `installed` flags are
+   * always recomputed against the current install state.
    */
-  async discoverPlugins(): Promise<DiscoveredPlugin[]> {
+  async discoverPlugins(options?: {
+    refresh?: boolean;
+  }): Promise<DiscoveredPlugin[]> {
     const installedNames = new Set(
       this.getLoadedExtensions().map((ext) => ext.name),
     );
-    return discoverPlugins(this.getMarketplaces(), installedNames);
+    if (this.discoverCache && !options?.refresh) {
+      return this.discoverCache.map((plugin) => ({
+        ...plugin,
+        installed: installedNames.has(plugin.name),
+      }));
+    }
+    const result = await discoverPlugins(
+      this.getMarketplaces(),
+      installedNames,
+    );
+    this.discoverCache = result;
+    return result;
   }
 
   private enableByPath(

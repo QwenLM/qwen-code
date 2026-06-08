@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import open from 'open';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
+import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
 import {
@@ -35,6 +36,20 @@ interface DiscoverTabProps {
   onStatus: (status: StatusMessage | null) => void;
   onInstalled: () => void;
   reloadSignal: number;
+}
+
+/** Formats a raw install count like 787100 -> "787.1K". */
+function formatInstalls(n?: number): string | null {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+  if (n >= 1_000_000)
+    return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  return String(n);
+}
+
+function truncateText(text: string, max: number): string {
+  if (max <= 1 || text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
 }
 
 // Built per-render so the literal t() labels stay extractable and localize.
@@ -64,14 +79,36 @@ export const DiscoverTab = ({
 }: DiscoverTabProps) => {
   const [plugins, setPlugins] = useState<DiscoveredPlugin[]>([]);
   const [cursor, setCursor] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [query, setQuery] = useState('');
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [view, setView] = useState<DiscoverView>('list');
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
 
+  const { columns, rows } = useTerminalSize();
+  const availableWidth = Math.max(24, columns - 8);
+  // Each item renders as 3 lines (title, description, gap). Reserve rows for
+  // the tab bar, header, search box, scroll hints, status and footer.
+  const visibleCount = Math.max(
+    3,
+    Math.min(8, Math.floor(((rows || 24) - 13) / 3)),
+  );
+
   const extensionManager = config.getExtensionManager();
 
   const keyOf = (p: DiscoveredPlugin) => `${p.marketplaceName}/${p.name}`;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return plugins;
+    return plugins.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.marketplaceName.toLowerCase().includes(q) ||
+        (p.description?.toLowerCase().includes(q) ?? false),
+    );
+  }, [plugins, query]);
 
   const load = useCallback(async () => {
     if (!extensionManager) {
@@ -100,7 +137,23 @@ export const DiscoverTab = ({
     onLockChange(false);
   }, [onLockChange]);
 
-  const selected = plugins[cursor] ?? null;
+  const selected = filtered[cursor] ?? null;
+
+  // Keep the cursor in range as the filtered list changes (e.g. while typing).
+  useEffect(() => {
+    if (cursor > filtered.length - 1) {
+      setCursor(filtered.length > 0 ? filtered.length - 1 : 0);
+    }
+  }, [filtered.length, cursor]);
+
+  // Keep the cursor inside the visible window (scrolling viewport).
+  useEffect(() => {
+    if (cursor < scrollOffset) {
+      setScrollOffset(cursor);
+    } else if (cursor >= scrollOffset + visibleCount) {
+      setScrollOffset(cursor - visibleCount + 1);
+    }
+  }, [cursor, scrollOffset, visibleCount]);
 
   // Plugins queued for installation when the scope is chosen.
   const pendingInstall = useCallback((): DiscoveredPlugin[] => {
@@ -262,15 +315,31 @@ export const DiscoverTab = ({
     return items;
   }, [selected]);
 
-  // List keyboard.
+  // List keyboard: navigate, type-to-search, Space to toggle, Enter to view
+  // (or install the selected set), matching Claude Code's Discover list.
   useKeypress(
     (key) => {
-      if (plugins.length === 0) return;
       if (keyMatchers[Command.SELECTION_UP](key)) {
-        setCursor((prev) => (prev > 0 ? prev - 1 : plugins.length - 1));
-      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
-        setCursor((prev) => (prev < plugins.length - 1 ? prev + 1 : 0));
-      } else if (key.name === 'space' || key.sequence === ' ') {
+        if (filtered.length > 0)
+          setCursor((prev) => (prev > 0 ? prev - 1 : filtered.length - 1));
+        return;
+      }
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
+        if (filtered.length > 0)
+          setCursor((prev) => (prev < filtered.length - 1 ? prev + 1 : 0));
+        return;
+      }
+      if (key.name === 'return') {
+        if (selectedKeys.size > 0) {
+          beginInstall();
+        } else if (selected) {
+          onStatus(null);
+          setView('detail');
+          onLockChange(true);
+        }
+        return;
+      }
+      if (key.name === 'space' || key.sequence === ' ') {
         if (!selected || selected.installed) return;
         setSelectedKeys((prev) => {
           const next = new Set(prev);
@@ -279,14 +348,21 @@ export const DiscoverTab = ({
           else next.add(k);
           return next;
         });
-      } else if (key.sequence === 'i' && !key.ctrl && !key.meta) {
-        beginInstall();
-      } else if (key.name === 'return') {
-        if (selected) {
-          onStatus(null);
-          setView('detail');
-          onLockChange(true);
-        }
+        return;
+      }
+      if (key.name === 'backspace' || key.name === 'delete') {
+        setQuery((q) => q.slice(0, -1));
+        return;
+      }
+      // Printable character -> append to the search query.
+      if (
+        !key.ctrl &&
+        !key.meta &&
+        key.sequence &&
+        key.sequence.length === 1 &&
+        key.sequence >= ' '
+      ) {
+        setQuery((q) => q + key.sequence);
       }
     },
     { isActive: isActive && view === 'list' },
@@ -434,48 +510,98 @@ export const DiscoverTab = ({
     );
   }
 
+  const windowItems = filtered.slice(scrollOffset, scrollOffset + visibleCount);
+  const hasAbove = scrollOffset > 0;
+  const hasBelow = scrollOffset + visibleCount < filtered.length;
+
   return (
     <Box flexDirection="column">
-      <Text color={theme.text.secondary}>
-        {t('{{count}} plugin(s) available', { count: String(plugins.length) })}
-      </Text>
-      <Box flexDirection="column" marginTop={1}>
-        {plugins.map((plugin, index) => {
-          const isSelected = index === cursor;
-          const isChecked = selectedKeys.has(keyOf(plugin));
-          return (
-            <Box key={keyOf(plugin)}>
-              <Box minWidth={2} flexShrink={0}>
-                <Text
-                  color={isSelected ? theme.text.accent : theme.text.primary}
-                >
-                  {isSelected ? '●' : ' '}
-                </Text>
-              </Box>
-              <Box minWidth={4} flexShrink={0}>
-                <Text
-                  color={
-                    plugin.installed ? theme.status.success : theme.text.primary
-                  }
-                >
-                  {plugin.installed ? '[✓]' : isChecked ? '[•]' : '[ ]'}
-                </Text>
-              </Box>
-              <Box flexGrow={1}>
-                <Text
-                  color={isSelected ? theme.text.accent : theme.text.primary}
-                >
-                  {plugin.name}
-                </Text>
-              </Box>
-              <Text color={theme.text.secondary}>
-                {plugin.marketplaceName}
-                {plugin.installed ? ` (${t('installed')})` : ''}
-              </Text>
-            </Box>
-          );
-        })}
+      <Box>
+        <Text color={theme.text.primary} bold>
+          {t('Discover plugins')}
+        </Text>
+        <Text color={theme.text.secondary}>
+          {` (${filtered.length ? cursor + 1 : 0}/${filtered.length})`}
+        </Text>
       </Box>
+
+      <Box
+        borderStyle="round"
+        borderColor={theme.border.default}
+        paddingX={1}
+        width={availableWidth}
+      >
+        <Text color={theme.text.secondary}>{'⌕ '}</Text>
+        {query ? (
+          <Text color={theme.text.primary}>{query}</Text>
+        ) : (
+          <Text color={theme.text.secondary}>{t('Search…')}</Text>
+        )}
+      </Box>
+
+      {filtered.length === 0 ? (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t('No plugins match your search.')}
+          </Text>
+        </Box>
+      ) : (
+        <Box flexDirection="column" marginTop={1}>
+          {hasAbove ? (
+            <Text color={theme.text.secondary}>{t('↑ more above')}</Text>
+          ) : null}
+          {windowItems.map((plugin, i) => {
+            const absIndex = scrollOffset + i;
+            const isCursor = absIndex === cursor;
+            const isChecked = selectedKeys.has(keyOf(plugin));
+            const installs = formatInstalls(plugin.installs);
+            const checkbox = plugin.installed ? '✓' : isChecked ? '●' : '○';
+            const titleColor = isCursor
+              ? theme.text.accent
+              : theme.text.primary;
+            const meta =
+              ` · ${plugin.marketplaceName}` +
+              (installs ? ` · ${installs} installs` : '') +
+              (plugin.installed ? ` · ${t('installed')}` : '');
+            return (
+              <Box key={keyOf(plugin)} flexDirection="column" marginBottom={1}>
+                <Box>
+                  <Box minWidth={2} flexShrink={0}>
+                    <Text color={theme.text.accent}>
+                      {isCursor ? '›' : ' '}
+                    </Text>
+                  </Box>
+                  <Box minWidth={2} flexShrink={0}>
+                    <Text
+                      color={
+                        plugin.installed
+                          ? theme.status.success
+                          : theme.text.primary
+                      }
+                    >
+                      {checkbox}
+                    </Text>
+                  </Box>
+                  <Text bold color={titleColor}>
+                    {plugin.name}
+                  </Text>
+                  <Text color={theme.text.secondary}>{meta}</Text>
+                </Box>
+                {plugin.description ? (
+                  <Box paddingLeft={4}>
+                    <Text color={theme.text.secondary}>
+                      {truncateText(plugin.description, availableWidth - 4)}
+                    </Text>
+                  </Box>
+                ) : null}
+              </Box>
+            );
+          })}
+          {hasBelow ? (
+            <Text color={theme.text.secondary}>{t('↓ more below')}</Text>
+          ) : null}
+        </Box>
+      )}
     </Box>
   );
 };

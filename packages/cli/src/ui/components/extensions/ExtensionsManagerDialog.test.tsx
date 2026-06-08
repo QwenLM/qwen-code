@@ -192,6 +192,70 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Back to plugin list');
   });
 
+  it('windows a long Discover list with a scroll hint and count header', async () => {
+    const discovered: DiscoveredPlugin[] = Array.from(
+      { length: 15 },
+      (_, i) => ({
+        marketplaceName: 'mkt',
+        name: `plugin-${i}`,
+        installSource: `owner/repo:plugin-${i}`,
+        installed: false,
+      }),
+    );
+    const { lastFrame } = renderDialog(
+      createConfig(createManager({ discovered })),
+    );
+    await waitFor(() => {
+      expect(lastFrame()).toContain('plugin-0');
+    });
+    const frame = lastFrame();
+    expect(frame).toContain('Discover plugins');
+    expect(frame).toContain('(1/15)');
+    expect(frame).toContain('Search'); // search box
+    // Not all 15 fit; the more-below indicator is shown.
+    expect(frame).toContain('more below');
+    // The last item is scrolled out of the initial window.
+    expect(frame).not.toContain('plugin-14');
+  });
+
+  it('filters the Discover list as you type', async () => {
+    const discovered: DiscoveredPlugin[] = [
+      {
+        marketplaceName: 'm',
+        name: 'alpha',
+        installSource: 'o/r:alpha',
+        installed: false,
+      },
+      {
+        marketplaceName: 'm',
+        name: 'beta',
+        installSource: 'o/r:beta',
+        installed: false,
+      },
+      {
+        marketplaceName: 'm',
+        name: 'gamma',
+        installSource: 'o/r:gamma',
+        installed: false,
+      },
+    ];
+    const { stdin, lastFrame } = renderDialog(
+      createConfig(createManager({ discovered })),
+    );
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha');
+    });
+    for (const ch of 'beta') {
+      stdin.write(ch); // type-to-search, one printable char at a time
+    }
+    await waitFor(() => {
+      expect(lastFrame()).toContain('beta');
+      expect(lastFrame()).not.toContain('alpha');
+    });
+    expect(lastFrame()).not.toContain('gamma');
+    expect(lastFrame()).toContain('(1/1)');
+  });
+
   it('prompts to add a marketplace when none discovered', async () => {
     const { lastFrame } = renderDialog(createConfig(createManager()));
     await waitFor(() => {
