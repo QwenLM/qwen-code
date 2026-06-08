@@ -224,6 +224,8 @@ describe('useGeminiStream', () => {
       getCheckpointingEnabled: vi.fn(() => false),
       getGeminiClient: mockGetGeminiClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
+      getTeamManager: vi.fn(() => null),
+      onTeamManagerChange: vi.fn(),
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       addHistory: vi.fn(),

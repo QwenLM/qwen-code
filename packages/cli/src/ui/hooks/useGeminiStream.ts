@@ -1766,7 +1766,8 @@ export const useGeminiStream = (
         // Check image format support for non-continuations
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
@@ -1786,7 +1787,8 @@ export const useGeminiStream = (
 
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
@@ -2605,9 +2607,13 @@ export const useGeminiStream = (
   }, [config]);
 
   // When idle, drain the unified queue one item at a time.
+  // Skip when another submission is in flight (e.g. the teammate
+  // drain effect won this render) — the queue stays intact and
+  // the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
       const item = notificationQueueRef.current.shift()!;
@@ -2620,6 +2626,67 @@ export const useGeminiStream = (
       });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);
+
+  // ─── Teammate message integration ─────────────────────────
+  const teammateQueueRef = useRef<string[]>([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
+
+  // Subscribe to TeamManager's leader message callback.
+  // Track the bound manager so we can detach the callback
+  // before a new manager replaces it (and on unmount) —
+  // otherwise a stale TeamManager could keep pushing into
+  // the active queue ref after team recreation/remount.
+  useEffect(() => {
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
+    const handleManagerChange = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      if (boundManager && boundManager !== manager) {
+        boundManager.setLeaderMessageCallback(null);
+      }
+      boundManager = manager;
+      if (manager) {
+        manager.setLeaderMessageCallback((formatted: string) => {
+          teammateQueueRef.current.push(formatted);
+          setTeammateTrigger((n) => n + 1);
+        });
+      }
+    };
+
+    config.onTeamManagerChange(handleManagerChange);
+
+    // Catch manager that was set before this effect ran
+    const current = config.getTeamManager();
+    if (current) {
+      handleManagerChange(current);
+    }
+
+    return () => {
+      config.onTeamManagerChange(null, handleManagerChange);
+      if (boundManager) {
+        boundManager.setLeaderMessageCallback(null);
+        boundManager = null;
+      }
+    };
+  }, [config]);
+
+  // When idle, drain teammate messages one batch at a time.
+  // Skip when another submission is in flight (e.g. the
+  // notification effect won this render and called submitQuery
+  // synchronously, flipping isSubmittingQueryRef). Without this
+  // guard the splice would drain the queue and submitQuery
+  // would early-return, permanently losing those messages.
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
+      teammateQueueRef.current.length > 0
+    ) {
+      const batch = teammateQueueRef.current.splice(0);
+      submitQuery(batch.join('\n\n'), SendMessageType.Teammate);
+    }
+  }, [streamingState, submitQuery, teammateTrigger]);
 
   return {
     streamingState,
