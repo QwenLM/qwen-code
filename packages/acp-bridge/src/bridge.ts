@@ -3262,6 +3262,60 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return response;
     },
 
+    async setSessionLanguage(sessionId, params, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+
+      const result = (await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionLanguage,
+            {
+              sessionId,
+              language: params.language,
+              syncOutputLanguage: params.syncOutputLanguage,
+            },
+          ),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionLanguage,
+        ),
+        getTransportClosedReject(entry),
+      ])) as {
+        language: string;
+        outputLanguage: string | null;
+        refreshed: boolean;
+      };
+
+      try {
+        entry.events.publish({
+          type: 'language_changed',
+          data: {
+            sessionId: entry.sessionId,
+            language: result.language,
+            outputLanguage: result.outputLanguage ?? null,
+            refreshed: result.refreshed ?? false,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch (err) {
+        writeServeDebugLine(
+          `language_changed event publish failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      return {
+        language: result.language,
+        outputLanguage: result.outputLanguage ?? null,
+        refreshed: result.refreshed ?? false,
+      };
+    },
+
     async setSessionApprovalMode(sessionId, mode, opts, context) {
       // Forwards through `qwen/control/session/approval_mode` so the
       // change lands inside the ACP child's own `Config` (per-session

@@ -48,6 +48,7 @@ import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
+import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { mountAcpHttp } from './acpHttp/index.js';
 import {
@@ -289,7 +290,7 @@ function resolveDaemonTelemetryRoute(
     return { route: 'POST /sessions/delete' };
   }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -2215,6 +2216,57 @@ export function createServeApp(
       }
     },
   );
+
+  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+
+  app.post('/session/:id/language', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const language = body['language'];
+    const syncOutputLanguage = body['syncOutputLanguage'];
+
+    if (typeof language !== 'string' || !LANGUAGE_CODES.includes(language)) {
+      res.status(400).json({
+        error:
+          '`language` is required and must be one of: ' +
+          LANGUAGE_CODES.join(', '),
+        code: 'invalid_language',
+        allowed: LANGUAGE_CODES,
+      });
+      return;
+    }
+
+    if (
+      syncOutputLanguage !== undefined &&
+      typeof syncOutputLanguage !== 'boolean'
+    ) {
+      res.status(400).json({
+        error: '`syncOutputLanguage` must be a boolean when provided',
+        code: 'invalid_sync_flag',
+      });
+      return;
+    }
+
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+
+    try {
+      const response = await bridge.setSessionLanguage(
+        sessionId,
+        {
+          language,
+          syncOutputLanguage: syncOutputLanguage === true,
+        },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/language',
+        sessionId,
+      });
+    }
+  });
 
   app.post(
     '/workspace/mcp/:server/restart',

@@ -128,6 +128,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
+  sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',

@@ -174,6 +174,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // on; runtime-active policy is at `/capabilities` body `policy.permission`.
   'permission_mediation',
   'non_blocking_prompt',
+  'session_language',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -207,6 +208,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
+      f !== 'session_language' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
@@ -227,6 +229,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'prompt_absolute_deadline',
   'writer_idle_timeout',
   'non_blocking_prompt',
+  'session_language',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -305,6 +308,15 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setLanguageImpl?: (
+    sessionId: string,
+    params: { language: string; syncOutputLanguage: boolean },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{
+    language: string;
+    outputLanguage: string | null;
+    refreshed: boolean;
+  }>;
   setApprovalModeImpl?: (
     sessionId: string,
     mode: ApprovalMode,
@@ -434,6 +446,11 @@ interface FakeBridge extends AcpSessionBridge {
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
+    context?: BridgeClientRequestContext;
+  }>;
+  setLanguageCalls: Array<{
+    sessionId: string;
+    params: { language: string; syncOutputLanguage: boolean };
     context?: BridgeClientRequestContext;
   }>;
   setApprovalModeCalls: Array<{
@@ -693,6 +710,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       hooks: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setLanguageCalls: FakeBridge['setLanguageCalls'] = [];
+  const setLanguageImpl =
+    opts.setLanguageImpl ??
+    (async (
+      _sessionId: string,
+      params: { language: string; syncOutputLanguage: boolean },
+    ) => ({
+      language: params.language,
+      outputLanguage: params.syncOutputLanguage ? 'Chinese' : null,
+      refreshed: params.syncOutputLanguage,
+    }));
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const setApprovalModeImpl =
     opts.setApprovalModeImpl ??
@@ -804,6 +832,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTasksCalls,
     sessionHooksCalls,
     setModelCalls,
+    setLanguageCalls,
     setApprovalModeCalls,
     generateSessionRecapCalls,
     setToolEnabledCalls,
@@ -976,6 +1005,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionLanguage(sessionId, params, context) {
+      setLanguageCalls.push({
+        sessionId,
+        params,
+        ...(context ? { context } : {}),
+      });
+      return setLanguageImpl(sessionId, params, context);
     },
     async setSessionApprovalMode(sessionId, mode, o, context) {
       setApprovalModeCalls.push({
@@ -3367,6 +3404,120 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/language', () => {
+    it('200 with language result on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh', syncOutputLanguage: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        language: 'zh',
+        outputLanguage: 'Chinese',
+        refreshed: true,
+      });
+      expect(bridge.setLanguageCalls).toHaveLength(1);
+      expect(bridge.setLanguageCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        params: { language: 'zh', syncOutputLanguage: true },
+      });
+    });
+
+    it('syncOutputLanguage defaults to false when omitted', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'en' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        language: 'en',
+        outputLanguage: null,
+        refreshed: false,
+      });
+      expect(bridge.setLanguageCalls[0]?.params.syncOutputLanguage).toBe(false);
+    });
+
+    it('passes client identity context into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ language: 'ja' });
+      expect(res.status).toBe(200);
+      expect(bridge.setLanguageCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 on missing or invalid language code', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const missing = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_language');
+      expect(missing.body.allowed).toContain('zh');
+      expect(missing.body.allowed).toContain('auto');
+
+      const unknown = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'xx-invalid' });
+      expect(unknown.status).toBe(400);
+      expect(bridge.setLanguageCalls).toHaveLength(0);
+    });
+
+    it('400 when syncOutputLanguage is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh', syncOutputLanguage: 'yes' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_sync_flag');
+      expect(bridge.setLanguageCalls).toHaveLength(0);
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        setLanguageImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('500 when bridge throws an unexpected error', async () => {
+      const bridge = fakeBridge({
+        setLanguageImpl: async () => {
+          throw new Error('unexpected failure');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/language')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+      expect(res.status).toBe(500);
+      expect(res.body).toMatchObject({ error: expect.any(String) });
     });
   });
 

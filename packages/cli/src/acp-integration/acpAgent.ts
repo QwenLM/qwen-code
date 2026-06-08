@@ -114,6 +114,17 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
+  setLanguageAsync,
+  getCurrentLanguage,
+  SUPPORTED_LANGUAGES,
+} from '../i18n/index.js';
+import {
+  resolveOutputLanguage,
+  updateOutputLanguageFile,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+} from '../utils/languageUtils.js';
+import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
   SERVE_CONTROL_EXT_METHODS,
@@ -2860,6 +2871,108 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
+        const sessionId = params['sessionId'];
+        const language = params['language'];
+        const syncOutputLanguage = params['syncOutputLanguage'] === true;
+
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const allowedLanguages = [
+          ...SUPPORTED_LANGUAGES.map((l) => l.code),
+          'auto',
+        ];
+        if (
+          typeof language !== 'string' ||
+          !allowedLanguages.includes(language)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid language; must be one of: ${allowedLanguages.join(', ')}`,
+          );
+        }
+
+        this.sessionOrThrow(sessionId);
+
+        try {
+          await setLanguageAsync(language);
+        } catch (err) {
+          debugLogger.warn('setLanguageAsync failed:', err);
+          throw new RequestError(
+            -32603,
+            `Failed to switch UI language: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
+        const resolvedLanguage = getCurrentLanguage();
+
+        try {
+          this.settings.setValue(
+            SettingScope.User,
+            'general.language',
+            language,
+          );
+        } catch (err) {
+          debugLogger.warn('Failed to persist UI language setting:', err);
+        }
+
+        let outputLanguage: string | null = null;
+        let refreshed = false;
+
+        if (syncOutputLanguage) {
+          const resolved = resolveOutputLanguage(language);
+          const settingValue = isAutoLanguage(language)
+            ? OUTPUT_LANGUAGE_AUTO
+            : resolved;
+
+          let fileWriteOk = false;
+          try {
+            updateOutputLanguageFile(settingValue);
+            fileWriteOk = true;
+          } catch (err) {
+            debugLogger.warn('Failed to write output-language.md:', err);
+          }
+
+          if (fileWriteOk) {
+            try {
+              this.settings.setValue(
+                SettingScope.User,
+                'general.outputLanguage',
+                settingValue,
+              );
+            } catch (err) {
+              debugLogger.warn(
+                'Failed to persist output language setting:',
+                err,
+              );
+            }
+            const allSessions = [...this.sessions.values()];
+            const results = await Promise.allSettled(
+              allSessions.map(async (s) => {
+                const cfg = s.getConfig();
+                await cfg.refreshHierarchicalMemory();
+                await cfg.getGeminiClient()?.refreshSystemInstruction();
+              }),
+            );
+            const failedCount = results.filter(
+              (r) => r.status === 'rejected',
+            ).length;
+            if (failedCount > 0) {
+              debugLogger.warn(
+                `Language refresh failed for ${failedCount}/${results.length} session(s)`,
+              );
+            }
+            refreshed = results.length === 0 || failedCount === 0;
+          }
+          outputLanguage = fileWriteOk ? resolved : null;
+        }
+
+        return { language: resolvedLanguage, outputLanguage, refreshed };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // Generate a one-sentence "where did I leave off" summary.
