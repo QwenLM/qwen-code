@@ -1055,6 +1055,16 @@ export function createServeApp(
     }
   });
 
+  // GET /workspace/extensions — read-only installed extension status.
+  app.get('/workspace/extensions', async (req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/extensions');
+      res.status(200).json(await workspace.getWorkspaceExtensionsStatus(ctx));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/extensions' });
+    }
+  });
+
   // Workspace file routes (read-only + mutation).
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,

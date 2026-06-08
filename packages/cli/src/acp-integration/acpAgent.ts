@@ -39,6 +39,7 @@ import {
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
   subagentGenerator,
+  redactUrlCredentials,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -148,6 +149,9 @@ import {
   type ServeHookSource,
   type ServeSessionHooksStatus,
   type ServeWorkspaceHooksStatus,
+  type ServeExtensionEntry,
+  type ServeExtensionCapabilities,
+  type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '../serve/status.js';
 import {
@@ -2042,24 +2046,34 @@ class QwenAgent implements Agent {
           type: 'command',
           command: config.command,
           ...(config.name !== undefined ? { name: config.name } : {}),
-          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.description !== undefined
+            ? { description: config.description }
+            : {}),
           ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
           ...(config.env ? { env: config.env } : {}),
           ...(config.async !== undefined ? { async: config.async } : {}),
           ...(config.shell ? { shell: config.shell } : {}),
-          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+          ...(config.statusMessage !== undefined
+            ? { statusMessage: config.statusMessage }
+            : {}),
         };
       case 'http':
         return {
           type: 'http',
           url: config.url,
           ...(config.name !== undefined ? { name: config.name } : {}),
-          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.description !== undefined
+            ? { description: config.description }
+            : {}),
           ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
           ...(config.headers ? { headers: config.headers } : {}),
-          ...(config.allowedEnvVars ? { allowedEnvVars: config.allowedEnvVars } : {}),
+          ...(config.allowedEnvVars
+            ? { allowedEnvVars: config.allowedEnvVars }
+            : {}),
           ...(config.if !== undefined ? { if: config.if } : {}),
-          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+          ...(config.statusMessage !== undefined
+            ? { statusMessage: config.statusMessage }
+            : {}),
           ...(config.once !== undefined ? { once: config.once } : {}),
         };
       case 'function':
@@ -2067,20 +2081,30 @@ class QwenAgent implements Agent {
           type: 'function',
           ...(config.id !== undefined ? { id: config.id } : {}),
           ...(config.name !== undefined ? { name: config.name } : {}),
-          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.description !== undefined
+            ? { description: config.description }
+            : {}),
           ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
-          ...(config.errorMessage !== undefined ? { errorMessage: config.errorMessage } : {}),
-          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+          ...(config.errorMessage !== undefined
+            ? { errorMessage: config.errorMessage }
+            : {}),
+          ...(config.statusMessage !== undefined
+            ? { statusMessage: config.statusMessage }
+            : {}),
         };
       case 'prompt':
         return {
           type: 'prompt',
           prompt: config.prompt,
           ...(config.name !== undefined ? { name: config.name } : {}),
-          ...(config.description !== undefined ? { description: config.description } : {}),
+          ...(config.description !== undefined
+            ? { description: config.description }
+            : {}),
           ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
           ...(config.model ? { model: config.model } : {}),
-          ...(config.statusMessage !== undefined ? { statusMessage: config.statusMessage } : {}),
+          ...(config.statusMessage !== undefined
+            ? { statusMessage: config.statusMessage }
+            : {}),
         };
       default:
         return { type: (config as { type: string }).type };
@@ -2110,7 +2134,9 @@ class QwenAgent implements Agent {
           config: this.serializeHookConfig(entry.config),
           source: entry.source as ServeHookSource,
           ...(entry.matcher ? { matcher: entry.matcher } : {}),
-          ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
+          ...(entry.sequential !== undefined
+            ? { sequential: entry.sequential }
+            : {}),
           enabled: entry.enabled,
         }),
       );
@@ -2149,9 +2175,17 @@ class QwenAgent implements Agent {
       const disabled = config.getDisableAllHooks();
       const hookSystem = config.getHookSystem();
       if (!hookSystem) {
-        return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks: [] };
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          sessionId,
+          workspaceCwd,
+          disabled,
+          hooks: [],
+        };
       }
-      const sessionHooks = hookSystem.getSessionHooksManager().getAllSessionHooks(sessionId);
+      const sessionHooks = hookSystem
+        .getSessionHooksManager()
+        .getAllSessionHooks(sessionId);
       const hooks: ServeHookEntry[] = sessionHooks.map(
         (entry): ServeHookEntry => ({
           kind: 'hook',
@@ -2159,13 +2193,21 @@ class QwenAgent implements Agent {
           config: this.serializeHookConfig(entry.config),
           source: 'session',
           ...(entry.matcher ? { matcher: entry.matcher } : {}),
-          ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
+          ...(entry.sequential !== undefined
+            ? { sequential: entry.sequential }
+            : {}),
           enabled: true,
           hookId: entry.hookId,
           ...(entry.skillRoot ? { skillRoot: entry.skillRoot } : {}),
         }),
       );
-      return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks };
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        workspaceCwd,
+        disabled,
+        hooks,
+      };
     } catch (error) {
       let disabled = false;
       try {
@@ -2180,6 +2222,74 @@ class QwenAgent implements Agent {
         disabled,
         hooks: [],
         errors: [this.errorCell('session_hooks', error)],
+      };
+    }
+  }
+
+  private buildWorkspaceExtensionsStatus(
+    config: Config,
+  ): ServeWorkspaceExtensionsStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const extensions = config.getExtensions();
+      const entries: ServeExtensionEntry[] = extensions.map(
+        (ext): ServeExtensionEntry => {
+          const capabilities: ServeExtensionCapabilities = {
+            mcpServerCount: ext.mcpServers
+              ? Object.keys(ext.mcpServers).length
+              : 0,
+            skillCount: ext.skills?.length ?? 0,
+            agentCount: ext.agents?.length ?? 0,
+            hookCount: ext.hooks
+              ? Object.values(ext.hooks).reduce(
+                  (sum, defs) => sum + (defs?.length ?? 0),
+                  0,
+                )
+              : 0,
+            commandCount: ext.commands?.length ?? 0,
+            contextFileCount: ext.contextFiles.length,
+            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
+            hasSettings: (ext.settings?.length ?? 0) > 0,
+          };
+          return {
+            kind: 'extension',
+            id: ext.id,
+            name: ext.name,
+            version: ext.version,
+            isActive: ext.isActive,
+            path: ext.path,
+            ...(ext.installMetadata?.source
+              ? { source: redactUrlCredentials(ext.installMetadata.source) }
+              : {}),
+            ...(ext.installMetadata?.type
+              ? { installType: ext.installMetadata.type }
+              : {}),
+            ...(ext.installMetadata?.originSource
+              ? { originSource: ext.installMetadata.originSource }
+              : {}),
+            ...(ext.installMetadata?.ref
+              ? { ref: ext.installMetadata.ref }
+              : {}),
+            ...(ext.installMetadata?.autoUpdate !== undefined
+              ? { autoUpdate: ext.installMetadata.autoUpdate }
+              : {}),
+            capabilities,
+          };
+        },
+      );
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        extensions: entries,
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: false,
+        extensions: [],
+        errors: [this.errorCell('extensions', error)],
       };
     }
   }
@@ -2292,10 +2402,7 @@ class QwenAgent implements Agent {
       }
       case SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots: {
         const sessionId = params['sessionId'];
-        if (
-          typeof sessionId !== 'string' ||
-          !SESSION_ID_RE.test(sessionId)
-        ) {
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing sessionId',
@@ -2336,14 +2443,27 @@ class QwenAgent implements Agent {
         return { snapshots: results } as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.workspaceHooks:
-        return this.buildWorkspaceHooksStatus(this.config) as unknown as Record<string, unknown>;
+        return this.buildWorkspaceHooksStatus(this.config) as unknown as Record<
+          string,
+          unknown
+        >;
       case SERVE_STATUS_EXT_METHODS.sessionHooks: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          throw RequestError.invalidParams(undefined, 'Invalid or missing sessionId');
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
         }
-        return this.buildSessionHooksStatus(sessionId) as unknown as Record<string, unknown>;
+        return this.buildSessionHooksStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
       }
+      case SERVE_STATUS_EXT_METHODS.workspaceExtensions:
+        return this.buildWorkspaceExtensionsStatus(
+          this.config,
+        ) as unknown as Record<string, unknown>;
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // Single-server MCP restart with budget pre-check. Soft skips
         // return structured 200 responses; hard errors propagate as
@@ -3140,8 +3260,7 @@ class QwenAgent implements Agent {
             filesChanged = fileResult.filesChanged;
             filesFailed = fileResult.filesFailed;
           } catch (err) {
-            const reason =
-              err instanceof Error ? err.message : String(err);
+            const reason = err instanceof Error ? err.message : String(err);
             debugLogger.error(
               `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
             );

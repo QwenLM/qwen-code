@@ -69,6 +69,7 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   DaemonSessionHooksStatus,
+  DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceHooksStatus,
 } from './types.js';
 
@@ -529,6 +530,18 @@ export class DaemonClient {
         if (!res.ok)
           throw await this.failOnError(res, 'GET /session/:id/hooks');
         return (await res.json()) as DaemonSessionHooksStatus;
+      },
+    );
+  }
+
+  async workspaceExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /workspace/extensions');
+        return (await res.json()) as DaemonWorkspaceExtensionsStatus;
       },
     );
   }

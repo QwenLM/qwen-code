@@ -31,6 +31,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
@@ -3038,6 +3039,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getWorkspaceExtensionsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceExtensions,
+        () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
+      );
+    },
+
     async setSessionModel(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -3532,8 +3540,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const data = (err as { data?: unknown })?.data;
         if (data && typeof data === 'object' && 'errorKind' in data) {
           const kind = (data as { errorKind: string }).errorKind;
-          const msg =
-            (err as { message?: string })?.message ?? 'Rewind failed';
+          const msg = (err as { message?: string })?.message ?? 'Rewind failed';
           if (kind === 'session_busy') {
             throw new SessionBusyError(sessionId, msg);
           }
@@ -3544,12 +3551,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
-      const targetTurnIndex =
-        (response['targetTurnIndex'] as number) ?? 0;
-      const filesChanged =
-        (response['filesChanged'] as string[]) ?? [];
-      const filesFailed =
-        (response['filesFailed'] as string[]) ?? [];
+      const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
+      const filesChanged = (response['filesChanged'] as string[]) ?? [];
+      const filesFailed = (response['filesFailed'] as string[]) ?? [];
 
       try {
         entry.events.publish({

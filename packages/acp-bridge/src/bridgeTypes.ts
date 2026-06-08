@@ -22,6 +22,7 @@ import type {
   ServeSessionHooksStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceToolsStatus,
@@ -362,6 +363,9 @@ export interface AcpSessionBridge {
 
   /** Read session-scoped hook status for a live session. */
   getSessionHooksStatus(sessionId: string): Promise<ServeSessionHooksStatus>;
+
+  /** Read workspace-level installed extension status. */
+  getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
    * Switch the active model service for a session. Throws

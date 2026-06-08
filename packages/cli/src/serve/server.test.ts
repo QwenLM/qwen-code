@@ -74,6 +74,7 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
+  ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -176,6 +177,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
+  'workspace_extensions',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -202,7 +204,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'non_blocking_prompt' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
-      f !== 'session_hooks',
+      f !== 'session_hooks' &&
+      f !== 'workspace_extensions',
   ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
@@ -219,6 +222,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
+  'workspace_extensions',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -274,6 +278,7 @@ interface FakeBridgeOpts {
   workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
   workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
   workspaceHooksImpl?: () => Promise<ServeWorkspaceHooksStatus>;
+  workspaceExtensionsImpl?: () => Promise<ServeWorkspaceExtensionsStatus>;
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
@@ -411,6 +416,7 @@ interface FakeBridge extends AcpSessionBridge {
   workspaceEnvCalls: number;
   workspacePreflightCalls: number;
   workspaceHooksCalls: number;
+  workspaceExtensionsCalls: number;
   sessionContextCalls: string[];
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
@@ -493,6 +499,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceEnvCalls = 0;
   let workspacePreflightCalls = 0;
   let workspaceHooksCalls = 0;
+  let workspaceExtensionsCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
@@ -606,6 +613,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       disabled: false,
       hooks: [],
       events: {},
+    }));
+  const workspaceExtensionsImpl =
+    opts.workspaceExtensionsImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true,
+      extensions: [],
     }));
   const sessionContextImpl =
     opts.sessionContextImpl ??
@@ -815,6 +830,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get workspaceHooksCalls() {
       return workspaceHooksCalls;
     },
+    get workspaceExtensionsCalls() {
+      return workspaceExtensionsCalls;
+    },
     get sessionCount() {
       return calls.length;
     },
@@ -921,6 +939,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceHooksStatus() {
       workspaceHooksCalls += 1;
       return workspaceHooksImpl();
+    },
+    async getWorkspaceExtensionsStatus() {
+      workspaceExtensionsCalls += 1;
+      return workspaceExtensionsImpl();
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -1075,6 +1097,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       if (method === 'qwen/status/workspace/hooks') {
         workspaceHooksCalls += 1;
         return workspaceHooksImpl();
+      }
+      if (method === 'qwen/status/workspace/extensions') {
+        workspaceExtensionsCalls += 1;
+        return workspaceExtensionsImpl();
       }
       return idle();
     },
@@ -1784,6 +1810,51 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(hooks);
       expect(bridge.sessionHooksCalls).toEqual(['s-1']);
+    });
+
+    it('returns workspace extensions status from the bridge', async () => {
+      const extensions: ServeWorkspaceExtensionsStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        extensions: [
+          {
+            kind: 'extension',
+            id: 'abc123',
+            name: 'test-ext',
+            version: '1.0.0',
+            isActive: true,
+            path: '/home/user/.qwen/extensions/test-ext',
+            source: 'https://github.com/org/test-ext',
+            installType: 'git',
+            capabilities: {
+              mcpServerCount: 1,
+              skillCount: 2,
+              agentCount: 0,
+              hookCount: 0,
+              commandCount: 1,
+              contextFileCount: 1,
+              channelCount: 0,
+              hasSettings: false,
+            },
+          },
+        ],
+      };
+      const bridge = fakeBridge({
+        workspaceExtensionsImpl: async () => extensions,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/extensions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(extensions);
+      expect(bridge.workspaceExtensionsCalls).toBe(1);
     });
 
     it('returns read-only session snapshots from the bridge', async () => {
