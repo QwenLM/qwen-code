@@ -58,7 +58,7 @@ function formatMode(mode: string, t: ReturnType<typeof useI18n>['t']): string {
   }
 }
 
-interface WelcomeHeaderProps {
+export interface WelcomeHeaderProps {
   version: string;
   cwd: string;
   currentModel: string;

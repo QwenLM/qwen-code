@@ -104,6 +104,7 @@ import {
   WebShellCustomizationProvider,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
+  type WelcomeHeaderRenderer,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -192,6 +193,8 @@ export interface WebShellProps {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
+  renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
 }
@@ -498,6 +501,7 @@ export function App({
   hiddenSlashCommands,
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
+  renderWelcomeHeader,
   markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -508,8 +512,8 @@ export function App({
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
   const customization = useMemo(
-    () => ({ renderToolHeaderExtra, markdown }),
-    [renderToolHeaderExtra, markdown],
+    () => ({ renderToolHeaderExtra, renderWelcomeHeader, markdown }),
+    [renderToolHeaderExtra, renderWelcomeHeader, markdown],
   );
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
@@ -1878,21 +1882,29 @@ export function App({
       });
   }, [connection.commands, connection.skills, hiddenSlashCommands, t]);
 
-  const welcomeHeader = useMemo(
-    () => (
-      <WelcomeHeader
-        version={connection.capabilities?.qwenCodeVersion || ''}
-        cwd={connection.workspaceCwd || ''}
-        currentModel={currentModel}
-        currentMode={currentMode}
-      />
-    ),
+  const welcomeHeaderProps = useMemo(
+    () => ({
+      version: connection.capabilities?.qwenCodeVersion || '',
+      cwd: connection.workspaceCwd || '',
+      currentModel,
+      currentMode,
+    }),
     [
       connection.capabilities?.qwenCodeVersion,
       connection.workspaceCwd,
       currentModel,
       currentMode,
     ],
+  );
+
+  const welcomeHeader = useMemo(
+    () =>
+      renderWelcomeHeader ? (
+        renderWelcomeHeader(welcomeHeaderProps)
+      ) : (
+        <WelcomeHeader {...welcomeHeaderProps} />
+      ),
+    [renderWelcomeHeader, welcomeHeaderProps],
   );
 
   const appClassName = [
