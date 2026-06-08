@@ -17,6 +17,7 @@ import {
   PairingService,
   SESSION_READ,
   APPROVE,
+  WRITE,
 } from '../packages/rc-gateway/dist/index.js';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -196,6 +197,30 @@ try {
     r.status === 404
       ? ok('permission vote reached real daemon (404 no pending)')
       : bad(`vote returned ${r.status}`);
+  }
+
+  // Prompt with a write-scoped token reaches the real daemon. For an unknown
+  // session the daemon rejects with a non-2xx, which the gateway maps to 502
+  // (proves route + scope + daemon reached without needing a live model turn).
+  {
+    const { code: wc } = pairing.mint([SESSION_READ, WRITE]);
+    const rr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: wc, label: 'writer' }),
+    });
+    const wt = (await rr.json()).token;
+    const r = await fetch(`${gw}/rc/session/does-not-exist/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${wt}`,
+      },
+      body: JSON.stringify({ prompt: 'ping' }),
+    });
+    r.status === 502
+      ? ok('prompt reached real daemon (502 for unknown session)')
+      : bad(`prompt returned ${r.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
