@@ -193,6 +193,13 @@ export class ToolCallEmitter extends BaseEmitter {
   }
 
   /**
+   * Checks if a tool name is the EnterPlanModeTool.
+   */
+  isEnterPlanModeTool(toolName: string): boolean {
+    return toolName === ToolNames.ENTER_PLAN_MODE;
+  }
+
+  /**
    * Resolves tool metadata from the registry.
    * Falls back to defaults if tool not found or build fails.
    *
@@ -242,8 +249,11 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param toolName - Optional tool name to handle special cases like exit_plan_mode
    */
   mapToolKind(kind: Kind, toolName?: string): ToolKind {
-    // Special case: exit_plan_mode uses 'switch_mode' kind per ACP spec
-    if (toolName && this.isExitPlanModeTool(toolName)) {
+    // Special case: enter/exit_plan_mode use 'switch_mode' kind per ACP spec
+    if (
+      toolName &&
+      (this.isExitPlanModeTool(toolName) || this.isEnterPlanModeTool(toolName))
+    ) {
       return 'switch_mode';
     }
 

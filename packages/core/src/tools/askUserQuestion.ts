@@ -239,6 +239,9 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         })
         .join('\n');
 
+      // ── Plan gate metadata side effects ──────────────────────────
+      this.applyPlanGateMetadata();
+
       const llmMessage = `User has provided the following answers:\n\n${answersContent}`;
       const displayMessage = `User has provided the following answers:\n\n${answersContent}`;
 
@@ -259,6 +262,45 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         llmContent: errorLlmContent,
         returnDisplay: `Error processing answers: ${errorMessage}`,
       };
+    }
+  }
+
+  /**
+   * Updates Plan Approval Gate state based on the metadata.source field
+   * and the user's answer. Only acts on recognized gate metadata sources.
+   */
+  private applyPlanGateMetadata(): void {
+    const source = this.params.metadata?.source;
+    if (!source) return;
+
+    const gateState = this._config.getPlanGateState();
+    if (!gateState) return;
+
+    if (source === 'plan_gate_cap') {
+      // Cap escalation: the first answer determines the next gate mode.
+      const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
+
+      // The option labels used in formatCapEscalationResponse:
+      //   "Continue editing plan" → uncapped
+      //   "Approve execution" → user_override
+      //   Anything else (free-text / Other) → user_takeover
+      const normalised = firstAnswer.toLowerCase().trim();
+      if (normalised.startsWith('continue')) {
+        gateState.gateMode = 'uncapped';
+        gateState.capEscalationPending = false;
+      } else if (normalised.startsWith('approve')) {
+        gateState.gateMode = 'user_override';
+        gateState.capEscalationPending = false;
+      } else {
+        // Free-text / Other: user takes manual control
+        gateState.gateMode = 'user_takeover';
+        gateState.capEscalationPending = false;
+      }
+    } else if (source === 'plan_gate_needs_user') {
+      // User answered a gate-suggested question. Reset the capped
+      // review count because the new information may change the plan
+      // basis, and keep the gate active.
+      gateState.reviewCount = 0;
     }
   }
 }

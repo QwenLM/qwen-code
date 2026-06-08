@@ -104,6 +104,10 @@ export type {
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
 export type {
+  EnterPlanModeTool,
+  EnterPlanModeParams,
+} from './tools/enterPlanMode.js';
+export type {
   SyntheticOutputTool,
   StructuredOutputParams,
 } from './tools/syntheticOutput.js';

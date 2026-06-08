@@ -2294,6 +2294,7 @@ export class Session implements SessionContext {
     const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
     const isAgentTool = tool.name === ToolNames.AGENT;
     const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
+    const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
 
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];
@@ -2743,6 +2744,20 @@ export class Session implements SessionContext {
 
       // Clean up event listeners
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+      // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
+      // approval mode inside execute() without going through the user-confirmation
+      // branch above, so notify the client of the current mode explicitly.
+      if (
+        (isEnterPlanModeTool || isExitPlanModeTool) &&
+        !didRequestPermission &&
+        !toolResult.error
+      ) {
+        await this.sendUpdate({
+          sessionUpdate: 'current_mode_update',
+          currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
+        });
+      }
 
       // Create response parts first (needed for emitResult and recordToolResult)
       const responseParts = convertToFunctionResponse(
