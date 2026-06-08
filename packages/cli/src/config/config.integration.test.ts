@@ -122,7 +122,7 @@ describe('Configuration Integration Tests', () => {
         '.cursorignore',
       ]);
       expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
-        '.qwenignore/.cursorignore',
+        '.qwenignore, .cursorignore',
       );
     });
 

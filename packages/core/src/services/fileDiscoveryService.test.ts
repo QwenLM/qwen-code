@@ -77,7 +77,7 @@ describe('FileDiscoveryService', () => {
       const service = new FileDiscoveryService(projectRoot, ['.cursorignore']);
 
       expect(service.getQwenIgnoreFileNamesDisplay()).toBe(
-        '.qwenignore/.cursorignore',
+        '.qwenignore, .cursorignore',
       );
       expect(service.shouldQwenIgnoreFile('cursor-secret.txt')).toBe(true);
       expect(service.shouldQwenIgnoreFile('agent-secret.txt')).toBe(false);

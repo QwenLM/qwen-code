@@ -28,6 +28,7 @@ export function normalizeQwenCustomIgnoreFileNames(
       path.isAbsolute(candidate) ||
       candidate.startsWith('/') ||
       candidate.includes('\0') ||
+      candidate === QWEN_IGNORE_FILE_NAME ||
       candidate.split('/').includes('..')
     ) {
       continue;
@@ -53,7 +54,7 @@ export function getQwenIgnoreFileNames(
 export function formatQwenIgnoreFileNames(
   customIgnoreFileNames?: readonly string[],
 ): string {
-  return getQwenIgnoreFileNames(customIgnoreFileNames).join('/');
+  return getQwenIgnoreFileNames(customIgnoreFileNames).join(', ');
 }
 
 export interface QwenIgnoreFilter {

@@ -404,13 +404,18 @@ export async function runQwenServe(
   // default with the workspace-scoped event channel; until then the
   // throttled stderr warning is the canonical "emit channel orphaned"
   // breadcrumb.
-  const fsFactory =
-    deps.fsFactory ??
-    createWorkspaceFileSystemFactory({
+  let fsFactory = deps.fsFactory;
+  if (!fsFactory) {
+    const customIgnoreFiles =
+      loadSettings(boundWorkspace).merged.context?.fileFiltering
+        ?.customIgnoreFiles;
+    fsFactory = createWorkspaceFileSystemFactory({
       boundWorkspace,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
+      ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
+  }
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,

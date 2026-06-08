@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  formatQwenIgnoreFileNames,
   getQwenIgnoreFileNames,
   normalizeQwenCustomIgnoreFileNames,
   QwenIgnoreParser,
@@ -113,6 +114,7 @@ describe('QwenIgnoreParser', () => {
           ' .cursorignore ',
           '.cursorignore',
           'nested\\.ignore',
+          '.qwenignore',
           '',
           '/absolute',
           '../escape',
@@ -128,6 +130,16 @@ describe('QwenIgnoreParser', () => {
         '.agentignore',
         '.aiignore',
       ]);
+    });
+
+    it('should keep .qwenignore when custom ignore files are empty', () => {
+      expect(getQwenIgnoreFileNames([])).toEqual(['.qwenignore']);
+    });
+
+    it('should format ignore file names for user-facing messages', () => {
+      expect(formatQwenIgnoreFileNames(['.cursorignore'])).toBe(
+        '.qwenignore, .cursorignore',
+      );
     });
   });
 

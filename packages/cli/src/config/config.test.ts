@@ -3036,7 +3036,7 @@ describe('loadCliConfig fileFiltering', () => {
       '.cursorignore',
     ]);
     expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
-      '.qwenignore/.cursorignore',
+      '.qwenignore, .cursorignore',
     );
   });
 });

@@ -52,7 +52,11 @@ async function getMcpServersFromConfig(
 async function createMinimalConfig(): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
-  const fileService = new FileDiscoveryService(cwd);
+  const fileFiltering = settings.merged.context?.fileFiltering;
+  const fileService = new FileDiscoveryService(
+    cwd,
+    fileFiltering?.customIgnoreFiles,
+  );
 
   const config = new Config({
     sessionId: 'mcp-reconnect',
@@ -62,6 +66,7 @@ async function createMinimalConfig(): Promise<Config> {
     mcpServers: settings.merged.mcpServers || {},
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
+    ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
   await config.initialize();

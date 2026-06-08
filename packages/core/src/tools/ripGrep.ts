@@ -410,26 +410,18 @@ class GrepToolInvocation extends BaseToolInvocation<
     if (filteringOptions.respectQwenIgnore) {
       // Load ignore files from each workspace directory, not just the primary one.
       const seenIgnoreFiles = new Set<string>();
+      const ignoreFileNames = getQwenIgnoreFileNames(
+        filteringOptions.customIgnoreFiles,
+      );
       for (const searchPath of paths) {
-        let isDir = dirIsDirCache.get(searchPath);
-        if (isDir === undefined) {
-          try {
-            isDir = fs.statSync(searchPath).isDirectory();
-          } catch {
-            isDir = false;
-          }
-          dirIsDirCache.set(searchPath, isDir);
-          trimCache(dirIsDirCache);
-        }
-        const dir = isDir ? searchPath : path.dirname(searchPath);
-        let qwenIgnorePaths = qwenIgnoreCache.get(dir);
+        const ignoreRoot = this.getIgnoreRootForSearchPath(searchPath);
+        const cacheKey = [ignoreRoot, ...ignoreFileNames].join('\0');
+        let qwenIgnorePaths = qwenIgnoreCache.get(cacheKey);
         if (qwenIgnorePaths === undefined) {
-          qwenIgnorePaths = getQwenIgnoreFileNames(
-            filteringOptions.customIgnoreFiles,
-          )
-            .map((ignoreFileName) => path.join(dir, ignoreFileName))
+          qwenIgnorePaths = ignoreFileNames
+            .map((ignoreFileName) => path.join(ignoreRoot, ignoreFileName))
             .filter((candidate) => fs.existsSync(candidate));
-          qwenIgnoreCache.set(dir, qwenIgnorePaths);
+          qwenIgnoreCache.set(cacheKey, qwenIgnorePaths);
           trimCache(qwenIgnoreCache);
         }
         for (const qwenIgnorePath of qwenIgnorePaths) {
@@ -456,6 +448,36 @@ class GrepToolInvocation extends BaseToolInvocation<
     }
 
     return { stdout: result.stdout, truncated: result.truncated };
+  }
+
+  private getIgnoreRootForSearchPath(searchPath: string): string {
+    const resolvedSearchPath = path.resolve(searchPath);
+    for (const workspaceDir of this.config
+      .getWorkspaceContext()
+      .getDirectories()) {
+      const resolvedWorkspaceDir = path.resolve(workspaceDir);
+      const relative = path.relative(resolvedWorkspaceDir, resolvedSearchPath);
+      if (
+        relative === '' ||
+        (relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative))
+      ) {
+        return resolvedWorkspaceDir;
+      }
+    }
+
+    let isDir = dirIsDirCache.get(searchPath);
+    if (isDir === undefined) {
+      try {
+        isDir = fs.statSync(searchPath).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      dirIsDirCache.set(searchPath, isDir);
+      trimCache(dirIsDirCache);
+    }
+    return isDir ? searchPath : path.dirname(searchPath);
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {

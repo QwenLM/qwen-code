@@ -1590,7 +1590,7 @@ describe('Server Config (config.ts)', () => {
       '.cursorignore',
     ]);
     expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
-      '.qwenignore/.cursorignore',
+      '.qwenignore, .cursorignore',
     );
   });
 

@@ -220,6 +220,8 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   ignore?: Ignore;
   /** Override audit raw-path mode. Defaults to env `QWEN_AUDIT_RAW_PATHS=1`. */
   includeRawPaths?: boolean;
+  /** Custom AI ignore files from context.fileFiltering.customIgnoreFiles. */
+  customIgnoreFiles?: string[];
 }
 
 /**
@@ -237,6 +239,9 @@ export function createWorkspaceFileSystemFactory(
       projectRoot: boundWorkspace,
       useGitignore: true,
       useQwenignore: true,
+      ...(deps.customIgnoreFiles !== undefined
+        ? { customIgnoreFiles: deps.customIgnoreFiles }
+        : {}),
       ignoreDirs: [],
     });
   // Freeze the `Ignore` instance so it cannot be mutated after
