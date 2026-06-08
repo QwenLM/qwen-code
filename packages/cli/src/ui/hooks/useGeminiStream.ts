@@ -938,7 +938,8 @@ export const useGeminiStream = (
         if (!prev) {
           if (debugLogger.isEnabled()) {
             debugLogger.debug(
-              `[THOUGHT_MERGE] New thought: subject="${incoming.subject?.substring(0, 50)}", ` +
+              `[THOUGHT_MERGE] New thought: ` +
+                `subjectLength=${incoming.subject?.length ?? 0}, ` +
                 `description length=${incoming.description?.length ?? 0}`,
             );
           }
