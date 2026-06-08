@@ -150,15 +150,22 @@ export function useHistory(): UseHistoryManagerReturn {
       let toolGroupsCompacted = 0;
 
       let totalThoughts = 0;
-      let totalToolGroups = 0;
+      let totalToolGroupsWithOutput = 0;
       for (const item of prev) {
         if (
           item.type === 'gemini_thought' ||
           item.type === 'gemini_thought_content'
         ) {
           totalThoughts++;
-        } else if (item.type === 'tool_group') {
-          totalToolGroups++;
+        } else if (
+          item.type === 'tool_group' &&
+          item.tools.some(
+            (t) =>
+              t.resultDisplay != null &&
+              t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE,
+          )
+        ) {
+          totalToolGroupsWithOutput++;
         }
       }
       const thoughtsToDrop = Math.max(
@@ -167,7 +174,7 @@ export function useHistory(): UseHistoryManagerReturn {
       );
       const toolGroupsToCompact = Math.max(
         0,
-        totalToolGroups - UI_COMPACT_KEEP_RECENT,
+        totalToolGroupsWithOutput - UI_COMPACT_KEEP_RECENT,
       );
       let thoughtsDropped = 0;
       let toolGroupsSeen = 0;
