@@ -134,7 +134,12 @@ export const MainContent = () => {
   // `isSummaryAbsorbed` → `renderVirtualItem` → every static item re-renders.
   const prevAbsorbedCallIdsRef = useRef<Set<string>>(EMPTY_ABSORBED_CALL_IDS);
   const absorbedCallIds = useMemo(() => {
-    if (!compactMode) return EMPTY_ABSORBED_CALL_IDS;
+    // When no cross-group merge will happen (Static mode or compactInline),
+    // don't mark summaries as absorbed so the standalone `● <label>` line
+    // in HistoryItemDisplay can render — <Static> can't repaint committed
+    // items, so the label's only path to the screen is the standalone line.
+    if (!compactMode || !uiState.useTerminalBuffer || compactInline)
+      return EMPTY_ABSORBED_CALL_IDS;
     const absorbed = new Set<string>();
     for (const item of uiState.history) {
       if (item.type !== 'tool_group') continue;
@@ -164,9 +169,11 @@ export const MainContent = () => {
     return absorbed;
   }, [
     compactMode,
+    compactInline,
     uiState.history,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
+    uiState.useTerminalBuffer,
   ]);
 
   // Merge consecutive tool_groups for compact mode display. Summaries for
