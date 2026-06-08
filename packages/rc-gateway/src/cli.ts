@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { startDaemon } from './daemonSupervisor.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
+import { VapidStore } from './webpush/vapid.js';
+import { PushStore } from './pushStore.js';
 import { createGatewayApp } from './server.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
@@ -24,7 +26,19 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     join(homedir(), '.qwen', 'rc', 'tokens.json'),
   );
   const pairing = new PairingService();
-  const app = createGatewayApp({ daemon: handle.daemon, store, pairing });
+  const vapid = await VapidStore.open(
+    join(homedir(), '.qwen', 'rc', 'vapid.json'),
+  );
+  const pushStore = await PushStore.open(
+    join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
+  );
+  const app = createGatewayApp({
+    daemon: handle.daemon,
+    store,
+    pairing,
+    vapid,
+    pushStore,
+  });
 
   const port = opts.gatewayPort ?? 4170;
   app.listen(port, '127.0.0.1', () => {
@@ -39,6 +53,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       [
         `qwen-rc gateway listening on http://127.0.0.1:${port}`,
         `web viewer: http://127.0.0.1:${port}/ui/`,
+        `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
         `owner pairing code: ${code}`,
         `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
         `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,
