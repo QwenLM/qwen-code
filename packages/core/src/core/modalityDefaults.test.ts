@@ -139,6 +139,18 @@ describe('defaultModalities', () => {
       expect(m.audio).toBeUndefined();
     });
 
+    it('returns image + video for qwen3.7-plus', () => {
+      const m = defaultModalities('qwen3.7-plus');
+      expect(m.image).toBe(true);
+      expect(m.video).toBe(true);
+      expect(m.pdf).toBeUndefined();
+      expect(m.audio).toBeUndefined();
+    });
+
+    it('returns text-only for qwen3.7-max', () => {
+      expect(defaultModalities('qwen3.7-max')).toEqual({});
+    });
+
     it('returns image + video for qwen3.6-35b variants', () => {
       const m = defaultModalities('qwen3.6-35b-a3b-nvfp4');
       expect(m.image).toBe(true);
