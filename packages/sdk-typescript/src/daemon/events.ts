@@ -835,6 +835,7 @@ export type DaemonTurnErrorEvent = DaemonEventEnvelope<
 export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
   'session_rewound',
   DaemonSessionRewoundData
+>;
 export type DaemonSessionSnapshotEvent = DaemonEventEnvelope<
   'session_snapshot',
   DaemonSessionSnapshotData
@@ -1401,6 +1402,7 @@ export function asKnownDaemonEvent(
     case 'session_rewound':
       return isSessionRewoundData(event.data)
         ? (event as DaemonSessionRewoundEvent)
+        : undefined;
     case 'session_snapshot':
       return isSessionSnapshotData(event.data)
         ? (event as DaemonSessionSnapshotEvent)
@@ -1782,6 +1784,7 @@ export function reduceDaemonSessionEvent(
         ...base,
         rewindCount: base.rewindCount + 1,
         lastRewind: mergeOriginator(event.data, event),
+      };
     case 'session_snapshot':
       return {
         ...base,
