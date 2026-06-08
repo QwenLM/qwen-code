@@ -489,7 +489,7 @@ function getString(
   key: string,
 ): string | undefined {
   const value = record?.[key];
-  return typeof value === 'string' ? value : undefined;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function getTodoStatus(
@@ -621,6 +621,10 @@ function isApprovalToken(token: string): boolean {
     token === 'confirmed' ||
     token === 'proceed' ||
     token === 'proceed_once' ||
+    token === 'proceed_always_project' ||
+    token === 'proceed_always_user' ||
+    token === 'allow_once' ||
+    token === 'allow_always' ||
     token === 'success' ||
     token === 'succeeded'
   );

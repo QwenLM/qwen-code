@@ -152,6 +152,35 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('ignores daemon plan entries without content', () => {
+    const plan = {
+      sessionUpdate: 'plan',
+      entries: [
+        { content: '', priority: 'high', status: 'in_progress' },
+        { content: '运行类型检查', priority: 'high', status: 'in_progress' },
+      ],
+    };
+
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('plan-1', `plan: ${JSON.stringify(plan)}`, 1),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'plan-1',
+        role: 'plan',
+        todos: [
+          {
+            id: 'plan-1',
+            content: '运行类型检查',
+            priority: 'high',
+            status: 'in_progress',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('keeps TodoWrite blocks as tool messages and does not aggregate tools', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
@@ -227,6 +256,57 @@ describe('transcriptBlocksToDaemonMessages', () => {
           },
         ],
       },
+    ]);
+  });
+
+  it('renders insight progress messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'insight-1',
+        'assistant',
+        '{"insight_progress":{"stage":"scan","progress":0.5,"detail":"reading"}}',
+        1,
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'insight-1-ip',
+        role: 'insight_progress',
+        stage: 'scan',
+        progress: 0.5,
+        detail: 'reading',
+      },
+    ]);
+  });
+
+  it('renders terminal insight messages with surrounding text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'insight-1',
+        'assistant',
+        'before {"insight_ready":{"path":"/tmp/report.md"}} middle {"insight_error":{"error":"boom"}} after',
+        1,
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      { id: 'insight-1-t-0', role: 'assistant', content: 'before' },
+      { id: 'insight-1-ir-0', role: 'insight_ready', path: '/tmp/report.md' },
+      { id: 'insight-1-t-2', role: 'assistant', content: 'middle' },
+      { id: 'insight-1-ie-0', role: 'insight_error', error: 'boom' },
+      { id: 'insight-1-t-4', role: 'assistant', content: 'after' },
+    ]);
+  });
+
+  it('keeps malformed insight JSON as assistant text', () => {
+    const content = 'before {"insight_ready": bad} after';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('insight-1', 'assistant', content, 1),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'insight-1', role: 'assistant', content },
     ]);
   });
 
@@ -1430,6 +1510,39 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
+    });
+  });
+
+  it('treats compound allow permission resolutions as approved', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Fetch page',
+        options: [{ optionId: 'allow_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'webfetch-1',
+          kind: 'fetch',
+          rawInput: {
+            url: 'https://example.com',
+            prompt: 'read',
+          },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:allow_once',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      callId: 'webfetch-1',
+      status: 'in_progress',
     });
   });
 
