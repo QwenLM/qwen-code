@@ -946,12 +946,14 @@ export const useGeminiStream = (
         }
         const subject = incoming.subject || prev.subject;
         const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
-        debugLogger.debug(
-          `[THOUGHT_MERGE] Accumulating thought: ` +
-            `prev length=${prev.description?.length ?? 0}, ` +
-            `incoming length=${incoming.description?.length ?? 0}, ` +
-            `total length=${description.length}`,
-        );
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[THOUGHT_MERGE] Accumulating thought: ` +
+              `prev length=${prev.description?.length ?? 0}, ` +
+              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `total length=${description.length}`,
+          );
+        }
         return { subject, description };
       });
     },
@@ -976,12 +978,14 @@ export const useGeminiStream = (
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
 
-      debugLogger.debug(
-        `[THOUGHT_BUFFER] Buffer growing: ` +
-          `current=${currentThoughtBuffer.length}, ` +
-          `incoming=${thoughtText.length}, ` +
-          `total=${newThoughtBuffer.length}`,
-      );
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[THOUGHT_BUFFER] Buffer growing: ` +
+            `current=${currentThoughtBuffer.length}, ` +
+            `incoming=${thoughtText.length}, ` +
+            `total=${newThoughtBuffer.length}`,
+        );
+      }
 
       const pendingType = pendingHistoryItemRef.current?.type;
       const isPendingThought =

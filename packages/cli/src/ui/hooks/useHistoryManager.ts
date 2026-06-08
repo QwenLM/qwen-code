@@ -72,12 +72,14 @@ export function useHistory(): UseHistoryManagerReturn {
         }
 
         const newHistory = [...prevHistory, newItem];
-        const textSize = newItem.text?.length ?? 0;
-        debugLogger.debug(
-          `[ADD_ITEM] type=${newItem.type}, ` +
-            `textSize=${textSize}, ` +
-            `historyLength=${newHistory.length}`,
-        );
+        if (debugLogger.isEnabled()) {
+          const textSize = newItem.text?.length ?? 0;
+          debugLogger.debug(
+            `[ADD_ITEM] type=${newItem.type}, ` +
+              `textSize=${textSize}, ` +
+              `historyLength=${newHistory.length}`,
+          );
+        }
         return newHistory;
       });
       return id; // Return the generated ID (even if not added, to keep signature)

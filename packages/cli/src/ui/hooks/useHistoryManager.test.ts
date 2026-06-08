@@ -9,6 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import { useHistory } from './useHistoryManager.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
+import { ToolCallStatus } from '../types.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
@@ -295,7 +296,7 @@ describe('useHistoryManager', () => {
                   name: 'read_file',
                   description: '',
                   resultDisplay: 'some file content here',
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
@@ -341,7 +342,7 @@ describe('useHistoryManager', () => {
                     originalContent: 'old',
                     newContent: 'new',
                   },
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
@@ -390,7 +391,7 @@ describe('useHistoryManager', () => {
                   name: 'read_file',
                   description: '',
                   resultDisplay: `content-${i}`,
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
@@ -445,7 +446,7 @@ describe('useHistoryManager', () => {
                   name: 'read_file',
                   description: '',
                   resultDisplay: `content-${i}`,
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
@@ -549,7 +550,7 @@ describe('useHistoryManager', () => {
                       : i % 3 === 1
                         ? { ansiOutput: '\x1b[31mred\x1b[0m' } // AnsiOutputDisplay
                         : { type: 'task_execution', result: 'data' }, // AgentResultDisplay
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
@@ -598,7 +599,7 @@ describe('useHistoryManager', () => {
                   name: 'tool',
                   description: '',
                   resultDisplay: null,
-                  status: 'completed',
+                  status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
               ],
