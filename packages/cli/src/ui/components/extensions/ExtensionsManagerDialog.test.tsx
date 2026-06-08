@@ -323,7 +323,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     stdin.write('\r'); // Enter on the add row -> opens the add sub-view (locks tabs)
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add a marketplace source');
+      expect(lastFrame()).toContain('Enter marketplace source:');
     });
     stdin.write('\x1b'); // Escape should return to the list, not close the dialog
     await waitFor(() => {
@@ -341,9 +341,15 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     stdin.write('\r'); // Enter on add row
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add a marketplace source');
+      expect(lastFrame()).toContain('Add Marketplace');
     });
-    // The supported source formats are surfaced to guide the user.
-    expect(lastFrame()).toContain('owner/repo');
+    // CC-style: prompt + examples list to guide the user.
+    const frame = lastFrame();
+    expect(frame).toContain('Enter marketplace source:');
+    expect(frame).toContain('Examples:');
+    expect(frame).toContain('owner/repo (GitHub)');
+    expect(frame).toContain('git@github.com:owner/repo.git (SSH)');
+    expect(frame).toContain('https://example.com/marketplace.json');
+    expect(frame).toContain('./path/to/marketplace');
   });
 });

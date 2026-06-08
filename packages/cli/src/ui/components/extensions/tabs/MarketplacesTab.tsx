@@ -203,12 +203,25 @@ export const MarketplacesTab = ({
   if (view === 'add') {
     return (
       <Box flexDirection="column" gap={1}>
-        <Text color={theme.text.primary}>{t('Add a marketplace source:')}</Text>
-        <Text color={theme.text.secondary}>
-          {t(
-            'Formats: owner/repo · git@github.com:owner/repo.git · https://host/marketplace.json · ./local/path',
-          )}
+        <Text color={theme.text.primary} bold>
+          {t('Add Marketplace')}
         </Text>
+
+        <Box flexDirection="column">
+          <Text color={theme.text.primary}>
+            {t('Enter marketplace source:')}
+          </Text>
+          <Text color={theme.text.secondary}>{t('Examples:')}</Text>
+          <Text color={theme.text.secondary}>{' · owner/repo (GitHub)'}</Text>
+          <Text color={theme.text.secondary}>
+            {' · git@github.com:owner/repo.git (SSH)'}
+          </Text>
+          <Text color={theme.text.secondary}>
+            {' · https://example.com/marketplace.json'}
+          </Text>
+          <Text color={theme.text.secondary}>{' · ./path/to/marketplace'}</Text>
+        </Box>
+
         {busy ? (
           <Text color={theme.text.secondary}>{t('Adding...')}</Text>
         ) : (
@@ -216,7 +229,6 @@ export const MarketplacesTab = ({
             value={input}
             onChange={setInput}
             onSubmit={() => void submitAdd()}
-            placeholder="owner/repo"
             isActive={isActive}
           />
         )}
