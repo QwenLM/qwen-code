@@ -2719,23 +2719,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           newSessionId: result.newSessionId,
           displayName: result.title,
         };
-        entry.events.publish({
-          type: 'session_branched',
+        const branchEnvelope = {
+          type: 'session_branched' as const,
           data: eventData,
           ...(originatorClientId ? { originatorClientId } : {}),
-        });
-        for (const e of byId.values()) {
-          if (
-            e.sessionId !== sessionId &&
-            e.sessionId !== result.newSessionId
-          ) {
-            e.events.publish({
-              type: 'session_branched',
-              data: eventData,
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
-          }
-        }
+        };
+        entry.events.publish(branchEnvelope);
+        broadcastWorkspaceEvent(branchEnvelope, sessionId);
 
         return {
           ...restored,

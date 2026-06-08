@@ -1368,7 +1368,8 @@ export async function computeUniqueBranchTitle(
   baseName: string,
   sessionService: SessionService,
 ): Promise<string> {
-  const trimmed = baseName.trim();
+  const maxSuffixLen = ' (Branch 1234567890123)'.length;
+  const trimmed = baseName.trim().slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
   const taken = new Set(
     (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
       (t) => t.toLowerCase().trim(),
