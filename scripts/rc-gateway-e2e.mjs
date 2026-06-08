@@ -20,6 +20,7 @@ import {
   SESSION_READ,
   APPROVE,
   WRITE,
+  OWNER,
 } from '../packages/rc-gateway/dist/index.js';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -274,6 +275,64 @@ try {
     dr.status === 204
       ? ok('push unsubscribe -> 204')
       : bad(`push delete ${dr.status}`);
+  }
+
+  // WebPush send-test (cycle 9): an owner token subscribes a dummy endpoint and
+  // POSTs /rc/push/test. The route is owner-gated and fans out to the caller's
+  // own subscriptions. The real send to the dummy endpoint fails/expires
+  // (network/410) which is fine — we assert only the route + fan-out wiring
+  // (200 with sent>=1), not delivery success.
+  {
+    const { code: oc } = pairing.mint([SESSION_READ, OWNER]);
+    const orr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: oc, label: 'push-owner' }),
+    });
+    const ownerToken = (await orr.json()).token;
+
+    const sr = await fetch(`${gw}/rc/push/subscribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({
+        subscription: {
+          endpoint: 'https://push.example.com/e2e-test-target',
+          keys: { p256dh: 'p256dh-e2e-test', auth: 'auth-e2e-test' },
+        },
+      }),
+    });
+    sr.status === 201
+      ? ok('push subscribe (owner, for send-test) -> 201')
+      : bad(`push owner subscribe ${sr.status}`);
+
+    const tr = await fetch(`${gw}/rc/push/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({ sessionId: 'e2e' }),
+    });
+    const tb = await tr.json();
+    tr.status === 200 && typeof tb.sent === 'number' && tb.sent >= 1
+      ? ok(`push test route -> 200 with sent=${tb.sent}`)
+      : bad(`push test ${tr.status} ${JSON.stringify(tb)}`);
+
+    // A non-owner (session:read-only) token must be rejected at the owner gate.
+    const ntr = await fetch(`${gw}/rc/push/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    ntr.status === 403
+      ? ok('push test route as non-owner -> 403')
+      : bad(`push test non-owner ${ntr.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
