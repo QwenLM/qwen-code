@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { DaemonClient } from '@qwen-code/sdk';
 import {
   createGatewayApp,
+  SessionEventPump,
   TokenStore,
   PairingService,
   VapidStore,
@@ -75,7 +76,13 @@ const daemon = spawn(
 );
 
 let gatewayServer;
-const cleanup = () => {
+let pump;
+const cleanup = async () => {
+  try {
+    if (pump) await pump.stop();
+  } catch {
+    /* ignore */
+  }
   try {
     gatewayServer?.close();
   } catch {
@@ -105,7 +112,13 @@ try {
   const pairing = new PairingService();
   const vapid = await VapidStore.open(join(workspace, 'vapid.json'));
   const pushStore = await PushStore.open(join(workspace, 'push.json'));
-  const app = createGatewayApp({ daemon: dc, store, pairing, vapid, pushStore });
+  const { app, notifier } = createGatewayApp({
+    daemon: dc,
+    store,
+    pairing,
+    vapid,
+    pushStore,
+  });
   gatewayServer = await new Promise((res) => {
     const s = app.listen(GATEWAY_PORT, '127.0.0.1', () => res(s));
   });
@@ -115,6 +128,23 @@ try {
   {
     const r = await fetch(`${gw}/rc/health`);
     r.status === 200 ? ok('gateway /rc/health 200') : bad(`gateway health ${r.status}`);
+  }
+
+  // 2b. Session event pump (cycle 10): starts cleanly against the REAL daemon
+  //     (capabilities + empty session list resolve; no exception), and the
+  //     gateway stays healthy after it boots. No event is asserted — auto-push
+  //     delivery is verified-locally-only.
+  {
+    try {
+      pump = new SessionEventPump(dc, notifier);
+      await pump.start();
+      const r = await fetch(`${gw}/rc/health`);
+      r.status === 200
+        ? ok('session event pump started cleanly; gateway still healthy')
+        : bad(`gateway unhealthy after pump start (${r.status})`);
+    } catch (e) {
+      bad(`pump start threw: ${e?.message ?? e}`);
+    }
   }
 
   // 3. Pairing -> scoped token.
@@ -337,7 +367,7 @@ try {
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
 } finally {
-  cleanup();
+  await cleanup();
 }
 
 console.log(`\n=== e2e result: ${pass} passed, ${fail} failed ===\n`);
