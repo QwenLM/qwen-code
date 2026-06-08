@@ -728,23 +728,40 @@ export const useGeminiStream = (
       currentAutoImproveLoopIdRef.current = null;
       submitPromptOnCompleteRef.current = null;
       const cwd = config.getWorkingDir() || config.getProjectRoot();
-      void markActiveAutoImproveRunCancelled(cwd, autoImproveLoopId).catch(
-        (error: unknown) => {
+      // Defer the user-facing message until the cancellation result is known,
+      // so we never claim "cancelled" when the state write actually failed (or
+      // there was nothing to cancel) and the loop is in fact still running.
+      void markActiveAutoImproveRunCancelled(cwd, autoImproveLoopId)
+        .then((cancelled) => {
+          addItem(
+            {
+              type: cancelled ? MessageType.INFO : MessageType.ERROR,
+              text: cancelled
+                ? t(
+                    'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
+                  )
+                : t(
+                    "Couldn't confirm auto-improve run cancellation; it may still be active. Run /auto-improve status to check.",
+                  ),
+            },
+            Date.now(),
+          );
+        })
+        .catch((error: unknown) => {
           debugLogger.warn(
             'Failed to mark auto-improve run cancelled:',
             error instanceof Error ? error.message : String(error),
           );
-        },
-      );
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.',
-          ),
-        },
-        Date.now(),
-      );
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                "Couldn't confirm auto-improve run cancellation; it may still be active. Run /auto-improve status to check.",
+              ),
+            },
+            Date.now(),
+          );
+        });
     }
     setPendingHistoryItem(null);
     clearRetryCountdown();

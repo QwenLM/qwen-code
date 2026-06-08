@@ -159,6 +159,18 @@ vi.mock('./slashCommandProcessor.js', () => ({
   handleSlashCommand: vi.fn().mockReturnValue(false),
 }));
 
+// Keep the real exports (e.g. AUTO_IMPROVE_LOOP_ID_LINE_PREFIX) but stub the
+// filesystem-backed cancellation so it reports success — the cancellation
+// guidance message is now gated on this result.
+vi.mock('../commands/autoImproveState.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../commands/autoImproveState.js')>();
+  return {
+    ...actual,
+    markActiveAutoImproveRunCancelled: vi.fn().mockResolvedValue(true),
+  };
+});
+
 // --- END MOCKS ---
 
 // --- Tests for useGeminiStream Hook ---

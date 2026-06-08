@@ -237,6 +237,8 @@ export default {
     '自动改进执行已跳过：已请求停止。',
   'Auto-improve run cancelled. The loop is still active; run /auto-improve stop to stop future ticks.':
     '自动改进执行已取消。循环仍处于活动状态；运行 /auto-improve stop 可停止后续执行。',
+  "Couldn't confirm auto-improve run cancellation; it may still be active. Run /auto-improve status to check.":
+    '无法确认自动改进执行是否已取消；它可能仍处于活动状态。运行 /auto-improve status 进行检查。',
   'Auto-improve tick skipped: loop is not running.':
     '自动改进执行已跳过：循环未运行。',
   'Auto-improve tick skipped: previous run is still active.':

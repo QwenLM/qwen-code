@@ -183,6 +183,11 @@ async function getRepoRoot(config: Config): Promise<string> {
       ]);
       return stdout.trim();
     } catch {
+      // Don't permanently cache a transient git failure (uninitialized repo,
+      // temp FS hiccup): evict so the next call re-resolves instead of serving
+      // the cwd fallback for the rest of the session. In-flight concurrent
+      // callers still share this promise.
+      repoRootCache.delete(cwd);
       return cwd;
     }
   })();
@@ -300,7 +305,7 @@ function describeSources(state: AutoImproveLoopState): string {
 }
 
 function formatCustomSources(customSources: string[]): string {
-  if (customSources.length === 0) return '(none)';
+  if (customSources.length === 0) return t('(none)');
   return customSources.map((source) => `  - ${source}`).join('\n');
 }
 
