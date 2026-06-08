@@ -2,7 +2,7 @@ import { createContext, useContext, type ReactNode } from 'react';
 import type { Components, Options } from 'react-markdown';
 import type { ACPToolCall } from './adapters/types';
 
-export type MarkdownContentSource = 'assistant';
+export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;

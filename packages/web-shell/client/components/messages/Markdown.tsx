@@ -463,7 +463,10 @@ export const Markdown = memo(function Markdown({
     : [rehypeKatex];
 
   return (
-    <div className={styles.content} data-markdown-source={source}>
+    <div
+      className={source !== 'thinking' ? styles.content : ''}
+      data-markdown-source={source}
+    >
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}

@@ -19,7 +19,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.thinking}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.thinkingBody}>
-            <Markdown content={thinking} />
+            <Markdown content={thinking} source="thinking" />
           </div>
         </div>
       )}
