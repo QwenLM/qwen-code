@@ -180,6 +180,11 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
         this.fileWatchers.clear();
         foldersChangeListener.dispose();
+        for (const instance of this.fileSearchInstances.values()) {
+          void instance.dispose?.().catch(() => {});
+        }
+        this.fileSearchInstances.clear();
+        this.fileSearchInitializing.clear();
       },
     };
   }

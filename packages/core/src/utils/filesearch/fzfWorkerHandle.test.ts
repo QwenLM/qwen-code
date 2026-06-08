@@ -200,6 +200,32 @@ describe('FzfWorkerHandle', () => {
       ).rejects.toThrow();
     });
 
+    it('rejects pending find() when worker crashes unexpectedly', async () => {
+      if (!workerExists) return;
+
+      // Overwrite fzfWorker.js with a script that crashes on 'find'.
+      const goodWorker = fs.readFileSync(outfile, 'utf8');
+      fs.writeFileSync(
+        outfile,
+        `import { parentPort } from 'node:worker_threads';
+         parentPort.on('message', (msg) => {
+           if (msg.type === 'init') { parentPort.postMessage({ type: 'ready' }); return; }
+           if (msg.type === 'find') { process.exit(1); }
+         });`,
+      );
+      __resetWorkerScriptResolutionForTests();
+      restorers.push(__setWorkerThresholdForTests(1));
+
+      try {
+        const handle = await FzfWorkerHandle.create(['a.ts'], { fuzzy: 'v2' });
+        await expect(handle.find('a')).rejects.toThrow(/exited unexpectedly/);
+      } finally {
+        // Restore the real worker for subsequent tests.
+        fs.writeFileSync(outfile, goodWorker);
+        __resetWorkerScriptResolutionForTests();
+      }
+    });
+
     it('handles concurrent find() calls', async () => {
       if (!workerExists) return;
       __resetWorkerScriptResolutionForTests();

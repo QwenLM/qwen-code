@@ -317,14 +317,13 @@ export class FzfWorkerHandle {
       transport = inProcessTransport;
     }
     const inst = transport.spawn(files, options);
+    const timeoutMs = Math.max(10_000, files.length / 10);
+    let timerId: ReturnType<typeof setTimeout> | undefined;
     try {
-      // Scale timeout with file count — large workspaces legitimately take
-      // longer to build the fzf index, but anything beyond this is a hang.
-      const timeoutMs = Math.max(10_000, files.length / 10);
       await Promise.race([
         inst.ready(),
-        new Promise<never>((_, rej) =>
-          setTimeout(
+        new Promise<never>((_, rej) => {
+          timerId = setTimeout(
             () =>
               rej(
                 new Error(
@@ -332,12 +331,14 @@ export class FzfWorkerHandle {
                 ),
               ),
             timeoutMs,
-          ),
-        ),
+          );
+        }),
       ]);
     } catch (err) {
       await inst.dispose();
       throw err;
+    } finally {
+      if (timerId !== undefined) clearTimeout(timerId);
     }
     return new FzfWorkerHandle(inst);
   }

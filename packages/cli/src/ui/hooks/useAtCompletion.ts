@@ -121,6 +121,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
 
   useEffect(() => {
     dispatch({ type: 'RESET' });
+    return () => {
+      void fileSearch.current?.dispose?.();
+      fileSearch.current = null;
+    };
   }, [cwd, config]);
 
   // Reacts to user input (`pattern`) ONLY.
@@ -243,8 +247,6 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       if (slowSearchTimer.current) {
         clearTimeout(slowSearchTimer.current);
       }
-      void fileSearch.current?.dispose?.();
-      fileSearch.current = null;
     };
   }, [state.status, state.pattern, config, cwd]);
 }
