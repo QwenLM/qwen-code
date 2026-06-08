@@ -78,3 +78,4 @@ export {
   type ToolCallContext,
 } from './policy/evaluator.js';
 export { PolicyEnforcer } from './policy/enforcer.js';
+export { SnoozeStore, type SnoozeState } from './routing/snooze.js';
