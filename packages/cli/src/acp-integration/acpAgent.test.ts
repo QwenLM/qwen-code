@@ -1352,7 +1352,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'General coding model',
           authType: 'qwen',
           contextWindowSize: 65_536,
-          baseUrl: 'https://secret.example.com',
+          baseUrl: 'https://api.example.com',
           envKey: 'DASHSCOPE_API_KEY',
         },
       ]),
