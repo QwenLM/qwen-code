@@ -68,14 +68,25 @@ export function ExtensionsManagerDialog({
   // Bumped to force tabs to re-load when a cross-tab change happens
   // (e.g. installing from Discover should refresh Installed).
   const [reloadSignal, setReloadSignal] = useState(0);
+  // When set, the Discover tab is restricted to this marketplace (set by the
+  // Marketplaces tab's "Browse plugins" action; cleared on manual tab switch).
+  const [discoverFilter, setDiscoverFilter] = useState<string | null>(null);
 
   const cycleTab = useCallback((direction: 1 | -1) => {
     setStatus(null);
+    setDiscoverFilter(null);
     setActiveTab((current) => {
       const index = TABS.findIndex((tab) => tab.id === current);
       const next = (index + direction + TABS.length) % TABS.length;
       return TABS[next].id;
     });
+  }, []);
+
+  const handleBrowseMarketplace = useCallback((marketplaceName: string) => {
+    setStatus(null);
+    setTabLocked(false);
+    setDiscoverFilter(marketplaceName);
+    setActiveTab(EXTENSIONS_TABS.DISCOVER);
   }, []);
 
   const bumpReload = useCallback(() => {
@@ -140,6 +151,7 @@ export function ExtensionsManagerDialog({
               onLockChange={handleLockChange}
               onStatus={setStatus}
               onInstalled={bumpReload}
+              marketplaceFilter={discoverFilter ?? undefined}
               reloadSignal={reloadSignal}
             />
           )}
@@ -160,6 +172,7 @@ export function ExtensionsManagerDialog({
               onLockChange={handleLockChange}
               onStatus={setStatus}
               onChanged={bumpReload}
+              onBrowse={handleBrowseMarketplace}
               reloadSignal={reloadSignal}
             />
           )}

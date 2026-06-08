@@ -10,6 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { TextInput } from '../../shared/TextInput.js';
+import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
 import {
   type Config,
@@ -24,6 +25,7 @@ import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 const debugLogger = createDebugLogger('MARKETPLACES_TAB');
 
 type MarketplacesView = 'list' | 'add' | 'detail' | 'remove-confirm';
+type MarketplaceDetailAction = 'browse' | 'update' | 'remove';
 
 interface MarketplacesTabProps {
   config: Config;
@@ -31,7 +33,16 @@ interface MarketplacesTabProps {
   onLockChange: (locked: boolean) => void;
   onStatus: (status: StatusMessage | null) => void;
   onChanged: () => void;
+  /** Switch to the Discover tab filtered to the given marketplace. */
+  onBrowse: (marketplaceName: string) => void;
   reloadSignal: number;
+}
+
+function formatDate(iso?: string): string | null {
+  if (!iso) return null;
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return null;
+  return new Date(time).toLocaleDateString();
 }
 
 export const MarketplacesTab = ({
@@ -40,6 +51,7 @@ export const MarketplacesTab = ({
   onLockChange,
   onStatus,
   onChanged,
+  onBrowse,
   reloadSignal,
 }: MarketplacesTabProps) => {
   const [sources, setSources] = useState<MarketplaceSource[]>([]);
@@ -132,6 +144,46 @@ export const MarketplacesTab = ({
     goToList();
   }, [extensionManager, selectedSource, onStatus, load, onChanged, goToList]);
 
+  const updateMarketplace = useCallback(async () => {
+    if (!extensionManager || !selectedSource) return;
+    setDetailLoading(true);
+    try {
+      // Re-fetch the marketplace config and stamp a fresh "last updated".
+      const cfg = await extensionManager.loadMarketplace(selectedSource.source);
+      setDetailConfig(cfg ?? null);
+      extensionManager.markMarketplaceUpdated(selectedSource.name);
+      load();
+      onChanged();
+      onStatus({
+        type: 'success',
+        text: t('Updated marketplace "{{name}}".', {
+          name: selectedSource.name,
+        }),
+      });
+    } catch (error) {
+      onStatus({
+        type: 'error',
+        text: redactUrlCredentials(getErrorMessage(error)),
+      });
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [extensionManager, selectedSource, load, onChanged, onStatus]);
+
+  const handleDetailAction = useCallback(
+    (action: MarketplaceDetailAction) => {
+      if (!selectedSource) return;
+      if (action === 'browse') {
+        onBrowse(selectedSource.name);
+      } else if (action === 'update') {
+        void updateMarketplace();
+      } else if (action === 'remove') {
+        setView('remove-confirm');
+      }
+    },
+    [selectedSource, onBrowse, updateMarketplace],
+  );
+
   // List keyboard.
   useKeypress(
     (key) => {
@@ -172,17 +224,11 @@ export const MarketplacesTab = ({
     { isActive: isActive && view === 'add' },
   );
 
-  // Detail escape.
+  // Detail: Escape goes back; the action selector (RadioButtonSelect) owns Enter.
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
         goToList();
-      } else if (
-        (key.sequence === 'd' || key.sequence === 'x') &&
-        !key.ctrl &&
-        !key.meta
-      ) {
-        setView('remove-confirm');
       }
     },
     { isActive: isActive && view === 'detail' },
@@ -237,43 +283,114 @@ export const MarketplacesTab = ({
   }
 
   if (view === 'detail' && selectedSource) {
+    const plugins = detailConfig?.plugins ?? [];
+    const availableCount = plugins.length;
+    const installedNames = new Set(
+      (extensionManager?.getLoadedExtensions() ?? []).map((ext) => ext.name),
+    );
+    const installedPlugins = plugins.filter((p) => installedNames.has(p.name));
+    const lastUpdated = formatDate(
+      selectedSource.lastUpdatedAt ?? selectedSource.addedAt,
+    );
+
+    const actions: Array<{
+      key: string;
+      label: string;
+      value: MarketplaceDetailAction;
+    }> = [
+      {
+        key: 'browse',
+        label: t('Browse plugins ({{count}})', {
+          count: String(availableCount),
+        }),
+        value: 'browse',
+      },
+      {
+        key: 'update',
+        label: lastUpdated
+          ? t('Update marketplace (last updated {{date}})', {
+              date: lastUpdated,
+            })
+          : t('Update marketplace'),
+        value: 'update',
+      },
+      { key: 'remove', label: t('Remove marketplace'), value: 'remove' },
+    ];
+
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          <Text color={theme.text.accent} bold>
+          <Text color={theme.text.primary} bold>
             {selectedSource.name}
           </Text>
           <Text color={theme.text.secondary}>
-            {redactUrlCredentials(selectedSource.source)} ({selectedSource.type}
-            )
+            {redactUrlCredentials(selectedSource.source)}
           </Text>
         </Box>
+
         {detailLoading ? (
           <Text color={theme.text.secondary}>{t('Loading...')}</Text>
         ) : detailConfig ? (
-          <Box flexDirection="column">
+          <Box flexDirection="column" gap={1}>
             <Text color={theme.text.primary}>
-              {t('{{count}} plugin(s):', {
-                count: String(detailConfig.plugins?.length ?? 0),
+              {t('{{count}} available plugins', {
+                count: String(availableCount),
               })}
             </Text>
-            <Box flexDirection="column" paddingLeft={2}>
-              {(detailConfig.plugins ?? []).slice(0, 15).map((p) => (
-                <Text key={p.name} color={theme.text.secondary}>
-                  - {p.name}
-                  {p.description ? `: ${p.description}` : ''}
+
+            {installedPlugins.length > 0 ? (
+              <Box flexDirection="column">
+                <Text color={theme.text.primary} bold>
+                  {t('Installed plugins ({{count}}):', {
+                    count: String(installedPlugins.length),
+                  })}
                 </Text>
-              ))}
-            </Box>
+                {installedPlugins.map((p) => (
+                  <Box key={p.name} flexDirection="column">
+                    <Box>
+                      <Box minWidth={2} flexShrink={0}>
+                        <Text color={theme.status.success}>{'●'}</Text>
+                      </Box>
+                      <Text color={theme.text.primary}>{p.name}</Text>
+                    </Box>
+                    {p.description ? (
+                      <Box paddingLeft={2}>
+                        <Text color={theme.text.secondary}>
+                          {p.description}
+                        </Text>
+                      </Box>
+                    ) : null}
+                  </Box>
+                ))}
+              </Box>
+            ) : null}
+
+            <RadioButtonSelect
+              items={actions}
+              isFocused={isActive}
+              showNumbers={false}
+              onSelect={handleDetailAction}
+            />
           </Box>
         ) : (
-          <Text color={theme.status.error}>
-            {t('Could not load this marketplace.')}
-          </Text>
+          <Box flexDirection="column" gap={1}>
+            <Text color={theme.status.error}>
+              {t('Could not load this marketplace.')}
+            </Text>
+            <RadioButtonSelect
+              items={[
+                {
+                  key: 'remove',
+                  label: t('Remove marketplace'),
+                  value: 'remove' as MarketplaceDetailAction,
+                },
+              ]}
+              isFocused={isActive}
+              showNumbers={false}
+              onSelect={handleDetailAction}
+            />
+          </Box>
         )}
-        <Text color={theme.text.secondary}>
-          {t('d to remove · Esc to go back')}
-        </Text>
       </Box>
     );
   }

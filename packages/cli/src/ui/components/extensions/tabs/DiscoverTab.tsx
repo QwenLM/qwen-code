@@ -35,6 +35,8 @@ interface DiscoverTabProps {
   onLockChange: (locked: boolean) => void;
   onStatus: (status: StatusMessage | null) => void;
   onInstalled: () => void;
+  /** When set, only plugins from this marketplace are shown. */
+  marketplaceFilter?: string;
   reloadSignal: number;
 }
 
@@ -75,6 +77,7 @@ export const DiscoverTab = ({
   onLockChange,
   onStatus,
   onInstalled,
+  marketplaceFilter,
   reloadSignal,
 }: DiscoverTabProps) => {
   const [plugins, setPlugins] = useState<DiscoveredPlugin[]>([]);
@@ -100,15 +103,24 @@ export const DiscoverTab = ({
   const keyOf = (p: DiscoveredPlugin) => `${p.marketplaceName}/${p.name}`;
 
   const filtered = useMemo(() => {
+    const byMarketplace = marketplaceFilter
+      ? plugins.filter((p) => p.marketplaceName === marketplaceFilter)
+      : plugins;
     const q = query.trim().toLowerCase();
-    if (!q) return plugins;
-    return plugins.filter(
+    if (!q) return byMarketplace;
+    return byMarketplace.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
         p.marketplaceName.toLowerCase().includes(q) ||
         (p.description?.toLowerCase().includes(q) ?? false),
     );
-  }, [plugins, query]);
+  }, [plugins, query, marketplaceFilter]);
+
+  // Reset the cursor to the top when the marketplace filter changes.
+  useEffect(() => {
+    setCursor(0);
+    setScrollOffset(0);
+  }, [marketplaceFilter]);
 
   const load = useCallback(async () => {
     if (!extensionManager) {
@@ -523,6 +535,13 @@ export const DiscoverTab = ({
         <Text color={theme.text.secondary}>
           {` (${filtered.length ? cursor + 1 : 0}/${filtered.length})`}
         </Text>
+        {marketplaceFilter ? (
+          <Text color={theme.text.secondary}>
+            {t(' · {{marketplace}} (Tab to clear)', {
+              marketplace: marketplaceFilter,
+            })}
+          </Text>
+        ) : null}
       </Box>
 
       <Box

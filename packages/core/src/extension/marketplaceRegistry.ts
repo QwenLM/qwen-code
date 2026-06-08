@@ -30,6 +30,8 @@ export interface MarketplaceSource {
   type: MarketplaceSourceType;
   /** ISO timestamp recorded when the source was added. */
   addedAt?: string;
+  /** ISO timestamp of the last successful (re)fetch / update. */
+  lastUpdatedAt?: string;
 }
 
 /**

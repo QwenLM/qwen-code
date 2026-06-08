@@ -558,11 +558,13 @@ export class ExtensionManager {
           `Expected a .claude-plugin/marketplace.json.`,
       );
     }
+    const now = new Date().toISOString();
     const entry: MarketplaceSource = {
       name: config.name || trimmed,
       source: trimmed,
       type: parseMarketplaceSourceType(trimmed),
-      addedAt: new Date().toISOString(),
+      addedAt: now,
+      lastUpdatedAt: now,
     };
     this.marketplaceRegistryStore.add(entry);
     this.discoverCache = null; // sources changed -> refetch on next discover
@@ -575,6 +577,24 @@ export class ExtensionManager {
       this.discoverCache = null;
     }
     return removed;
+  }
+
+  /**
+   * Records a fresh "last updated" timestamp for a marketplace and invalidates
+   * the discovery cache so the next discover re-fetches it.
+   */
+  markMarketplaceUpdated(name: string): MarketplaceSource | undefined {
+    const entry = this.getMarketplaces().find((m) => m.name === name);
+    if (!entry) {
+      return undefined;
+    }
+    const updated: MarketplaceSource = {
+      ...entry,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.marketplaceRegistryStore.add(updated); // add() replaces by name
+    this.discoverCache = null;
+    return updated;
   }
 
   loadMarketplace(source: string): Promise<ClaudeMarketplaceConfig | null> {

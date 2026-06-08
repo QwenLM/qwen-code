@@ -350,6 +350,105 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(lastFrame()).toContain('Skills');
   });
 
+  it('shows a CC-style marketplace detail with installed plugins and actions', async () => {
+    const manager = createManager({
+      extensions: [mockExtension('pdf', true)], // installed, belongs to Skills
+      marketplaces: [
+        { name: 'Skills', source: 'anthropics/skills', type: 'github' },
+      ],
+    });
+    manager.loadMarketplace = vi.fn().mockResolvedValue({
+      name: 'Skills',
+      owner: { name: 'o', email: 'e' },
+      plugins: [
+        { name: 'pdf', version: '1', description: 'PDF tools', source: 'a/s' },
+        { name: 'docx', version: '1', source: 'a/s' },
+      ],
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+    });
+    // Wait until sources have loaded (and the keypress handler re-subscribed).
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Skills');
+    });
+    stdin.write('\x1B[B'); // down -> select the Skills source row
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Skills');
+    });
+    stdin.write('\r'); // Enter -> open detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('available plugins');
+    });
+    const frame = lastFrame();
+    expect(frame).toContain('2 available plugins');
+    expect(frame).toContain('Installed plugins (1):');
+    expect(frame).toContain('pdf');
+    expect(frame).toContain('Browse plugins (2)');
+    expect(frame).toContain('Update marketplace');
+    expect(frame).toContain('Remove marketplace');
+  });
+
+  it('Browse plugins jumps to Discover filtered by the marketplace', async () => {
+    const manager = createManager({
+      marketplaces: [
+        { name: 'Skills', source: 'anthropics/skills', type: 'github' },
+      ],
+      discovered: [
+        {
+          marketplaceName: 'Skills',
+          name: 'pdf',
+          installSource: 'a/s:pdf',
+          installed: false,
+        },
+        {
+          marketplaceName: 'Skills',
+          name: 'docx',
+          installSource: 'a/s:docx',
+          installed: false,
+        },
+        {
+          marketplaceName: 'Other',
+          name: 'zzz',
+          installSource: 'o/o:zzz',
+          installed: false,
+        },
+      ],
+    });
+    manager.loadMarketplace = vi.fn().mockResolvedValue({
+      name: 'Skills',
+      owner: { name: 'o', email: 'e' },
+      plugins: [
+        { name: 'pdf', version: '1', source: 'a/s' },
+        { name: 'docx', version: '1', source: 'a/s' },
+      ],
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Skills'); // sources loaded
+    });
+    stdin.write('\x1B[B'); // down -> Skills source
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Skills');
+    });
+    stdin.write('\r'); // Enter -> detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Browse plugins (2)');
+    });
+    stdin.write('\r'); // select "Browse plugins" -> Discover filtered
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Discover plugins');
+    });
+    const frame = lastFrame();
+    // Filtered to the Skills marketplace: its plugins show, the other does not.
+    expect(frame).toContain('Skills');
+    expect(frame).toContain('pdf');
+    expect(frame).toContain('docx');
+    expect(frame).not.toContain('zzz');
+  });
+
   it('switches tabs with the Tab key', async () => {
     const config = createConfig(
       createManager({ extensions: [mockExtension('alpha', true)] }),
