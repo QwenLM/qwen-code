@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
 
           branch="release/desktop-${RELEASE_TAG}"
-          git switch -c "$branch"
+          git switch -C "$branch"
           git add package.json apps/electron/package.json packages/shared/package.json
 
           if git diff --staged --quiet; then
@@ -126,7 +126,12 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
           if [ "$IS_DRY_RUN" = "false" ]; then
-            git push --set-upstream origin "$branch"
+            remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
+            if [ -n "$remote_sha" ]; then
+              git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
+            else
+              git push origin "HEAD:refs/heads/$branch"
+            fi
             echo "ref=$branch" >> "$GITHUB_OUTPUT"
           else
             echo "Dry run enabled. Skipping release branch push."
@@ -138,6 +143,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     needs: release_metadata
+    defaults:
+      run:
+        shell: bash
     env:
       RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
       RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
@@ -181,15 +189,47 @@ jobs:
       - name: Confirm release version
         run: bun run check-release-version --version "$RELEASE_VERSION"
 
+      - name: Configure optional signing secrets
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD_SECRET: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK_SECRET: ${{ secrets.CSC_LINK }}
+          SENTRY_ELECTRON_INGEST_URL_SECRET: ${{ secrets.SENTRY_ELECTRON_INGEST_URL }}
+        run: |
+          set -euo pipefail
+
+          append_env() {
+            local name="$1"
+            local value="$2"
+
+            if [ -z "$value" ]; then
+              return
+            fi
+
+            {
+              echo "$name<<__${name}__"
+              printf '%s\n' "$value"
+              echo "__${name}__"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "$CSC_LINK_SECRET" ]; then
+            append_env "CSC_LINK" "$CSC_LINK_SECRET"
+            append_env "CSC_KEY_PASSWORD" "$CSC_KEY_PASSWORD_SECRET"
+            append_env "APPLE_ID" "$APPLE_ID_SECRET"
+            append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
+            append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          fi
+
+          append_env "SENTRY_ELECTRON_INGEST_URL" "$SENTRY_ELECTRON_INGEST_URL_SECRET"
+
       - name: Build desktop installer
         run: ${{ matrix.command }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          SENTRY_ELECTRON_INGEST_URL: ${{ secrets.SENTRY_ELECTRON_INGEST_URL }}
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
@@ -282,7 +322,7 @@ jobs:
     needs:
       - publish
       - release_metadata
-    if: ${{ inputs.dry_run == false }}
+    if: ${{ inputs.dry_run == false && inputs.draft == false }}
     permissions:
       contents: write
       pull-requests: write
