@@ -1,4 +1,4 @@
-/* global self */
+/* global self, fetch, indexedDB */
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
@@ -28,31 +28,126 @@ self.addEventListener('push', (event) => {
         requestId: p.requestId,
         sessionId: p.sessionId,
         kind: p.kind,
+        approveOptionId: p.approveOptionId,
       },
       actions,
     }),
   );
 });
 
+// Best-effort read of the bearer token mirrored into IndexedDB by the viewer
+// (DB qwen-rc v1, store auth, key token). Resolves undefined on any error so
+// voting silently falls back to opening the app.
+function idbGetToken() {
+  return new Promise((resolve) => {
+    try {
+      if (!('indexedDB' in self)) return resolve(undefined);
+      const req = indexedDB.open('qwen-rc', 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('auth')) {
+          db.createObjectStore('auth');
+        }
+      };
+      req.onerror = () => resolve(undefined);
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('auth')) return resolve(undefined);
+          const tx = db.transaction('auth', 'readonly');
+          const get = tx.objectStore('auth').get('token');
+          get.onsuccess = () =>
+            resolve(typeof get.result === 'string' ? get.result : undefined);
+          get.onerror = () => resolve(undefined);
+        } catch {
+          resolve(undefined);
+        }
+      };
+    } catch {
+      resolve(undefined);
+    }
+  });
+}
+
+// POST a vote to the cycle-6 permission endpoint. Resolves undefined on any
+// network/error so the caller can fall back to opening the app.
+async function postVote(sessionId, requestId, body, token) {
+  try {
+    return await fetch(
+      '/rc/session/' +
+        encodeURIComponent(sessionId) +
+        '/permission/' +
+        encodeURIComponent(requestId),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+// Brief confirmation notification, reusing the request tag so it replaces the
+// original notification rather than stacking.
+function confirmNote(text, tag) {
+  return self.registration.showNotification(text, {
+    tag: tag || undefined,
+  });
+}
+
+// Focus an existing window at the deep link, or open a new one.
+async function openApp(url) {
+  const all = await self.clients.matchAll({
+    type: 'window',
+    includeUncontrolled: true,
+  });
+  for (const c of all) {
+    if ('focus' in c) {
+      c.navigate?.(url);
+      return c.focus();
+    }
+  }
+  return self.clients.openWindow(url);
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const d = event.notification.data || {};
-  // Cycle 11: every click (incl. action buttons) opens/focuses the app at the
-  // deep link. Cycle 12 will POST approve/deny inline for the action buttons.
-  const url = d.url || '/ui/';
-  event.waitUntil(
-    (async () => {
-      const all = await self.clients.matchAll({
-        type: 'window',
-        includeUncontrolled: true,
-      });
-      for (const c of all) {
-        if ('focus' in c) {
-          c.navigate?.(url);
-          return c.focus();
+  const isVote = event.action === 'approve' || event.action === 'deny';
+  if (isVote && d.requestId && d.sessionId) {
+    event.waitUntil(
+      (async () => {
+        const token = await idbGetToken();
+        const body =
+          event.action === 'approve'
+            ? d.approveOptionId
+              ? { outcome: 'selected', optionId: d.approveOptionId }
+              : null
+            : { outcome: 'cancelled' };
+        if (token && body) {
+          const res = await postVote(d.sessionId, d.requestId, body, token);
+          if (res && res.ok) {
+            await confirmNote(
+              event.action === 'approve' ? 'Approved' : 'Denied',
+              d.requestId,
+            );
+            return;
+          }
+          if (res && res.status === 404) {
+            await confirmNote('Already resolved', d.requestId);
+            return;
+          }
         }
-      }
-      return self.clients.openWindow(url);
-    })(),
-  );
+        // fall through: open the app so the user can act manually
+        await openApp(d.url || '/ui/');
+      })(),
+    );
+    return;
+  }
+  event.waitUntil(openApp(d.url || '/ui/'));
 });
