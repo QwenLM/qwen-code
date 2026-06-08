@@ -680,62 +680,6 @@ You are an agent.
       expect(config.approvalMode).toBeUndefined();
     });
 
-    it('should parse valid effort string', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        effort: 'high',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\neffort: high\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.effort).toBe('high');
-    });
-
-    it('should normalise effort alias med → medium', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        effort: 'med',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\neffort: med\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.effort).toBe('medium');
-    });
-
-    it('should accept integer effort', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        effort: 7,
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\neffort: 7\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.effort).toBe(7);
-    });
-
-    it('should drop invalid effort', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        effort: 'extreme',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\neffort: extreme\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.effort).toBeUndefined();
-    });
-
     it('should parse maxTurns as number', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
@@ -776,148 +720,6 @@ You are an agent.
         'project',
       );
       expect(config.maxTurns).toBeUndefined();
-    });
-
-    it('should parse skills from comma-separated string', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        skills: 'lint, format',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nskills: "lint, format"\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.skills).toEqual(['lint', 'format']);
-    });
-
-    it('should parse skills from YAML array', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        skills: ['lint', 'format'],
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nskills:\n  - lint\n  - format\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.skills).toEqual(['lint', 'format']);
-    });
-
-    it('should parse initialPrompt verbatim', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        initialPrompt: 'Start by reading README.md',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\ninitialPrompt: Start by reading README.md\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.initialPrompt).toBe('Start by reading README.md');
-    });
-
-    it('should drop whitespace-only initialPrompt', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        initialPrompt: '   ',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\ninitialPrompt: "   "\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.initialPrompt).toBeUndefined();
-    });
-
-    it('should parse valid memory value', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        memory: 'project',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nmemory: project\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.memory).toBe('project');
-    });
-
-    it('should drop invalid memory value', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        memory: 'cloud',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nmemory: cloud\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.memory).toBeUndefined();
-    });
-
-    it('should parse isolation: worktree', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        isolation: 'worktree',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nisolation: worktree\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.isolation).toBe('worktree');
-    });
-
-    it('should drop invalid isolation value', () => {
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        isolation: 'docker',
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nisolation: docker\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.isolation).toBeUndefined();
-    });
-
-    it('should carry mcpServers verbatim (loose validation)', () => {
-      const mcpServers = [{ filesystem: { type: 'stdio' } }];
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        mcpServers,
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nmcpServers: [...]\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.mcpServers).toEqual(mcpServers);
-    });
-
-    it('should carry hooks verbatim (loose validation)', () => {
-      const hooks = { PreToolUse: [] };
-      mockParseYaml.mockReturnValueOnce({
-        name: 'a',
-        description: 'd',
-        hooks,
-      });
-      const config = manager.parseSubagentContent(
-        '---\nname: a\ndescription: d\nhooks: {...}\n---\nx',
-        validConfig.filePath!,
-        'project',
-      );
-      expect(config.hooks).toEqual(hooks);
     });
 
     it('should preserve color from allowlist', () => {
@@ -1085,63 +887,12 @@ You are an agent.
       expect(serialized).toContain('permissionMode: bypassPermissions');
     });
 
-    it('should serialize effort when set', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        effort: 'high',
-      });
-      expect(serialized).toContain('effort: high');
-    });
-
     it('should serialize maxTurns when set', () => {
       const serialized = manager.serializeSubagent({
         ...validConfig,
         maxTurns: 25,
       });
       expect(serialized).toContain('maxTurns: 25');
-    });
-
-    it('should serialize skills array when non-empty', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        skills: ['lint', 'format'],
-      });
-      expect(serialized).toContain('skills:');
-      expect(serialized).toContain('- lint');
-      expect(serialized).toContain('- format');
-    });
-
-    it('should not serialize empty skills array', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        skills: [],
-      });
-      expect(serialized).not.toContain('skills:');
-    });
-
-    it('should serialize initialPrompt when set', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        initialPrompt: 'Begin reading README',
-      });
-      expect(serialized).toContain('initialPrompt:');
-      expect(serialized).toContain('Begin reading README');
-    });
-
-    it('should serialize memory when set', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        memory: 'project',
-      });
-      expect(serialized).toContain('memory: project');
-    });
-
-    it('should serialize isolation when set', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        isolation: 'worktree',
-      });
-      expect(serialized).toContain('isolation: worktree');
     });
 
     it('should prune legacy runConfig.max_turns when top-level maxTurns is set', () => {
@@ -1185,34 +936,7 @@ You are an agent.
     it('should not include new fields when undefined', () => {
       const serialized = manager.serializeSubagent(validConfig);
       expect(serialized).not.toContain('permissionMode:');
-      expect(serialized).not.toContain('effort:');
       expect(serialized).not.toContain('maxTurns:');
-      expect(serialized).not.toContain('skills:');
-      expect(serialized).not.toContain('initialPrompt:');
-      expect(serialized).not.toContain('memory:');
-      expect(serialized).not.toContain('isolation:');
-      expect(serialized).not.toContain('mcpServers:');
-      expect(serialized).not.toContain('hooks:');
-    });
-
-    it('should NOT serialize mcpServers (nested-object round-trip not safe yet)', () => {
-      // The local yaml-parser only formats one level of nesting and would
-      // mangle nested mcpServers into "[object Object]" on emit. We carry the
-      // field through in memory but drop it on serialize until a real YAML
-      // library is wired in.
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        mcpServers: [{ filesystem: { type: 'stdio', command: 'node' } }],
-      });
-      expect(serialized).not.toContain('mcpServers:');
-    });
-
-    it('should NOT serialize hooks (nested-object round-trip not safe yet)', () => {
-      const serialized = manager.serializeSubagent({
-        ...validConfig,
-        hooks: { PreToolUse: [{ matcher: 'x' }] },
-      });
-      expect(serialized).not.toContain('hooks:');
     });
   });
 

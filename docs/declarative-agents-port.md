@@ -8,6 +8,32 @@ coordinating with the workflow port in issue [#4721][i4721] / PR [#4732][p4732].
 [i4721]: https://github.com/QwenLM/qwen-code/issues/4721
 [p4732]: https://github.com/QwenLM/qwen-code/pull/4732
 
+## Implementation status (vertical-sliced)
+
+PR [#4842][p4842] ships only the fields that have an end-to-end runtime path
+today. The remaining fields are deferred to follow-up PRs that first add the
+prerequisite infrastructure they need.
+
+| Field             | Status in this PR | Why deferred / prerequisite                                                 |
+| ----------------- | ----------------- | --------------------------------------------------------------------------- |
+| `permissionMode`  | **shipped**       | bridges to existing qwen `approvalMode` at parse time                       |
+| `maxTurns`        | **shipped**       | wired into existing `runConfig.max_turns` runtime path                      |
+| `color` allowlist | **shipped**       | tightens existing field to CC's `_Y` set + `auto` legacy sentinel handling  |
+| `effort`          | deferred          | no model-layer `effort` parameter exists yet in qwen providers              |
+| `mcpServers`      | deferred          | needs nested-aware YAML parser (replace `yaml-parser.ts` with `js-yaml`)    |
+| `hooks`           | deferred          | needs nested-aware YAML parser (same as above)                              |
+| `memory`          | deferred          | qwen's auto-memory has no `user`/`project`/`local` scope distinction yet    |
+| `isolation`       | deferred          | workflow PR #4732 owns the runtime; per-agent default lands when that lands |
+| `initialPrompt`   | deferred          | requires `--agent` CLI flag (no main-session-agent infra in qwen)           |
+| `skills`          | deferred          | requires SkillManager consumption of `config.skills`                        |
+
+The full reverse-engineering record below is retained as the design reference
+for the follow-up PRs — schema constants, DL7/Ig5 semantics, error messages,
+and the coordination matrix with workflow are still load-bearing for that
+work even though the data carriers are not shipped today.
+
+[p4842]: https://github.com/QwenLM/qwen-code/pull/4842
+
 ---
 
 ## Phase 0 — Boundaries

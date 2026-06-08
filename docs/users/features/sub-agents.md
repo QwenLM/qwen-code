@@ -277,34 +277,25 @@ disallowedTools:
 
 #### Claude Code Compatibility Fields
 
-Qwen Code accepts the full set of frontmatter fields that Claude Code's
-`.claude/agents/*.md` schema uses, so you can drop a Claude Code agent file
-into `.qwen/agents/` and it will parse identically. Optional fields with
-invalid values are silently dropped at parse time rather than rejected — the
-same lenient posture Claude Code uses.
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
 
-| Field            | Type             | Notes                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `permissionMode` | string           | Enum: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time. When both are set, `approvalMode` wins.                                                                                                                                                                                                                                 |
-| `effort`         | string \| number | Thinking effort: `low`, `medium`, `high`, `xhigh`, `max`, or a positive integer. The alias `med` resolves to `medium`.                                                                                                                                                                                                                                                                          |
-| `maxTurns`       | number           | Positive integer. Caps the agent's turn budget. Overrides the legacy nested `runConfig.max_turns` when both are present.                                                                                                                                                                                                                                                                        |
-| `skills`         | string \| array  | List of skill names. Accepts a comma-separated string (`"lint, format"`) or a YAML array. Carried through to the runtime; per-skill semantics land in a follow-up.                                                                                                                                                                                                                              |
-| `initialPrompt`  | string           | Initial message auto-submitted when the agent runs as the main-session agent (e.g. via a future `--agent` flag). Has no effect when the agent runs as a subagent.                                                                                                                                                                                                                               |
-| `memory`         | string           | Enum: `user`, `project`, `local`. Memory scope tag. Carried verbatim; runtime semantics land in a follow-up.                                                                                                                                                                                                                                                                                    |
-| `isolation`      | string           | Currently only `worktree` is valid. Used as the per-agent default; when a workflow specifies its own isolation per-call, the workflow value wins.                                                                                                                                                                                                                                               |
-| `mcpServers`     | array            | Per-agent MCP-server overrides. **Limited support**: qwen-code's lightweight YAML parser only handles 1 level of nesting. Flat array-of-strings form (`mcpServers: [filesystem-server]`) reads cleanly; the nested CC form (`- name: { type: stdio, command: node }`) is garbled on read. `/agents` edits drop the field rather than risk corruption. Full nested support lands with `js-yaml`. |
-| `hooks`          | object           | Per-agent hook overrides. **Limited support**: hooks require nested YAML throughout, which the local parser cannot represent. Drop-in CC `hooks:` blocks will be misread. Carried as a placeholder for forward compatibility; the field works correctly once `js-yaml` lands.                                                                                                                   |
-| `color`          | string           | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors Claude Code's `_Y`). The legacy qwen sentinel `auto` is also accepted for backward compatibility. Values outside both lists are silently dropped.                                                                                                                                       |
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                                                |
+| ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                                               |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Overrides the legacy nested `runConfig.max_turns` when both are present; the legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                                                                |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is accepted on read and normalised to undefined for round-trip parity with the existing CLI helpers. Other values are silently dropped on parse. |
 
-Example combining several fields:
+Example:
 
 ```
 ---
 name: rigorous-reviewer
-description: Deep code review with high thinking effort and a turn cap
-effort: high
-maxTurns: 50
+description: Deep code review with a turn cap
 permissionMode: plan
+maxTurns: 50
 color: cyan
 tools:
   - read_file
@@ -315,6 +306,13 @@ tools:
 You are a code reviewer. Analyze the code thoroughly and report findings
 ordered by severity.
 ```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation`, `mcpServers`, `hooks` — are documented in the
+declarative-agent design doc and land in follow-up PRs once the prerequisite
+infrastructure exists (`effort` needs a model-layer parameter; `memory`
+needs a scoped memory subsystem; `mcpServers` / `hooks` need a nested-aware
+YAML parser; `--agent` CLI flag enables `initialPrompt`; etc.).
 
 #### Example Usage
 

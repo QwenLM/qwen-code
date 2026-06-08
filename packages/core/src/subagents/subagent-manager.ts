@@ -49,13 +49,9 @@ import { BuiltinAgentRegistry } from './builtin-agents.js';
 import {
   COLOR_VALUES,
   isColor,
-  isIsolation,
-  isMemory,
   isPermissionMode,
   parseBackground,
-  parseEffort,
   parseMaxTurns,
-  parseStringOrArray,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
@@ -638,37 +634,9 @@ export class SubagentManager {
       frontmatter['permissionMode'] = config.permissionMode;
     }
 
-    if (config.effort !== undefined) {
-      frontmatter['effort'] = config.effort;
-    }
-
     if (config.maxTurns !== undefined) {
       frontmatter['maxTurns'] = config.maxTurns;
     }
-
-    if (config.skills && config.skills.length > 0) {
-      frontmatter['skills'] = config.skills;
-    }
-
-    if (config.initialPrompt) {
-      frontmatter['initialPrompt'] = config.initialPrompt;
-    }
-
-    if (config.memory) {
-      frontmatter['memory'] = config.memory;
-    }
-
-    if (config.isolation) {
-      frontmatter['isolation'] = config.isolation;
-    }
-
-    // NOTE: mcpServers and hooks are intentionally NOT serialised. They are
-    // carried verbatim from the file into in-memory config, but the local
-    // yaml-parser only formats one level of nesting and would mangle their
-    // shape on emit. Until a real YAML library is wired in, the
-    // `updateSubagent` write path will drop these fields rather than corrupt
-    // them. Users who edit them manually retain their values through reads;
-    // see docs/users/features/sub-agents.md for the limitation.
 
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
@@ -1278,14 +1246,6 @@ function parseSubagentContent(
         : undefined;
     const effectiveApprovalMode = approvalMode ?? bridgedApprovalMode;
 
-    // effort: DL7 GN enum or integer; `med` alias normalises to `medium`.
-    const effort = parseEffort(frontmatter['effort']);
-    if (frontmatter['effort'] !== undefined && effort === undefined) {
-      debugLogger.warn(
-        `Agent file ${filePath} has invalid effort '${frontmatter['effort']}'. Dropping field.`,
-      );
-    }
-
     // maxTurns: positive integer (or numeric string).
     const maxTurns = parseMaxTurns(frontmatter['maxTurns']);
     if (frontmatter['maxTurns'] !== undefined && maxTurns === undefined) {
@@ -1293,43 +1253,6 @@ function parseSubagentContent(
         `Agent file ${filePath} has invalid maxTurns '${frontmatter['maxTurns']}'. Dropping field.`,
       );
     }
-
-    // skills: comma-separated string or YAML array.
-    const skills = parseStringOrArray(frontmatter['skills']);
-
-    // initialPrompt: any non-empty-after-trim string.
-    const initialPromptRaw = frontmatter['initialPrompt'];
-    const initialPrompt =
-      typeof initialPromptRaw === 'string' && initialPromptRaw.trim().length > 0
-        ? initialPromptRaw
-        : undefined;
-
-    // memory: CC enum.
-    const memoryRaw = frontmatter['memory'];
-    const memory = isMemory(memoryRaw) ? memoryRaw : undefined;
-    if (memoryRaw !== undefined && memoryRaw !== null && memory === undefined) {
-      debugLogger.warn(
-        `Agent file ${filePath} has invalid memory '${memoryRaw}'. Dropping field.`,
-      );
-    }
-
-    // isolation: CC enum (currently "worktree" only).
-    const isolationRaw = frontmatter['isolation'];
-    const isolation = isIsolation(isolationRaw) ? isolationRaw : undefined;
-    if (
-      isolationRaw !== undefined &&
-      isolationRaw !== null &&
-      isolation === undefined
-    ) {
-      debugLogger.warn(
-        `Agent file ${filePath} has invalid isolation '${isolationRaw}'. Dropping field.`,
-      );
-    }
-
-    // mcpServers / hooks: loose validation per CC Ig5 (z.unknown()). Carried
-    // verbatim; runtime semantics deferred to follow-up PRs.
-    const mcpServers = frontmatter['mcpServers'];
-    const hooks = frontmatter['hooks'];
 
     const config: SubagentConfig = {
       name,
@@ -1345,14 +1268,7 @@ function parseSubagentContent(
       level,
       ...(background ? { background } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),
-      ...(effort !== undefined ? { effort } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
-      ...(skills !== undefined ? { skills } : {}),
-      ...(initialPrompt !== undefined ? { initialPrompt } : {}),
-      ...(memory !== undefined ? { memory } : {}),
-      ...(isolation !== undefined ? { isolation } : {}),
-      ...(mcpServers !== undefined ? { mcpServers } : {}),
-      ...(hooks !== undefined ? { hooks } : {}),
     };
 
     // Validate the parsed configuration

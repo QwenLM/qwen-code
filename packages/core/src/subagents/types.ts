@@ -120,69 +120,11 @@ export interface SubagentConfig {
   permissionMode?: string;
 
   /**
-   * Optional thinking-effort hint. Either one of `low | medium | high | xhigh
-   * | max` (with `med` aliased to `medium`) or a positive integer. Maps to
-   * Claude Code's DL7 `effort` field.
-   */
-  effort?: string | number;
-
-  /**
    * Optional maximum number of turns before the agent halts. Positive integer.
    * Top-level promotion of the legacy `runConfig.max_turns` field; when both
    * are set, top-level `maxTurns` wins.
    */
   maxTurns?: number;
-
-  /**
-   * Optional list of skill names to expose to this agent. Matches CC `skills`
-   * frontmatter field.
-   */
-  skills?: string[];
-
-  /**
-   * Optional initial prompt automatically submitted when the agent becomes
-   * the main-session agent (via `--agent` or settings). Has no effect when
-   * the agent runs as a subagent.
-   */
-  initialPrompt?: string;
-
-  /**
-   * Optional memory binding. One of `user | project | local`. Carried verbatim
-   * for CC parity; runtime semantics are deferred to a follow-up PR.
-   */
-  memory?: string;
-
-  /**
-   * Optional isolation mode. Currently the only valid value is `worktree`.
-   * Used as the per-agent default; per-call workflow `opts.isolation` (when
-   * present) overrides this. Carried verbatim for CC parity; runtime
-   * semantics are owned by the workflow port (#4721 / PR #4732).
-   */
-  isolation?: string;
-
-  /**
-   * Optional MCP-server overrides. Carried verbatim for CC parity; runtime
-   * semantics are deferred to a follow-up PR.
-   *
-   * **Known limitation:** qwen-code's lightweight `yaml-parser.ts` only handles
-   * one level of YAML nesting. Flat forms — array of server names, e.g.
-   * `mcpServers: [filesystem-server, redis-server]` — round-trip cleanly.
-   * Nested CC forms (`mcpServers: - name: { type: stdio, command: node }`)
-   * are read with deeper keys collapsed or leaked. Full nested support lands
-   * when this codebase wires in `js-yaml`.
-   */
-  mcpServers?: unknown;
-
-  /**
-   * Optional hooks. Carried verbatim for CC parity; runtime semantics are
-   * deferred to a follow-up PR.
-   *
-   * **Known limitation:** hooks fundamentally require nested YAML, which
-   * qwen-code's `yaml-parser.ts` cannot represent (see `mcpServers` above).
-   * In practice the field is shaped correctly only for trivial inputs; full
-   * support lands with `js-yaml`.
-   */
-  hooks?: unknown;
 
   /**
    * Indicates whether this is a built-in agent.

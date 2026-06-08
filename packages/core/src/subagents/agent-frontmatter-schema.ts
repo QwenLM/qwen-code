@@ -20,15 +20,6 @@
  * its semantics would break existing `.qwen/agents/*.md` files.
  */
 
-/** Effort enum (DL7 `GN` constant). */
-export const EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
-export type EffortValue = (typeof EFFORT_VALUES)[number];
-
-/** Effort aliases (DL7 `P37` constant). */
-export const EFFORT_ALIASES: Readonly<Record<string, EffortValue>> = {
-  med: 'medium',
-};
-
 /** Permission mode enum (DL7 `$E` / `kc` constant). */
 export const PERMISSION_MODE_VALUES = [
   'acceptEdits',
@@ -39,18 +30,6 @@ export const PERMISSION_MODE_VALUES = [
   'plan',
 ] as const;
 export type PermissionModeValue = (typeof PERMISSION_MODE_VALUES)[number];
-
-/** Memory enum (CC parity). */
-export const MEMORY_VALUES = ['user', 'project', 'local'] as const;
-export type MemoryValue = (typeof MEMORY_VALUES)[number];
-
-/**
- * Isolation enum (CC parity). The CC binary also has a `["none","worktree"]`
- * schema at strings:313284, but that belongs to background-session settings,
- * NOT to the agent frontmatter — verified during reverse engineering.
- */
-export const ISOLATION_VALUES = ['worktree'] as const;
-export type IsolationValue = (typeof ISOLATION_VALUES)[number];
 
 /** Color allowlist (DL7 `_Y` constant). Values outside this list are silently dropped. */
 export const COLOR_VALUES = [
@@ -149,56 +128,11 @@ export function parseMaxTurns(value: unknown): number | undefined {
   return candidate;
 }
 
-/**
- * Parse an effort value. Accepts EFFORT_VALUES literals, the `med → medium`
- * alias, or a positive integer. Returns `undefined` otherwise.
- */
-export function parseEffort(value: unknown): EffortValue | number | undefined {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) return undefined;
-    const aliased = EFFORT_ALIASES[trimmed];
-    if (aliased) return aliased;
-    if ((EFFORT_VALUES as readonly string[]).includes(trimmed)) {
-      return trimmed as EffortValue;
-    }
-    // CC parity: DL7 falls back to parseInt for non-enum strings so that
-    // `effort: "5"` (quoted YAML number) round-trips like `effort: 5`.
-    const asInt = Number.parseInt(trimmed, 10);
-    if (!Number.isNaN(asInt) && String(asInt) === trimmed && asInt > 0) {
-      return asInt;
-    }
-    return undefined;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isInteger(value)) return undefined;
-    if (value <= 0) return undefined;
-    return value;
-  }
-  return undefined;
-}
-
 /** Type guard: value is a valid PERMISSION_MODE_VALUES literal. */
 export function isPermissionMode(value: unknown): value is PermissionModeValue {
   return (
     typeof value === 'string' &&
     (PERMISSION_MODE_VALUES as readonly string[]).includes(value)
-  );
-}
-
-/** Type guard: value is a valid MEMORY_VALUES literal. */
-export function isMemory(value: unknown): value is MemoryValue {
-  return (
-    typeof value === 'string' &&
-    (MEMORY_VALUES as readonly string[]).includes(value)
-  );
-}
-
-/** Type guard: value is a valid ISOLATION_VALUES literal. */
-export function isIsolation(value: unknown): value is IsolationValue {
-  return (
-    typeof value === 'string' &&
-    (ISOLATION_VALUES as readonly string[]).includes(value)
   );
 }
 
