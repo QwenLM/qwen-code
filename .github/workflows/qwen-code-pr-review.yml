@@ -41,7 +41,7 @@ concurrency:
     ${{ github.event_name == 'pull_request_target' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: "${{ github.event_name == 'pull_request_target' }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
   review-config:
