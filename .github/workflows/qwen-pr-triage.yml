@@ -99,7 +99,7 @@ jobs:
       cancel-in-progress: true
     runs-on: 'ubuntu-latest'
     outputs:
-      verdict: '${{ steps.run.outputs.verdict }}'
+      verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -124,6 +124,8 @@ jobs:
                 "run_shell_command(gh api)",
                 "run_shell_command(gh label list)",
                 "run_shell_command(curl)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(cat)",
                 "read_file",
                 "grep_search",
                 "glob"
@@ -133,12 +135,23 @@ jobs:
             }
           prompt: '/product-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
 
-      - name: 'Capture verdict'
+      - name: 'Read verdict from skill output'
         if: always()
         id: 'capture'
         run: |
-          # Default to pass if the action didn't explicitly fail
-          echo "verdict=${VERDICT:-pass}" >> "$GITHUB_OUTPUT"
+          VERDICT_FILE="/tmp/triage-results/product-decision.json"
+          if [ -f "$VERDICT_FILE" ]; then
+            VERDICT=$(jq -r '.verdict // "pass"' "$VERDICT_FILE")
+          else
+            # Skill didn't write verdict file — treat action exit code as signal
+            if [ "${{ steps.run.outcome }}" = "success" ]; then
+              VERDICT="pass"
+            else
+              VERDICT="fail"
+            fi
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "::notice::Product decision verdict: $VERDICT"
 
   # ─── Stage 2a: Code Review (parallel) ──────────────────────────────
   # Security: review reads PR diff via API (no code execution). Fork PRs
@@ -309,6 +322,7 @@ jobs:
         continue-on-error: true
 
       - name: 'Run approval-decision'
+        id: 'run'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -328,9 +342,22 @@ jobs:
                 "run_shell_command(gh pr view)",
                 "run_shell_command(gh pr review)",
                 "run_shell_command(gh api)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(cat)",
                 "read_file"
               ],
               "sandbox": false,
               "maxSessionTurns": 15
             }
           prompt: '/approval-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
+
+      - name: 'Read verdict from skill output'
+        if: always()
+        run: |
+          VERDICT_FILE="/tmp/triage-results/approval-decision.json"
+          if [ -f "$VERDICT_FILE" ]; then
+            VERDICT=$(jq -r '.verdict // "approve"' "$VERDICT_FILE")
+            echo "::notice::Approval decision verdict: $VERDICT"
+          else
+            echo "::warning::Approval skill did not write verdict file"
+          fi

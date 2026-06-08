@@ -132,13 +132,26 @@ EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.b
 
 ### 7. Output Verdict
 
-Print the verdict to stdout so the CI job can capture it:
+Write the verdict to a file so the CI workflow can read it:
 
-```
-VERDICT=pass
+```bash
+mkdir -p /tmp/triage-results
+cat > /tmp/triage-results/product-decision.json << 'VERDICT_EOF'
+{
+  "verdict": "pass",
+  "summary": "<one-line summary of decision>",
+  "blocking_reasons": []
+}
+VERDICT_EOF
 ```
 
-or `fail` (template failure, hard product rejection) or `needs_human` (escalated to maintainer).
+Possible `verdict` values:
+
+- `pass` — direction and approach are acceptable, proceed to review
+- `fail` — template missing, hard product rejection
+- `needs_human` — escalated to maintainer, cannot decide autonomously
+
+For `fail` or `needs_human`, populate `blocking_reasons` with specific concerns.
 
 ## Comment Style
 

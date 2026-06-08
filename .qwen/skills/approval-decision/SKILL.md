@@ -127,11 +127,19 @@ Escalate (genuinely unsure):
 
 ### 7. Output Verdict
 
-```
-VERDICT=approve
+Write the verdict to a file so the CI workflow can read it:
+
+```bash
+mkdir -p /tmp/triage-results
+cat > /tmp/triage-results/approval-decision.json << 'VERDICT_EOF'
+{
+  "verdict": "approve",
+  "summary": "<one-line summary of decision>"
+}
+VERDICT_EOF
 ```
 
-or `request_changes` or `escalate`.
+Possible `verdict` values: `approve`, `request_changes`, `escalate`.
 
 ## Comment Style
 
