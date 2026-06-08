@@ -121,24 +121,6 @@ vi.mock('../services/sleepInhibitor.js', () => ({
   acquireSleepInhibitor: mockAcquireSleepInhibitor,
 }));
 
-const { mockDebugLoggerWarn } = vi.hoisted(() => ({
-  mockDebugLoggerWarn: vi.fn(),
-}));
-
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: () => ({
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: mockDebugLoggerWarn,
-      error: vi.fn(),
-    }),
-  };
-});
-
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
