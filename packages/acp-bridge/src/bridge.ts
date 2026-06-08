@@ -293,6 +293,9 @@ interface SessionEntry {
    * inline session updates / permission requests can safely inherit this id.
    */
   activePromptOriginatorClientId?: string;
+  /** True while a prompt is executing on the FIFO, regardless of whether
+   *  an originator clientId is known. Used by the session reaper to avoid
+   *  killing sessions mid-prompt. */
   promptActive: boolean;
   /**
    * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
@@ -869,9 +872,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (shuttingDown) return;
       const now = Date.now();
       for (const [id, entry] of byId) {
-        if (entry.activePromptOriginatorClientId !== undefined) continue;
+        if (entry.promptActive) continue;
         if (entry.events.subscriberCount > 0) continue;
-        if (entry.clientIds.size > 0) continue;
+        // Note: clientIds.size is NOT checked here. Close-on-last-detach
+        // handles the normal path (client sends detach → immediate close).
+        // The reaper covers the crash path where detach was never sent —
+        // clientIds still > 0 but no SSE subscriber and no heartbeat for
+        // the configured TTL.
         const lastActive =
           entry.sessionLastSeenAt ?? Date.parse(entry.createdAt);
         const idle = now - lastActive;
@@ -1953,6 +1960,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       connection: ci.connection,
       events,
       promptQueue: Promise.resolve(),
+      promptActive: false,
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -2654,6 +2662,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (signal?.aborted) {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
+                entry.promptActive = true;
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2689,6 +2698,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptPromise = entry.connection
                   .prompt(normalized)
                   .finally(() => {
+                    entry.promptActive = false;
                     delete entry.activePromptOriginatorClientId;
                     entry.promptActive = false;
                   });
@@ -4383,11 +4393,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // disconnected. This is the symmetric rollback the server's
       // `!res.writable && session.attached` path calls into.
       //
-      // BkwQP: detachClient ONLY decrements; it does NOT reap on its
-      // own. Reaping is the spawn-owner's responsibility, and the spawn
-      // owner's `killSession({ requireZeroAttaches: true })` sets
-      // `spawnOwnerWantedKill` if they had to bail. Only when that
-      // tombstone is set do we complete the deferred reap from here.
+      // BkwQP: detachClient decrements attachCount and unregisters the
+      // client. Two close paths:
+      // 1. spawnOwnerWantedKill tombstone → killSession (deferred reap
+      //    from the spawn-handshake disconnect race).
+      // 2. clientIds.size === 0 → closeSessionImpl (last registered
+      //    client left; session closed immediately, JSONL preserved).
+      // The idle reaper serves as a backstop for clients that crash
+      // without sending a detach request.
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
@@ -4402,6 +4415,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // already validated all the conditions ourselves.
         await this.killSession(sessionId).catch(() => {
           /* best-effort; channel.exited will eventually reap anyway */
+        });
+      } else if (
+        entry.clientIds.size === 0 &&
+        entry.events.subscriberCount === 0
+      ) {
+        // Last registered client left AND no SSE subscribers remain.
+        // Close the session immediately so it doesn't linger in memory.
+        // The JSONL transcript on disk is preserved — session/load or
+        // session/resume can restore it later. The idle reaper serves
+        // as a backstop for the case where the detach request was never
+        // sent (client crash, kill -9, network failure).
+        await closeSessionImpl(sessionId, undefined, {
+          reason: 'last_client_detached',
+        }).catch((err) => {
+          writeStderrLine(
+            `qwen serve: close-on-last-detach failed for ` +
+              `${JSON.stringify(sessionId)}: ${String(err)}`,
+          );
         });
       }
     },

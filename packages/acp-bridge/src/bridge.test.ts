@@ -542,20 +542,23 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      bridge.recordHeartbeat(session.sessionId, { clientId: session.clientId });
+      // Attach two clients so detaching one doesn't trigger
+      // close-on-last-detach (which would remove the session entirely).
+      const s1 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const _s2 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.recordHeartbeat(s1.sessionId, { clientId: s1.clientId });
 
-      const before = bridge.getHeartbeatState(session.sessionId);
-      expect(before?.clientLastSeenAt.get(session.clientId!)).toBeDefined();
+      const before = bridge.getHeartbeatState(s1.sessionId);
+      expect(before?.clientLastSeenAt.get(s1.clientId!)).toBeDefined();
 
-      await bridge.detachClient(session.sessionId, session.clientId);
+      await bridge.detachClient(s1.sessionId, s1.clientId);
 
-      const after = bridge.getHeartbeatState(session.sessionId);
+      const after = bridge.getHeartbeatState(s1.sessionId);
       // session watermark stays — diagnostics still see "this session
-      // was alive at T"; per-client entry is gone since the client
-      // ref-count hit zero.
+      // was alive at T"; per-client entry for s1 is gone since its
+      // ref-count hit zero; s2's clientId is still present.
       expect(after?.sessionLastSeenAt).toBe(before?.sessionLastSeenAt);
-      expect(after?.clientLastSeenAt.size).toBe(0);
+      expect(after?.clientLastSeenAt.has(s1.clientId!)).toBe(false);
 
       await bridge.shutdown();
     });
@@ -9154,7 +9157,7 @@ describe('preheat', () => {
 // Session idle reaper
 // ---------------------------------------------------------------------------
 describe('session idle reaper', () => {
-  it('reaps an idle session after the timeout expires', async () => {
+  it('reaps an orphaned session whose client crashed (no detach sent)', async () => {
     vi.useFakeTimers();
     try {
       const handle = makeChannel();
@@ -9163,14 +9166,15 @@ describe('session idle reaper', () => {
         sessionReapIntervalMs: 1_000,
         sessionIdleTimeoutMs: 5_000,
       });
-      const session = await bridge.spawnOrAttach({
+      await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
       expect(bridge.sessionCount).toBe(1);
 
-      await bridge.detachClient(session.sessionId, session.clientId);
-
+      // Simulate client crash: client never sends detach, but SSE
+      // dropped and no heartbeat. clientIds still > 0 — only the
+      // reaper can catch this.
       await vi.advanceTimersByTimeAsync(6_000);
       expect(bridge.sessionCount).toBe(0);
 
@@ -9229,13 +9233,18 @@ describe('session idle reaper', () => {
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
-      await bridge.detachClient(session.sessionId, session.clientId);
+      // Subscribe BEFORE detach so the subscriber keeps the session alive
       const abort = new AbortController();
       bridge.subscribeEvents(session.sessionId, { signal: abort.signal });
+      // Detach — close-on-last-detach checks subscriberCount > 0 → skips
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
 
+      // Advance past idle timeout — subscriber still protects from reaper
       await vi.advanceTimersByTimeAsync(5_000);
       expect(bridge.sessionCount).toBe(1);
 
+      // Drop the subscriber — reaper catches it on next tick
       abort.abort();
       await vi.advanceTimersByTimeAsync(2_000);
       expect(bridge.sessionCount).toBe(0);
@@ -9246,29 +9255,37 @@ describe('session idle reaper', () => {
     }
   });
 
-  it('does NOT reap a session with registered clients', async () => {
+  it('does NOT reap a session with an active prompt (no SSE, no heartbeat)', async () => {
     vi.useFakeTimers();
     try {
-      const handle = makeChannel();
+      const handle = makeChannel({
+        promptImpl: () => new Promise<never>(() => {}),
+      });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         sessionReapIntervalMs: 1_000,
-        sessionIdleTimeoutMs: 3_000,
+        sessionIdleTimeoutMs: 2_000,
       });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
+      const promptPromise = bridge
+        .sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hi' }],
+        })
+        .catch(() => {});
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
 
+      // No subscriber, client registered but prompt active → reaper skips
       await vi.advanceTimersByTimeAsync(5_000);
       expect(bridge.sessionCount).toBe(1);
 
-      await bridge.detachClient(session.sessionId, session.clientId);
-
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(bridge.sessionCount).toBe(0);
-
       await bridge.shutdown();
+      await promptPromise;
     } finally {
       vi.useRealTimers();
     }
@@ -9390,7 +9407,7 @@ describe('session idle reaper', () => {
     await bridge.shutdown();
   });
 
-  it('reaps multiple idle sessions in one tick', async () => {
+  it('reaps multiple orphaned sessions in one tick', async () => {
     vi.useFakeTimers();
     try {
       const handle = makeChannel();
@@ -9399,24 +9416,21 @@ describe('session idle reaper', () => {
         sessionReapIntervalMs: 1_000,
         sessionIdleTimeoutMs: 3_000,
       });
-      const s1 = await bridge.spawnOrAttach({
+      await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
-      const s2 = await bridge.spawnOrAttach({
+      await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
-      const s3 = await bridge.spawnOrAttach({
+      await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
       expect(bridge.sessionCount).toBe(3);
 
-      await bridge.detachClient(s1.sessionId, s1.clientId);
-      await bridge.detachClient(s2.sessionId, s2.clientId);
-      await bridge.detachClient(s3.sessionId, s3.clientId);
-
+      // No detach — simulates client crash. Reaper catches all 3.
       await vi.advanceTimersByTimeAsync(4_000);
       expect(bridge.sessionCount).toBe(0);
 
@@ -9440,8 +9454,8 @@ describe('session idle reaper', () => {
         sessionScope: 'thread',
       });
 
-      await bridge.detachClient(session.sessionId, session.clientId);
-
+      // No detach — simulates a crashed client that still sends heartbeats
+      // (e.g. a headless API client with a keepalive loop).
       await vi.advanceTimersByTimeAsync(4_000);
       bridge.recordHeartbeat(session.sessionId);
       expect(bridge.sessionCount).toBe(1);
@@ -9496,13 +9510,12 @@ describe('session idle reaper', () => {
       });
       await bridge.detachClient(session.sessionId, session.clientId);
 
-      // Reaper closes the session after 3s idle
-      await vi.advanceTimersByTimeAsync(4_000);
+      // Close-on-last-detach fires immediately — session gone
       expect(bridge.sessionCount).toBe(0);
-      // Channel should still be alive — idle timer just started
+      // Channel should still be alive — channelIdleTimeoutMs grace
       expect(handle.killed).toBe(false);
 
-      // Channel idle timer fires after 2s more
+      // Channel idle timer fires after 2s
       await vi.advanceTimersByTimeAsync(2_000);
       expect(handle.killed).toBe(true);
 
@@ -9510,5 +9523,76 @@ describe('session idle reaper', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Close on last client detach
+// ---------------------------------------------------------------------------
+describe('close on last client detach', () => {
+  it('closes the session when the last client detaches', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionReapIntervalMs: 0,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.detachClient(session.sessionId, session.clientId);
+    expect(bridge.sessionCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
+  it('does NOT close when other clients remain', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionReapIntervalMs: 0,
+    });
+    const s1 = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+    const s2 = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+    expect(s2.attached).toBe(true);
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.detachClient(s1.sessionId, s1.clientId);
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.detachClient(s2.sessionId, s2.clientId);
+    expect(bridge.sessionCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
+  it('closes immediately on last detach (session removed from byId)', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionReapIntervalMs: 0,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(bridge.sessionCount).toBe(1);
+
+    // Last client detaches — session closed immediately, no reaper needed
+    await bridge.detachClient(session.sessionId, session.clientId);
+    expect(bridge.sessionCount).toBe(0);
+
+    // Session is gone from bridge but getHeartbeatState returns undefined
+    expect(bridge.getHeartbeatState(session.sessionId)).toBeUndefined();
+
+    await bridge.shutdown();
   });
 });

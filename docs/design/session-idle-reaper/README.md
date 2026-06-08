@@ -98,10 +98,19 @@ Bridge closure (createHttpAcpBridge)
 | `writerIdleTimeoutMs`                     | SSE subscriber            | Evicts a single stuck SSE subscriber                                             |
 | Disconnect reaper (server.ts)             | Spawn handshake           | Reaps sessions whose spawn-owner disconnected DURING the POST /session handshake |
 
-The session reaper fills the gap between "spawn-handshake reaper" (covers only
-the creation window) and "channel idle timer" (fires only when ALL sessions are
-gone). It covers the common case: a session was created successfully, used for a
-while, and then the client disappeared.
+Two mechanisms work together to cover session lifecycle cleanup:
+
+1. **Close-on-last-detach** (primary) — when `detachClient` removes the last
+   registered client AND no SSE subscribers remain, the session is closed
+   immediately via `closeSessionImpl`. This handles the normal path: user
+   closes a tab → React cleanup → `POST /session/:id/detach`.
+
+2. **Session idle reaper** (backstop) — periodic scan for sessions with no
+   active prompt and no SSE subscribers that haven't received a heartbeat
+   within the configured TTL. This catches the crash path: browser killed,
+   network dropped, `kill -9` — the detach request was never sent, so
+   `clientIds` still shows registered clients but the session is effectively
+   orphaned.
 
 ---
 
