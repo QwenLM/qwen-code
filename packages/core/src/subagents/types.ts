@@ -110,6 +110,69 @@ export interface SubagentConfig {
   background?: boolean;
 
   /**
+   * Optional Claude-Code-compatible permission mode (`acceptEdits`, `auto`,
+   * `bypassPermissions`, `default`, `dontAsk`, `plan`). Carried through from
+   * frontmatter for parity with `.claude/agents/*.md` files. At parse time it
+   * is normalised to {@link approvalMode} via
+   * `permissionModeToApprovalMode()`; if both `permissionMode` and
+   * `approvalMode` are present in frontmatter, `approvalMode` wins.
+   */
+  permissionMode?: string;
+
+  /**
+   * Optional thinking-effort hint. Either one of `low | medium | high | xhigh
+   * | max` (with `med` aliased to `medium`) or a positive integer. Maps to
+   * Claude Code's DL7 `effort` field.
+   */
+  effort?: string | number;
+
+  /**
+   * Optional maximum number of turns before the agent halts. Positive integer.
+   * Top-level promotion of the legacy `runConfig.max_turns` field; when both
+   * are set, top-level `maxTurns` wins.
+   */
+  maxTurns?: number;
+
+  /**
+   * Optional list of skill names to expose to this agent. Matches CC `skills`
+   * frontmatter field.
+   */
+  skills?: string[];
+
+  /**
+   * Optional initial prompt automatically submitted when the agent becomes
+   * the main-session agent (via `--agent` or settings). Has no effect when
+   * the agent runs as a subagent.
+   */
+  initialPrompt?: string;
+
+  /**
+   * Optional memory binding. One of `user | project | local`. Carried verbatim
+   * for CC parity; runtime semantics are deferred to a follow-up PR.
+   */
+  memory?: string;
+
+  /**
+   * Optional isolation mode. Currently the only valid value is `worktree`.
+   * Used as the per-agent default; per-call workflow `opts.isolation` (when
+   * present) overrides this. Carried verbatim for CC parity; runtime
+   * semantics are owned by the workflow port (#4721 / PR #4732).
+   */
+  isolation?: string;
+
+  /**
+   * Optional MCP-server overrides. Carried verbatim for CC parity; runtime
+   * semantics are deferred to a follow-up PR. Validated lazily at run time.
+   */
+  mcpServers?: unknown;
+
+  /**
+   * Optional hooks. Carried verbatim for CC parity; runtime semantics are
+   * deferred to a follow-up PR. Validated lazily at run time.
+   */
+  hooks?: unknown;
+
+  /**
    * Indicates whether this is a built-in agent.
    * Built-in agents cannot be modified or deleted.
    */

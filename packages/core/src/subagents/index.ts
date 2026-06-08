@@ -37,5 +37,31 @@ export {
 // Validation system
 export { SubagentValidator } from './validation.js';
 
+// Declarative-agent frontmatter schema (CC 2.1.168 parity constants + parsers)
+export {
+  EFFORT_VALUES,
+  EFFORT_ALIASES,
+  PERMISSION_MODE_VALUES,
+  MEMORY_VALUES,
+  ISOLATION_VALUES,
+  COLOR_VALUES,
+  permissionModeToApprovalMode,
+  parseStringOrArray,
+  parseBackground,
+  parseMaxTurns,
+  parseEffort,
+  isPermissionMode,
+  isMemory,
+  isIsolation,
+  isColor,
+} from './agent-frontmatter-schema.js';
+export type {
+  EffortValue,
+  PermissionModeValue,
+  MemoryValue,
+  IsolationValue,
+  ColorValue,
+} from './agent-frontmatter-schema.js';
+
 // Main management class
 export { SubagentManager } from './subagent-manager.js';
