@@ -11,16 +11,29 @@
         margin: 2rem auto;
         padding: 0 1rem;
       }
-      h1 { font-size: 1.2rem; }
+      h1 {
+        font-size: 1.2rem;
+      }
       section {
         border: 1px solid #ccc;
         border-radius: 8px;
         padding: 1rem;
         margin-bottom: 1rem;
       }
-      input { padding: 0.4rem; font: inherit; }
-      button { padding: 0.4rem 0.8rem; font: inherit; cursor: pointer; }
-      #status { min-height: 1.2em; color: #444; margin-bottom: 0.5rem; }
+      input {
+        padding: 0.4rem;
+        font: inherit;
+      }
+      button {
+        padding: 0.4rem 0.8rem;
+        font: inherit;
+        cursor: pointer;
+      }
+      #status {
+        min-height: 1.2em;
+        color: #444;
+        margin-bottom: 0.5rem;
+      }
       .card {
         border: 1px solid #c80;
         background: #fffbe6;
@@ -56,6 +69,9 @@
       <button id="watch">Watch</button>
       <button id="stop" disabled>Stop</button>
     </section>
+    <section>
+      <button id="enable">Enable notifications</button>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -83,6 +99,44 @@
 
       const token = () => localStorage.getItem(TOKEN_KEY);
 
+      function urlBase64ToUint8Array(base64url) {
+        const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
+        const base64 = (base64url + padding)
+          .replace(/-/g, '+')
+          .replace(/_/g, '/');
+        const raw = atob(base64);
+        const out = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+      }
+
+      // Best-effort mirror of the bearer token into IndexedDB (DB qwen-rc, store
+      // auth, key token) for cycle-12 inline voting from the service worker.
+      // Wrapped so IndexedDB absence/errors never break pairing.
+      function idbPutToken(tok) {
+        try {
+          if (!('indexedDB' in self) || !tok) return;
+          const req = indexedDB.open('qwen-rc', 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains('auth')) {
+              db.createObjectStore('auth');
+            }
+          };
+          req.onsuccess = () => {
+            try {
+              const db = req.result;
+              const tx = db.transaction('auth', 'readwrite');
+              tx.objectStore('auth').put(tok, 'token');
+            } catch {
+              /* best-effort */
+            }
+          };
+        } catch {
+          /* best-effort */
+        }
+      }
+
       $('pair').onclick = async () => {
         const code = $('code').value.trim();
         if (!code) return setStatus('enter a code');
@@ -95,6 +149,7 @@
           if (!res.ok) return setStatus('invalid code (' + res.status + ')');
           const data = await res.json();
           localStorage.setItem(TOKEN_KEY, data.token);
+          idbPutToken(data.token);
           setStatus('paired; scopes: ' + (data.scopes || []).join(', '));
         } catch (e) {
           setStatus('pair failed: ' + e);
@@ -193,9 +248,7 @@
         setStatus('sending…');
         try {
           const res = await fetch(
-            '/rc/session/' +
-              encodeURIComponent(watchedSessionId) +
-              '/prompt',
+            '/rc/session/' + encodeURIComponent(watchedSessionId) + '/prompt',
             {
               method: 'POST',
               headers: {
@@ -293,6 +346,55 @@
           $('stop').disabled = true;
         }
       };
+
+      async function enableNotifications() {
+        // 1. guards
+        if (!token()) return setStatus('pair first');
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+          return setStatus('push unsupported');
+        }
+        $('enable').disabled = true;
+        try {
+          // 2. register the service worker
+          const reg = await navigator.serviceWorker.register('/ui/sw.js');
+          // 3. request notification permission
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') return setStatus('notifications denied');
+          // 4. fetch the VAPID public key
+          const vapidRes = await fetch('/rc/push/vapid', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!vapidRes.ok) {
+            return setStatus('vapid fetch failed (' + vapidRes.status + ')');
+          }
+          const { applicationServerKey } = await vapidRes.json();
+          // 5. subscribe via the push manager
+          const sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(applicationServerKey),
+          });
+          // 6. POST the subscription to the gateway
+          const subRes = await fetch('/rc/push/subscribe', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({
+              subscription: sub.toJSON ? sub.toJSON() : sub,
+            }),
+          });
+          idbPutToken(token());
+          if (subRes.status === 201) setStatus('notifications enabled');
+          else setStatus('enable failed (' + subRes.status + ')');
+        } catch (e) {
+          setStatus('enable failed: ' + e);
+        } finally {
+          $('enable').disabled = false;
+        }
+      }
+
+      $('enable').onclick = enableNotifications;
     </script>
   </body>
 </html>
