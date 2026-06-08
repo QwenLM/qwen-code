@@ -542,7 +542,7 @@ function daemonToolBlockToToolCall(
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
     parentToolCallId: block.parentToolCallId,
-    startTime: blockStartTime(block),
+    startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
   };
 }
@@ -579,14 +579,10 @@ function permissionBlockToToolCall(
     status: 'pending',
     kind: inferToolKind(toolName, kind),
     args: rawInput,
-    startTime: blockStartTime(block),
+    startTime: block.createdAt,
   };
 
   return syntheticTool;
-}
-
-function blockStartTime(block: DaemonTranscriptBlock): number {
-  return block.serverTimestamp ?? block.clientReceivedAt;
 }
 
 function rememberPermissionToolInfo(
