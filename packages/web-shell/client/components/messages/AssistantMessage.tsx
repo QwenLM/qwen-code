@@ -31,7 +31,17 @@ export const AssistantMessage = memo(function AssistantMessage({
   useEffect(() => {
     const el = bodyRef.current;
     if (!el || !compactThinking) return;
-    setOverflowing(el.scrollHeight > el.clientHeight);
+
+    const check = () => {
+      if (thinkingExpanded) return;
+      setOverflowing(el.scrollHeight > el.clientHeight);
+    };
+
+    check();
+
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [thinking, compactThinking, thinkingExpanded]);
 
   const handleToggle = useCallback(() => {
@@ -46,12 +56,23 @@ export const AssistantMessage = memo(function AssistantMessage({
           <div className={styles.thinkingBody}>
             <div
               ref={bodyRef}
-              className={collapsed ? styles.thinkingCollapsed : undefined}
+              className={
+                collapsed
+                  ? overflowing
+                    ? `${styles.thinkingCollapsed} ${styles.thinkingCollapsedMask}`
+                    : styles.thinkingCollapsed
+                  : undefined
+              }
             >
               <Markdown content={thinking} source="thinking" />
             </div>
             {compactThinking && (overflowing || thinkingExpanded) && (
-              <button className={styles.expandToggle} onClick={handleToggle}>
+              <button
+                className={styles.expandToggle}
+                onClick={handleToggle}
+                aria-expanded={!collapsed}
+                aria-label="Toggle thinking details"
+              >
                 {collapsed ? '···' : '▲'}
               </button>
             )}

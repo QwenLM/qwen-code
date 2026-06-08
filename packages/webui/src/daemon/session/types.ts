@@ -20,7 +20,6 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonShellCommandResult,
-  DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonWorkspaceProvidersStatus,
@@ -141,23 +140,6 @@ export interface DaemonTodoList {
   status: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
-}
-
-export interface DaemonSubAgentRun {
-  blockId: string;
-  toolCallId: string;
-  toolName: string;
-  title: string;
-  status: string;
-  subagentType?: string;
-  createdAt: number;
-  updatedAt: number;
-  isActive: boolean;
-  childText: string;
-  childToolBlocks: DaemonToolTranscriptBlock[];
-  rawInput?: unknown;
-  rawOutput?: unknown;
-  raw: DaemonToolTranscriptBlock;
 }
 
 export interface DaemonSessionActions {

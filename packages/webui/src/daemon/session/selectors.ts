@@ -11,7 +11,6 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonPromptStatus,
-  DaemonSubAgentRun,
   DaemonTodoItem,
   DaemonTodoList,
 } from './types.js';
@@ -105,9 +104,10 @@ export function parseDaemonTodoItemsFromEntries(
         id,
         content,
         status: getTodoStatus(getString(item, 'status')),
-        ...(getTodoPriority(getString(item, 'priority'))
-          ? { priority: getTodoPriority(getString(item, 'priority')) }
-          : {}),
+        ...(() => {
+          const priority = getTodoPriority(getString(item, 'priority'));
+          return priority ? { priority } : {};
+        })(),
       },
     ];
   });
@@ -142,72 +142,6 @@ export function selectDaemonSubAgentToolBlocks(
     (block): block is DaemonToolTranscriptBlock =>
       block.kind === 'tool' && isDaemonSubAgentToolBlock(block),
   );
-}
-
-export function selectDaemonSubAgentRuns(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonSubAgentRun[] {
-  const runsByCallId = new Map<string, DaemonSubAgentRun>();
-  const childToolsByParentId = new Map<
-    string,
-    Map<string, DaemonToolTranscriptBlock>
-  >();
-  const childTextByParentId = new Map<string, string>();
-
-  for (const block of blocks) {
-    if (
-      (block.kind === 'assistant' || block.kind === 'thought') &&
-      block.parentToolCallId
-    ) {
-      childTextByParentId.set(
-        block.parentToolCallId,
-        `${childTextByParentId.get(block.parentToolCallId) ?? ''}${block.text}`,
-      );
-      continue;
-    }
-
-    if (block.kind !== 'tool') continue;
-
-    if (block.parentToolCallId) {
-      const childTools =
-        childToolsByParentId.get(block.parentToolCallId) ?? new Map();
-      childTools.set(block.toolCallId, block);
-      childToolsByParentId.set(block.parentToolCallId, childTools);
-      continue;
-    }
-
-    if (!isDaemonSubAgentToolBlock(block)) continue;
-
-    const existing = runsByCallId.get(block.toolCallId);
-    const subagentType = getSubAgentType(block);
-    runsByCallId.set(block.toolCallId, {
-      blockId: block.id,
-      toolCallId: block.toolCallId,
-      toolName: block.toolName || 'unknown',
-      title: block.title,
-      status: block.status,
-      ...(subagentType ? { subagentType } : {}),
-      createdAt: existing?.createdAt ?? block.createdAt,
-      updatedAt: block.updatedAt,
-      isActive: isDaemonActiveToolStatus(block.status),
-      childText: existing?.childText ?? '',
-      childToolBlocks: existing?.childToolBlocks ?? [],
-      ...(block.rawInput !== undefined ? { rawInput: block.rawInput } : {}),
-      ...(block.rawOutput !== undefined ? { rawOutput: block.rawOutput } : {}),
-      raw: block,
-    });
-  }
-
-  return Array.from(runsByCallId.values()).map((run) => {
-    const childTools = childToolsByParentId.get(run.toolCallId);
-    return {
-      ...run,
-      childText: childTextByParentId.get(run.toolCallId) ?? run.childText,
-      childToolBlocks: childTools
-        ? Array.from(childTools.values())
-        : run.childToolBlocks,
-    };
-  });
 }
 
 export function selectDaemonTranscriptStreamingState(
@@ -254,25 +188,6 @@ function isStreamingTextBlock(block: DaemonTextTranscriptBlock): boolean {
 
 function isRunningToolBlock(block: DaemonToolTranscriptBlock): boolean {
   return block.status === 'running' || block.status === 'in_progress';
-}
-
-function isDaemonActiveToolStatus(status: string): boolean {
-  return (
-    status === 'pending' ||
-    status === 'confirming' ||
-    status === 'background' ||
-    status === 'running' ||
-    status === 'in_progress'
-  );
-}
-
-function getSubAgentType(block: DaemonToolTranscriptBlock): string | undefined {
-  if (block.subagentType) return block.subagentType;
-  const rawInput = getRecord(block.rawInput);
-  const inputType = getString(rawInput, 'subagent_type');
-  if (inputType) return inputType;
-  const rawOutput = getRecord(block.rawOutput);
-  return getString(rawOutput, 'subagentName');
 }
 
 function getTodoArray(

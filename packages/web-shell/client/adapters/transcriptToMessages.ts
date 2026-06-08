@@ -43,9 +43,10 @@ function parseDaemonTodoItemsFromEntries(
         id,
         content,
         status: getTodoStatus(getString(item, 'status')),
-        ...(getTodoPriority(getString(item, 'priority'))
-          ? { priority: getTodoPriority(getString(item, 'priority')) }
-          : {}),
+        ...(() => {
+          const priority = getTodoPriority(getString(item, 'priority'));
+          return priority ? { priority } : {};
+        })(),
       },
     ];
   });
@@ -664,8 +665,9 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
-  const normalized = block.toolName?.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return normalized === 'askuserquestion';
+  if (!block.toolName) return false;
+  const normalized = block.toolName.toLowerCase();
+  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
 function getToolContentText(

@@ -15,7 +15,6 @@ import {
   selectDaemonActiveTodoList,
   selectDaemonLatestTodoList,
   selectDaemonPendingPermissions,
-  selectDaemonSubAgentRuns,
   selectDaemonSubAgentToolBlocks,
   selectDaemonStreamingState,
   selectDaemonTodoLists,
@@ -162,70 +161,6 @@ describe('daemon selectors', () => {
       parent,
       child,
       rawTask,
-    ]);
-  });
-
-  it('groups top-level sub-agent runs with child tools and text', () => {
-    const parent = block({
-      kind: 'tool',
-      id: 'agent-block',
-      toolCallId: 'agent-1',
-      title: 'Agent',
-      status: 'in_progress',
-      toolName: 'agent',
-      rawInput: { subagent_type: 'researcher' },
-      createdAt: 10,
-      updatedAt: 20,
-    });
-    const childText = block({
-      kind: 'assistant',
-      id: 'agent-text',
-      text: 'working',
-      parentToolCallId: 'agent-1',
-    });
-    const childTool = block({
-      kind: 'tool',
-      id: 'child-block',
-      toolCallId: 'child-1',
-      title: 'Read',
-      status: 'completed',
-      toolName: 'read_file',
-      parentToolCallId: 'agent-1',
-    });
-    const completed = block({
-      kind: 'tool',
-      id: 'task-block',
-      toolCallId: 'task-1',
-      title: 'Task',
-      status: 'completed',
-      toolName: 'task',
-      createdAt: 30,
-      updatedAt: 40,
-    });
-
-    expect(
-      selectDaemonSubAgentRuns([parent, childText, childTool, completed]),
-    ).toMatchObject([
-      {
-        blockId: 'agent-block',
-        toolCallId: 'agent-1',
-        toolName: 'agent',
-        title: 'Agent',
-        status: 'in_progress',
-        subagentType: 'researcher',
-        createdAt: 10,
-        updatedAt: 20,
-        isActive: true,
-        childText: 'working',
-        childToolBlocks: [{ toolCallId: 'child-1' }],
-      },
-      {
-        blockId: 'task-block',
-        toolCallId: 'task-1',
-        toolName: 'task',
-        status: 'completed',
-        isActive: false,
-      },
     ]);
   });
 

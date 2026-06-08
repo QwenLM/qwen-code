@@ -59,6 +59,9 @@
 .thinkingCollapsed {
   max-height: calc(5 * 1.5em);
   overflow: hidden;
+}
+
+.thinkingCollapsedMask {
   mask-image: linear-gradient(to bottom, #000 60%, transparent);
   -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
 }

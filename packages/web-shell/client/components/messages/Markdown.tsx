@@ -464,7 +464,7 @@ export const Markdown = memo(function Markdown({
 
   return (
     <div
-      className={source !== 'thinking' ? styles.content : ''}
+      className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
     >
       <ReactMarkdown

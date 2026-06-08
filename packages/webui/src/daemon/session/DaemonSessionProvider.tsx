@@ -43,7 +43,6 @@ import {
   selectDaemonActiveTodoList,
   selectDaemonPendingPermissions,
   selectDaemonStreamingState,
-  selectDaemonSubAgentRuns,
 } from './selectors.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -63,7 +62,6 @@ import type {
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionProviderProps,
-  DaemonSubAgentRun,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
 } from './types.js';
@@ -78,7 +76,6 @@ export type {
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionProviderProps,
-  DaemonSubAgentRun,
   DaemonTodoItem,
   DaemonTodoList,
   DaemonTodoPriority,
@@ -977,11 +974,6 @@ export function useDaemonPendingPermissions() {
 export function useDaemonActiveTodoList() {
   const blocks = useDaemonTranscriptBlocks();
   return useMemo(() => selectDaemonActiveTodoList(blocks), [blocks]);
-}
-
-export function useDaemonSubAgentRuns(): DaemonSubAgentRun[] {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => selectDaemonSubAgentRuns(blocks), [blocks]);
 }
 
 export function useDaemonStreamingState() {

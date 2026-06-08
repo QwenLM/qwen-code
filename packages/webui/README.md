@@ -247,18 +247,16 @@ Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that cre
 
 ### Session hooks
 
-| Hook                            | Returns                                                                                                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `useTranscriptBlocks()`         | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                         |
-| `useTranscriptState()`          | Full `DaemonTranscriptState` (blocks + metadata)                                                        |
-| `useActions()`                  | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`  |
-| `useConnection()`               | `{ status, sessionId, currentModel, currentMode, commands, skills, models, tokenCount, contextWindow }` |
-| `useStreamingState()`           | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                     |
-| `usePromptStatus()`             | `'idle' \| 'waiting' \| 'streaming'`                                                                    |
-| `usePendingPermissions()`       | Unresolved permission blocks                                                                            |
-| `usePendingPermissionRequest()` | First pending permission mapped to UI-ready shape                                                       |
-| `useTodoLists()`                | All todo/plan lists from tool blocks                                                                    |
-| `useActiveTodoList()`           | Latest todo list with active items                                                                      |
+| Hook                      | Returns                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `useTranscriptBlocks()`   | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                         |
+| `useTranscriptState()`    | Full `DaemonTranscriptState` (blocks + metadata)                                                        |
+| `useActions()`            | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`  |
+| `useConnection()`         | `{ status, sessionId, currentModel, currentMode, commands, skills, models, tokenCount, contextWindow }` |
+| `useStreamingState()`     | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                     |
+| `usePromptStatus()`       | `'idle' \| 'waiting' \| 'streaming'`                                                                    |
+| `usePendingPermissions()` | Unresolved permission blocks                                                                            |
+| `useActiveTodoList()`     | Latest todo list with active items                                                                      |
 
 ### Workspace hooks
 

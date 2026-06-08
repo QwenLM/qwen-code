@@ -100,9 +100,6 @@ export { useDaemonSkills as useSkills } from './daemon/index.js';
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
-/** Sub-agent runs extracted from the current session transcript. */
-export { useDaemonSubAgentRuns as useSubAgentRuns } from './daemon/index.js';
-
 // ── Workspace Hooks ───────────────────────────────────────────────
 
 /** Workspace context value (file ops, directory listing). */
@@ -153,8 +150,6 @@ export type {
   DaemonSessionContextValue,
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
-  /** Top-level sub-agent run with parent block, child tool blocks, and child text. */
-  DaemonSubAgentRun,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
