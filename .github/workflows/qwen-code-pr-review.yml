@@ -40,6 +40,9 @@ concurrency:
 
 jobs:
   review-config:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'review_requested'
     runs-on: 'ubuntu-latest'
     permissions: {}
     outputs:
