@@ -29,7 +29,10 @@ export type AuditAction =
   | 'push_sent'
   | 'push_send_failed'
   | 'push_subscription_expired'
-  | 'policy_decision';
+  | 'policy_decision'
+  | 'push_suppressed'
+  | 'routing_snoozed'
+  | 'routing_unsnoozed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -48,6 +51,9 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'push_send_failed',
   'push_subscription_expired',
   'policy_decision',
+  'push_suppressed',
+  'routing_snoozed',
+  'routing_unsnoozed',
 ];
 
 export interface AuditEntry {
