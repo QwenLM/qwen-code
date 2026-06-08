@@ -517,7 +517,8 @@ export default {
   'No extensions installed.': '未安装扩展。',
   'Extension "{{name}}" not found.': '未找到扩展 "{{name}}"。',
   'No extensions to update.': '没有可更新的扩展。',
-  'Usage: /extensions install <source>': '用法：/extensions install <来源>',
+  'Usage: /extensions install <source> [--scope user|project]':
+    '用法：/extensions install <来源> [--scope user|project]',
   'Installing extension from "{{source}}"...':
     '正在从 "{{source}}" 安装扩展...',
   'Extension "{{name}}" installed successfully.': '扩展 "{{name}}" 安装成功。',
@@ -546,6 +547,15 @@ export default {
     '--ref 和 --auto-update 不适用于市场扩展。',
   'Extension "{{name}}" installed successfully and enabled.':
     '扩展 "{{name}}" 安装成功并已启用。',
+  'Extension "{{name}}" installed successfully and enabled for this project.':
+    '扩展 "{{name}}" 安装成功并已为当前项目启用。',
+  'Extension "{{name}}" linked successfully and enabled for this project.':
+    '扩展 "{{name}}" 链接成功并已为当前项目启用。',
+  'Scope:': '作用域：',
+  'Install scope: "user" (global, default) or "project" (only the current project).':
+    '安装作用域："user"（全局，默认）或 "project"（仅当前项目）。',
+  'Scope to uninstall from when an extension exists at both user and project scope.':
+    '当扩展同时存在于用户级和项目级时，指定从哪个作用域卸载。',
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安装的扩展的 GitHub URL、本地路径或市场源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安装的 Git 引用。',

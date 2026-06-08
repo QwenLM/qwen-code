@@ -11,6 +11,7 @@ import {
   getScopedEnvContents,
 } from './extensionSettings.js';
 import type { ExtensionConfig } from './extensionManager.js';
+import { ExtensionScope } from './types.js';
 import { ExtensionStorage } from './storage.js';
 import prompts from 'prompts';
 import * as fsPromises from 'node:fs/promises';
@@ -557,6 +558,49 @@ describe('extensionSettings', () => {
         VAR1: 'workspace-value1',
         SENSITIVE_VAR: 'workspace-secret',
       });
+    });
+
+    it('isolates project-scope secrets from user-scope secrets', async () => {
+      // A secret stored for a user-scoped extension.
+      const userKeychain = new KeychainTokenStorage(
+        `Qwen Code Extensions test-ext 12345`,
+      );
+      await userKeychain.setSecret('SENSITIVE_VAR', 'user-secret');
+
+      // Reading the same-named extension at project scope must NOT surface the
+      // user-scope secret.
+      const projectContents = await getScopedEnvContents(
+        config,
+        extensionId,
+        ExtensionSettingScope.USER,
+        ExtensionScope.Project,
+        tempWorkspaceDir,
+      );
+      expect(projectContents['SENSITIVE_VAR']).toBeUndefined();
+
+      // A secret stored for the project-scoped extension is visible at project
+      // scope but not at user scope.
+      const projectKeychain = new KeychainTokenStorage(
+        `Qwen Code Extensions test-ext 12345 ${ExtensionScope.Project} ${tempWorkspaceDir}`,
+      );
+      await projectKeychain.setSecret('SENSITIVE_VAR', 'project-secret');
+
+      const projectContents2 = await getScopedEnvContents(
+        config,
+        extensionId,
+        ExtensionSettingScope.USER,
+        ExtensionScope.Project,
+        tempWorkspaceDir,
+      );
+      expect(projectContents2['SENSITIVE_VAR']).toBe('project-secret');
+
+      const userContents = await getScopedEnvContents(
+        config,
+        extensionId,
+        ExtensionSettingScope.USER,
+        ExtensionScope.User,
+      );
+      expect(userContents['SENSITIVE_VAR']).toBe('user-secret');
     });
   });
 

@@ -154,9 +154,22 @@ workspace settings and project hooks: they are skipped entirely in an untrusted
 workspace. When a user-level and a project-level extension share the same name,
 the user-level one takes precedence.
 
+> **Security:** project-level extensions auto-load (running their MCP servers,
+> hooks, commands, and context files) as soon as you **trust** the workspace —
+> the same way project hooks and workspace settings do. A committed
+> `.qwen/extensions/` therefore means anyone who trusts the folder runs that
+> code without a separate install/consent step. Only trust workspaces whose
+> `.qwen/extensions/` you have reviewed, and treat committing extensions as
+> equivalent to committing executable tooling.
+
 You can decide whether to commit `.qwen/extensions/` to version control:
-gitignore it for personal dev extensions, or commit it to ship team-standard
-tooling alongside the project.
+gitignore it for personal dev extensions, or commit it to ship reviewed,
+team-standard tooling alongside the project. Note that an extension's
+non-sensitive settings are written to a `.env` file inside its install
+directory (so project-scoped extensions keep that file under
+`<project>/.qwen/extensions/<name>/`); add it to `.gitignore` if it may hold
+environment-specific values. Sensitive settings are stored in the OS keychain,
+not on disk.
 
 ### Uninstalling an extension
 

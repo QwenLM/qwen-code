@@ -49,10 +49,20 @@ const getKeychainStorageName = (
   extensionName: string,
   extensionId: string,
   scope: ExtensionSettingScope,
+  extensionScope: ExtensionScope = ExtensionScope.User,
+  workspaceDir?: string,
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
     return `${base} ${process.cwd()}`;
+  }
+  // Project-scoped extensions get a project-local keychain key so their secrets
+  // never collide with (or leak into) a same-named user-scoped extension, and
+  // stay isolated between projects — mirroring the project-local .env file.
+  // User-scoped keys are left byte-identical to avoid orphaning existing
+  // secrets.
+  if (extensionScope === ExtensionScope.Project) {
+    return `${base} ${ExtensionScope.Project} ${workspaceDir ?? process.cwd()}`;
   }
   return base;
 };
@@ -102,7 +112,13 @@ export async function maybePromptForSettings(
     workspaceDir,
   );
   const keychain = new KeychainTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+    getKeychainStorageName(
+      extensionName,
+      extensionId,
+      scope,
+      extensionScope,
+      workspaceDir,
+    ),
   );
 
   if (!settings || settings.length === 0) {
@@ -179,7 +195,13 @@ export async function getScopedEnvContents(
 ): Promise<Record<string, string>> {
   const { name: extensionName } = extensionConfig;
   const keychain = new KeychainTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+    getKeychainStorageName(
+      extensionName,
+      extensionId,
+      scope,
+      extensionScope,
+      workspaceDir,
+    ),
   );
   const envFilePath = getEnvFilePath(
     extensionName,
@@ -264,7 +286,13 @@ export async function updateSetting(
 
   const newValue = await requestSetting(settingToUpdate);
   const keychain = new KeychainTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+    getKeychainStorageName(
+      extensionName,
+      extensionId,
+      scope,
+      extensionScope,
+      workspaceDir,
+    ),
   );
 
   if (settingToUpdate.sensitive) {

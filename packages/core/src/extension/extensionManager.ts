@@ -1340,26 +1340,32 @@ export class ExtensionManager {
     // When a scope is explicitly requested and the loaded extension is not at
     // that scope (e.g. removing a project copy that is shadowed by a user-level
     // extension of the same name), resolve the on-disk extension at that scope.
+    // If nothing is installed at the requested scope, treat it as not found
+    // rather than falling back to the differently-scoped loaded extension —
+    // otherwise we would wipe that extension's enablement/cache state while
+    // leaving it on disk.
     if (scope && extension?.scope !== scope) {
       const scopedDir =
         scope === ExtensionScope.Project
           ? new Storage(currentDir).getExtensionsDir()
           : ExtensionStorage.getUserExtensionsDir();
-      const scopedMatch = await this.findExtensionByNameInDir(
-        scopedDir,
-        extensionIdentifier,
-        currentDir,
-        scope,
-      );
-      if (scopedMatch) {
-        extension = scopedMatch;
-      }
+      extension =
+        (await this.findExtensionByNameInDir(
+          scopedDir,
+          extensionIdentifier,
+          currentDir,
+          scope,
+        )) ?? undefined;
     }
 
     if (!extension) {
       throw new Error(`Extension not found.`);
     }
     const targetScope = scope ?? extension.scope;
+    const extensionsDir =
+      targetScope === ExtensionScope.Project
+        ? new Storage(currentDir).getExtensionsDir()
+        : ExtensionStorage.getUserExtensionsDir();
     const storage = new ExtensionStorage(
       extension.installMetadata?.type === 'link'
         ? extension.name
@@ -1368,7 +1374,17 @@ export class ExtensionManager {
       currentDir,
     );
 
-    await fs.promises.rm(storage.getExtensionDir(), {
+    const extensionDir = storage.getExtensionDir();
+    // Isolation guard: never let a crafted extension name (e.g. one that slips a
+    // dot segment past validation) resolve the deletion target outside its
+    // scope's extensions directory.
+    Storage.assertPathWithinDirectory(
+      extensionDir,
+      extensionsDir,
+      `Refusing to uninstall "${extension.name}": resolved path is outside the extensions directory.`,
+    );
+
+    await fs.promises.rm(extensionDir, {
       recursive: true,
       force: true,
     });
@@ -1635,6 +1651,14 @@ export function validateName(name: string) {
   if (!/^[a-zA-Z0-9-_.]+$/.test(name)) {
     throw new Error(
       `Invalid extension name: "${name}". Only letters (a-z, A-Z), numbers (0-9), underscores (_), dots (.), and dashes (-) are allowed.`,
+    );
+  }
+  // A name made up solely of dots (".", "..", ...) passes the character check
+  // above but is a path-traversal vector once joined onto an extensions
+  // directory, so reject it explicitly.
+  if (/^\.+$/.test(name)) {
+    throw new Error(
+      `Invalid extension name: "${name}". A name cannot consist only of dots.`,
     );
   }
 }

@@ -540,7 +540,8 @@ export default {
   'No extensions installed.': 'No extensions installed.',
   'Extension "{{name}}" not found.': 'Extension "{{name}}" not found.',
   'No extensions to update.': 'No extensions to update.',
-  'Usage: /extensions install <source>': 'Usage: /extensions install <source>',
+  'Usage: /extensions install <source> [--scope user|project]':
+    'Usage: /extensions install <source> [--scope user|project]',
   'Installing extension from "{{source}}"...':
     'Installing extension from "{{source}}"...',
   'Extension "{{name}}" installed successfully.':
@@ -572,6 +573,15 @@ export default {
     '--ref and --auto-update are not applicable for marketplace extensions.',
   'Extension "{{name}}" installed successfully and enabled.':
     'Extension "{{name}}" installed successfully and enabled.',
+  'Extension "{{name}}" installed successfully and enabled for this project.':
+    'Extension "{{name}}" installed successfully and enabled for this project.',
+  'Extension "{{name}}" linked successfully and enabled for this project.':
+    'Extension "{{name}}" linked successfully and enabled for this project.',
+  'Scope:': 'Scope:',
+  'Install scope: "user" (global, default) or "project" (only the current project).':
+    'Install scope: "user" (global, default) or "project" (only the current project).',
+  'Scope to uninstall from when an extension exists at both user and project scope.':
+    'Scope to uninstall from when an extension exists at both user and project scope.',
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
   'The git ref to install from.': 'The git ref to install from.',

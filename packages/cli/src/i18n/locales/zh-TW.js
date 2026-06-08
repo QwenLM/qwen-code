@@ -476,7 +476,8 @@ export default {
   'No extensions installed.': '未安裝擴展。',
   'Extension "{{name}}" not found.': '未找到擴展 "{{name}}"。',
   'No extensions to update.': '沒有可更新的擴展。',
-  'Usage: /extensions install <source>': '用法：/extensions install <來源>',
+  'Usage: /extensions install <source> [--scope user|project]':
+    '用法：/extensions install <來源> [--scope user|project]',
   'Installing extension from "{{source}}"...':
     '正在從 "{{source}}" 安裝擴展...',
   'Extension "{{name}}" installed successfully.': '擴展 "{{name}}" 安裝成功。',
@@ -505,6 +506,15 @@ export default {
     '--ref 和 --auto-update 不適用於市場擴展。',
   'Extension "{{name}}" installed successfully and enabled.':
     '擴展 "{{name}}" 安裝成功並已啟用。',
+  'Extension "{{name}}" installed successfully and enabled for this project.':
+    '擴展 "{{name}}" 安裝成功並已為目前專案啟用。',
+  'Extension "{{name}}" linked successfully and enabled for this project.':
+    '擴展 "{{name}}" 連結成功並已為目前專案啟用。',
+  'Scope:': '作用域：',
+  'Install scope: "user" (global, default) or "project" (only the current project).':
+    '安裝作用域："user"（全域，預設）或 "project"（僅目前專案）。',
+  'Scope to uninstall from when an extension exists at both user and project scope.':
+    '當擴展同時存在於用戶級與專案級時，指定要從哪個作用域卸載。',
   'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
     '要安裝的擴展的 GitHub URL、本地路徑或市場源（marketplace-url:plugin-name）。',
   'The git ref to install from.': '要安裝的 Git 引用。',

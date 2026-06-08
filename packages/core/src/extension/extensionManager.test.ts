@@ -489,6 +489,37 @@ describe('extension tests', () => {
         manager.getLoadedExtensions().find((e) => e.name === 'proj-ext'),
       ).toBeUndefined();
     });
+
+    it('throws (and leaves state intact) when uninstalling at a scope where the extension is not installed', async () => {
+      // Only a user-scoped extension exists.
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'user-only',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ isWorkspaceTrusted: true });
+      await manager.refreshCache();
+
+      await expect(
+        manager.uninstallExtension(
+          'user-only',
+          false,
+          undefined,
+          ExtensionScope.Project,
+        ),
+      ).rejects.toThrow(/not found/i);
+
+      // The user-scoped extension must be untouched: still on disk, still
+      // loaded, and still enabled.
+      expect(fs.existsSync(path.join(userExtensionsDir, 'user-only'))).toBe(
+        true,
+      );
+      expect(
+        manager.getLoadedExtensions().find((e) => e.name === 'user-only'),
+      ).toBeDefined();
+      expect(manager.isEnabled('user-only', tempWorkspaceDir)).toBe(true);
+    });
   });
 
   describe('enableExtension / disableExtension', () => {
@@ -888,6 +919,15 @@ describe('extension tests', () => {
 
       it('should reject empty names', () => {
         expect(() => validateName('')).toThrow('Invalid extension name');
+      });
+
+      it('should reject dot-only names that could traverse directories', () => {
+        expect(() => validateName('.')).toThrow('cannot consist only of dots');
+        expect(() => validateName('..')).toThrow('cannot consist only of dots');
+        expect(() => validateName('...')).toThrow('cannot consist only of dots');
+        // A dot as part of a larger name is still allowed.
+        expect(() => validateName('.hidden')).not.toThrow();
+        expect(() => validateName('a..b')).not.toThrow();
       });
     });
 
