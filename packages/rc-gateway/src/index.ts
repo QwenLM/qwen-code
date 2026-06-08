@@ -53,3 +53,8 @@ export {
   type PushSenderOptions,
 } from './webpush/sender.js';
 export { PushNotifier } from './webpush/notifier.js';
+export {
+  SessionEventPump,
+  type SessionEventPumpOptions,
+  type PumpNotifier,
+} from './webpush/pump.js';
