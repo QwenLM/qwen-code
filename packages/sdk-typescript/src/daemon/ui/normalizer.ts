@@ -230,6 +230,9 @@ export function normalizeDaemonEvent(
     case 'tool_toggled':
       return normalizeToolToggled(event, base);
 
+    case 'settings_changed':
+      return normalizeSettingsChanged(event, base);
+
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
 
@@ -967,6 +970,26 @@ function normalizeToolToggled(
       type: 'workspace.tool.toggled',
       toolName,
       enabled,
+    },
+  ];
+}
+
+function normalizeSettingsChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const key = getString(event.data, 'key');
+  const scope = getString(event.data, 'scope');
+  if (!key) {
+    return fallbackDebug(event, base, 'malformed settings_changed payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.settings.changed',
+      key,
+      scope: scope ?? 'workspace',
+      value: isRecord(event.data) ? event.data['value'] : undefined,
     },
   ];
 }

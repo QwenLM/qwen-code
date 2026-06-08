@@ -296,6 +296,7 @@ function applyDaemonTranscriptEvent(
     case 'workspace.memory.changed':
     case 'workspace.agent.changed':
     case 'workspace.tool.toggled':
+    case 'workspace.settings.changed':
     case 'workspace.initialized':
     case 'workspace.mcp.budget_warning':
     case 'workspace.mcp.child_refused':

@@ -199,6 +199,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.filter(
     (f) =>
+      f !== 'workspace_init' &&
+      f !== 'workspace_mcp_restart' &&
+      f !== 'session_recap' &&
+      f !== 'session_btw' &&
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
@@ -207,12 +211,14 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_hooks' &&
       f !== 'workspace_extensions',
   ),
+  'workspace_settings',
+  'workspace_init',
+  'workspace_mcp_restart',
+  'session_recap',
+  'session_btw',
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
-  // T2.4 (#4514). Conditional — advertised only when
-  // `--allow-origin <pattern>` is configured. Registry-declaration
-  // order puts it after `require_auth` (latest conditional tag added).
   'allow_origin',
   'auth_device_flow',
   'permission_mediation',
@@ -1299,6 +1305,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               writerIdleTimeoutMs: 60_000,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_settings') {
+          expect(predicate({ persistSettingAvailable: true })).toBe(true);
+          expect(predicate({ persistSettingAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistSettingAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(

@@ -100,6 +100,7 @@ import {
   type DaemonWorkspaceService,
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
 
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
@@ -266,6 +267,12 @@ export interface ServeAppDeps {
     enabled: boolean,
   ) => Promise<void>;
   contextFilename?: string;
+  persistSetting?: (
+    workspace: string,
+    scope: import('../config/settings.js').SettingScope,
+    key: string,
+    value: unknown,
+  ) => Promise<void>;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -361,6 +368,10 @@ function resolveDaemonTelemetryRoute(
   const toolEnable = path.match(/^\/workspace\/tools\/([^/]+)\/enable$/);
   if (toolEnable?.[1] && req.method === 'POST') {
     return { route: 'POST /workspace/tools/:name/enable' };
+  }
+  if (path === '/workspace/settings') {
+    if (req.method === 'GET') return { route: 'GET /workspace/settings' };
+    if (req.method === 'POST') return { route: 'POST /workspace/settings' };
   }
   return undefined;
 }
@@ -933,6 +944,7 @@ export function createServeApp(
         ...(opts.writerIdleTimeoutMs !== undefined
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
+        persistSettingAvailable: deps.persistSetting !== undefined,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -1075,6 +1087,25 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+
+  if (deps.persistSetting) {
+    const persistSetting = deps.persistSetting;
+    registerWorkspaceSettingsRoutes(app, {
+      boundWorkspace,
+      mutate,
+      safeBody,
+      persistSetting,
+      broadcastSettingsChanged: (key, value, scope, clientId) => {
+        bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value, scope },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      },
+      parseAndValidateClientId: (req, res) =>
+        parseAndValidateWorkspaceClientId(req, res, bridge),
+    });
+  }
 
   // -- auth device-flow routes ---------------------------------------------
 

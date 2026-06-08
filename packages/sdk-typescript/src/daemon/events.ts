@@ -59,6 +59,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // Mutation control events.
   'approval_mode_changed',
   'tool_toggled',
+  'settings_changed',
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
@@ -760,6 +761,10 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
   'tool_toggled',
   DaemonToolToggledData
 >;
+export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
+  'settings_changed',
+  Record<string, unknown>
+>;
 export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
@@ -835,6 +840,7 @@ export type DaemonControlEvent =
   | DaemonPermissionForbiddenEvent
   | DaemonApprovalModeChangedEvent
   | DaemonToolToggledEvent
+  | DaemonSettingsChangedEvent
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
@@ -1320,6 +1326,10 @@ export function asKnownDaemonEvent(
       return isToolToggledData(event.data)
         ? (event as DaemonToolToggledEvent)
         : undefined;
+    case 'settings_changed':
+      return event.data != null && typeof event.data === 'object'
+        ? (event as DaemonEventEnvelope<'settings_changed', Record<string, unknown>>)
+        : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
@@ -1674,14 +1684,13 @@ export function reduceDaemonSessionEvent(
         lastApprovalModeChange: mergeOriginator(event.data, event),
       };
     case 'tool_toggled':
-      // Workspace-scoped — same `tool_toggled` envelope is fan-out to
-      // every session, so adapters can render "this tool was disabled
-      // by another client" without polling.
       return {
         ...base,
         toolToggleCount: base.toolToggleCount + 1,
         lastToolToggle: mergeOriginator(event.data, event),
       };
+    case 'settings_changed':
+      return base;
     case 'workspace_initialized':
       // Workspace-scoped fan-out. Non-terminal — just records that a
       // QWEN.md scaffold was performed.
