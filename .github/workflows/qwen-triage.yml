@@ -29,8 +29,13 @@ jobs:
       # cancellation, not job eligibility. Other job gates below can diverge.
       cancel-in-progress: >-
         ${{
-          github.event_name != 'issue_comment' ||
-          (startsWith(github.event.comment.body, '@qwen-code /triage') &&
+          github.event_name == 'issues' ||
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.draft == false) ||
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'issue_comment' &&
+           startsWith(github.event.comment.body, '@qwen-code /triage') &&
            (github.event.comment.author_association == 'OWNER' ||
             github.event.comment.author_association == 'MEMBER' ||
             github.event.comment.author_association == 'COLLABORATOR'))
