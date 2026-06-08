@@ -10,8 +10,21 @@ import * as path from 'path';
 import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
-import { parse as parseYaml } from '../utils/yaml-parser.js';
+import { parse as parseYamlSimple } from '../utils/yaml-parser.js';
 import * as yaml from 'yaml';
+
+/**
+ * Parses a YAML string with full spec support (block scalars, nested
+ * structures, etc.), falling back to the simple parser on failure so
+ * that slightly malformed frontmatter still loads where possible.
+ */
+function parseYaml(input: string): Record<string, unknown> {
+  try {
+    return yaml.parse(input) as Record<string, unknown>;
+  } catch {
+    return parseYamlSimple(input);
+  }
+}
 import type {
   SkillConfig,
   SkillLevel,
@@ -702,20 +715,12 @@ export class SkillManager {
       }
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'] as
+        | Record<string, unknown>
+        | undefined;
+      if (hooksRaw !== undefined) {
+        hooks = this.parseHooksConfig(hooksRaw);
       }
 
       // Set skillRoot to the directory containing SKILL.md
