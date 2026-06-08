@@ -56,6 +56,14 @@ describe('ExitPlanModeTool', () => {
               type: 'string',
               description: expect.stringContaining('The plan you came up with'),
             },
+            originalRequest: {
+              type: 'string',
+              description: expect.stringContaining('original user request'),
+            },
+            researchSummary: {
+              type: 'string',
+              description: expect.stringContaining('investigation'),
+            },
             resolutionSummary: {
               type: 'string',
               description: expect.stringContaining('gate review'),

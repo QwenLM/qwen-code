@@ -28,6 +28,7 @@ import {
   GATE_AGENT_NAMES,
   CAPPED_REVIEW_LIMIT,
   MAX_AGENT_RETRIES,
+  CAP_ESCALATION_LABELS,
   maxSeverity,
 } from './types.js';
 import { runGateAgent } from './gateReviewAgents.js';
@@ -154,6 +155,10 @@ async function runSingleAgentWithRetry(
   signal: AbortSignal,
 ): Promise<GateAgentResult | null> {
   for (let attempt = 1; attempt <= MAX_AGENT_RETRIES; attempt++) {
+    if (signal.aborted) {
+      debugLogger.warn(`Gate agent ${role} skipped: signal already aborted`);
+      return null;
+    }
     try {
       return await runGateAgent(config, role, bundle, signal);
     } catch (error) {
@@ -290,8 +295,8 @@ export function formatCapEscalationResponse(
   }
   lines.push(
     '\nProvide these options (the UI automatically provides a free-text "Other" input):',
-    '1. "Continue editing plan" — keep iterating with the gate (uncapped)',
-    '2. "Approve execution" — user override, skip the gate and execute',
+    `1. "${CAP_ESCALATION_LABELS.CONTINUE}" — keep iterating with the gate (uncapped)`,
+    `2. "${CAP_ESCALATION_LABELS.APPROVE}" — user override, skip the gate and execute`,
   );
   return lines.join('\n');
 }

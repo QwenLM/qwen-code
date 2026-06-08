@@ -254,7 +254,7 @@ export async function runGateAgent(
 
 // ── JSON parsing / validation ──────────────────────────────────────────
 
-function parseGateAgentResult(
+export function parseGateAgentResult(
   raw: string,
   expectedRole: GateAgentName,
 ): GateAgentResult {

@@ -2748,10 +2748,13 @@ export class Session implements SessionContext {
       // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
       // approval mode inside execute() without going through the user-confirmation
       // branch above, so notify the client of the current mode explicitly.
+      // Only send when the mode actually changed (a gate "blocked" result keeps
+      // the mode at PLAN, and a redundant notification would be misleading).
       if (
         (isEnterPlanModeTool || isExitPlanModeTool) &&
         !didRequestPermission &&
-        !toolResult.error
+        !toolResult.error &&
+        this.config.getApprovalMode() !== approvalMode
       ) {
         await this.sendUpdate({
           sessionUpdate: 'current_mode_update',

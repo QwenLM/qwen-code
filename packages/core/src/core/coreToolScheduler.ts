@@ -1841,6 +1841,8 @@ export class CoreToolScheduler {
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
+          const isEnterPlanModeTool =
+            canonicalName === ToolNames.ENTER_PLAN_MODE;
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
@@ -2030,6 +2032,7 @@ export class CoreToolScheduler {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               this.setStatusInternal(reqInfo.callId, 'error', {
