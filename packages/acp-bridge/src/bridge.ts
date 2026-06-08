@@ -3179,7 +3179,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           data: {
             sessionId: entry.sessionId,
             language: result.language,
-            outputLanguage: result.outputLanguage,
+            outputLanguage: result.outputLanguage ?? null,
             refreshed: result.refreshed ?? false,
           },
           ...(originatorClientId ? { originatorClientId } : {}),
@@ -3584,8 +3584,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const data = (err as { data?: unknown })?.data;
         if (data && typeof data === 'object' && 'errorKind' in data) {
           const kind = (data as { errorKind: string }).errorKind;
-          const msg =
-            (err as { message?: string })?.message ?? 'Rewind failed';
+          const msg = (err as { message?: string })?.message ?? 'Rewind failed';
           if (kind === 'session_busy') {
             throw new SessionBusyError(sessionId, msg);
           }
@@ -3596,12 +3595,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
-      const targetTurnIndex =
-        (response['targetTurnIndex'] as number) ?? 0;
-      const filesChanged =
-        (response['filesChanged'] as string[]) ?? [];
-      const filesFailed =
-        (response['filesFailed'] as string[]) ?? [];
+      const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
+      const filesChanged = (response['filesChanged'] as string[]) ?? [];
+      const filesFailed = (response['filesFailed'] as string[]) ?? [];
 
       try {
         entry.events.publish({
