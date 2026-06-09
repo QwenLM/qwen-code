@@ -40,6 +40,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
     'Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File',
   );
   expect(workflow).not.toContain("cache: 'npm'");
+  expect(workflow).toContain('npm ci still running...');
   expect(workflow).toContain('QWEN_BIN="${RUNNER_TEMP}/qwen-bin"');
   expect(workflow).toContain('exec node "$GITHUB_WORKSPACE/dist/cli.js" "$@"');
   expect(workflow).toContain('git worktree remove --force "$review_path"');

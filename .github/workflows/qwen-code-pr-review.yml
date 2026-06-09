@@ -302,7 +302,18 @@ jobs:
 
       - name: 'Install dependencies and build Qwen CLI'
         if: "steps.context.outputs.should_run == 'true'"
-        run: 'npm ci'
+        run: |-
+          set -euo pipefail
+
+          npm ci &
+          npm_pid="$!"
+          while kill -0 "$npm_pid" 2>/dev/null; do
+            sleep 15
+            if kill -0 "$npm_pid" 2>/dev/null; then
+              echo 'npm ci still running...'
+            fi
+          done
+          wait "$npm_pid"
 
       - name: 'Prepare local Qwen CLI'
         if: "steps.context.outputs.should_run == 'true'"
