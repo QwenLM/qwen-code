@@ -349,9 +349,11 @@ function isBlockedAuthProviderHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
 
-  const ipVersion = net.isIP(host);
+  const bareHost =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  const ipVersion = net.isIP(bareHost);
   if (ipVersion === 4) {
-    const parts = host.split('.').map((part) => Number(part));
+    const parts = bareHost.split('.').map((part) => Number(part));
     const [a, b] = parts;
     return (
       a === 0 ||
@@ -364,10 +366,10 @@ function isBlockedAuthProviderHost(hostname: string): boolean {
   }
 
   if (ipVersion === 6) {
-    if (host === '::1' || host.startsWith('fe80:')) return true;
-    if (host.startsWith('fc') || host.startsWith('fd')) return true;
-    if (host.startsWith('::ffff:')) {
-      return isBlockedAuthProviderHost(host.slice('::ffff:'.length));
+    if (bareHost === '::1' || bareHost.startsWith('fe80:')) return true;
+    if (bareHost.startsWith('fc') || bareHost.startsWith('fd')) return true;
+    if (bareHost.startsWith('::ffff:')) {
+      return isBlockedAuthProviderHost(bareHost.slice('::ffff:'.length));
     }
   }
 
@@ -396,10 +398,14 @@ function parseAuthProviderBaseUrl(
   return parsed.toString().replace(/\/$/, '');
 }
 
+type AuthProviderParseResult =
+  | { ok: true; value: ServeAuthProviderInstallRequest }
+  | { ok: false; code: string; error: string };
+
 function parseAuthProviderInstallRequest(
   body: Record<string, unknown>,
   options?: { allowPrivateBaseUrl?: boolean },
-): ServeAuthProviderInstallRequest | undefined {
+): AuthProviderParseResult {
   const providerId = body['providerId'];
   const apiKey = body['apiKey'];
   if (
@@ -408,14 +414,25 @@ function parseAuthProviderInstallRequest(
     typeof apiKey !== 'string' ||
     apiKey.trim().length === 0
   ) {
-    return undefined;
+    return {
+      ok: false,
+      code: 'invalid_request',
+      error: '`providerId` and `apiKey` are required',
+    };
   }
   const protocol = body['protocol'];
   const baseUrl = parseAuthProviderBaseUrl(
     body['baseUrl'],
     options?.allowPrivateBaseUrl === true,
   );
-  if (baseUrl === null) return undefined;
+  if (baseUrl === null) {
+    return {
+      ok: false,
+      code: 'invalid_base_url',
+      error:
+        '`baseUrl` must be an http(s) URL without credentials or blocked private-network host',
+    };
+  }
   const modelIds = parseStringArray(body['modelIds']);
   const rawAdvanced =
     body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
@@ -461,17 +478,20 @@ function parseAuthProviderInstallRequest(
       }
     : undefined;
   return {
-    providerId: providerId.trim(),
-    ...(typeof protocol === 'string' && protocol.trim()
-      ? {
-          protocol:
-            protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
-        }
-      : {}),
-    ...(baseUrl ? { baseUrl } : {}),
-    apiKey,
-    ...(modelIds ? { modelIds } : {}),
-    ...(advancedConfig ? { advancedConfig } : {}),
+    ok: true,
+    value: {
+      providerId: providerId.trim(),
+      ...(typeof protocol === 'string' && protocol.trim()
+        ? {
+            protocol:
+              protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
+          }
+        : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      apiKey,
+      ...(modelIds ? { modelIds } : {}),
+      ...(advancedConfig ? { advancedConfig } : {}),
+    },
   };
 }
 
@@ -1582,25 +1602,26 @@ export function createServeApp(
       const parsed = parseAuthProviderInstallRequest(safeBody(req), {
         allowPrivateBaseUrl: opts.allowPrivateAuthBaseUrl === true,
       });
-      if (!parsed) {
+      if (!parsed.ok) {
         res.status(400).json({
-          error: '`providerId` and `apiKey` are required',
-          code: 'invalid_request',
+          error: parsed.error,
+          code: parsed.code,
         });
         return;
       }
+      const installRequest = parsed.value;
       const knownProvider = ALL_PROVIDERS.find(
-        (provider) => provider.id === parsed.providerId,
+        (provider) => provider.id === installRequest.providerId,
       );
       if (!knownProvider) {
         res.status(400).json({
-          error: `Unsupported auth provider: ${parsed.providerId}`,
+          error: `Unsupported auth provider: ${installRequest.providerId}`,
           code: 'unsupported_provider',
         });
         return;
       }
       try {
-        res.status(200).json(await deps.installAuthProvider(parsed));
+        res.status(200).json(await deps.installAuthProvider(installRequest));
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',

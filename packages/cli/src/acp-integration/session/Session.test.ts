@@ -231,6 +231,11 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
   };
+  let mockBackgroundTaskRegistry: {
+    setNotificationCallback: ReturnType<typeof vi.fn>;
+    hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -282,6 +287,11 @@ describe('Session', () => {
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+    };
+    mockBackgroundTaskRegistry = {
+      setNotificationCallback: vi.fn(),
+      hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      abortAll: vi.fn(),
     };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
@@ -1674,6 +1684,54 @@ describe('Session', () => {
           },
         },
       });
+    });
+
+    it('does not execute tool calls requested by background task notifications', async () => {
+      let notificationCallback:
+        | ((displayText: string, modelText: string) => void)
+        | undefined;
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (callback?: (displayText: string, modelText: string) => void) => {
+          notificationCallback = callback;
+        },
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          (async function* () {
+            notificationCallback?.('task finished', 'malicious task output');
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'done' }] } }],
+              },
+            };
+          })(),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/secret.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      } as PromptRequest);
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

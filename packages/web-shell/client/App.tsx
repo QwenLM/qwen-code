@@ -1406,14 +1406,19 @@ export function App({
   const handleBusyGoalClear = useCallback(
     (text: string) => {
       const goalToClear = activeGoalRef.current;
+      let cancelSucceeded = false;
       store.appendLocalUserMessage(text);
       sessionActions
         .cancel()
-        .then(() =>
-          sendPrompt(text, undefined, { optimisticUserMessage: false }),
-        )
+        .then(() => {
+          cancelSucceeded = true;
+          return sendPrompt(text, undefined, { optimisticUserMessage: false });
+        })
         .then(() => dispatchGoalCleared(goalToClear))
         .catch((error: unknown) => {
+          if (cancelSucceeded) {
+            dispatchGoalCleared(goalToClear);
+          }
           reportError(error, 'Failed to clear /goal');
         });
       return true;

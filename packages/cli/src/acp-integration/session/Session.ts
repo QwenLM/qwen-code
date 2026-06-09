@@ -72,6 +72,7 @@ import {
   getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
+  formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -400,6 +401,7 @@ export class Session implements SessionContext {
     [];
   private notificationResolve: (() => void) | null = null;
   private notificationProcessing: Promise<void> | null = null;
+  private notificationAbort: AbortController | null = null;
   private notificationDraining = false;
   private notificationCounter = 0;
 
@@ -686,6 +688,10 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
+    if (this.notificationAbort) {
+      this.notificationAbort.abort();
+      this.notificationAbort = null;
+    }
 
     if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
@@ -738,6 +744,10 @@ export class Session implements SessionContext {
     if (this.followupAbort) {
       this.followupAbort.abort();
       this.followupAbort = null;
+    }
+    if (this.notificationAbort) {
+      this.notificationAbort.abort();
+      this.notificationAbort = null;
     }
 
     // Abort any in-progress cron execution (user prompt takes priority)
@@ -1860,7 +1870,7 @@ export class Session implements SessionContext {
       if (this.notificationResolve) {
         this.notificationResolve();
         this.notificationResolve = null;
-      } else if (!this.notificationDraining) {
+      } else if (!this.notificationDraining && !this.pendingPrompt) {
         this.#scheduleBackgroundTaskNotificationProcessing();
       }
     });
@@ -1902,12 +1912,16 @@ export class Session implements SessionContext {
     });
 
     const notificationSend = new AbortController();
+    this.notificationAbort = notificationSend;
     try {
       while (this.notificationQueue.length > 0) {
         const item = this.notificationQueue.shift()!;
         await this.#executeNotificationPrompt(item, notificationSend);
       }
     } finally {
+      if (this.notificationAbort === notificationSend) {
+        this.notificationAbort = null;
+      }
       resolveCompletion();
     }
   }
@@ -2019,12 +2033,9 @@ export class Session implements SessionContext {
                 }
 
                 if (functionCalls.length > 0) {
-                  const toolResponseParts = await this.runToolCalls(
-                    pendingSend.signal,
-                    promptId,
-                    functionCalls,
+                  debugLogger.warn(
+                    `Ignoring ${functionCalls.length} tool call(s) requested while processing a background task notification.`,
                   );
-                  nextMessage = { role: 'user', parts: toolResponseParts };
                 }
               }
             } catch (error) {
@@ -3231,6 +3242,15 @@ export class Session implements SessionContext {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  if (approvalMode === ApprovalMode.AUTO) {
+                    const before = this.config.getAutoModeDenialState();
+                    const after = recordFallbackApprove(before);
+                    debugLogger.warn(
+                      `Auto mode denial counters reset after fallback approval: ` +
+                        `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+                    );
+                    this.config.setAutoModeDenialState(after);
+                  }
                 } else {
                   return earlyErrorResponse(
                     new Error(
