@@ -101,11 +101,16 @@ export function useTeamInProcess(
         for (const member of teamFile.members) {
           const interactive = inProcessBackend.getAgent(member.agentId);
           if (interactive) {
+            // Tab label is the teammate's name, not its model: teammates
+            // usually inherit the leader's model, so a model label would be
+            // empty (→ 'teammate') or identical across the whole team, making
+            // tabs indistinguishable. The name is the teammate's identity.
             actionsRef.current.registerAgent(
               member.agentId,
               interactive,
-              member.model ?? 'teammate',
+              member.name,
               member.color ?? nextColor(),
+              member.name,
             );
             ownedAgentIds.add(member.agentId);
           }
@@ -124,10 +129,11 @@ export function useTeamInProcess(
 
           const interactive = backend.getAgent(event.agentId);
           if (interactive) {
+            // Label the tab by teammate name (see discovery path above).
             actionsRef.current.registerAgent(
               event.agentId,
               interactive,
-              event.model ?? 'teammate',
+              event.name,
               event.color ?? nextColor(),
               event.name,
             );
