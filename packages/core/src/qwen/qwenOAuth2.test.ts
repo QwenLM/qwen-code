@@ -759,9 +759,21 @@ describe('QwenOAuth2Client', () => {
                 reject(new Error('missing abort signal'));
                 return;
               }
-              signal.addEventListener('abort', () => reject(signal.reason), {
-                once: true,
-              });
+              signal.addEventListener(
+                'abort',
+                () => {
+                  reject(
+                    Object.assign(
+                      new DOMException(
+                        'The operation was aborted',
+                        'AbortError',
+                      ),
+                      { cause: signal.reason },
+                    ),
+                  );
+                },
+                { once: true },
+              );
             }),
         );
 
@@ -774,11 +786,64 @@ describe('QwenOAuth2Client', () => {
         const error = await refreshError;
         expect(error).toBeInstanceOf(Error);
         expect((error as Error).message).toContain(
-          'Token refresh failed: Operation timed out',
+          'Token refresh timeout: The operation was aborted (cause: Operation timed out)',
         );
+        expect((error as Error).cause).toBeInstanceOf(DOMException);
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should keep the refresh timeout active while reading the response body', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(async (_url, init) => {
+          const signal = (init as RequestInit).signal;
+          if (!signal) {
+            throw new Error('missing abort signal');
+          }
+          return {
+            ok: true,
+            text: () =>
+              new Promise<string>((_, reject) => {
+                signal.addEventListener('abort', () => reject(signal.reason), {
+                  once: true,
+                });
+              }),
+          } as Response;
+        });
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('Token refresh timeout:');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve non-timeout network errors and show the token endpoint', async () => {
+      const cause = Object.assign(new Error('connect ECONNREFUSED'), {
+        code: 'ECONNREFUSED',
+      });
+      const networkError = new TypeError('fetch failed', { cause });
+      vi.mocked(global.fetch).mockRejectedValue(networkError);
+
+      const error = await client
+        .refreshAccessToken()
+        .catch((refreshError: unknown) => refreshError);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).cause).toBe(networkError);
+      expect((error as Error).message).toContain('Token refresh failed:');
+      expect((error as Error).message).toContain(
+        'https://chat.qwen.ai/api/v1/oauth2/token',
+      );
     });
 
     it('should NOT clear credentials on malformed 200 response (e.g. proxy HTML)', async () => {
