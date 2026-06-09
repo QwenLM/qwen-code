@@ -93,6 +93,14 @@ describe('trace-context', () => {
 
       expect(getActiveSpanTraceContext()).toBeNull();
     });
+
+    it('rejects span with valid traceId but zero spanId', () => {
+      vi.mocked(trace.getActiveSpan).mockReturnValue(
+        mockSpan('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', INVALID_SPAN, 1),
+      );
+
+      expect(getActiveSpanTraceContext()).toBeNull();
+    });
   });
 
   describe('getSessionRootTraceContext', () => {
@@ -119,6 +127,14 @@ describe('trace-context', () => {
 
     it('returns null when no session context', () => {
       vi.mocked(getSessionContext).mockReturnValue(undefined);
+      expect(getSessionRootTraceContext()).toBeNull();
+    });
+
+    it('returns null when getSessionContext throws', () => {
+      vi.mocked(getSessionContext).mockImplementation(() => {
+        throw new Error('session unavailable');
+      });
+
       expect(getSessionRootTraceContext()).toBeNull();
     });
 

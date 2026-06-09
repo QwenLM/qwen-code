@@ -48,6 +48,7 @@ export function getShellContextEnvVars(): Record<string, string> {
       env['TRACEPARENT'] = formatTraceparent(ctx);
     } else {
       env['TRACEPARENT'] = '';
+      env['TRACESTATE'] = '';
     }
   }
 
