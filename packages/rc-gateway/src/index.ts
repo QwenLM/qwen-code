@@ -15,7 +15,7 @@ export {
   type SpawnedDaemon,
   type StartDaemonOptions,
 } from './daemonSupervisor.js';
-export { TokenStore, type TokenInfo } from './tokenStore.js';
+export { TokenStore, type TokenInfo, type ShareInfo } from './tokenStore.js';
 export { PairingService } from './pairing.js';
 export { ConnectionRegistry } from './connectionRegistry.js';
 export {

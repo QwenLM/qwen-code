@@ -16,6 +16,12 @@ interface TokenRecord {
   scopes: RcScope[];
   label: string;
   createdAt: number;
+  /** Epoch ms after which this token no longer resolves. Share tokens only. */
+  expiresAt?: number;
+  /** The one session id a share token may touch. Share tokens only. */
+  sessionLockId?: string;
+  /** The owner token id that minted this share. Share tokens only. */
+  parentId?: string;
 }
 
 /** Public metadata about an issued token. Never includes secret material. */
@@ -24,6 +30,19 @@ export interface TokenInfo {
   scopes: RcScope[];
   label: string;
   createdAt: number;
+}
+
+/** Public metadata about a share token. Never includes secret material. */
+export interface ShareInfo {
+  id: string;
+  label: string;
+  scopes: RcScope[];
+  sessionLockId: string;
+  expiresAt?: number;
+  parentId?: string;
+  createdAt: number;
+  /** Computed at read time: `expiresAt !== undefined && now >= expiresAt`. */
+  expired: boolean;
 }
 
 interface PersistShape {
@@ -82,8 +101,43 @@ export class TokenStore {
     return { id, token };
   }
 
-  /** Resolve a raw `Authorization` header value to identity + scopes. */
-  resolve(authHeader: string): { id: string; scopes: RcScope[] } | null {
+  /**
+   * Issue a session-locked, TTL-bounded share token. Like `issue`, but stamps
+   * `expiresAt = nowFn() + ttlSec*1000`, the session lock, and the parent id.
+   */
+  async issueShare(opts: {
+    scopes: RcScope[];
+    label: string;
+    sessionLockId: string;
+    ttlSec: number;
+    parentId: string;
+  }): Promise<{ id: string; token: string; expiresAt: number }> {
+    const id = randomBytes(8).toString('hex');
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = this.nowFn() + opts.ttlSec * 1000;
+    this.records.push({
+      id,
+      tokenHash: sha256Hex(token),
+      scopes: [...opts.scopes],
+      label: opts.label,
+      createdAt: this.nowFn(),
+      expiresAt,
+      sessionLockId: opts.sessionLockId,
+      parentId: opts.parentId,
+    });
+    await this.persist();
+    return { id, token, expiresAt };
+  }
+
+  /**
+   * Resolve a raw `Authorization` header value to identity + scopes. An expired
+   * share token (`expiresAt !== undefined && now >= expiresAt`) is treated as no
+   * match (→ null → 401). On match, the record's `sessionLockId` is returned so
+   * `enforceSessionLock` can confine a share token to its one session.
+   */
+  resolve(
+    authHeader: string,
+  ): { id: string; scopes: RcScope[]; sessionLockId?: string } | null {
     const cred = parseBearer(authHeader);
     if (!cred) return null;
     const candidate = Buffer.from(sha256Hex(cred), 'hex');
@@ -93,7 +147,15 @@ export class TokenStore {
         stored.length === candidate.length &&
         timingSafeEqual(stored, candidate)
       ) {
-        return { id: rec.id, scopes: [...rec.scopes] };
+        // Expired share token: strict >= means at exactly expiresAt it is dead.
+        if (rec.expiresAt !== undefined && this.nowFn() >= rec.expiresAt) {
+          continue;
+        }
+        return {
+          id: rec.id,
+          scopes: [...rec.scopes],
+          sessionLockId: rec.sessionLockId,
+        };
       }
     }
     return null;
@@ -116,6 +178,26 @@ export class TokenStore {
       label: r.label,
       createdAt: r.createdAt,
     }));
+  }
+
+  /**
+   * List share tokens (records carrying a `sessionLockId`) as metadata only.
+   * `expired` is computed at read time; no secret material is exposed.
+   */
+  listShares(): ShareInfo[] {
+    const now = this.nowFn();
+    return this.records
+      .filter((r) => r.sessionLockId !== undefined)
+      .map((r) => ({
+        id: r.id,
+        label: r.label,
+        scopes: [...r.scopes],
+        sessionLockId: r.sessionLockId!,
+        expiresAt: r.expiresAt,
+        parentId: r.parentId,
+        createdAt: r.createdAt,
+        expired: r.expiresAt !== undefined && now >= r.expiresAt,
+      }));
   }
 
   /**

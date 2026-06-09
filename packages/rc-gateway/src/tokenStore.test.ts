@@ -9,7 +9,7 @@ import { mkdtempSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TokenStore } from './tokenStore.js';
-import { SESSION_READ } from './scopes.js';
+import { SESSION_READ, SHARE, APPROVE } from './scopes.js';
 
 function freshPath(): string {
   return join(mkdtempSync(join(tmpdir(), 'rc-tokens-')), 'tokens.json');
@@ -102,5 +102,109 @@ describe('TokenStore', () => {
     scopes!.push('owner');
     expect(store.scopesFor(id)).toEqual([SESSION_READ]);
     expect(store.scopesFor('does-not-exist')).toBeUndefined();
+  });
+
+  it('a normal issue token resolves with sessionLockId undefined', async () => {
+    const store = await TokenStore.open(path);
+    const { id, token } = await store.issue([SESSION_READ], 'phone');
+    expect(store.resolve(`Bearer ${token}`)).toEqual({
+      id,
+      scopes: [SESSION_READ],
+    });
+    // Explicitly: no lock leaks onto a normal token.
+    expect(store.resolve(`Bearer ${token}`)?.sessionLockId).toBeUndefined();
+  });
+
+  it('issueShare stamps expiresAt, sessionLockId, and parentId', async () => {
+    const now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    expect(share.expiresAt).toBe(1_000_000 + 3600 * 1000);
+    expect(typeof share.id).toBe('string');
+    expect(share.token.length).toBeGreaterThan(20);
+
+    const list = store.listShares();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: share.id,
+      label: 'guest',
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+      expiresAt: share.expiresAt,
+      parentId: 'owner-1',
+      expired: false,
+    });
+  });
+
+  it('resolve of a not-yet-expired share returns scopes + sessionLockId', async () => {
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    now = 1_000_000 + 60 * 1000; // 1 minute later, still valid
+    expect(store.resolve(`Bearer ${share.token}`)).toEqual({
+      id: share.id,
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      sessionLockId: 's1',
+    });
+  });
+
+  it('resolve of an expired share returns null (strict >= at expiresAt)', async () => {
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    // Exactly at expiresAt is already expired (strict >=).
+    now = share.expiresAt;
+    expect(store.resolve(`Bearer ${share.token}`)).toBeNull();
+    // Well past expiry stays expired.
+    now = share.expiresAt + 10_000;
+    expect(store.resolve(`Bearer ${share.token}`)).toBeNull();
+  });
+
+  it('listShares returns only share records, with expired computed', async () => {
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    await store.issue([SESSION_READ], 'normal'); // not a share — excluded
+    const a = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'short',
+      sessionLockId: 's1',
+      ttlSec: 60,
+      parentId: 'owner-1',
+    });
+    const b = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'long',
+      sessionLockId: 's2',
+      ttlSec: 7200,
+      parentId: 'owner-1',
+    });
+    now = a.expiresAt; // a is now expired, b is not
+    const shares = store.listShares();
+    expect(shares).toHaveLength(2);
+    const byId = Object.fromEntries(shares.map((s) => [s.id, s]));
+    expect(byId[a.id].expired).toBe(true);
+    expect(byId[b.id].expired).toBe(false);
+    // Never leaks secret material.
+    const serialized = JSON.stringify(shares);
+    expect(serialized).not.toContain('tokenHash');
+    expect(serialized).not.toContain(a.token);
   });
 });
