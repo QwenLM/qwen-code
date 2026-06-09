@@ -166,6 +166,16 @@ export class TeamManager {
    *  the envelope, while teammates have no way to learn it. */
   private readonly envelopeNonce: string = randomBytes(8).toString('hex');
 
+  /** Separate per-session nonce for the `<task_content_…>` envelope
+   *  that wraps a teammate-authored task description delivered to the
+   *  claiming teammate. MUST be distinct from `envelopeNonce`: the
+   *  task-content prompt is shown to the teammate's model, so reusing
+   *  `envelopeNonce` here would leak the leader-trust nonce and let a
+   *  teammate forge a `<teammate_message_…>` envelope the leader
+   *  trusts. This nonce only needs to stop the task author from forging
+   *  the task-content closing tag. */
+  private readonly taskContentNonce: string = randomBytes(8).toString('hex');
+
   /** Names of teammates with a pending leader-requested shutdown.
    *  Gates both the per-idle mailbox read in flushNextMessage and
    *  the shutdown_approved abort path in sendMessage. Tracked
@@ -427,6 +437,7 @@ export class TeamManager {
     toName: string,
     message: string,
     from?: string,
+    summary?: string,
   ): Promise<void> {
     // Messages addressed to the leader go to leader's mailbox.
     if (
@@ -436,6 +447,7 @@ export class TeamManager {
       await writeMessage(this.teamFile.name, LEADER_NAME, {
         from: from ?? 'unknown',
         text: message,
+        summary,
         timestamp: new Date().toISOString(),
         read: false,
       });
@@ -1404,12 +1416,16 @@ export class TeamManager {
         // written by another agent — which may itself have ingested
         // injected text from external data — so frame the content as data
         // to act on, not as instructions to obey. The per-session
-        // `envelopeNonce` (same as `formatLeaderEnvelope`) means the
-        // task author cannot forge the closing tag to break out of the
-        // envelope, e.g. via a `</task_content>` payload in the
-        // description. Mirrors treating `send_message` as a privileged sink.
-        const open = `<task_content_${this.envelopeNonce}>`;
-        const close = `</task_content_${this.envelopeNonce}>`;
+        // A dedicated `taskContentNonce` (NOT the leader-trust
+        // `envelopeNonce`) means the task author cannot forge the closing
+        // tag to break out of the envelope, e.g. via a `</task_content>`
+        // payload in the description. It MUST differ from `envelopeNonce`
+        // because this prompt is delivered to the claiming teammate —
+        // reusing the leader nonce here would leak it and let a teammate
+        // forge a `<teammate_message_…>` envelope the leader trusts.
+        // Mirrors treating `send_message` as a privileged sink.
+        const open = `<task_content_${this.taskContentNonce}>`;
+        const close = `</task_content_${this.taskContentNonce}>`;
         const taskPrompt =
           `You have been assigned task #${claimed.id}.\n\n` +
           `${open}\n` +

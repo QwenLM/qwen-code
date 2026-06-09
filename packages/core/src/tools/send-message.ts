@@ -189,6 +189,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         to,
         this.params.message,
         getAgentName() ?? LEADER_NAME,
+        this.params.summary,
       );
       const msg = `Message sent to "${to}".`;
       return { llmContent: msg, returnDisplay: msg };

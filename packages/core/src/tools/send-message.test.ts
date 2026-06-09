@@ -48,7 +48,12 @@ describe('SendMessageTool — team mode', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('alice');
-    expect(sendMessage).toHaveBeenCalledWith('alice', 'hello', 'leader');
+    expect(sendMessage).toHaveBeenCalledWith(
+      'alice',
+      'hello',
+      'leader',
+      undefined,
+    );
   });
 
   it('broadcasts with "*"', async () => {
