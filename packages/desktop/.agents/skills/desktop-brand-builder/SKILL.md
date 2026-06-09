@@ -106,7 +106,8 @@ bun install
 Then run this skill's bundled brand creation script:
 
 ```bash
-bun run .qwen/skills/desktop-brand-builder/scripts/brand-create.ts \
+cd /absolute/path/to/qwen-code
+bun run packages/desktop/.agents/skills/desktop-brand-builder/scripts/brand-create.ts \
   --desktop-root /absolute/path/to/qwen-code/packages/desktop \
   --config /absolute/path/to/brand.json
 ```
@@ -142,8 +143,8 @@ After packaging:
 - Invalid `brandId`: show the regex and ask for a corrected value.
 - Missing `logo`: ask for a valid local path.
 - Missing bundled script: report that
-  `.qwen/skills/desktop-brand-builder/scripts/brand-create.ts` is missing, and
-  include the expected command.
+  `packages/desktop/.agents/skills/desktop-brand-builder/scripts/brand-create.ts`
+  is missing, and include the expected command.
 - Build failure: preserve the build directory, return the last useful error
   lines, and include the full log path or command that produced the failure.
 
