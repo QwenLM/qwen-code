@@ -17,7 +17,7 @@ import type {
 export const EXTENSIONS_TABS = {
   DISCOVER: 'discover',
   INSTALLED: 'installed',
-  MARKETPLACES: 'marketplaces',
+  SOURCES: 'sources',
 } as const;
 
 export type ExtensionsTab =

@@ -20,7 +20,7 @@ import {
 import { TabBar } from './TabBar.js';
 import { DiscoverTab } from './tabs/DiscoverTab.js';
 import { InstalledTab } from './tabs/InstalledTab.js';
-import { MarketplacesTab } from './tabs/MarketplacesTab.js';
+import { SourcesTab } from './tabs/SourcesTab.js';
 
 export interface StatusMessage {
   type: 'info' | 'success' | 'error';
@@ -30,7 +30,7 @@ export interface StatusMessage {
 const TABS: ExtensionsTabDef[] = [
   { id: EXTENSIONS_TABS.INSTALLED, label: 'Installed' },
   { id: EXTENSIONS_TABS.DISCOVER, label: 'Discover' },
-  { id: EXTENSIONS_TABS.MARKETPLACES, label: 'Sources' },
+  { id: EXTENSIONS_TABS.SOURCES, label: 'Sources' },
 ];
 
 // Literal t() calls keep the footer hints extractable for translation.
@@ -44,7 +44,7 @@ function footerHint(tab: ExtensionsTab): string {
       return t(
         '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
       );
-    case EXTENSIONS_TABS.MARKETPLACES:
+    case EXTENSIONS_TABS.SOURCES:
       return t('↑↓ navigate · Enter select · d remove marketplace · Esc close');
     default:
       return '';
@@ -85,7 +85,7 @@ export function ExtensionsManagerDialog({
     });
   }, []);
 
-  const handleBrowseMarketplace = useCallback((marketplaceName: string) => {
+  const handleBrowseSource = useCallback((marketplaceName: string) => {
     setStatus(null);
     setTabLocked(false);
     setDiscoverFilter(marketplaceName);
@@ -168,14 +168,14 @@ export function ExtensionsManagerDialog({
               reloadSignal={reloadSignal}
             />
           )}
-          {activeTab === EXTENSIONS_TABS.MARKETPLACES && (
-            <MarketplacesTab
+          {activeTab === EXTENSIONS_TABS.SOURCES && (
+            <SourcesTab
               config={config}
-              isActive={activeTab === EXTENSIONS_TABS.MARKETPLACES}
+              isActive={activeTab === EXTENSIONS_TABS.SOURCES}
               onLockChange={handleLockChange}
               onStatus={setStatus}
               onChanged={bumpReload}
-              onBrowse={handleBrowseMarketplace}
+              onBrowse={handleBrowseSource}
               onFooter={setTabFooter}
               reloadSignal={reloadSignal}
             />

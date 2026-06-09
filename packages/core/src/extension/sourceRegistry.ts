@@ -15,19 +15,19 @@ import type {
   ClaudeMarketplacePluginConfig,
 } from './claude-converter.js';
 
-const debugLogger = createDebugLogger('MARKETPLACE_REGISTRY');
+const debugLogger = createDebugLogger('SOURCE_REGISTRY');
 
-export type MarketplaceSourceType = 'github' | 'git' | 'http' | 'local';
+export type ExtensionSourceType = 'github' | 'git' | 'http' | 'local';
 
 /**
  * A persisted marketplace source the user has added (Marketplaces tab).
  */
-export interface MarketplaceSource {
+export interface ExtensionSource {
   /** Display name (from the marketplace config `name`, or derived). */
   name: string;
   /** Original input string used to add the source. */
   source: string;
-  type: MarketplaceSourceType;
+  type: ExtensionSourceType;
   /** ISO timestamp recorded when the source was added. */
   addedAt?: string;
   /** ISO timestamp of the last successful (re)fetch / update. */
@@ -115,13 +115,11 @@ function pluginInstalls(
 }
 
 /**
- * Classifies a marketplace source string into a {@link MarketplaceSourceType}
+ * Classifies a marketplace source string into a {@link ExtensionSourceType}
  * using format heuristics only (no network / filesystem access required for a
  * confident answer, beyond an optional existence check the caller may do).
  */
-export function parseMarketplaceSourceType(
-  source: string,
-): MarketplaceSourceType {
+export function parseExtensionSourceType(source: string): ExtensionSourceType {
   const trimmed = source.trim();
   if (trimmed.startsWith('git@') || trimmed.startsWith('sso://')) {
     return 'git';
@@ -149,13 +147,13 @@ function isOwnerRepoShorthand(source: string): boolean {
 
 /**
  * Builds the install-source string fed to `parseInstallSource` for a discovered
- * plugin. For repo/local marketplaces this is `<marketplace>:<pluginName>`,
+ * plugin. For repo/local sources this is `<marketplace>:<pluginName>`,
  * which the existing installer resolves against the marketplace's
- * `marketplace.json`. For direct-JSON (`http`) marketplaces it is derived from
+ * `marketplace.json`. For direct-JSON (`http`) sources it is derived from
  * the per-plugin `source` field.
  */
 function resolveInstallSource(
-  marketplace: MarketplaceSource,
+  marketplace: ExtensionSource,
   plugin: ClaudeMarketplacePluginConfig,
 ): string {
   if (marketplace.type !== 'http') {
@@ -175,7 +173,7 @@ function resolveInstallSource(
 }
 
 function pluginsFromConfig(
-  marketplace: MarketplaceSource,
+  marketplace: ExtensionSource,
   config: ClaudeMarketplaceConfig,
   installedNames: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
@@ -198,14 +196,14 @@ function pluginsFromConfig(
 /**
  * Persists the list of marketplace sources the user has added.
  */
-export class MarketplaceRegistryStore {
+export class SourceRegistryStore {
   constructor(private readonly filePath: string) {}
 
-  read(): MarketplaceSource[] {
+  read(): ExtensionSource[] {
     try {
       const content = fs.readFileSync(this.filePath, 'utf-8');
       const parsed = JSON.parse(content);
-      return Array.isArray(parsed) ? (parsed as MarketplaceSource[]) : [];
+      return Array.isArray(parsed) ? (parsed as ExtensionSource[]) : [];
     } catch (error) {
       if (
         error instanceof Error &&
@@ -219,7 +217,7 @@ export class MarketplaceRegistryStore {
     }
   }
 
-  private write(sources: MarketplaceSource[]): void {
+  private write(sources: ExtensionSource[]): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     atomicWriteFileSync(this.filePath, JSON.stringify(sources, null, 2));
   }
@@ -227,7 +225,7 @@ export class MarketplaceRegistryStore {
   /**
    * Adds (or replaces, when name/source matches) a marketplace source.
    */
-  add(source: MarketplaceSource): void {
+  add(source: ExtensionSource): void {
     const sources = this.read().filter(
       (existing) =>
         existing.name !== source.name && existing.source !== source.source,
@@ -255,11 +253,11 @@ export class MarketplaceRegistryStore {
  * one bad source does not break discovery.
  */
 export async function discoverPlugins(
-  marketplaces: readonly MarketplaceSource[],
+  sources: readonly ExtensionSource[],
   installedNames: ReadonlySet<string>,
 ): Promise<DiscoveredPlugin[]> {
   const results = await Promise.all(
-    marketplaces.map(async (marketplace) => {
+    sources.map(async (marketplace) => {
       try {
         const config = await loadMarketplaceConfigFromSource(
           marketplace.source,
@@ -286,7 +284,7 @@ export async function discoverPlugins(
   );
 
   // De-duplicate by `${marketplaceName}/${pluginName}` to keep distinct plugins
-  // that happen to share a name across different marketplaces.
+  // that happen to share a name across different sources.
   const seen = new Set<string>();
   const deduped: DiscoveredPlugin[] = [];
   for (const plugin of results.flat()) {

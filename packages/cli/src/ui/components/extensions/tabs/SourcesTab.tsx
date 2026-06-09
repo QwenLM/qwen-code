@@ -15,7 +15,7 @@ import { t } from '../../../../i18n/index.js';
 import {
   type Config,
   type Extension,
-  type MarketplaceSource,
+  type ExtensionSource,
   type ClaudeMarketplaceConfig,
   parseInstallSource,
   redactUrlCredentials,
@@ -25,25 +25,25 @@ import { getErrorMessage } from '../../../../utils/errors.js';
 import { ExtensionActionsView } from '../views/ExtensionActionsView.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
-const debugLogger = createDebugLogger('MARKETPLACES_TAB');
+const debugLogger = createDebugLogger('SOURCES_TAB');
 
-type MarketplacesView =
+type SourcesView =
   | 'list'
   | 'install-extension'
   | 'add'
   | 'detail'
   | 'extension-detail'
   | 'remove-confirm';
-type MarketplaceDetailAction = 'browse' | 'update' | 'remove';
+type SourceDetailAction = 'browse' | 'update' | 'remove';
 
 // Flat, navigable entries shown on the Marketplaces tab list.
 type Entry =
   | { kind: 'install-extension' }
   | { kind: 'add-marketplace' }
   | { kind: 'extension'; extension: Extension }
-  | { kind: 'marketplace'; source: MarketplaceSource };
+  | { kind: 'marketplace'; source: ExtensionSource };
 
-interface MarketplacesTabProps {
+interface SourcesTabProps {
   config: Config;
   isActive: boolean;
   onLockChange: (locked: boolean) => void;
@@ -69,7 +69,7 @@ function extensionSourceLabel(ext: Extension): string {
   return `${redactUrlCredentials(meta.source)} (${meta.type})`;
 }
 
-export const MarketplacesTab = ({
+export const SourcesTab = ({
   config,
   isActive,
   onLockChange,
@@ -78,18 +78,18 @@ export const MarketplacesTab = ({
   onBrowse,
   onFooter,
   reloadSignal,
-}: MarketplacesTabProps) => {
-  const [sources, setSources] = useState<MarketplaceSource[]>([]);
+}: SourcesTabProps) => {
+  const [sources, setSources] = useState<ExtensionSource[]>([]);
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [view, setView] = useState<MarketplacesView>('list');
+  const [view, setView] = useState<SourcesView>('list');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [detailConfig, setDetailConfig] =
     useState<ClaudeMarketplaceConfig | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   // The marketplace / extension currently being viewed or confirmed.
-  const [detailSource, setDetailSource] = useState<MarketplaceSource | null>(
+  const [detailSource, setDetailSource] = useState<ExtensionSource | null>(
     null,
   );
   const [detailExtension, setDetailExtension] = useState<Extension | null>(
@@ -106,14 +106,14 @@ export const MarketplacesTab = ({
       debugLogger.error('Failed to refresh extensions:', error);
     }
     setExtensions(extensionManager.getLoadedExtensions());
-    setSources(extensionManager.getMarketplaces());
+    setSources(extensionManager.getSources());
   }, [extensionManager]);
 
   useEffect(() => {
     load();
   }, [load, reloadSignal]);
 
-  // Entries: two action rows, then installed extensions, then marketplaces.
+  // Entries: two action rows, then installed extensions, then sources.
   const entries = useMemo<Entry[]>(
     () => [
       { kind: 'install-extension' },
@@ -168,7 +168,7 @@ export const MarketplacesTab = ({
     if (!extensionManager || !input.trim()) return;
     setBusy(true);
     try {
-      const entry = await extensionManager.addMarketplace(input.trim());
+      const entry = await extensionManager.addSource(input.trim());
       onStatus({
         type: 'success',
         text: t('Added marketplace "{{name}}".', { name: entry.name }),
@@ -209,8 +209,8 @@ export const MarketplacesTab = ({
     }
   }, [extensionManager, input, onStatus, load, onChanged, goToList]);
 
-  const openMarketplaceDetail = useCallback(
-    async (source: MarketplaceSource) => {
+  const openSourceDetail = useCallback(
+    async (source: ExtensionSource) => {
       onStatus(null);
       setDetailSource(source);
       setView('detail');
@@ -218,7 +218,7 @@ export const MarketplacesTab = ({
       setDetailLoading(true);
       setDetailConfig(null);
       try {
-        const cfg = await extensionManager?.loadMarketplace(source.source);
+        const cfg = await extensionManager?.loadSource(source.source);
         setDetailConfig(cfg ?? null);
       } catch (error) {
         debugLogger.error('Failed to load marketplace detail:', error);
@@ -239,9 +239,9 @@ export const MarketplacesTab = ({
     [onLockChange, onStatus],
   );
 
-  const removeMarketplace = useCallback(() => {
+  const removeSource = useCallback(() => {
     if (!extensionManager || !detailSource) return;
-    const removed = extensionManager.removeMarketplace(detailSource.name);
+    const removed = extensionManager.removeSource(detailSource.name);
     if (removed) {
       onStatus({
         type: 'success',
@@ -253,13 +253,13 @@ export const MarketplacesTab = ({
     goToList();
   }, [extensionManager, detailSource, onStatus, load, onChanged, goToList]);
 
-  const updateMarketplace = useCallback(async () => {
+  const updateSource = useCallback(async () => {
     if (!extensionManager || !detailSource) return;
     setDetailLoading(true);
     try {
-      const cfg = await extensionManager.loadMarketplace(detailSource.source);
+      const cfg = await extensionManager.loadSource(detailSource.source);
       setDetailConfig(cfg ?? null);
-      extensionManager.markMarketplaceUpdated(detailSource.name);
+      extensionManager.markSourceUpdated(detailSource.name);
       await load();
       onChanged();
       onStatus({
@@ -276,18 +276,18 @@ export const MarketplacesTab = ({
     }
   }, [extensionManager, detailSource, load, onChanged, onStatus]);
 
-  const handleMarketplaceDetailAction = useCallback(
-    (action: MarketplaceDetailAction) => {
+  const handleSourceDetailAction = useCallback(
+    (action: SourceDetailAction) => {
       if (!detailSource) return;
       if (action === 'browse') {
         onBrowse(detailSource.name);
       } else if (action === 'update') {
-        void updateMarketplace();
+        void updateSource();
       } else if (action === 'remove') {
         setView('remove-confirm');
       }
     },
-    [detailSource, onBrowse, updateMarketplace],
+    [detailSource, onBrowse, updateSource],
   );
 
   // List keyboard: navigate entries, Enter dispatches by kind, d removes.
@@ -318,7 +318,7 @@ export const MarketplacesTab = ({
             openExtensionDetail(selectedEntry.extension);
             break;
           case 'marketplace':
-            void openMarketplaceDetail(selectedEntry.source);
+            void openSourceDetail(selectedEntry.source);
             break;
           default:
             break;
@@ -366,7 +366,7 @@ export const MarketplacesTab = ({
   useKeypress(
     (key) => {
       if (key.name === 'return' || key.sequence === 'y') {
-        removeMarketplace();
+        removeSource();
       } else if (key.name === 'escape' || key.sequence === 'n') {
         goToList();
       }
@@ -471,7 +471,7 @@ export const MarketplacesTab = ({
     const actions: Array<{
       key: string;
       label: string;
-      value: MarketplaceDetailAction;
+      value: SourceDetailAction;
     }> = [
       {
         key: 'browse',
@@ -544,7 +544,7 @@ export const MarketplacesTab = ({
               items={actions}
               isFocused={isActive}
               showNumbers={false}
-              onSelect={handleMarketplaceDetailAction}
+              onSelect={handleSourceDetailAction}
             />
           </Box>
         ) : (
@@ -557,12 +557,12 @@ export const MarketplacesTab = ({
                 {
                   key: 'remove',
                   label: t('Remove marketplace'),
-                  value: 'remove' as MarketplaceDetailAction,
+                  value: 'remove' as SourceDetailAction,
                 },
               ]}
               isFocused={isActive}
               showNumbers={false}
-              onSelect={handleMarketplaceDetailAction}
+              onSelect={handleSourceDetailAction}
             />
           </Box>
         )}
@@ -616,7 +616,7 @@ export const MarketplacesTab = ({
   };
 
   const extensionsStart = 2;
-  const marketplacesStart = 2 + extensions.length;
+  const sourcesStart = 2 + extensions.length;
 
   return (
     <Box flexDirection="column">
@@ -651,7 +651,7 @@ export const MarketplacesTab = ({
           </Text>
           {sources.map((source, j) =>
             renderRow(
-              marketplacesStart + j,
+              sourcesStart + j,
               source.name,
               `${redactUrlCredentials(source.source)} (${source.type})`,
             ),
@@ -662,7 +662,7 @@ export const MarketplacesTab = ({
       {extensions.length === 0 && sources.length === 0 ? (
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
-            {t('No extensions or marketplaces added yet.')}
+            {t('No extensions or sources added yet.')}
           </Text>
         </Box>
       ) : null}

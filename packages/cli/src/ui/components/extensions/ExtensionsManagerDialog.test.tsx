@@ -20,7 +20,7 @@ import type {
   Config,
   Extension,
   DiscoveredPlugin,
-  MarketplaceSource,
+  ExtensionSource,
 } from '@qwen-code/qwen-code-core';
 import type { ExtensionUpdateState } from '../../state/extensions.js';
 
@@ -44,7 +44,7 @@ const mockExtension = (name: string, isActive = true): Extension =>
 interface ManagerOverrides {
   extensions?: Extension[];
   discovered?: DiscoveredPlugin[];
-  marketplaces?: MarketplaceSource[];
+  sources?: ExtensionSource[];
   favorites?: string[];
   scopes?: Record<string, string>;
 }
@@ -58,7 +58,7 @@ const createManager = (o: ManagerOverrides = {}) => {
     getExtensionScopes: vi.fn(() => o.scopes ?? {}),
     isFavorite: vi.fn((name: string) => (o.favorites ?? []).includes(name)),
     getExtensionScope: vi.fn((name: string) => o.scopes?.[name] ?? 'user'),
-    getMarketplaces: vi.fn(() => o.marketplaces ?? []),
+    getSources: vi.fn(() => o.sources ?? []),
     discoverPlugins: vi.fn().mockResolvedValue(o.discovered ?? []),
     toggleFavorite: vi.fn(() => true),
     setExtensionScope: vi.fn(),
@@ -67,9 +67,9 @@ const createManager = (o: ManagerOverrides = {}) => {
     uninstallExtension: vi.fn().mockResolvedValue(undefined),
     checkForAllExtensionUpdates: vi.fn().mockResolvedValue(undefined),
     updateExtension: vi.fn().mockResolvedValue(undefined),
-    addMarketplace: vi.fn(),
-    removeMarketplace: vi.fn(() => true),
-    loadMarketplace: vi.fn().mockResolvedValue(null),
+    addSource: vi.fn(),
+    removeSource: vi.fn(() => true),
+    loadSource: vi.fn().mockResolvedValue(null),
   };
 };
 
@@ -347,13 +347,13 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
   it('shows the install/add actions and grouped sections on the Marketplaces tab', async () => {
     const config = createConfig(
       createManager({
-        marketplaces: [
+        sources: [
           { name: 'Skills', source: 'anthropics/skills', type: 'github' },
         ],
       }),
     );
     const { lastFrame } = renderDialog(config, {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('Add new marketplace');
@@ -373,7 +373,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       extensions: [mockExtension('alpha', true)],
     });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('alpha'); // Extensions section row
@@ -401,7 +401,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       extensions: [mockExtension('alpha', true)],
     });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('alpha');
@@ -432,7 +432,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       extensions: [mockExtension('alpha', false)], // disabled
     });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('alpha');
@@ -487,11 +487,11 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
   it('shows a CC-style marketplace detail with installed plugins and actions', async () => {
     const manager = createManager({
       extensions: [mockExtension('pdf', true)], // installed, belongs to Skills
-      marketplaces: [
+      sources: [
         { name: 'Skills', source: 'anthropics/skills', type: 'github' },
       ],
     });
-    manager.loadMarketplace = vi.fn().mockResolvedValue({
+    manager.loadSource = vi.fn().mockResolvedValue({
       name: 'Skills',
       owner: { name: 'o', email: 'e' },
       plugins: [
@@ -500,7 +500,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       ],
     });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     // Wait until the list has loaded (and the keypress handler re-subscribed).
     await waitFor(() => {
@@ -528,7 +528,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
 
   it('Browse plugins jumps to Discover filtered by the marketplace', async () => {
     const manager = createManager({
-      marketplaces: [
+      sources: [
         { name: 'Skills', source: 'anthropics/skills', type: 'github' },
       ],
       discovered: [
@@ -552,7 +552,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
         },
       ],
     });
-    manager.loadMarketplace = vi.fn().mockResolvedValue({
+    manager.loadSource = vi.fn().mockResolvedValue({
       name: 'Skills',
       owner: { name: 'o', email: 'e' },
       plugins: [
@@ -561,7 +561,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       ],
     });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('Skills'); // list loaded
@@ -618,7 +618,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     const manager = createManager();
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
       onClose,
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('Install new extension');
@@ -636,7 +636,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
 
   it('opens the install-extension input view on Enter', async () => {
     const { stdin, lastFrame } = renderDialog(createConfig(createManager()), {
-      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+      initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
       expect(lastFrame()).toContain('Install new extension');

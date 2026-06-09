@@ -52,12 +52,12 @@ import {
   type ExtensionScope,
 } from './extensionPreferences.js';
 import {
-  MarketplaceRegistryStore,
+  SourceRegistryStore,
   discoverPlugins,
-  parseMarketplaceSourceType,
-  type MarketplaceSource,
+  parseExtensionSourceType,
+  type ExtensionSource,
   type DiscoveredPlugin,
-} from './marketplaceRegistry.js';
+} from './sourceRegistry.js';
 import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
@@ -320,7 +320,7 @@ export class ExtensionManager {
   private readonly enabledExtensionNamesOverride: string[];
   private readonly workspaceDir: string;
   private readonly preferencesStore: ExtensionPreferencesStore;
-  private readonly marketplaceRegistryStore: MarketplaceRegistryStore;
+  private readonly sourceRegistryStore: SourceRegistryStore;
   private discoverCache: DiscoveredPlugin[] | null = null;
 
   private config?: Config;
@@ -345,8 +345,8 @@ export class ExtensionManager {
     this.preferencesStore = new ExtensionPreferencesStore(
       path.join(this.configDir, 'extension-preferences.json'),
     );
-    this.marketplaceRegistryStore = new MarketplaceRegistryStore(
-      path.join(this.configDir, 'marketplaces.json'),
+    this.sourceRegistryStore = new SourceRegistryStore(
+      path.join(this.configDir, 'sources.json'),
     );
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
@@ -540,8 +540,8 @@ export class ExtensionManager {
   // Marketplace registry & discovery
   // ==========================================================================
 
-  getMarketplaces(): MarketplaceSource[] {
-    return this.marketplaceRegistryStore.read();
+  getSources(): ExtensionSource[] {
+    return this.sourceRegistryStore.read();
   }
 
   /**
@@ -549,7 +549,7 @@ export class ExtensionManager {
    * human-readable name (falling back to the raw source). Throws if no
    * marketplace config can be resolved from the source.
    */
-  async addMarketplace(source: string): Promise<MarketplaceSource> {
+  async addSource(source: string): Promise<ExtensionSource> {
     const trimmed = source.trim();
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
@@ -579,20 +579,20 @@ export class ExtensionManager {
       );
     }
     const now = new Date().toISOString();
-    const entry: MarketplaceSource = {
+    const entry: ExtensionSource = {
       name: config.name || trimmed,
       source: trimmed,
-      type: parseMarketplaceSourceType(trimmed),
+      type: parseExtensionSourceType(trimmed),
       addedAt: now,
       lastUpdatedAt: now,
     };
-    this.marketplaceRegistryStore.add(entry);
+    this.sourceRegistryStore.add(entry);
     this.discoverCache = null; // sources changed -> refetch on next discover
     return entry;
   }
 
-  removeMarketplace(name: string): boolean {
-    const removed = this.marketplaceRegistryStore.remove(name);
+  removeSource(name: string): boolean {
+    const removed = this.sourceRegistryStore.remove(name);
     if (removed) {
       this.discoverCache = null;
     }
@@ -603,26 +603,26 @@ export class ExtensionManager {
    * Records a fresh "last updated" timestamp for a marketplace and invalidates
    * the discovery cache so the next discover re-fetches it.
    */
-  markMarketplaceUpdated(name: string): MarketplaceSource | undefined {
-    const entry = this.getMarketplaces().find((m) => m.name === name);
+  markSourceUpdated(name: string): ExtensionSource | undefined {
+    const entry = this.getSources().find((m) => m.name === name);
     if (!entry) {
       return undefined;
     }
-    const updated: MarketplaceSource = {
+    const updated: ExtensionSource = {
       ...entry,
       lastUpdatedAt: new Date().toISOString(),
     };
-    this.marketplaceRegistryStore.add(updated); // add() replaces by name
+    this.sourceRegistryStore.add(updated); // add() replaces by name
     this.discoverCache = null;
     return updated;
   }
 
-  loadMarketplace(source: string): Promise<ClaudeMarketplaceConfig | null> {
+  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
     return loadMarketplaceConfigFromSource(source);
   }
 
   /**
-   * Discovers all installable plugins across configured marketplaces, marking
+   * Discovers all installable plugins across configured sources, marking
    * which are already installed. The fetched listing is cached for the session;
    * pass `{ refresh: true }` to force a re-fetch. The cheap `installed` flags are
    * always recomputed against the current install state.
@@ -639,10 +639,7 @@ export class ExtensionManager {
         installed: installedNames.has(plugin.name),
       }));
     }
-    const result = await discoverPlugins(
-      this.getMarketplaces(),
-      installedNames,
-    );
+    const result = await discoverPlugins(this.getSources(), installedNames);
     this.discoverCache = result;
     return result;
   }

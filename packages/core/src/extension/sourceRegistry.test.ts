@@ -9,11 +9,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-  MarketplaceRegistryStore,
-  parseMarketplaceSourceType,
+  SourceRegistryStore,
+  parseExtensionSourceType,
   discoverPlugins,
-  type MarketplaceSource,
-} from './marketplaceRegistry.js';
+  type ExtensionSource,
+} from './sourceRegistry.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 
@@ -25,7 +25,7 @@ vi.mock('./marketplace.js', async (importOriginal) => {
   };
 });
 
-describe('parseMarketplaceSourceType', () => {
+describe('parseExtensionSourceType', () => {
   it.each([
     ['anthropics/skills', 'github'],
     ['https://github.com/owner/repo', 'github'],
@@ -35,16 +35,16 @@ describe('parseMarketplaceSourceType', () => {
     ['./local/marketplace', 'local'],
     ['/abs/path/marketplace', 'local'],
   ] as const)('classifies %s as %s', (input, expected) => {
-    expect(parseMarketplaceSourceType(input)).toBe(expected);
+    expect(parseExtensionSourceType(input)).toBe(expected);
   });
 });
 
-describe('MarketplaceRegistryStore', () => {
+describe('SourceRegistryStore', () => {
   let tmpDir: string;
   let filePath: string;
-  let store: MarketplaceRegistryStore;
+  let store: SourceRegistryStore;
 
-  const make = (name: string, source: string): MarketplaceSource => ({
+  const make = (name: string, source: string): ExtensionSource => ({
     name,
     source,
     type: 'github',
@@ -52,8 +52,8 @@ describe('MarketplaceRegistryStore', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mkt-reg-'));
-    filePath = path.join(tmpDir, 'nested', 'marketplaces.json');
-    store = new MarketplaceRegistryStore(filePath);
+    filePath = path.join(tmpDir, 'nested', 'sources.json');
+    store = new SourceRegistryStore(filePath);
   });
 
   afterEach(() => {
@@ -68,7 +68,7 @@ describe('MarketplaceRegistryStore', () => {
     store.add(make('Skills', 'anthropics/skills'));
     expect(store.read()).toHaveLength(1);
 
-    const reopened = new MarketplaceRegistryStore(filePath);
+    const reopened = new SourceRegistryStore(filePath);
     expect(reopened.read()[0].name).toBe('Skills');
   });
 
@@ -105,7 +105,7 @@ describe('discoverPlugins', () => {
     plugins,
   });
 
-  it('flattens plugins across marketplaces and marks installed ones', async () => {
+  it('flattens plugins across sources and marks installed ones', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(
       async (source: string) => {
         if (source === 'anthropics/skills') {
@@ -130,7 +130,7 @@ describe('discoverPlugins', () => {
       },
     );
 
-    const sources: MarketplaceSource[] = [
+    const sources: ExtensionSource[] = [
       { name: 'Skills', source: 'anthropics/skills', type: 'github' },
       { name: 'Other', source: 'me/other', type: 'github' },
     ];
@@ -171,7 +171,7 @@ describe('discoverPlugins', () => {
     expect(plugin.lastUpdated).toBe('Jun 5, 2026');
   });
 
-  it('derives install source from per-plugin source for http marketplaces', async () => {
+  it('derives install source from per-plugin source for http sources', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [
         {
@@ -200,7 +200,7 @@ describe('discoverPlugins', () => {
     );
   });
 
-  it('skips marketplaces that fail to load without throwing', async () => {
+  it('skips sources that fail to load without throwing', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(
       async (source: string) => {
         if (source === 'good/repo') {

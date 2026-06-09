@@ -148,7 +148,7 @@ describe('isClaudePluginConfig', () => {
   it('should identify Claude plugin directory', () => {
     const extensionDir = '/tmp/test-extension';
     const marketplace = {
-      marketplaceSource: 'https://test.com',
+      extensionSource: 'https://test.com',
       pluginName: 'test-plugin',
     };
 

@@ -704,7 +704,7 @@ export function mergeClaudeConfigs(
  */
 export function isClaudePluginConfig(
   extensionDir: string,
-  marketplace: { marketplaceSource: string; pluginName: string },
+  marketplace: { extensionSource: string; pluginName: string },
 ) {
   const marketplaceConfigFilePath = path.join(
     extensionDir,
