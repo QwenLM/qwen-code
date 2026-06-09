@@ -21,7 +21,7 @@ export function parse(yamlString: string): Record<string, unknown> {
   try {
     const result = yaml.parse(yamlString, { schema: 'core' });
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      return result as Record<string, unknown>;
+      return stripNullValues(result as Record<string, unknown>);
     }
   } catch (error) {
     debugLogger.debug(
@@ -29,6 +29,24 @@ export function parse(yamlString: string): Record<string, unknown> {
     );
   }
   return parseSimple(yamlString);
+}
+
+/**
+ * Strips top-level null values so callers can keep using `!== undefined`.
+ * yaml.parse returns null for bare keys (e.g. `hooks:`) and explicit
+ * nulls (`key: null`, `key: ~`), while the old simple parser omitted
+ * them entirely — normalizing here keeps the contract consistent.
+ */
+function stripNullValues(
+  obj: Record<string, unknown>,
+): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== null) {
+      cleaned[key] = value;
+    }
+  }
+  return cleaned;
 }
 
 /**

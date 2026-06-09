@@ -135,7 +135,7 @@ export function parseSkillContent(
   const allowedToolsRaw = frontmatter['allowedTools'] as unknown[] | undefined;
   let allowedTools: string[] | undefined;
 
-  if (allowedToolsRaw != null) {
+  if (allowedToolsRaw !== undefined) {
     if (Array.isArray(allowedToolsRaw)) {
       allowedTools = allowedToolsRaw.map(String);
     } else {

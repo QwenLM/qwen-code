@@ -70,18 +70,18 @@ describe('yaml-parser', () => {
       expect(result['created']).toBe('2024-01-01');
     });
 
-    it('should return null for bare keys with no value', () => {
+    it('should strip bare keys with no value', () => {
       const input = 'name: test\nhooks:';
       const result = parse(input);
       expect(result['name']).toBe('test');
-      expect(result['hooks']).toBeNull();
+      expect(result['hooks']).toBeUndefined();
     });
 
-    it('should return null for explicit null and tilde values', () => {
+    it('should strip explicit null and tilde values', () => {
       const input = 'a: null\nb: ~';
       const result = parse(input);
-      expect(result['a']).toBeNull();
-      expect(result['b']).toBeNull();
+      expect(result['a']).toBeUndefined();
+      expect(result['b']).toBeUndefined();
     });
 
     it('should treat yes/no as strings in YAML 1.2 core schema', () => {
