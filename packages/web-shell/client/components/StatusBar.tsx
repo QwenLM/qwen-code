@@ -7,6 +7,8 @@ function getModeIndicator(
   t: ReturnType<typeof useI18n>['t'],
 ): { label: string; className: string } | null {
   switch (mode) {
+    case 'default':
+      return { label: t('mode.default'), className: styles.modeDefault };
     case 'plan':
       return { label: t('mode.plan'), className: styles.modePlan };
     case 'auto-edit':
@@ -16,11 +18,17 @@ function getModeIndicator(
     case 'yolo':
       return { label: t('mode.yolo'), className: styles.modeYolo };
     default:
+      // Only reached before a mode is known (e.g. while disconnected).
       return null;
   }
 }
 
-export function StatusBar() {
+interface StatusBarProps {
+  /** Open the approval-mode picker so the mode can be chosen with the mouse. */
+  onSelectMode: () => void;
+}
+
+export function StatusBar({ onSelectMode }: StatusBarProps) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
   const currentModel = connection.currentModel ?? '';
@@ -36,12 +44,26 @@ export function StatusBar() {
     <div className={styles.bar}>
       <div className={styles.left}>
         {modeIndicator ? (
-          <>
+          // The hint advertises "click to switch", so the indicator is always
+          // a real button — never a non-interactive label. stopPropagation on
+          // both mousedown and touchstart keeps the trigger from counting as an
+          // "outside" press for the picker's own dismiss handler (it listens on
+          // exactly those two), so re-activating toggles cleanly on mouse and
+          // touch alike.
+          <button
+            type="button"
+            className={styles.modeButton}
+            onClick={onSelectMode}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            title={t('mode.select')}
+            aria-haspopup="listbox"
+          >
             <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
               {modeIndicator.label}
             </span>
             <span className={styles.modeHint}>{t('status.modeHint')}</span>
-          </>
+          </button>
         ) : (
           <span>{t('status.shortcuts')}</span>
         )}

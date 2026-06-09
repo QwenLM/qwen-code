@@ -19,8 +19,30 @@
   position: relative;
 }
 
+.modeButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.modeButton:hover .modeHint,
+.modeButton:focus-visible .modeHint {
+  color: var(--text-secondary);
+}
+
 .modeLabel {
   font-size: 13px;
+}
+
+.modeDefault {
+  color: var(--text-secondary);
 }
 
 .modePlan {
