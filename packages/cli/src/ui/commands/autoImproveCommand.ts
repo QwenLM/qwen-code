@@ -31,6 +31,7 @@ import {
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
   readAutoImproveLoopState,
+  compactAutoImproveRunIndex,
   readAutoImproveRunIndex,
   writeActiveAutoImproveLoop,
   writeAutoImproveLoopState,
@@ -302,6 +303,12 @@ async function markRunCompleted(
     state.status = 'stopped';
   }
   await writeAutoImproveLoopState(repoRoot, state);
+  // The tick agent appends a record to runs/index.json per run but nothing
+  // rewrites it, so compact it back to the cap after each completed run.
+  // Best-effort: a failure here must not fail run finalization.
+  await compactAutoImproveRunIndex(repoRoot, loopId).catch((error) => {
+    debugLogger.warn(`run index compaction failed for loop ${loopId}:`, error);
+  });
 }
 
 function describeSources(state: AutoImproveLoopState): string {

@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_AUTO_IMPROVE_CONFIG,
   getAutoImproveLoopDir,
+  getAutoImproveRunIndexPath,
   getAutoImproveStatePath,
+  compactAutoImproveRunIndex,
   isRecord,
   isValidAutoImproveLoopId,
   MAX_AUTO_IMPROVE_PROMPT_LENGTH,
@@ -499,6 +501,56 @@ describe('autoImproveState', () => {
 
       const result = await readActiveAutoImproveLoop(tempDir);
       expect(result).toEqual({ activeLoopId: 'valid-loop-id' });
+    });
+  });
+
+  describe('compactAutoImproveRunIndex', () => {
+    it('rewrites the on-disk index to the cap when it exceeds MAX', async () => {
+      const loopId = 'test-loop-compact';
+      const indexPath = getAutoImproveRunIndexPath(tempDir, loopId);
+      await fs.mkdir(path.dirname(indexPath), { recursive: true });
+      const runs = Array.from({ length: 150 }, (_, i) => ({
+        runId: `r${i}`,
+        status: 'success',
+        updatedAt: '2026-05-25T00:00:00.000Z',
+      }));
+      await fs.writeFile(
+        indexPath,
+        JSON.stringify({ version: 1, runs }),
+        'utf8',
+      );
+
+      await compactAutoImproveRunIndex(tempDir, loopId);
+
+      const after = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+        runs: Array<{ runId: string }>;
+      };
+      expect(after.runs).toHaveLength(100);
+      // Most recent 100 kept (r50..r149).
+      expect(after.runs[0]!.runId).toBe('r50');
+      expect(after.runs[99]!.runId).toBe('r149');
+    });
+
+    it('leaves an index at/below the cap byte-for-byte unchanged', async () => {
+      const loopId = 'test-loop-nocompact';
+      const indexPath = getAutoImproveRunIndexPath(tempDir, loopId);
+      await fs.mkdir(path.dirname(indexPath), { recursive: true });
+      const raw = JSON.stringify({
+        version: 1,
+        runs: [{ runId: 'r1', status: 'success' }],
+      });
+      await fs.writeFile(indexPath, raw, 'utf8');
+
+      await compactAutoImproveRunIndex(tempDir, loopId);
+
+      // No rewrite — exact same bytes (compaction only fires over the cap).
+      expect(await fs.readFile(indexPath, 'utf8')).toBe(raw);
+    });
+
+    it('is a no-op for a missing index', async () => {
+      await expect(
+        compactAutoImproveRunIndex(tempDir, 'nonexistent-loop'),
+      ).resolves.toBeUndefined();
     });
   });
 

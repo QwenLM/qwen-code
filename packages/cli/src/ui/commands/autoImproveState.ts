@@ -584,6 +584,41 @@ export async function readAutoImproveRunIndex(
   }
 }
 
+export async function compactAutoImproveRunIndex(
+  repoRoot: string,
+  loopId: string,
+): Promise<void> {
+  // The tick agent appends one record to index.json per run; normalizeRunIndex
+  // truncates to the most recent MAX_RUN_INDEX_RECORDS on read, but nothing
+  // rewrites the file, so it grows unbounded on disk (and every read pays an
+  // O(N) parse). Rewrite the truncated view once the raw file exceeds the cap.
+  // Read the raw record count first so we only pay the write when needed.
+  let rawCount: number;
+  try {
+    const raw = await fs.readFile(
+      getAutoImproveRunIndexPath(repoRoot, loopId),
+      'utf8',
+    );
+    const parsed = JSON.parse(raw) as unknown;
+    const runs = isRecord(parsed) ? parsed['runs'] : undefined;
+    rawCount = Array.isArray(runs) ? runs.length : 0;
+  } catch {
+    // Missing/corrupt index: nothing to compact (reads already fall back to
+    // an empty index).
+    return;
+  }
+  if (rawCount <= MAX_RUN_INDEX_RECORDS) return;
+  const normalized = await readAutoImproveRunIndex(repoRoot, loopId);
+  const indexPath = getAutoImproveRunIndexPath(repoRoot, loopId);
+  const tmpPath = `${indexPath}.tmp`;
+  await fs.writeFile(
+    tmpPath,
+    `${JSON.stringify(normalized, null, 2)}\n`,
+    'utf8',
+  );
+  await fs.rename(tmpPath, indexPath);
+}
+
 function getLoopStateTimestamp(state: AutoImproveLoopState): number {
   const parsed = Date.parse(state.createdAt);
   return Number.isFinite(parsed) ? parsed : 0;

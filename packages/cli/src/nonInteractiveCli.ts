@@ -1116,6 +1116,10 @@ export async function runNonInteractive(
 
               scheduler.start((job: { prompt: string }) => {
                 void (async () => {
+                  // Per-tick start: `startTime` is the process entry point, so
+                  // for a long-running cron session it would report a duration
+                  // accumulated from process start rather than this tick.
+                  const cronJobStart = Date.now();
                   const label = job.prompt.slice(0, 40);
                   let modelText = job.prompt;
                   let slashOnComplete:
@@ -1143,7 +1147,7 @@ export async function runNonInteractive(
                           isError: slashCommandResult.messageType === 'error',
                           adapter,
                           config,
-                          startTimeMs: startTime,
+                          startTimeMs: cronJobStart,
                         });
                       } finally {
                         checkCronDone();
