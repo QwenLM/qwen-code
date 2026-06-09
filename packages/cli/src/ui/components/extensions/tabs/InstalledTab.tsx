@@ -28,7 +28,7 @@ import type {
   InstalledGroup,
   InstalledMcpInfo,
 } from '../types.js';
-import { McpDetailView } from '../views/McpDetailView.js';
+import { McpServerActionsView } from '../views/McpServerActionsView.js';
 import { ExtensionActionsView } from '../views/ExtensionActionsView.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
@@ -355,16 +355,6 @@ export const InstalledTab = ({
     { isActive: isActive && view === 'list' },
   );
 
-  // Escape handling for sub-views (the container handles Escape on the list).
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        goToList();
-      }
-    },
-    { isActive: isActive && view === 'mcp-detail' },
-  );
-
   if (loading) {
     return <Text color={theme.text.secondary}>{t('Loading...')}</Text>;
   }
@@ -384,7 +374,15 @@ export const InstalledTab = ({
   }
 
   if (view === 'mcp-detail' && selectedItem?.kind === 'mcp') {
-    return <McpDetailView mcp={selectedItem.mcp} />;
+    return (
+      <McpServerActionsView
+        config={config}
+        serverName={selectedItem.mcp.name}
+        onStatus={onStatus}
+        onReload={load}
+        onExit={goToList}
+      />
+    );
   }
 
   if (items.length === 0) {

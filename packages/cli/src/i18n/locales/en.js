@@ -8,6 +8,11 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    'Cannot disable an extension-provided MCP server here.',
+  'Cleared authentication for "{{name}}".':
+    'Cleared authentication for "{{name}}".',
+
   'User level': 'User level',
   'Project level': 'Project level',
   'Local level': 'Local level',
@@ -75,7 +80,6 @@ export default {
   'Local (Only You)': 'Local (Only You)',
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}.',
-  'MCP Server': 'MCP Server',
   'MCP servers': 'MCP servers',
   'Mark for Update': 'Mark for Update',
   Marketplaces: 'Marketplaces',
@@ -100,7 +104,6 @@ export default {
   'Scope:': 'Scope:',
   'Set "{{name}}" scope to {{scope}}.': 'Set "{{name}}" scope to {{scope}}.',
   Sources: 'Sources',
-  'Transport:': 'Transport:',
   'Type to search · Space to toggle · Enter to view · Esc to go back':
     'Type to search · Space to toggle · Enter to view · Esc to go back',
   Uninstall: 'Uninstall',

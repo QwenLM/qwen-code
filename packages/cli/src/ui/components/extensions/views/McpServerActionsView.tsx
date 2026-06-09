@@ -1,0 +1,288 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { useState, useCallback, useEffect } from 'react';
+import { Text } from 'ink';
+import { theme } from '../../../semantic-colors.js';
+import { t } from '../../../../i18n/index.js';
+import {
+  type Config,
+  getMCPServerStatus,
+  DiscoveredMCPTool,
+  MCPOAuthTokenStorage,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
+import { loadSettings, SettingScope } from '../../../../config/settings.js';
+import { getErrorMessage } from '../../../../utils/errors.js';
+import { ServerDetailStep } from '../../mcp/steps/ServerDetailStep.js';
+import { ToolListStep } from '../../mcp/steps/ToolListStep.js';
+import { ToolDetailStep } from '../../mcp/steps/ToolDetailStep.js';
+import { AuthenticateStep } from '../../mcp/steps/AuthenticateStep.js';
+import { isToolValid, getToolInvalidReasons } from '../../mcp/utils.js';
+import type {
+  MCPServerDisplayInfo,
+  MCPToolDisplayInfo,
+} from '../../mcp/types.js';
+import type { StatusMessage } from '../ExtensionsManagerDialog.js';
+
+const debugLogger = createDebugLogger('EXT_MCP_DETAIL');
+
+type SubView = 'detail' | 'tools' | 'tool-detail' | 'authenticate';
+
+interface McpServerActionsViewProps {
+  config: Config;
+  /** Name of the installed MCP server to manage. */
+  serverName: string;
+  onStatus: (status: StatusMessage | null) => void;
+  /** Ask the parent list to reload (state changed). */
+  onReload: () => void;
+  /** Leave the detail and return to the list. */
+  onExit: () => void;
+}
+
+/**
+ * MCP server detail + actions inside the extensions manager, reusing the
+ * `/mcp` dialog's ServerDetailStep / ToolListStep / AuthenticateStep so the
+ * behaviour (live status, view tools, enable/disable, re-authenticate, clear
+ * auth) stays identical to `/mcp`.
+ */
+export const McpServerActionsView = ({
+  config,
+  serverName,
+  onStatus,
+  onReload,
+  onExit,
+}: McpServerActionsViewProps) => {
+  const [sub, setSub] = useState<SubView>('detail');
+  const [server, setServer] = useState<MCPServerDisplayInfo | null>(null);
+  const [selectedTool, setSelectedTool] = useState<MCPToolDisplayInfo | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(true);
+
+  const buildServer =
+    useCallback(async (): Promise<MCPServerDisplayInfo | null> => {
+      const mcpServers = config.getMcpServers() || {};
+      const serverConfig = mcpServers[serverName];
+      if (!serverConfig) return null;
+
+      const settings = loadSettings();
+      const userSettings = settings.forScope(SettingScope.User).settings;
+      const workspaceSettings = settings.forScope(
+        SettingScope.Workspace,
+      ).settings;
+
+      const status = getMCPServerStatus(serverName);
+      const toolRegistry = config.getToolRegistry();
+      const serverTools = (toolRegistry?.getAllTools() || []).filter(
+        (tool): tool is DiscoveredMCPTool =>
+          tool instanceof DiscoveredMCPTool && tool.serverName === serverName,
+      );
+
+      let source: 'user' | 'project' | 'extension' = 'user';
+      if (serverConfig.extensionName) {
+        source = 'extension';
+      } else if (workspaceSettings.mcpServers?.[serverName]) {
+        source = 'project';
+      } else if (userSettings.mcpServers?.[serverName]) {
+        source = 'user';
+      }
+
+      let hasOAuthTokens = false;
+      try {
+        const credentials = await new MCPOAuthTokenStorage().getCredentials(
+          serverName,
+        );
+        hasOAuthTokens = credentials !== null;
+      } catch {
+        // ignore token lookup failures
+      }
+
+      return {
+        name: serverName,
+        status,
+        source,
+        config: serverConfig,
+        toolCount: serverTools.length,
+        invalidToolCount: serverTools.filter((x) => !x.name || !x.description)
+          .length,
+        promptCount: 0,
+        isDisabled: config.isMcpServerDisabled(serverName),
+        hasOAuthTokens,
+      };
+    }, [config, serverName]);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      setServer(await buildServer());
+    } catch (error) {
+      debugLogger.error('Failed to load MCP server:', error);
+    } finally {
+      setLoading(false);
+    }
+    onReload();
+  }, [buildServer, onReload]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const info = await buildServer();
+      if (!cancelled) {
+        setServer(info);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [buildServer]);
+
+  const getServerTools = useCallback((): MCPToolDisplayInfo[] => {
+    const toolRegistry = config.getToolRegistry();
+    if (!toolRegistry) return [];
+    const out: MCPToolDisplayInfo[] = [];
+    for (const tool of toolRegistry.getAllTools()) {
+      if (
+        !(tool instanceof DiscoveredMCPTool) ||
+        tool.serverName !== serverName
+      )
+        continue;
+      const valid = isToolValid(tool.name, tool.description);
+      out.push({
+        name: tool.name || t('(unnamed)'),
+        description: tool.description,
+        serverName: tool.serverName,
+        schema: tool.parameterSchema as object | undefined,
+        annotations: tool.annotations,
+        isValid: valid,
+        invalidReason: valid
+          ? undefined
+          : getToolInvalidReasons(tool.name, tool.description).join(', '),
+      });
+    }
+    return out;
+  }, [config, serverName]);
+
+  const handleReconnect = useCallback(async () => {
+    try {
+      await config.getToolRegistry()?.discoverToolsForServer(serverName);
+      await reload();
+    } catch (error) {
+      onStatus({ type: 'error', text: getErrorMessage(error) });
+    }
+  }, [config, serverName, reload, onStatus]);
+
+  const handleToggleDisable = useCallback(async () => {
+    if (!server) return;
+    const toolRegistry = config.getToolRegistry();
+    try {
+      if (server.isDisabled) {
+        // Enable: drop from both exclusion lists + runtime, then rediscover.
+        const settings = loadSettings();
+        for (const scope of [SettingScope.User, SettingScope.Workspace]) {
+          const excluded =
+            settings.forScope(scope).settings.mcp?.excluded || [];
+          if (excluded.includes(serverName)) {
+            settings.setValue(
+              scope,
+              'mcp.excluded',
+              excluded.filter((n: string) => n !== serverName),
+            );
+          }
+        }
+        const runtimeExcluded = config.getExcludedMcpServers() || [];
+        config.setExcludedMcpServers(
+          runtimeExcluded.filter((n) => n !== serverName),
+        );
+        await toolRegistry?.discoverToolsForServer(serverName);
+      } else {
+        if (server.source === 'extension') {
+          onStatus({
+            type: 'error',
+            text: t('Cannot disable an extension-provided MCP server here.'),
+          });
+          return;
+        }
+        const scope =
+          server.source === 'project'
+            ? SettingScope.Workspace
+            : SettingScope.User;
+        const settings = loadSettings();
+        const excluded = settings.forScope(scope).settings.mcp?.excluded || [];
+        if (!excluded.includes(serverName)) {
+          settings.setValue(scope, 'mcp.excluded', [...excluded, serverName]);
+        }
+        await toolRegistry?.disableMcpServer(serverName);
+      }
+      await reload();
+    } catch (error) {
+      onStatus({ type: 'error', text: getErrorMessage(error) });
+    }
+  }, [server, config, serverName, reload, onStatus]);
+
+  const handleClearAuth = useCallback(async () => {
+    try {
+      await new MCPOAuthTokenStorage().deleteCredentials(serverName);
+      await config.getToolRegistry()?.disconnectServer(serverName);
+      await reload();
+      onStatus({
+        type: 'success',
+        text: t('Cleared authentication for "{{name}}".', { name: serverName }),
+      });
+    } catch (error) {
+      onStatus({ type: 'error', text: getErrorMessage(error) });
+    }
+  }, [config, serverName, reload, onStatus]);
+
+  if (loading && !server) {
+    return <Text color={theme.text.secondary}>{t('Loading...')}</Text>;
+  }
+
+  if (sub === 'authenticate') {
+    return (
+      <AuthenticateStep
+        server={server}
+        onBack={() => {
+          setSub('detail');
+          void reload();
+        }}
+      />
+    );
+  }
+
+  if (sub === 'tool-detail') {
+    return (
+      <ToolDetailStep tool={selectedTool} onBack={() => setSub('tools')} />
+    );
+  }
+
+  if (sub === 'tools') {
+    return (
+      <ToolListStep
+        tools={getServerTools()}
+        serverName={serverName}
+        onSelect={(tool) => {
+          setSelectedTool(tool);
+          setSub('tool-detail');
+        }}
+        onBack={() => setSub('detail')}
+      />
+    );
+  }
+
+  return (
+    <ServerDetailStep
+      server={server}
+      onViewTools={() => setSub('tools')}
+      onReconnect={() => void handleReconnect()}
+      onDisable={() => void handleToggleDisable()}
+      onAuthenticate={() => setSub('authenticate')}
+      onClearAuth={() => void handleClearAuth()}
+      onBack={onExit}
+    />
+  );
+};

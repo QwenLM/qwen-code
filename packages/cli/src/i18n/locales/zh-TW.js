@@ -9,6 +9,10 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    '無法在此處停用擴展提供的 MCP 伺服器。',
+  'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
+
   'User level': '使用者層級',
   'Project level': '專案層級',
   'Local level': '本機層級',
@@ -75,7 +79,6 @@ export default {
   'Local (Only You)': '本地（僅你自己）',
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
-  'MCP Server': 'MCP 伺服器',
   'MCP servers': 'MCP 伺服器',
   'Mark for Update': '標記為待更新',
   Marketplaces: '市場來源',
@@ -99,7 +102,6 @@ export default {
   'Set "{{name}}" scope to {{scope}}.':
     '已將 "{{name}}" 的作用域設為 {{scope}}。',
   Sources: '來源',
-  'Transport:': '傳輸方式：',
   'Type to search · Space to toggle · Enter to view · Esc to go back':
     '輸入以搜尋 · Space 切換 · Enter 查看 · Esc 返回',
   Uninstall: '卸載',

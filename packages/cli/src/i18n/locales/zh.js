@@ -7,6 +7,10 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Cannot disable an extension-provided MCP server here.':
+    '无法在此处禁用扩展提供的 MCP 服务器。',
+  'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
+
   'User level': '用户级',
   'Project level': '项目级',
   'Local level': '本地级',
@@ -73,7 +77,6 @@ export default {
   'Local (Only You)': '本地（仅你自己）',
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
-  'MCP Server': 'MCP 服务器',
   'MCP servers': 'MCP 服务器',
   'Mark for Update': '标记为待更新',
   Marketplaces: '市场源',
@@ -97,7 +100,6 @@ export default {
   'Set "{{name}}" scope to {{scope}}.':
     '已将 "{{name}}" 的作用域设为 {{scope}}。',
   Sources: '来源',
-  'Transport:': '传输方式：',
   'Type to search · Space to toggle · Enter to view · Esc to go back':
     '输入以搜索 · Space 切换 · Enter 查看 · Esc 返回',
   Uninstall: '卸载',
