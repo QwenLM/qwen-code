@@ -2021,8 +2021,7 @@ export function App({
                   onSubDialog={(key) => {
                     setShowSettingsDialog(false);
                     if (key === 'ui.theme') setShowThemeDialog(true);
-                    else if (key === 'fastModel')
-                      setModelInlineMode('fast');
+                    else if (key === 'fastModel') setModelInlineMode('fast');
                     else if (key === 'tools.approvalMode')
                       setApprovalModeInlineOpen(true);
                   }}
@@ -2104,10 +2103,13 @@ export function App({
                       ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
                       : undefined
                   }
-                  // Only the approval-mode picker (reachable by mouse from the
-                  // status bar) reveals itself; the model/agents/memory panels
+                  // The approval-mode and model pickers are reachable by mouse
+                  // from the status bar, so they reveal themselves when opened
+                  // while the user is scrolled up; the agents/memory panels
                   // keep the user's scroll position.
-                  autoScrollTailIntoView={approvalModeInlineOpen}
+                  autoScrollTailIntoView={
+                    approvalModeInlineOpen || modelInlineMode !== null
+                  }
                 />
 
                 {btwMessage?.role === 'btw' && (
@@ -2175,6 +2177,9 @@ export function App({
               ) : (
                 <StatusBar
                   onSelectMode={() => setApprovalModeInlineOpen((v) => !v)}
+                  onSelectModel={() =>
+                    setModelInlineMode((v) => (v ? null : 'main'))
+                  }
                 />
               ))}
 
