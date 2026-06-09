@@ -32,6 +32,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain(
     "GH_WINDOWS_AMD64_SHA256: '77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211'",
   );
+  expect(workflow).toContain('if ($ver -ne $env:GH_VERSION)');
   expect(workflow).toContain(
     'https://github.com/cli/cli/releases/download/v${env:GH_VERSION}/$asset',
   );

@@ -55,7 +55,7 @@ test('returns 124 when the command times out', async () => {
       args: [child],
       logPath,
       timeoutMs: 2_000,
-      killAfterMs: 50,
+      killAfterMs: 500,
       stdout: { write() {} },
       stderr: { write() {} },
     });

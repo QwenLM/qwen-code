@@ -264,35 +264,40 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $existing = Get-Command gh.exe -ErrorAction SilentlyContinue
           if ($existing) {
-            $bin = Split-Path -Parent $existing.Source
-            $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            & $existing.Source --version
-          } else {
-            $asset = "gh_${env:GH_VERSION}_windows_amd64.zip"
-            $url = "https://github.com/cli/cli/releases/download/v${env:GH_VERSION}/$asset"
-            $installRoot = Join-Path $env:RUNNER_TEMP 'gh-cli'
-            $zipPath = Join-Path $env:RUNNER_TEMP $asset
-
-            Invoke-WebRequest -Uri $url -OutFile $zipPath
-            $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actualHash -ne $env:GH_WINDOWS_AMD64_SHA256) {
-              throw "GitHub CLI checksum mismatch: expected $env:GH_WINDOWS_AMD64_SHA256, got $actualHash"
+            $ver = (& $existing.Source --version 2>&1) -replace '^gh version\s+', '' -replace '\s.*', ''
+            if ($ver -ne $env:GH_VERSION) {
+              Write-Warning "Runner has gh $ver but workflow expects $($env:GH_VERSION); installing pinned version."
+            } else {
+              $bin = Split-Path -Parent $existing.Source
+              $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              & $existing.Source --version
+              return
             }
-
-            if (Test-Path $installRoot) {
-              Remove-Item -Recurse -Force $installRoot
-            }
-            Expand-Archive -Path $zipPath -DestinationPath $installRoot
-
-            $gh = Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File |
-              Select-Object -First 1
-            if (!$gh) {
-              throw "GitHub CLI was not found under $installRoot"
-            }
-            $bin = Split-Path -Parent $gh.FullName
-            $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            & $gh.FullName --version
           }
+          $asset = "gh_${env:GH_VERSION}_windows_amd64.zip"
+          $url = "https://github.com/cli/cli/releases/download/v${env:GH_VERSION}/$asset"
+          $installRoot = Join-Path $env:RUNNER_TEMP 'gh-cli'
+          $zipPath = Join-Path $env:RUNNER_TEMP $asset
+
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:GH_WINDOWS_AMD64_SHA256) {
+            throw "GitHub CLI checksum mismatch: expected $env:GH_WINDOWS_AMD64_SHA256, got $actualHash"
+          }
+
+          if (Test-Path $installRoot) {
+            Remove-Item -Recurse -Force $installRoot
+          }
+          Expand-Archive -Path $zipPath -DestinationPath $installRoot
+
+          $gh = Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File |
+            Select-Object -First 1
+          if (!$gh) {
+            throw "GitHub CLI was not found under $installRoot"
+          }
+          $bin = Split-Path -Parent $gh.FullName
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $gh.FullName --version
 
       - name: 'Set up Node.js 22.x'
         if: "steps.context.outputs.should_run == 'true'"
