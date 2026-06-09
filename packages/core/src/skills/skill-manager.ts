@@ -692,7 +692,7 @@ export class SkillManager {
         | undefined;
       let allowedTools: string[] | undefined;
 
-      if (allowedToolsRaw !== undefined) {
+      if (allowedToolsRaw != null) {
         if (Array.isArray(allowedToolsRaw)) {
           allowedTools = allowedToolsRaw.map(String);
         } else {
@@ -705,7 +705,7 @@ export class SkillManager {
       const hooksRaw = frontmatter['hooks'] as
         | Record<string, unknown>
         | undefined;
-      if (hooksRaw !== undefined) {
+      if (hooksRaw != null) {
         hooks = this.parseHooksConfig(hooksRaw);
       }
 
