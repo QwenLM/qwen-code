@@ -300,6 +300,35 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('keeps capabilities handshake failures out of the transcript', async () => {
+    sdkMocks.capabilities.mockRejectedValue(
+      Object.assign(new Error('GET /capabilities: HTTP 400'), { status: 400 }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      connection = useDaemonConnection();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'GET /capabilities: HTTP 400',
+    });
+    expect(blocks).toEqual([]);
+  });
+
   it('records action errors when no session is connected', async () => {
     let actions: DaemonUiSessionActions | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
@@ -2176,7 +2205,7 @@ describe('DaemonSessionProvider', () => {
         kind: 'user',
         text: 'keep transcript',
       });
-      expect(blocks).toContainEqual(
+      expect(blocks).not.toContainEqual(
         expect.objectContaining({
           kind: 'error',
           text: 'Unauthorized',

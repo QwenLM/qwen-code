@@ -644,7 +644,6 @@ export function DaemonSessionProvider({
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
-          store.dispatch({ type: 'error', text: message, recoverable: true });
           session = undefined;
           sessionRef.current = undefined;
           clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
