@@ -22,6 +22,10 @@ import {
   resetTrustedFoldersForTesting,
 } from '../../config/trustedFolders.js';
 
+async function realpath(filePath: string): Promise<string> {
+  return fs.promises.realpath(filePath);
+}
+
 describe('cdCommand', () => {
   let tmpDir: string;
   let currentDir: string;
@@ -133,7 +137,7 @@ describe('cdCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: `Already in ${fs.realpathSync(currentDir)}.`,
+      content: `Already in ${await realpath(currentDir)}.`,
     });
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
@@ -183,14 +187,15 @@ describe('cdCommand', () => {
       context,
       '../next',
     )) as MessageActionReturn;
-    const realNextDir = fs.realpathSync(nextDir);
+    const realCurrentDir = await realpath(currentDir);
+    const realNextDir = await realpath(nextDir);
 
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realNextDir,
       realNextDir,
     );
     expect(addWorkingDirectoryChangedContext).toHaveBeenCalledWith(
-      fs.realpathSync(currentDir),
+      realCurrentDir,
       realNextDir,
     );
     expect(result).toEqual({
@@ -208,7 +213,7 @@ describe('cdCommand', () => {
       context,
       '../space\\ dir',
     )) as MessageActionReturn;
-    const realSpacedDir = fs.realpathSync(spacedDir);
+    const realSpacedDir = await realpath(spacedDir);
 
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realSpacedDir,
@@ -229,7 +234,7 @@ describe('cdCommand', () => {
       context,
       '"../space  dir"',
     )) as MessageActionReturn;
-    const realSpacedDir = fs.realpathSync(spacedDir);
+    const realSpacedDir = await realpath(spacedDir);
 
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realSpacedDir,
@@ -251,7 +256,7 @@ describe('cdCommand', () => {
       context,
       '../next',
     )) as MessageActionReturn;
-    const realNextDir = fs.realpathSync(nextDir);
+    const realNextDir = await realpath(nextDir);
 
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realNextDir,
@@ -273,7 +278,7 @@ describe('cdCommand', () => {
       context,
       '../next',
     )) as MessageActionReturn;
-    const realNextDir = fs.realpathSync(nextDir);
+    const realNextDir = await realpath(nextDir);
 
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
       realNextDir,
@@ -313,7 +318,7 @@ describe('cdCommand', () => {
     )) as ConfirmActionReturn;
 
     expect(result.type).toBe('confirm_action');
-    expect(result.prompt).toContain(fs.realpathSync(nextDir));
+    expect(result.prompt).toContain(await realpath(nextDir));
     expect(result.prompt).toContain('trusted for future sessions');
     expect(result.originalInvocation.raw).toBe('/cd ../next');
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
@@ -322,7 +327,7 @@ describe('cdCommand', () => {
   it('asks again when confirmed path resolves to a different directory', async () => {
     const changedDir = path.join(tmpDir, 'changed');
     fs.mkdirSync(changedDir);
-    const originalRealPath = fs.realpathSync(nextDir);
+    const originalRealPath = await realpath(nextDir);
     context = createMockCommandContext({
       invocation: {
         raw: '/cd ../next',
@@ -355,11 +360,11 @@ describe('cdCommand', () => {
 
     expect(result.type).toBe('confirm_action');
     expect(result.prompt).not.toContain(originalRealPath);
-    expect(result.prompt).toContain(fs.realpathSync(changedDir));
+    expect(result.prompt).toContain(await realpath(changedDir));
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
-    expect(
-      loadTrustedFolders().isPathTrusted(fs.realpathSync(changedDir)),
-    ).toBe(undefined);
+    expect(loadTrustedFolders().isPathTrusted(await realpath(changedDir))).toBe(
+      undefined,
+    );
   });
 
   it('trusts the target directory after confirmation before moving', async () => {
@@ -389,7 +394,7 @@ describe('cdCommand', () => {
       context,
       '../next',
     )) as MessageActionReturn;
-    const realNextDir = fs.realpathSync(nextDir);
+    const realNextDir = await realpath(nextDir);
 
     expect(loadTrustedFolders().isPathTrusted(realNextDir)).toBe(true);
     expect(relocateWorkingDirectory).toHaveBeenCalledWith(
@@ -431,7 +436,7 @@ describe('cdCommand', () => {
       context,
       '../next',
     )) as MessageActionReturn;
-    const realNextDir = fs.realpathSync(nextDir);
+    const realNextDir = await realpath(nextDir);
 
     expect(result.type).toBe('message');
     expect(result.messageType).toBe('error');

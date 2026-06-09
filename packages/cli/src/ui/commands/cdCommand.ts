@@ -14,6 +14,7 @@ import {
   loadTrustedFolders,
   TrustLevel,
 } from '../../config/trustedFolders.js';
+import { t } from '../../i18n/index.js';
 
 const pendingTrustedPathConfirmations = new Map<string, string>();
 
@@ -51,7 +52,9 @@ function resolveCdPath(input: string, baseDir: string): string {
 
 export const cdCommand: SlashCommand = {
   name: 'cd',
-  description: 'Move this session to a new working directory',
+  get description() {
+    return t('Move this session to a new working directory');
+  },
   kind: CommandKind.BUILT_IN,
   argumentHint: '<path>',
   supportedModes: ['interactive'] as const,
