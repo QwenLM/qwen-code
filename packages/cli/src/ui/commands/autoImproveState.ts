@@ -697,6 +697,59 @@ export async function listAutoImproveLoopStates(
     });
 }
 
+// Read only the single most-recently-written loop state instead of reading +
+// parsing every loop's state.json (what statusAutoImprove's no-active-loop
+// fallback otherwise pays). Order the loop dirs by their state.json mtime
+// (cheap stat, no read), then read from newest until a valid one is found.
+export async function readMostRecentLoopState(
+  repoRoot: string,
+): Promise<AutoImproveLoopState | null> {
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try {
+    entries = await fs.readdir(
+      path.join(getAutoImproveRoot(repoRoot), 'loops'),
+      { withFileTypes: true },
+    );
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return null;
+    }
+    throw error;
+  }
+
+  const candidates: Array<{ loopId: string; mtimeMs: number }> = [];
+  await Promise.all(
+    entries
+      .filter(
+        (entry) => entry.isDirectory() && isValidAutoImproveLoopId(entry.name),
+      )
+      .map(async (entry) => {
+        try {
+          const stat = await fs.stat(
+            getAutoImproveStatePath(repoRoot, entry.name),
+          );
+          candidates.push({ loopId: entry.name, mtimeMs: stat.mtimeMs });
+        } catch {
+          // Missing/unreadable state.json — skip this dir.
+        }
+      }),
+  );
+  candidates.sort(
+    (left, right) =>
+      right.mtimeMs - left.mtimeMs || right.loopId.localeCompare(left.loopId),
+  );
+  for (const { loopId } of candidates) {
+    const state = await readAutoImproveLoopState(repoRoot, loopId);
+    if (state) return state;
+  }
+  return null;
+}
+
 export async function writeAutoImproveLoopState(
   repoRoot: string,
   state: AutoImproveLoopState,

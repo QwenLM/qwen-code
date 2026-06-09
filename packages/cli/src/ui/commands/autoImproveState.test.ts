@@ -17,6 +17,7 @@ import {
   isRecord,
   isStaleAutoImproveRunRef,
   isValidAutoImproveLoopId,
+  readMostRecentLoopState,
   MAX_AUTO_IMPROVE_PROMPT_LENGTH,
   MAX_TARGET_BRANCH_LENGTH,
   normalizeStringList,
@@ -143,6 +144,45 @@ describe('autoImproveState', () => {
           now,
         ),
       ).toBe(false);
+    });
+  });
+
+  describe('readMostRecentLoopState', () => {
+    const makeLoop = async (loopId: string): Promise<void> => {
+      await writeAutoImproveLoopState(tempDir, {
+        version: 1,
+        loopId,
+        status: 'running',
+        sessionScoped: true,
+        createdAt: '2026-05-25T00:00:00.000Z',
+        cadence: '30m',
+        cron: '*/30 * * * *',
+        targetBranch: 'main',
+        repoRoot: tempDir,
+        deliveryPolicy: 'source-aware-local-commit',
+        stopRequested: false,
+        sourceSnapshot: DEFAULT_AUTO_IMPROVE_CONFIG,
+        prompt: '',
+      });
+    };
+
+    it('returns null when no loops exist', async () => {
+      expect(await readMostRecentLoopState(tempDir)).toBeNull();
+    });
+
+    it('returns the loop whose state.json was written most recently', async () => {
+      await makeLoop('loop-a');
+      await makeLoop('loop-b');
+      // loop-b is naturally newer; bump loop-a's mtime so it becomes newest.
+      const future = new Date(Date.now() + 60_000);
+      await fs.utimes(
+        getAutoImproveStatePath(tempDir, 'loop-a'),
+        future,
+        future,
+      );
+
+      const result = await readMostRecentLoopState(tempDir);
+      expect(result?.loopId).toBe('loop-a');
     });
   });
 

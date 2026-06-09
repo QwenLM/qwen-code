@@ -28,7 +28,7 @@ import {
   isRecord,
   isTerminalAutoImproveRunStatus,
   isValidAutoImproveLoopId,
-  listAutoImproveLoopStates,
+  readMostRecentLoopState,
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
   readAutoImproveLoopState,
@@ -754,7 +754,7 @@ async function statusAutoImprove(
   const active = await readActiveAutoImproveLoop(repoRoot);
   const state = active
     ? await readAutoImproveLoopState(repoRoot, active.activeLoopId)
-    : (await listAutoImproveLoopStates(repoRoot))[0];
+    : await readMostRecentLoopState(repoRoot);
   if (!state) {
     if (active) {
       return message(
