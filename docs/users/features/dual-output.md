@@ -223,7 +223,7 @@ echo '{"type":"submit","text":"Explain this repo"}' >> /tmp/qwen-input.jsonl
 The prompt appears in the TUI exactly as if the user typed it, and the
 streaming response is mirrored on `/tmp/qwen-events.jsonl`.
 
-### Using FIFOs (named pipes)
+### Using FIFOs (named pipes) for event output
 
 FIFOs deliver lower latency than regular files (no disk I/O) and work
 well when both sides are on the same host. The bridge opens FIFOs with
@@ -231,8 +231,13 @@ well when both sides are on the same host. The bridge opens FIFOs with
 connected yet — events are buffered in the kernel pipe buffer until a
 reader attaches.
 
+> **Note:** `--input-file` requires a regular file (not a FIFO) because
+> the watcher relies on `stat.size` to detect new data, which is always
+> 0 for FIFOs.
+
 ```bash
-mkfifo /tmp/qwen-events.jsonl /tmp/qwen-input.jsonl
+mkfifo /tmp/qwen-events.jsonl
+touch /tmp/qwen-input.jsonl
 qwen \
   --json-file /tmp/qwen-events.jsonl \
   --input-file /tmp/qwen-input.jsonl
@@ -348,9 +353,12 @@ polling — events are written synchronously as the TUI emits them.
   goes away (`EPIPE`), the bridge silently disables itself and the TUI
   keeps running. No retry.
 - **FIFO buffer overflow.** When writing to a FIFO with no reader
-  attached, the bridge buffers events internally. If the buffer exceeds
-  1 MB (no consumer is draining), the bridge disables itself. The TUI
-  continues running normally.
+  attached, events buffer in the kernel pipe (~64 KB on Linux) and the
+  Node.js WriteStream. Once the pipe is full or the internal buffer
+  exceeds 1 MB, the bridge disables itself and closes the fd. No
+  `session_end` is emitted in this case — consumers should treat a
+  closed stream without `session_end` as an abnormal termination. The
+  TUI continues running normally.
 - **Adapter exception.** Any exception thrown while emitting an event is
   caught, logged, and disables the bridge. The TUI is never crashed by a
   dual-output failure.
