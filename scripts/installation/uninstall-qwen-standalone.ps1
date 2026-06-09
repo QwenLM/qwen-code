@@ -199,8 +199,8 @@ function Remove-PathEntryFromAllScopes {
         return
     }
 
-    Remove-PathEntry -BinDir $BinDir -Scope 'User'
-    Remove-PathEntry -BinDir $BinDir -Scope 'Machine'
+    Remove-PathEntry -BinDir $target -Scope 'User'
+    Remove-PathEntry -BinDir $target -Scope 'Machine'
 
     $current = New-Object System.Collections.Generic.List[string]
     foreach ($entry in @($env:Path -split ';')) {

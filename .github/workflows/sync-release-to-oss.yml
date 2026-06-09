@@ -86,17 +86,6 @@ jobs:
           RELEASE_VERSION="${RELEASE_TAG#v}"
           npm run package:hosted-installation -- --out-dir dist/installation --version "${RELEASE_VERSION}"
 
-      - name: 'Validate Hosted Installation Assets'
-        if: |-
-          ${{ steps.meta.outputs.is_stable == 'true' }}
-        run: |-
-          set -euo pipefail
-
-          grep -F -- '--repair-path' dist/installation/install-qwen-standalone.bat
-          grep -F -- '--path-scope' dist/installation/install-qwen-standalone.bat
-          grep -F -- 'QWEN_INSTALL_REPAIR_PATH' dist/installation/install-qwen-standalone.bat
-          grep -F -- 'QWEN_INSTALL_PATH_SCOPE' dist/installation/install-qwen-standalone.bat
-
       - name: 'Install ossutil'
         env:
           OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"

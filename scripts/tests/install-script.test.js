@@ -576,6 +576,35 @@ describe('release-script-utils', () => {
   });
 });
 
+const STUB_BAT_CONTENT =
+  '@echo off\r\n' +
+  'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
+  'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
+  'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
+  'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
+  'set "VERSION=latest"\r\n' +
+  'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
+  'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+  'set "ARG_KEY=%~1"\r\n' +
+  'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n';
+
+const STUB_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+  'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n';
+
+const STUB_UNINSTALL_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'is_qwen_standalone_install_dir() { return 0; }\n' +
+  'remove_shell_path_entry() { :; }\n' +
+  'QWEN_UNINSTALL_PURGE=""\n';
+
+const STUB_UNINSTALL_PS1_CONTENT =
+  'function Test-QwenStandaloneInstallDir { return $true }\n' +
+  'function Remove-PathEntryFromAllScopes { }\n' +
+  'function Remove-CurrentCmdPathShim { }\n' +
+  '$env:QWEN_UNINSTALL_PURGE = ""\n';
+
 describe('standalone release packaging', () => {
   it('defines a standalone packaging script', () => {
     const packageJson = JSON.parse(readScript('package.json'));
@@ -1051,22 +1080,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\n' +
-          'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
-          'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
-          'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
-          'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
-          'set "VERSION=latest"\r\n' +
-          'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
-          'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
-          'set "ARG_KEY=%~1"\r\n' +
-          'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // The ps1 shim has every required behavior pattern but also contains
       // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
@@ -1081,17 +1099,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-PathEntryFromAllScopes { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       await expect(
@@ -1117,22 +1129,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\n' +
-          'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
-          'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
-          'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
-          'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
-          'set "VERSION=latest"\r\n' +
-          'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
-          'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
-          'set "ARG_KEY=%~1"\r\n' +
-          'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // ps1 contains the exact docstring shipped in production
       // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
@@ -1148,17 +1149,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-PathEntryFromAllScopes { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       // Build should succeed (only resolves; throws would fail the test).
@@ -1872,9 +1867,6 @@ describe('standalone release packaging', () => {
     const verifyStepIndex = ossWorkflow.indexOf(
       "- name: 'Verify Aliyun OSS Release Assets'",
     );
-    const validateHostedStepIndex = ossWorkflow.indexOf(
-      "- name: 'Validate Hosted Installation Assets'",
-    );
     const publishLatestStepIndex = ossWorkflow.indexOf(
       "- name: 'Publish Aliyun OSS Latest VERSION'",
     );
@@ -1886,8 +1878,6 @@ describe('standalone release packaging', () => {
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
     expect(packageHostedStepIndex).toBeGreaterThanOrEqual(0);
-    expect(validateHostedStepIndex).toBeGreaterThan(packageHostedStepIndex);
-    expect(validateHostedStepIndex).toBeLessThan(syncHostedStepIndex);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
     expect(syncHostedStepIndex).toBeGreaterThan(verifyStepIndex);
     expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
@@ -1927,15 +1917,6 @@ describe('standalone release packaging', () => {
     expect(syncHostedStep).toContain(
       'dist/installation/install-qwen-standalone.sh',
     );
-    const validateHostedStep = ossWorkflow.slice(
-      validateHostedStepIndex,
-      syncHostedStepIndex,
-    );
-    expect(validateHostedStep).toContain('--repair-path');
-    expect(validateHostedStep).toContain('--path-scope');
-    expect(validateHostedStep).toContain('QWEN_INSTALL_REPAIR_PATH');
-    expect(validateHostedStep).toContain('QWEN_INSTALL_PATH_SCOPE');
-    expect(validateHostedStep).toContain('install-qwen-standalone.bat');
     const uploadScript = readScript('scripts/upload-aliyun-oss-assets.js');
     expect(uploadScript).toContain("'--acl'");
     expect(uploadScript).toContain("'public-read'");

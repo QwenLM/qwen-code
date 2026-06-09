@@ -1327,7 +1327,7 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-rem Persist the install bin to user PATH unless --no-modify-path is set.
+rem Persist the install bin to PATH unless --no-modify-path is set.
 if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
     call :MaybeUpdatePath "!EXTRA_BIN!"
     if !ERRORLEVEL! NEQ 0 (
