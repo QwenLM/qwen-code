@@ -2622,9 +2622,13 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
-          });
+          config
+            .getChatRecordingService()
+            ?.rewindRecording(
+              targetTurnIndex,
+              { truncatedCount: originalLength - truncatedUi.length },
+              config.getFileHistoryService().getSnapshots(),
+            );
         }
 
         // Show file restore result after conversation truncation so the

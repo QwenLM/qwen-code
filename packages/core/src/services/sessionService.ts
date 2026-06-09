@@ -15,9 +15,16 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
+import {
+  deserializeSnapshots,
+  FILE_HISTORY_DIR,
+  MAX_SNAPSHOTS,
+} from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -129,6 +136,8 @@ export interface ResumedSessionData {
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
   lastCompletedUuid: string | null;
+  /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
+  fileHistorySnapshots?: FileHistorySnapshot[];
 }
 
 /**
@@ -168,6 +177,53 @@ const TAIL_READ_SIZE = 64 * 1024;
  * Sessions are stored as JSONL files, one per session.
  * File location: ~/.qwen/tmp/<project_id>/chats/
  */
+
+async function copyFileHistoryBackups(
+  sourceSessionId: string,
+  targetSessionId: string,
+): Promise<void> {
+  const fsPromises = await import('node:fs/promises');
+  const sourceDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    sourceSessionId,
+  );
+  const targetDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    targetSessionId,
+  );
+
+  let entries: string[];
+  try {
+    entries = await fsPromises.readdir(sourceDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
+    return;
+  }
+  if (entries.length === 0) return;
+
+  await fsPromises.mkdir(targetDir, { recursive: true });
+  await Promise.all(
+    entries.map(async (name) => {
+      const src = path.join(sourceDir, name);
+      const dst = path.join(targetDir, name);
+      try {
+        await fsPromises.link(src, dst);
+      } catch {
+        try {
+          await fsPromises.copyFile(src, dst);
+        } catch (copyErr) {
+          debugLogger.warn(
+            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
+          );
+        }
+      }
+    }),
+  );
+}
+
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
@@ -716,10 +772,43 @@ export class SessionService {
       messages,
     };
 
+    // Extract file history snapshots for /rewind across resume
+    const fileHistorySnapshots: FileHistorySnapshot[] = [];
+    const seenPromptIds = new Set<string>();
+    for (const msg of messages) {
+      if (
+        msg.type === 'system' &&
+        msg.subtype === 'file_history_snapshot' &&
+        msg.systemPayload
+      ) {
+        const payload =
+          msg.systemPayload as unknown as FileHistorySnapshotRecordPayload;
+        if (!Array.isArray(payload?.snapshots)) continue;
+        let deserialized: FileHistorySnapshot[];
+        try {
+          deserialized = deserializeSnapshots(payload.snapshots);
+        } catch {
+          continue;
+        }
+        for (const s of deserialized) {
+          if (!seenPromptIds.has(s.promptId)) {
+            seenPromptIds.add(s.promptId);
+            fileHistorySnapshots.push(s);
+          }
+        }
+      }
+    }
+    const cappedSnapshots =
+      fileHistorySnapshots.length > MAX_SNAPSHOTS
+        ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
+        : fileHistorySnapshots;
+
     return {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
+      fileHistorySnapshots:
+        cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
     };
   }
 
@@ -947,6 +1036,8 @@ export class SessionService {
     } finally {
       fs.closeSync(fd);
     }
+
+    await copyFileHistoryBackups(sourceSessionId, newSessionId);
 
     return { filePath: targetPath, copiedCount: forked.length };
   }

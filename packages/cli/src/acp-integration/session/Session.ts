@@ -614,9 +614,13 @@ export class Session implements SessionContext {
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
-    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
-    });
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        this.config.getFileHistoryService().getSnapshots(),
+      );
 
     return { targetTurnIndex, apiTruncateIndex };
   }

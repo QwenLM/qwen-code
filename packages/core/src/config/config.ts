@@ -3611,6 +3611,15 @@ export class Config {
         this.fileCheckpointingEnabled,
         this.cwd,
       );
+      const snapshots = this.sessionData?.fileHistorySnapshots;
+      if (snapshots?.length) {
+        this.fileHistoryService.restoreFromSnapshots(snapshots);
+        void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
+          this.debugLogger.error(
+            `FileHistory: validateRestoredSnapshots failed: ${e}`,
+          );
+        });
+      }
     }
     return this.fileHistoryService;
   }

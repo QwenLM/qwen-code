@@ -307,6 +307,9 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getFileHistoryService: vi.fn().mockReturnValue({
+        getSnapshots: vi.fn().mockReturnValue([]),
+      }),
     } as unknown as Config;
 
     mockClient = {
