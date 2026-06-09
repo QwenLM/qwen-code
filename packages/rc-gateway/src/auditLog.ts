@@ -33,7 +33,9 @@ export type AuditAction =
   | 'push_suppressed'
   | 'routing_snoozed'
   | 'routing_unsnoozed'
-  | 'push_prefs_updated';
+  | 'push_prefs_updated'
+  | 'share_created'
+  | 'share_revoked';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -56,6 +58,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'routing_snoozed',
   'routing_unsnoozed',
   'push_prefs_updated',
+  'share_created',
+  'share_revoked',
 ];
 
 export interface AuditEntry {

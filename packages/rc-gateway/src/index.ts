@@ -35,6 +35,7 @@ export {
   OWNER,
   APPROVE,
   WRITE,
+  SHARE,
   KNOWN_SCOPES,
   type RcScope,
 } from './scopes.js';
