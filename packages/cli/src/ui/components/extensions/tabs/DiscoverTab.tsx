@@ -179,7 +179,10 @@ export const DiscoverTab = ({
 
   const beginInstall = useCallback(() => {
     if (pendingInstall().length === 0) {
-      onStatus({ type: 'info', text: t('No installable plugins selected.') });
+      onStatus({
+        type: 'info',
+        text: t('No installable extensions selected.'),
+      });
       return;
     }
     setView('scope-select');
@@ -222,7 +225,7 @@ export const DiscoverTab = ({
       if (errors.length === 0) {
         onStatus({
           type: 'success',
-          text: t('Installed {{count}} plugin(s).', {
+          text: t('Installed {{count}} extension(s).', {
             count: String(installed),
           }),
         });
@@ -321,7 +324,7 @@ export const DiscoverTab = ({
     }
     items.push({
       key: 'back',
-      label: t('Back to plugin list'),
+      label: t('Back to extension list'),
       value: 'back',
     });
     return items;
@@ -402,7 +405,7 @@ export const DiscoverTab = ({
 
   if (loading) {
     return (
-      <Text color={theme.text.secondary}>{t('Discovering plugins...')}</Text>
+      <Text color={theme.text.secondary}>{t('Discovering extensions...')}</Text>
     );
   }
 
@@ -411,7 +414,7 @@ export const DiscoverTab = ({
     return (
       <Box flexDirection="column" gap={1}>
         <Text color={theme.text.primary}>
-          {t('Install {{count}} plugin(s) to which scope?', {
+          {t('Install {{count}} extension(s) to which scope?', {
             count: String(count),
           })}
         </Text>
@@ -447,7 +450,7 @@ export const DiscoverTab = ({
     return (
       <Box flexDirection="column" gap={1}>
         <Text color={theme.text.primary} bold>
-          {t('Plugin details')}
+          {t('Extension details')}
         </Text>
 
         <Box flexDirection="column">
@@ -493,7 +496,7 @@ export const DiscoverTab = ({
 
         <Text color={theme.text.secondary} italic>
           {t(
-            '⚠ Make sure you trust a plugin before installing, updating, or using it. We cannot verify what MCP servers, files, or other software a plugin includes, or that it works as intended. See the plugin homepage for more information.',
+            '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.',
           )}
         </Text>
 
@@ -514,9 +517,13 @@ export const DiscoverTab = ({
   if (plugins.length === 0) {
     return (
       <Box flexDirection="column">
-        <Text color={theme.text.secondary}>{t('No plugins discovered.')}</Text>
         <Text color={theme.text.secondary}>
-          {t('Add a marketplace in the Marketplaces tab to discover plugins.')}
+          {t('No extensions discovered.')}
+        </Text>
+        <Text color={theme.text.secondary}>
+          {t(
+            'Add a marketplace in the Marketplaces tab to discover extensions.',
+          )}
         </Text>
       </Box>
     );
@@ -530,7 +537,7 @@ export const DiscoverTab = ({
     <Box flexDirection="column">
       <Box>
         <Text color={theme.text.primary} bold>
-          {t('Discover plugins')}
+          {t('Discover extensions')}
         </Text>
         <Text color={theme.text.secondary}>
           {` (${filtered.length ? cursor + 1 : 0}/${filtered.length})`}
@@ -561,7 +568,7 @@ export const DiscoverTab = ({
       {filtered.length === 0 ? (
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
-            {t('No plugins match your search.')}
+            {t('No extensions match your search.')}
           </Text>
         </Box>
       ) : (

@@ -148,6 +148,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     ];
     const { lastFrame } = renderDialog(
       createConfig(createManager({ discovered })),
+      { initialTab: EXTENSIONS_TABS.DISCOVER },
     );
     await waitFor(() => {
       expect(lastFrame()).toContain('pdf');
@@ -171,13 +172,14 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     ];
     const { stdin, lastFrame } = renderDialog(
       createConfig(createManager({ discovered })),
+      { initialTab: EXTENSIONS_TABS.DISCOVER },
     );
     await waitFor(() => {
       expect(lastFrame()).toContain('42crunch-api-security-testing');
     });
     stdin.write('\r'); // Enter -> detail
     await waitFor(() => {
-      expect(lastFrame()).toContain('Plugin details');
+      expect(lastFrame()).toContain('Extension details');
     });
     const frame = lastFrame();
     expect(frame).toContain('from claude-plugins-official');
@@ -189,7 +191,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('project scope');
     expect(frame).toContain('local scope');
     expect(frame).toContain('Open homepage');
-    expect(frame).toContain('Back to plugin list');
+    expect(frame).toContain('Back to extension list');
   });
 
   it('windows a long Discover list with a scroll hint and count header', async () => {
@@ -204,12 +206,13 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     );
     const { lastFrame } = renderDialog(
       createConfig(createManager({ discovered })),
+      { initialTab: EXTENSIONS_TABS.DISCOVER },
     );
     await waitFor(() => {
       expect(lastFrame()).toContain('plugin-0');
     });
     const frame = lastFrame();
-    expect(frame).toContain('Discover plugins');
+    expect(frame).toContain('Discover extensions');
     expect(frame).toContain('(1/15)');
     expect(frame).toContain('Search'); // search box
     // Not all 15 fit; the more-below indicator is shown.
@@ -241,6 +244,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     ];
     const { stdin, lastFrame } = renderDialog(
       createConfig(createManager({ discovered })),
+      { initialTab: EXTENSIONS_TABS.DISCOVER },
     );
     await waitFor(() => {
       expect(lastFrame()).toContain('alpha');
@@ -257,9 +261,11 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
   });
 
   it('prompts to add a marketplace when none discovered', async () => {
-    const { lastFrame } = renderDialog(createConfig(createManager()));
+    const { lastFrame } = renderDialog(createConfig(createManager()), {
+      initialTab: EXTENSIONS_TABS.DISCOVER,
+    });
     await waitFor(() => {
-      expect(lastFrame()).toContain('No plugins discovered');
+      expect(lastFrame()).toContain('No extensions discovered');
     });
   });
 
@@ -335,7 +341,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(lastFrame()).toContain('beta');
   });
 
-  it('shows the add-marketplace row on the Marketplaces tab', async () => {
+  it('shows the install/add actions and grouped sections on the Marketplaces tab', async () => {
     const config = createConfig(
       createManager({
         marketplaces: [
@@ -349,7 +355,11 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     await waitFor(() => {
       expect(lastFrame()).toContain('Add new marketplace');
     });
-    expect(lastFrame()).toContain('Skills');
+    const frame = lastFrame();
+    expect(frame).toContain('Install new extension');
+    expect(frame).toContain('Claude plugin marketplace'); // (Claude) annotation
+    expect(frame).toContain('Marketplaces'); // section header
+    expect(frame).toContain('Skills');
   });
 
   it('shows a CC-style marketplace detail with installed plugins and actions', async () => {
@@ -370,23 +380,26 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
       initialTab: EXTENSIONS_TABS.MARKETPLACES,
     });
-    // Wait until sources have loaded (and the keypress handler re-subscribed).
+    // Wait until the list has loaded (and the keypress handler re-subscribed).
     await waitFor(() => {
       expect(lastFrame()).toContain('Skills');
     });
-    stdin.write('\x1B[B'); // down -> select the Skills source row
+    // Rows: Install ext (0), Add marketplace (1), pdf extension (2), Skills (3).
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
     await waitFor(() => {
       expect(lastFrame()).toContain('● Skills');
     });
     stdin.write('\r'); // Enter -> open detail
     await waitFor(() => {
-      expect(lastFrame()).toContain('available plugins');
+      expect(lastFrame()).toContain('available extensions');
     });
     const frame = lastFrame();
-    expect(frame).toContain('2 available plugins');
-    expect(frame).toContain('Installed plugins (1):');
+    expect(frame).toContain('2 available extensions');
+    expect(frame).toContain('Installed extensions (1):');
     expect(frame).toContain('pdf');
-    expect(frame).toContain('Browse plugins (2)');
+    expect(frame).toContain('Browse extensions (2)');
     expect(frame).toContain('Update marketplace');
     expect(frame).toContain('Remove marketplace');
   });
@@ -429,22 +442,24 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       initialTab: EXTENSIONS_TABS.MARKETPLACES,
     });
     await waitFor(() => {
-      expect(lastFrame()).toContain('Skills'); // sources loaded
+      expect(lastFrame()).toContain('Skills'); // list loaded
     });
-    stdin.write('\x1B[B'); // down -> Skills source
+    // Rows: Install ext (0), Add marketplace (1), Skills (2).
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
     await waitFor(() => {
       expect(lastFrame()).toContain('● Skills');
     });
     stdin.write('\r'); // Enter -> detail
     await waitFor(() => {
-      expect(lastFrame()).toContain('Browse plugins (2)');
+      expect(lastFrame()).toContain('Browse extensions (2)');
     });
-    stdin.write('\r'); // select "Browse plugins" -> Discover filtered
+    stdin.write('\r'); // select "Browse extensions" -> Discover filtered
     await waitFor(() => {
-      expect(lastFrame()).toContain('Discover plugins');
+      expect(lastFrame()).toContain('Discover extensions');
     });
     const frame = lastFrame();
-    // Filtered to the Skills marketplace: its plugins show, the other does not.
+    // Filtered to the Skills marketplace: its extensions show, the other not.
     expect(frame).toContain('Skills');
     expect(frame).toContain('pdf');
     expect(frame).toContain('docx');
@@ -456,13 +471,13 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       createManager({ extensions: [mockExtension('alpha', true)] }),
     );
     const { stdin, lastFrame } = renderDialog(config);
-    // Starts on Discover.
-    await waitFor(() => {
-      expect(lastFrame()).toContain('No plugins discovered');
-    });
-    stdin.write('\t'); // -> Installed
+    // Starts on Installed (first tab).
     await waitFor(() => {
       expect(lastFrame()).toContain('alpha');
+    });
+    stdin.write('\t'); // -> Discover
+    await waitFor(() => {
+      expect(lastFrame()).toContain('No extensions discovered');
     });
   });
 
@@ -484,37 +499,33 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       initialTab: EXTENSIONS_TABS.MARKETPLACES,
     });
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add new marketplace');
+      expect(lastFrame()).toContain('Install new extension');
     });
-    stdin.write('\r'); // Enter on the add row -> opens the add sub-view (locks tabs)
+    stdin.write('\r'); // Enter on row 0 -> install-extension sub-view (locks tabs)
     await waitFor(() => {
-      expect(lastFrame()).toContain('Enter marketplace source:');
+      expect(lastFrame()).toContain('Enter extension source:');
     });
     stdin.write('\x1b'); // Escape should return to the list, not close the dialog
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add new marketplace');
+      expect(lastFrame()).toContain('Install new extension');
     });
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('opens the add-marketplace input view on Enter', async () => {
+  it('opens the install-extension input view on Enter', async () => {
     const { stdin, lastFrame } = renderDialog(createConfig(createManager()), {
       initialTab: EXTENSIONS_TABS.MARKETPLACES,
     });
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add new marketplace');
+      expect(lastFrame()).toContain('Install new extension');
     });
-    stdin.write('\r'); // Enter on add row
+    stdin.write('\r'); // Enter on the first row (Install new extension)
     await waitFor(() => {
-      expect(lastFrame()).toContain('Add Marketplace');
+      expect(lastFrame()).toContain('Install Extension');
     });
-    // CC-style: prompt + examples list to guide the user.
     const frame = lastFrame();
-    expect(frame).toContain('Enter marketplace source:');
-    expect(frame).toContain('Examples:');
+    expect(frame).toContain('Enter extension source:');
     expect(frame).toContain('owner/repo (GitHub)');
-    expect(frame).toContain('git@github.com:owner/repo.git (SSH)');
-    expect(frame).toContain('https://example.com/marketplace.json');
-    expect(frame).toContain('./path/to/marketplace');
+    expect(frame).toContain('@scope/name (npm)');
   });
 });

@@ -28,8 +28,8 @@ export interface StatusMessage {
 }
 
 const TABS: ExtensionsTabDef[] = [
-  { id: EXTENSIONS_TABS.DISCOVER, label: 'Discover' },
   { id: EXTENSIONS_TABS.INSTALLED, label: 'Installed' },
+  { id: EXTENSIONS_TABS.DISCOVER, label: 'Discover' },
   { id: EXTENSIONS_TABS.MARKETPLACES, label: 'Marketplaces' },
 ];
 
@@ -61,7 +61,7 @@ export function ExtensionsManagerDialog({
   const boxWidth = columns - 4;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
-    initialTab ?? EXTENSIONS_TABS.DISCOVER,
+    initialTab ?? EXTENSIONS_TABS.INSTALLED,
   );
   const [tabLocked, setTabLocked] = useState(false);
   const [status, setStatus] = useState<StatusMessage | null>(null);
