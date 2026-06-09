@@ -471,6 +471,63 @@ try {
       ? ok('routing snooze POST as non-owner -> 403')
       : bad(`routing snooze non-owner ${nsr.status}`);
   }
+
+  // Link-share core (cycle 18): owner mints a session-locked, TTL-bounded share
+  // token for a bogus session, lists it, proves the lock 403s a different
+  // session, then revokes it. Pure gateway state (no daemon involvement).
+  {
+    const { code: shc } = pairing.mint([SESSION_READ, OWNER]);
+    const shrr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: shc, label: 'share-owner' }),
+    });
+    const shareOwnerToken = (await shrr.json()).token;
+
+    const mr = await fetch(`${gw}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${shareOwnerToken}`,
+      },
+      body: JSON.stringify({ sessionId: 'share-sess', ttlSec: 3600 }),
+    });
+    const mb = await mr.json();
+    mr.status === 201 &&
+    typeof mb.id === 'string' &&
+    typeof mb.token === 'string' &&
+    mb.url === '/ui/share/' + mb.token &&
+    typeof mb.expiresAt === 'number'
+      ? ok('share mint -> 201 {id,token,url,expiresAt}')
+      : bad(`share mint ${mr.status} ${JSON.stringify(mb)}`);
+
+    const lr = await fetch(`${gw}/rc/share`, {
+      headers: { Authorization: `Bearer ${shareOwnerToken}` },
+    });
+    const lb = await lr.json();
+    lr.status === 200 &&
+    Array.isArray(lb.shares) &&
+    lb.shares.some((s) => s.id === mb.id && s.sessionLockId === 'share-sess')
+      ? ok('share list includes the minted share')
+      : bad(`share list ${lr.status} ${JSON.stringify(lb)}`);
+
+    // The share token on a DIFFERENT session -> 403 session_locked.
+    const wr = await fetch(`${gw}/rc/session/some-other-session/events`, {
+      headers: { Authorization: `Bearer ${mb.token}` },
+    });
+    const wb = await wr.json().catch(() => ({}));
+    wr.status === 403 && wb.code === 'session_locked'
+      ? ok('share token on a different session -> 403 session_locked')
+      : bad(`share wrong-session ${wr.status} ${JSON.stringify(wb)}`);
+
+    const dr = await fetch(`${gw}/rc/share/${mb.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${shareOwnerToken}` },
+    });
+    dr.status === 204
+      ? ok('share revoke -> 204')
+      : bad(`share revoke ${dr.status}`);
+  }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
 } finally {
