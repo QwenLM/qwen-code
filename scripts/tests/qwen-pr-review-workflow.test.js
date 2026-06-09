@@ -27,6 +27,9 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
     'https://github.com/cli/cli/releases/download/v${env:GH_VERSION}/$asset',
   );
   expect(workflow).toContain('Get-FileHash -Path $zipPath -Algorithm SHA256');
+  expect(workflow).toContain(
+    'Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File',
+  );
   expect(workflow).toContain("MSYSTEM: 'MINGW64'");
   expect(workflow).toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))');
   expect(workflow).toContain('node scripts/run-qwen-pr-review.js');

@@ -284,13 +284,14 @@ jobs:
             }
             Expand-Archive -Path $zipPath -DestinationPath $installRoot
 
-            $bin = Join-Path $installRoot "gh_${env:GH_VERSION}_windows_amd64\bin"
-            $gh = Join-Path $bin 'gh.exe'
-            if (!(Test-Path $gh)) {
-              throw "GitHub CLI was not found at $gh"
+            $gh = Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File |
+              Select-Object -First 1
+            if (!$gh) {
+              throw "GitHub CLI was not found under $installRoot"
             }
+            $bin = Split-Path -Parent $gh.FullName
             $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            & $gh --version
+            & $gh.FullName --version
           }
 
       - name: 'Set up Node.js 22.x'
