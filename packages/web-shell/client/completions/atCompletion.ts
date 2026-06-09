@@ -39,6 +39,7 @@ export function atCompletionSource(
       options: files.map((f) => ({
         label: `@${f}`,
         apply: `@${f} `,
+        type: 'file',
       })),
       filter: false,
     };

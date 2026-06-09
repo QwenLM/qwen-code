@@ -505,7 +505,7 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
-  compactThinking,
+  compactThinking = false,
   markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -671,6 +671,9 @@ export function App({
   const [memoryPortalHost, setMemoryPortalHost] =
     useState<HTMLDivElement | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [escapeHintVisible, setEscapeHintVisible] = useState(false);
+  const escPressCountRef = useRef(0);
+  const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
@@ -707,10 +710,12 @@ export function App({
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
       if (isAlreadyDispatched(error)) {
-        console.warn('[web-shell] error already dispatched', error);
+        console.error('[web-shell] error already dispatched', error);
         return;
       }
-      store.dispatch([{ type: 'error', text: formatError(error, fallback) }]);
+      const message = formatError(error, fallback);
+      console.error('[web-shell]', message, error);
+      store.dispatch([{ type: 'error', text: message }]);
     },
     [store],
   );
@@ -760,6 +765,7 @@ export function App({
       },
       (error: unknown) => {
         if (activeSessionIdRef.current !== sessionId) return;
+        console.error('[recap] failed:', error);
         setRecapMessage({
           anchorAfterId,
           anchorIndex,
@@ -1089,7 +1095,7 @@ export function App({
           }
         },
         (error: unknown) => {
-          console.warn('[auto-recap] failed:', error);
+          console.error('[auto-recap] failed:', error);
         },
       );
     }
@@ -1810,34 +1816,73 @@ export function App({
   }, [bottomHidden, handleClearScreen, handleToggleCompact]);
 
   useEffect(() => {
+    const resetEscapeState = () => {
+      escPressCountRef.current = 0;
+      setEscapeHintVisible(false);
+      if (escapeTimerRef.current) {
+        clearTimeout(escapeTimerRef.current);
+        escapeTimerRef.current = null;
+      }
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === 'Tab' && e.shiftKey && !bottomHidden) {
-        e.preventDefault();
-        handleCycleMode();
+      if (e.defaultPrevented || e.isComposing) return;
+
+      if (e.key !== 'Escape') {
+        if (escPressCountRef.current > 0) {
+          resetEscapeState();
+        }
+        if (e.key === 'Tab' && e.shiftKey && !bottomHidden) {
+          e.preventDefault();
+          handleCycleMode();
+        }
         return;
       }
-      if (
-        e.key === 'Escape' &&
-        !pendingApproval &&
-        !bottomHidden &&
-        clearQueuedPrompts()
-      ) {
+
+      if (pendingApproval || bottomHidden) return;
+
+      if (clearQueuedPrompts()) {
         e.preventDefault();
+        resetEscapeState();
         return;
       }
-      if (
-        e.key === 'Escape' &&
-        streamingState !== 'idle' &&
-        !pendingApproval &&
-        !bottomHidden
-      ) {
+
+      const text = editorRef.current?.getText() ?? '';
+      if (text.length > 0) {
+        e.preventDefault();
+        if (escPressCountRef.current === 0) {
+          escPressCountRef.current = 1;
+          setEscapeHintVisible(true);
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+          }
+          escapeTimerRef.current = setTimeout(() => {
+            resetEscapeState();
+          }, 500);
+        } else {
+          editorRef.current?.clearText();
+          resetEscapeState();
+        }
+        return;
+      }
+
+      if (streamingState !== 'idle') {
+        e.preventDefault();
         handleCancel();
+        resetEscapeState();
         return;
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      escPressCountRef.current = 0;
+      setEscapeHintVisible(false);
+      if (escapeTimerRef.current) {
+        clearTimeout(escapeTimerRef.current);
+        escapeTimerRef.current = null;
+      }
+    };
   }, [
     streamingState,
     handleCancel,
@@ -2176,6 +2221,7 @@ export function App({
                 <ShortcutsPanel />
               ) : (
                 <StatusBar
+                  escapeHint={escapeHintVisible}
                   onSelectMode={() => setApprovalModeInlineOpen((v) => !v)}
                   onSelectModel={() =>
                     setModelInlineMode((v) => (v ? null : 'main'))

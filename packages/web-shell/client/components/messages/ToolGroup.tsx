@@ -148,22 +148,20 @@ const MAX_BASH_LINES = 5;
 const MAX_READ_LINES = 25;
 
 function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
-  const isUserShell = isShellToolName(tool.toolName);
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
   const displayText = useMemo(
     () =>
-      isLong && !showAll
-        ? [
+      isLong
+        ? // Match CLI behavior: long shell output shows a fixed tail preview.
+          [
             `... first ${hiddenLinesCount} lines hidden ...`,
             ...lines.slice(-MAX_BASH_LINES),
           ].join('\n')
         : output,
-    [hiddenLinesCount, isLong, lines, output, showAll],
+    [hiddenLinesCount, isLong, lines, output],
   );
   const ansiSegments = useMemo(
     () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
@@ -188,16 +186,6 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
             ))
           : displayText}
       </pre>
-      {isLong && isUserShell && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : t('tool.linesTotal', { count: lines.length })}
-        </button>
-      )}
     </div>
   );
 }

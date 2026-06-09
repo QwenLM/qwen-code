@@ -85,6 +85,11 @@
   text-decoration: underline;
 }
 
+.escapeHint {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .model {
   color: var(--text-dimmed);
   font-size: 12px;

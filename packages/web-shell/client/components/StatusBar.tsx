@@ -24,13 +24,18 @@ function getModeIndicator(
 }
 
 interface StatusBarProps {
+  escapeHint?: boolean;
   /** Open the approval-mode picker so the mode can be chosen with the mouse. */
   onSelectMode: () => void;
   /** Open the model picker so the model can be chosen with the mouse. */
   onSelectModel: () => void;
 }
 
-export function StatusBar({ onSelectMode, onSelectModel }: StatusBarProps) {
+export function StatusBar({
+  escapeHint,
+  onSelectMode,
+  onSelectModel,
+}: StatusBarProps) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
   const currentModel = connection.currentModel ?? '';
@@ -45,7 +50,9 @@ export function StatusBar({ onSelectMode, onSelectModel }: StatusBarProps) {
   return (
     <div className={styles.bar}>
       <div className={styles.left}>
-        {modeIndicator ? (
+        {escapeHint ? (
+          <span className={styles.escapeHint}>{t('editor.escClearHint')}</span>
+        ) : modeIndicator ? (
           // The hint advertises "click to switch", so the indicator is always
           // a real button — never a non-interactive label. stopPropagation on
           // both mousedown and touchstart keeps the trigger from counting as an
