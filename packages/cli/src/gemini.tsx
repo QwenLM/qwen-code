@@ -42,6 +42,7 @@ import {
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
+import { SettingsWatcher } from './config/settingsWatcher.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -777,6 +778,12 @@ export async function main() {
   }
 
   {
+    // Start settings file watcher (skip in bare mode)
+    const settingsWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new SettingsWatcher(settings);
+    settingsWatcher?.startWatching();
+
     const config = await loadCliConfig(
       settings.merged,
       argv,
@@ -788,6 +795,8 @@ export async function main() {
         projectHooks: settings.getProjectHooks(),
       },
       buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
     );
     profileCheckpoint('after_load_cli_config');
 
