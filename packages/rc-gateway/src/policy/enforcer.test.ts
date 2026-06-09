@@ -61,6 +61,21 @@ const emptyPolicy: Policy = {
   rules: [],
 };
 
+// An allow rule whose expiresAt is firmly in the past: the (real-clock)
+// evaluator classifies it as a definitive no-match → falls through to default
+// prompt, so the enforcer must NOT auto-vote. Clock-independent.
+const expiredAllowBash: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [
+    {
+      id: 'expired-allow',
+      match: { tool: 'bash' },
+      action: 'allow',
+      expiresAt: '2000-01-01T00:00:00Z',
+    },
+  ],
+};
+
 let stub: StubDaemon | undefined;
 
 afterEach(async () => {
@@ -180,6 +195,20 @@ describe('PolicyEnforcer', () => {
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',
+      voted: false,
+    });
+  });
+
+  it('an out-of-window / expired allow rule does NOT auto-vote (falls through to prompt)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, expiredAllowBash, audit.recorder);
+
+    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    expect(handled).toBe(false);
+    expect(audit.entries[0].detail).toMatchObject({
+      action: 'prompt',
       voted: false,
     });
   });
