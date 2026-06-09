@@ -314,6 +314,12 @@ export class Session implements SessionContext {
    * process termination is slow.
    */
   private pendingPromptCompletion: Promise<void> | null = null;
+  // onComplete captured from a regular-prompt submit_prompt slash result (e.g.
+  // /auto-improve start → markRunCompleted). Prompts are serialized, so a single
+  // field is safe; the caller fires it after the turn so the run isn't stranded.
+  private pendingSlashOnComplete:
+    | ((opts?: { errored?: boolean }) => Promise<void>)
+    | undefined;
   private turn: number = 0;
   private readonly runtimeBaseDir: string;
 
@@ -666,11 +672,36 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
+      // Fire a submit_prompt slash onComplete (e.g. markRunCompleted) now that
+      // the turn finished, so /auto-improve start in ACP mode clears currentRun
+      // instead of deadlocking later ticks. Errored unless the turn ended
+      // cleanly. (#executePrompt discards onComplete, so it's threaded via the
+      // instance field.)
+      const onComplete = this.pendingSlashOnComplete;
+      this.pendingSlashOnComplete = undefined;
+      if (onComplete) {
+        await onComplete(
+          result.stopReason === 'end_turn' ? undefined : { errored: true },
+        ).catch((e: unknown) =>
+          debugLogger.warn('slash onComplete threw:', e),
+        );
+      }
       this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       return result;
+    } catch (error) {
+      // The turn threw — still fire onComplete (errored) so the run isn't
+      // stranded, then re-throw.
+      const onComplete = this.pendingSlashOnComplete;
+      this.pendingSlashOnComplete = undefined;
+      if (onComplete) {
+        await onComplete({ errored: true }).catch((e: unknown) =>
+          debugLogger.warn('slash onComplete (errored) threw:', e),
+        );
+      }
+      throw error;
     } finally {
       resolveCompletion();
     }
@@ -726,6 +757,12 @@ export class Session implements SessionContext {
             this.config,
             this.settings,
           );
+
+          // Capture onComplete before #processSlashCommandResult discards it
+          // (it returns only the content). The caller fires it after the turn.
+          if (slashCommandResult.type === 'submit_prompt') {
+            this.pendingSlashOnComplete = slashCommandResult.onComplete;
+          }
 
           parts = await this.#processSlashCommandResult(
             slashCommandResult,

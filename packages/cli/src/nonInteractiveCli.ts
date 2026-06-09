@@ -328,6 +328,15 @@ export async function runNonInteractive(
       abortController.abort();
     };
 
+    // Captured when a `-p` slash command returns submit_prompt with an
+    // onComplete (e.g. `/auto-improve start` → markRunCompleted). It is fired
+    // once this run finishes so currentRun doesn't stay 'implementing' and
+    // deadlock every subsequent cron tick. No-op for normal prompts (guarded by
+    // the `if (slashOnComplete)` checks below).
+    let slashOnComplete:
+      | ((opts?: { errored?: boolean }) => Promise<void>)
+      | undefined;
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
@@ -359,6 +368,7 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              slashOnComplete = slashCommandResult.onComplete;
               slashHandled = true;
               break;
             case 'message': {
@@ -1295,6 +1305,16 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      // Fire the captured onComplete on the error path before handleError
+      // (which exits the process) so e.g. a failed `-p /auto-improve start`
+      // still records the run as errored instead of stranding currentRun.
+      if (slashOnComplete) {
+        await slashOnComplete({ errored: true }).catch((e: unknown) =>
+          debugLogger.warn('slashOnComplete (errored) threw:', e),
+        );
+        slashOnComplete = undefined;
+      }
+
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
@@ -1366,6 +1386,15 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      // Success path: fire the captured onComplete (the error path already
+      // fired+cleared it in catch). Lets `-p /auto-improve start` clear
+      // currentRun after the first run instead of deadlocking later ticks.
+      if (slashOnComplete) {
+        await slashOnComplete().catch((e: unknown) =>
+          debugLogger.warn('slashOnComplete threw:', e),
+        );
+        slashOnComplete = undefined;
+      }
       // Cancel the wall-clock timer so it doesn't fire after a successful
       // run completes — important for callers (e.g. the `qwen serve`
       // daemon, SDK) that reuse a single process across many runs.
