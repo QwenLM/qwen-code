@@ -2507,6 +2507,35 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
     });
 
+    it('does not reset the Hook checkpoint when Cron skips microcompaction', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-cron-hook-checkpoint',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
     it('does not run microcompaction on SendMessageType.Retry', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       const { history } = await makeReadFileResponses(6);

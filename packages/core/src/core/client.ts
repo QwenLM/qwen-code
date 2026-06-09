@@ -1609,8 +1609,12 @@ export class GeminiClient {
         // Idle cleanup: clear old tool results when idle > threshold.
         // Runs on user and cron messages. ToolResult and Retry are
         // excluded; Hook continuations use a separate checkpoint below.
-        await this.microcompactIdleHistory(this.lastApiCompletionTimestamp);
-        this.lastHookMicrocompactionTimestamp = Date.now();
+        const compacted = await this.microcompactIdleHistory(
+          this.lastApiCompletionTimestamp,
+        );
+        if (messageType === SendMessageType.UserQuery || compacted) {
+          this.lastHookMicrocompactionTimestamp = Date.now();
+        }
       } else if (messageType === SendMessageType.Hook) {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
