@@ -1535,9 +1535,15 @@ export class Session implements SessionContext {
             )
           : [];
 
-      return messages.map((message) => ({
-        text: `\n[User message received during tool execution]: ${message}`,
-      }));
+      return messages.map((message) => {
+        const part = {
+          text: `\n[User message received during tool execution]: ${message}`,
+        };
+        this.config
+          .getChatRecordingService()
+          ?.recordMidTurnUserMessage([part], message);
+        return part;
+      });
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so

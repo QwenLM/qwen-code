@@ -41,6 +41,13 @@ const { mockConnectionState } = vi.hoisted(() => {
   return { mockConnectionState: state };
 });
 
+const { mockExtensionManagerState } = vi.hoisted(() => ({
+  mockExtensionManagerState: {
+    extensions: [] as Array<Record<string, unknown>>,
+    refreshCache: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 vi.mock('@agentclientprotocol/sdk', () => ({
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
@@ -149,6 +156,37 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     (provider: { envKey: string }) => (model: { envKey?: string }) =>
       model.envKey === provider.envKey,
   ),
+  ExtensionManager: vi.fn().mockImplementation(() => ({
+    refreshCache: mockExtensionManagerState.refreshCache,
+    getLoadedExtensions: vi.fn(() => mockExtensionManagerState.extensions),
+  })),
+  ExtensionSettingScope: {
+    USER: 'user',
+    WORKSPACE: 'workspace',
+  },
+  getScopedEnvContents: vi.fn().mockResolvedValue({}),
+  updateSetting: vi.fn().mockResolvedValue(undefined),
+  HookEventName: {
+    PreToolUse: 'PreToolUse',
+    PostToolUse: 'PostToolUse',
+    PostToolUseFailure: 'PostToolUseFailure',
+    PostToolBatch: 'PostToolBatch',
+    Notification: 'Notification',
+    UserPromptSubmit: 'UserPromptSubmit',
+    UserPromptExpansion: 'UserPromptExpansion',
+    SessionStart: 'SessionStart',
+    Stop: 'Stop',
+    SubagentStart: 'SubagentStart',
+    SubagentStop: 'SubagentStop',
+    PreCompact: 'PreCompact',
+    PostCompact: 'PostCompact',
+    SessionEnd: 'SessionEnd',
+    PermissionRequest: 'PermissionRequest',
+    PermissionDenied: 'PermissionDenied',
+    StopFailure: 'StopFailure',
+    TodoCreated: 'TodoCreated',
+    TodoCompleted: 'TodoCompleted',
+  },
   buildInstallPlan: vi.fn((provider, inputs) => ({
     providerId: provider.id,
     authType: inputs.protocol ?? provider.protocol,
@@ -850,6 +888,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConnectionState.reset();
+    mockExtensionManagerState.extensions = [];
+    mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     lastSessionMock = undefined;
     capturedAgentFactory = undefined;
 
@@ -1023,19 +1063,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } as unknown as LoadedSettings;
   }
 
-  function makeMemorySettings(memory: Record<string, unknown> = {}) {
+  function makeMemorySettings(
+    memory: Record<string, unknown> = {},
+    mergedMemory: Record<string, unknown> = memory,
+  ) {
     const user = {
       path: '/home/test/.qwen/settings.json',
       settings: { memory },
     };
+    const merged = { mcpServers: {}, memory: { ...mergedMemory } };
     const settings = {
-      merged: { mcpServers: {} },
+      merged,
       user,
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
       setValue: vi.fn((_scope: string, key: string, value: unknown) => {
         const [, memoryKey] = key.split('.');
-        if (memoryKey) user.settings.memory[memoryKey] = value;
+        if (memoryKey) {
+          user.settings.memory[memoryKey] = value;
+          merged.memory[memoryKey] = value;
+        }
       }),
     };
     return settings as unknown as LoadedSettings;
@@ -1735,10 +1782,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('qwen/settings extension methods read and update user memory settings', async () => {
-    const settings = makeMemorySettings({
-      enableManagedAutoMemory: false,
-      enableManagedAutoDream: 'invalid',
-    });
+    const settings = makeMemorySettings(
+      {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: 'invalid',
+      },
+      {
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: true,
+      },
+    );
     vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
@@ -1759,9 +1812,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod('qwen/settings/getMemory', {}),
     ).resolves.toEqual({
       settings: {
-        enableManagedAutoMemory: false,
-        enableManagedAutoDream: false,
-        enableAutoSkill: false,
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: true,
+        enableAutoSkill: true,
       },
     });
     await expect(
@@ -1785,7 +1838,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({
       settings: {
-        enableManagedAutoMemory: false,
+        enableManagedAutoMemory: true,
         enableManagedAutoDream: true,
         enableAutoSkill: true,
       },
@@ -1860,6 +1913,119 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspace: expect.objectContaining({ values: expect.anything() }),
       merged: expect.objectContaining({ values: expect.anything() }),
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore excludes untrusted workspace integrations from merged view', async () => {
+    const settings = makeCoreSettings();
+    (settings as { isTrusted: boolean }).isTrusted = false;
+    (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
+      userServer: { command: 'node' },
+    };
+    (settings.workspace.settings as Record<string, unknown>)['mcpServers'] = {
+      workspaceServer: { command: 'python' },
+    };
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    (settings.workspace.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo workspace' }] }],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+      workspace: { mcpServers: Array<{ name: string }> };
+      merged: {
+        mcpServers: Array<{ name: string }>;
+        hooks: Array<{
+          scope: string;
+          hook: { hooks: Array<{ command: string }> };
+        }>;
+      };
+    };
+
+    expect(result.workspace.mcpServers.map((entry) => entry.name)).toContain(
+      'workspaceServer',
+    );
+    expect(result.merged.mcpServers.map((entry) => entry.name)).toEqual([
+      'userServer',
+    ]);
+    expect(result.merged.hooks).toEqual([
+      expect.objectContaining({
+        scope: 'user',
+        hook: expect.objectContaining({
+          hooks: [expect.objectContaining({ command: 'echo user' })],
+        }),
+      }),
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/getCore excludes inactive extension integrations from merged view', async () => {
+    mockExtensionManagerState.extensions = [
+      {
+        id: 'active-ext',
+        name: 'active-ext',
+        version: '1.0.0',
+        isActive: true,
+        path: '/ext/active',
+        commands: [],
+        skills: [],
+        settings: [],
+        config: {
+          mcpServers: { activeServer: { command: 'node' } },
+        },
+        hooks: {
+          PreToolUse: [
+            { hooks: [{ type: 'command', command: 'echo active' }] },
+          ],
+        },
+      },
+      {
+        id: 'disabled-ext',
+        name: 'disabled-ext',
+        version: '1.0.0',
+        isActive: false,
+        path: '/ext/disabled',
+        commands: [],
+        skills: [],
+        settings: [],
+        config: {
+          mcpServers: { disabledServer: { command: 'python' } },
+        },
+        hooks: {
+          PreToolUse: [
+            { hooks: [{ type: 'command', command: 'echo disabled' }] },
+          ],
+        },
+      },
+    ];
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+      merged: {
+        mcpServers: Array<{ name: string }>;
+        hooks: Array<{ extensionName?: string }>;
+      };
+      extensions: Array<{ name: string; isActive: boolean }>;
+    };
+
+    expect(result.extensions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'disabled-ext', isActive: false }),
+      ]),
+    );
+    expect(result.merged.mcpServers.map((entry) => entry.name)).toEqual([
+      'activeServer',
+    ]);
+    expect(result.merged.hooks.map((entry) => entry.extensionName)).toEqual([
+      'active-ext',
+    ]);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2118,6 +2284,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings hook methods include all core hook events', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PostToolBatch: [{ hooks: [{ type: 'command', command: 'echo batch' }] }],
+      UserPromptExpansion: [
+        { hooks: [{ type: 'command', command: 'echo expansion' }] },
+      ],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+      user: { hooks: Array<{ event: string }> };
+    };
+    expect(result.user.hooks.map((entry) => entry.event).sort()).toEqual([
+      'PostToolBatch',
+      'UserPromptExpansion',
+    ]);
+
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PostToolBatch',
+      hook: { hooks: [{ type: 'command', command: 'echo more' }] },
+    });
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'UserPromptExpansion',
+      hook: { hooks: [{ type: 'command', command: 'echo more' }] },
+    });
+
+    const hookWrites = vi
+      .mocked(settings.setValue)
+      .mock.calls.filter((call) => call[1] === 'hooks');
+    expect(hookWrites.at(-2)?.[2]).toHaveProperty('PostToolBatch');
+    expect(hookWrites.at(-1)?.[2]).toHaveProperty('UserPromptExpansion');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/setHook replaces in place at a valid index and appends for out-of-range', async () => {
     const settings = makeCoreSettings();
     (settings.user.settings as Record<string, unknown>)['hooks'] = {
@@ -2245,6 +2450,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rules: [],
       }),
     ).rejects.toThrowError(/ruleType must be/);
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+      }),
+    ).rejects.toThrowError(/rules must be an array/);
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: 'ShellTool(git status)',
+      }),
+    ).rejects.toThrowError(/rules must be an array/);
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'allow',
+        rules: [''],
+      }),
+    ).rejects.toThrowError(/non-empty strings/);
+    expect(settings.setValue).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -4635,9 +4861,7 @@ describe('fetchAllowedGitHub', () => {
     const res = fakeResponse(200);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
     await expect(
-      fetchAllowedGitHub(
-        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
-      ),
+      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
     ).resolves.toBe(res);
   });
 
@@ -4662,9 +4886,7 @@ describe('fetchAllowedGitHub', () => {
       vi.fn().mockResolvedValue(fakeResponse(302, 'https://evil.com/x')),
     );
     await expect(
-      fetchAllowedGitHub(
-        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
-      ),
+      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
     ).rejects.toThrow(/disallowed host/);
   });
 
@@ -4678,9 +4900,7 @@ describe('fetchAllowedGitHub', () => {
         ),
     );
     await expect(
-      fetchAllowedGitHub(
-        'https://raw.githubusercontent.com/a/b/main/SKILL.md',
-      ),
+      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
     ).rejects.toThrow(/disallowed host/);
   });
 

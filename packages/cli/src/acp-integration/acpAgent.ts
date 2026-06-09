@@ -35,6 +35,7 @@ import {
   resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
+  HookEventName,
   updateSetting,
   SessionEndReason,
   restoreWorktreeContext,
@@ -227,13 +228,20 @@ function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
 }
 
 function normalizePermissionRules(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value)) {
+    throw RequestError.invalidParams(undefined, 'rules must be an array');
+  }
   return Array.from(
     new Set(
-      value
-        .filter((item): item is string => typeof item === 'string')
-        .map((item) => item.trim())
-        .filter(Boolean),
+      value.map((item) => {
+        if (typeof item !== 'string' || !item.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'rules must contain only non-empty strings',
+          );
+        }
+        return item.trim();
+      }),
     ),
   );
 }
@@ -299,19 +307,7 @@ type GitHubBlobSkillUrl = {
 type QwenSettingsScope = 'user' | 'workspace';
 type QwenSettingValue = string | number | boolean | string[] | undefined;
 type QwenMcpTransport = 'stdio' | 'http' | 'sse';
-type QwenHookEvent =
-  | 'UserPromptSubmit'
-  | 'Stop'
-  | 'Notification'
-  | 'PreToolUse'
-  | 'PostToolUse'
-  | 'PostToolUseFailure'
-  | 'SessionStart'
-  | 'SessionEnd'
-  | 'PreCompact'
-  | 'SubagentStart'
-  | 'SubagentStop'
-  | 'PermissionRequest';
+type QwenHookEvent = HookEventName;
 
 type QwenCoreSettingKey =
   | 'model.name'
@@ -414,25 +410,12 @@ const QWEN_CORE_SETTING_KEYS = Object.keys(
   QWEN_CORE_SETTING_DEFINITIONS,
 ) as QwenCoreSettingKey[];
 
-const QWEN_HOOK_EVENTS: QwenHookEvent[] = [
-  'UserPromptSubmit',
-  'Stop',
-  'Notification',
-  'PreToolUse',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'SessionStart',
-  'SessionEnd',
-  'PreCompact',
-  'SubagentStart',
-  'SubagentStop',
-  'PermissionRequest',
-];
+const QWEN_HOOK_EVENTS = Object.values(HookEventName) as QwenHookEvent[];
 
 const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
-  enableManagedAutoDream: false,
-  enableAutoSkill: false,
+  enableManagedAutoDream: true,
+  enableAutoSkill: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
@@ -2649,7 +2632,7 @@ class QwenAgent implements Agent {
     try {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
-        isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+        isWorkspaceTrusted: settings.isTrusted,
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -2712,7 +2695,10 @@ class QwenAgent implements Agent {
       }),
     );
 
-    const extensionMcpServers = extensions.flatMap((extension) =>
+    const activeExtensions = extensions.filter(
+      (extension) => extension.isActive,
+    );
+    const extensionMcpServers = activeExtensions.flatMap((extension) =>
       readMcpServers(
         { mcpServers: extension.config.mcpServers ?? {} },
         'extension',
@@ -2721,7 +2707,7 @@ class QwenAgent implements Agent {
         server: { ...entry.server, extensionName: extension.name },
       })),
     );
-    const extensionHooks = extensions.flatMap((extension) =>
+    const extensionHooks = activeExtensions.flatMap((extension) =>
       readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
     );
 
@@ -2738,12 +2724,14 @@ class QwenAgent implements Agent {
     for (const entry of readMcpServers(userSettings, 'user')) {
       mergedMcpByName.set(entry.name, entry);
     }
-    for (const entry of readMcpServers(workspaceSettings, 'workspace')) {
-      mergedMcpByName.set(entry.name, entry);
+    if (settings.isTrusted) {
+      for (const entry of readMcpServers(workspaceSettings, 'workspace')) {
+        mergedMcpByName.set(entry.name, entry);
+      }
     }
     const mergedHooks = [
       ...readHooks(userSettings, 'user'),
-      ...readHooks(workspaceSettings, 'workspace'),
+      ...(settings.isTrusted ? readHooks(workspaceSettings, 'workspace') : []),
     ];
 
     return {
@@ -3911,10 +3899,10 @@ class QwenAgent implements Agent {
         );
       }
       case 'qwen/settings/getMemory': {
+        const settings = loadSettings(cwd);
+        this.settings = settings;
         return {
-          settings: normalizeQwenMemorySettings(
-            this.settings.user.settings.memory,
-          ),
+          settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
       }
       case 'qwen/settings/setMemory': {
@@ -3935,7 +3923,7 @@ class QwenAgent implements Agent {
         }
         this.settings = settings;
         return {
-          settings: normalizeQwenMemorySettings(settings.user.settings.memory),
+          settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
       }
       case 'qwen/settings/getPath': {
@@ -4303,9 +4291,7 @@ class QwenAgent implements Agent {
           lastUpdated: sessionData.conversation.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
           // render a truncated replay as the full conversation.
-          ...(replayError !== undefined
-            ? { partial: true, replayError }
-            : {}),
+          ...(replayError !== undefined ? { partial: true, replayError } : {}),
         };
       }
       case 'restoreSessionHistory': {
@@ -4487,7 +4473,11 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
         const index = params['index'];
-        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) {
+        if (
+          typeof index !== 'number' ||
+          !Number.isInteger(index) ||
+          index < 0
+        ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         const settings = loadSettings(cwd);

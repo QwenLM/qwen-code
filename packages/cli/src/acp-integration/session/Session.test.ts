@@ -186,6 +186,7 @@ describe('Session', () => {
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
@@ -249,6 +250,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
@@ -2201,13 +2203,15 @@ describe('Session', () => {
           { sessionId: 'test-session-id' },
         );
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        const midTurnPart = {
+          text: '\n[User message received during tool execution]: please also check tests',
+        };
         expect(secondCall?.[1].message).toEqual(
-          expect.arrayContaining([
-            {
-              text: '\n[User message received during tool execution]: please also check tests',
-            },
-          ]),
+          expect.arrayContaining([midTurnPart]),
         );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
       });
 
       it('latches mid-turn drain off after a permanent (-32601) error', async () => {
@@ -2237,7 +2241,11 @@ describe('Session', () => {
               type: core.StreamEventType.CHUNK,
               value: {
                 functionCalls: [
-                  { id: 'c', name: 'read_file', args: { path: '/tmp/test.txt' } },
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
                 ],
               },
             },
@@ -2290,7 +2298,11 @@ describe('Session', () => {
               type: core.StreamEventType.CHUNK,
               value: {
                 functionCalls: [
-                  { id: 'c', name: 'read_file', args: { path: '/tmp/test.txt' } },
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
                 ],
               },
             },
