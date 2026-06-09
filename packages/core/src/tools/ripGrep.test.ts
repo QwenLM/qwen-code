@@ -872,6 +872,7 @@ describe('RipGrepTool', () => {
         });
 
         process.chdir(testCwd);
+        const expectedIgnoreFile = path.resolve('outside', '.cursorignore');
 
         const invocation = grepTool.build({
           pattern: 'secret',
@@ -892,9 +893,7 @@ describe('RipGrepTool', () => {
         const ignoreFileArgs = rgArgs.filter(
           (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
         );
-        expect(ignoreFileArgs).toContain(
-          path.join(outsideDir, '.cursorignore'),
-        );
+        expect(ignoreFileArgs).toContain(expectedIgnoreFile);
         expect(ignoreFileArgs).not.toContain(
           path.join('outside', '.cursorignore'),
         );
