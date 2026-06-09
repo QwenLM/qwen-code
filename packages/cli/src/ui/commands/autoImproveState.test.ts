@@ -15,6 +15,7 @@ import {
   getAutoImproveStatePath,
   compactAutoImproveRunIndex,
   isRecord,
+  isStaleAutoImproveRunRef,
   isValidAutoImproveLoopId,
   MAX_AUTO_IMPROVE_PROMPT_LENGTH,
   MAX_TARGET_BRANCH_LENGTH,
@@ -98,6 +99,50 @@ describe('autoImproveState', () => {
       const many = Array.from({ length: 20 }, (_, i) => `s${i}`);
       expect(normalizeStringList(many)).toHaveLength(10);
       expect(normalizeStringList(['x'.repeat(500)])[0]).toHaveLength(200);
+    });
+  });
+
+  describe('isStaleAutoImproveRunRef', () => {
+    const old = {
+      runId: 'r',
+      status: 'implementing',
+      startedAt: '2020-01-01T00:00:00.000Z',
+    };
+    it('flags an active run older than maxAge, not a fresh one', () => {
+      const twoHours = 2 * 60 * 60 * 1000;
+      expect(
+        isStaleAutoImproveRunRef(
+          old,
+          Date.parse('2020-01-01T03:00:00.000Z'),
+          twoHours,
+        ),
+      ).toBe(true);
+      expect(
+        isStaleAutoImproveRunRef(
+          old,
+          Date.parse('2020-01-01T01:00:00.000Z'),
+          twoHours,
+        ),
+      ).toBe(false);
+    });
+    it('is never stale without startedAt, for terminal status, or bad input', () => {
+      const now = Date.parse('2026-01-01T00:00:00.000Z');
+      expect(
+        isStaleAutoImproveRunRef({ runId: 'r', status: 'implementing' }, now),
+      ).toBe(false);
+      expect(
+        isStaleAutoImproveRunRef(
+          { runId: 'r', status: 'success', startedAt: old.startedAt },
+          now,
+        ),
+      ).toBe(false);
+      expect(isStaleAutoImproveRunRef(null, now)).toBe(false);
+      expect(
+        isStaleAutoImproveRunRef(
+          { runId: 'r', status: 'implementing', startedAt: 'not-a-date' },
+          now,
+        ),
+      ).toBe(false);
     });
   });
 

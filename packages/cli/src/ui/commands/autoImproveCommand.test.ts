@@ -624,9 +624,13 @@ describe('autoImproveCommand', () => {
     const active = JSON.parse(activeRaw) as { activeLoopId: string };
     const state = await readAutoImproveLoopState(tempDir, active.activeLoopId);
     expect(state).not.toBeNull();
+    // Cancellation flips the *same* run's status to 'cancelled' (it keeps its
+    // runId), so the submission's onComplete still owns it and must preserve the
+    // terminal status rather than overwrite it to 'success'.
+    const cancelledRunId = state!.currentRun!.runId;
     await writeAutoImproveLoopState(tempDir, {
       ...state!,
-      currentRun: { runId: 'cancelled-run', status: 'cancelled' },
+      currentRun: { ...state!.currentRun!, status: 'cancelled' },
     });
 
     await (result as { onComplete?: () => Promise<void> }).onComplete?.();
@@ -637,7 +641,7 @@ describe('autoImproveCommand', () => {
     );
     expect(updated?.currentRun).toBeUndefined();
     expect(updated?.lastRun).toMatchObject({
-      runId: 'cancelled-run',
+      runId: cancelledRunId,
       status: 'cancelled',
     });
   });
@@ -746,6 +750,107 @@ describe('autoImproveCommand', () => {
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'info',
+      content: expect.stringContaining('previous run is still active'),
+    });
+  });
+
+  it('ignores a stale completion that no longer owns currentRun', async () => {
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 30m',
+    );
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const state = await readAutoImproveLoopState(tempDir, active.activeLoopId);
+    // A newer tick has since claimed a different run.
+    await writeAutoImproveLoopState(tempDir, {
+      ...state!,
+      currentRun: {
+        runId: 'newer-run',
+        status: 'implementing',
+        startedAt: new Date().toISOString(),
+      },
+    });
+
+    // The original submission's onComplete fires late — it must NOT clobber the
+    // newer run's currentRun.
+    await (result as { onComplete?: () => Promise<void> }).onComplete?.();
+
+    const updated = await readAutoImproveLoopState(
+      tempDir,
+      active.activeLoopId,
+    );
+    expect(updated?.currentRun).toMatchObject({
+      runId: 'newer-run',
+      status: 'implementing',
+    });
+    expect(updated?.lastRun).toBeUndefined();
+  });
+
+  it('reclaims a stale stuck run so the tick proceeds instead of deadlocking', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const state = await readAutoImproveLoopState(tempDir, active.activeLoopId);
+    // currentRun looks stuck: active status with a startedAt far in the past.
+    await writeAutoImproveLoopState(tempDir, {
+      ...state!,
+      currentRun: {
+        runId: 'stuck-run',
+        status: 'implementing',
+        startedAt: '2020-01-01T00:00:00.000Z',
+      },
+    });
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      `tick ${active.activeLoopId}`,
+    );
+
+    // Tick proceeds (claims a fresh run) rather than skipping forever.
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+    const updated = await readAutoImproveLoopState(
+      tempDir,
+      active.activeLoopId,
+    );
+    expect(updated?.lastRun).toMatchObject({
+      runId: 'stuck-run',
+      status: 'failed',
+    });
+    expect(updated?.currentRun?.runId).not.toBe('stuck-run');
+    expect(updated?.currentRun?.status).toBe('implementing');
+  });
+
+  it('still skips when the active run is fresh (not stale)', async () => {
+    await autoImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const state = await readAutoImproveLoopState(tempDir, active.activeLoopId);
+    await writeAutoImproveLoopState(tempDir, {
+      ...state!,
+      currentRun: {
+        runId: 'fresh-run',
+        status: 'implementing',
+        startedAt: new Date().toISOString(),
+      },
+    });
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      `tick ${active.activeLoopId}`,
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
       content: expect.stringContaining('previous run is still active'),
     });
   });

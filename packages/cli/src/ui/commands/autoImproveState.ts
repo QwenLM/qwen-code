@@ -26,6 +26,11 @@ export interface AutoImproveConfig {
 export interface AutoImproveRunRef {
   runId: string;
   status: string;
+  // ISO timestamp of when this run claimed currentRun. Used to detect a stuck
+  // run (e.g. a completion write that failed, or a process killed before
+  // onComplete cleared currentRun) so the next tick can reclaim it instead of
+  // skipping forever.
+  startedAt?: string;
   worktreePath?: string;
   runDoc?: string;
   deliveryTarget?: AutoImproveDeliveryTarget;
@@ -201,11 +206,13 @@ function normalizeConfig(value: unknown): AutoImproveConfig {
   const sources = isRecord(rawSources) ? rawSources : {};
   const customSources = normalizeStringList(value['customSources']);
   const legacyUserContext =
-    typeof value['userContext'] === 'string' ? value['userContext'].trim() : '';
+    typeof value['userContext'] === 'string'
+      ? value['userContext'].replace(CONTROL_CHARS_RE, ' ').trim()
+      : '';
   if (customSources.length === 0 && legacyUserContext) {
-    // Apply the same length cap as normalizeStringList — this legacy value is
-    // pushed after normalization, so without the slice an unbounded userContext
-    // would reach the tick prompt inside the USER-PROVIDED DATA fence.
+    // Match normalizeStringList: strip control chars (above) AND length-cap, so
+    // a legacy userContext with embedded newlines/control chars can't forge
+    // extra lines inside the USER-PROVIDED DATA fence of the tick prompt.
     customSources.push(legacyUserContext.slice(0, MAX_CUSTOM_SOURCE_LENGTH));
   }
   return {
@@ -338,11 +345,15 @@ function normalizeRunRef(value: unknown): AutoImproveRunRef | undefined {
   };
   const worktreePath = value['worktreePath'];
   const runDoc = value['runDoc'];
+  const startedAt = value['startedAt'];
   if (typeof worktreePath === 'string' && worktreePath.trim()) {
     runRef.worktreePath = worktreePath;
   }
   if (typeof runDoc === 'string' && runDoc.trim()) {
     runRef.runDoc = runDoc;
+  }
+  if (typeof startedAt === 'string' && startedAt.trim()) {
+    runRef.startedAt = startedAt.trim();
   }
 
   const deliveryTarget = value['deliveryTarget'];
@@ -520,6 +531,29 @@ export function isActiveAutoImproveRunRef(
 ): value is AutoImproveRunRef {
   const runRef = normalizeRunRef(value);
   return !!runRef && ACTIVE_RUN_STATUSES.has(runRef.status);
+}
+
+// A run is considered "stuck" once it has been active longer than any real tick
+// could take. Generous on purpose: a too-aggressive value would reclaim a run
+// that is still legitimately working. The runId-ownership check in
+// markRunCompleted backstops this — even if a still-live run is reclaimed, its
+// late completion can't clobber the run that replaced it.
+export const MAX_AUTO_IMPROVE_RUN_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+export function isStaleAutoImproveRunRef(
+  value: unknown,
+  nowMs: number,
+  maxAgeMs: number = MAX_AUTO_IMPROVE_RUN_AGE_MS,
+): boolean {
+  const runRef = normalizeRunRef(value);
+  if (!runRef || !ACTIVE_RUN_STATUSES.has(runRef.status)) return false;
+  // Without a startedAt we can't tell its age — treat as not-stale so we never
+  // reclaim a run we can't reason about (forward-looking: new runs always set
+  // startedAt).
+  if (!runRef.startedAt) return false;
+  const started = Date.parse(runRef.startedAt);
+  if (!Number.isFinite(started)) return false;
+  return nowMs - started > maxAgeMs;
 }
 
 export function isTerminalAutoImproveRunStatus(status: string): boolean {

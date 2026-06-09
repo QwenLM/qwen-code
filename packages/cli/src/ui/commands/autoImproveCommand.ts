@@ -24,6 +24,7 @@ import {
   getAutoImproveLoopDir,
   initializeAutoImproveLoopFiles,
   isActiveAutoImproveRunRef,
+  isStaleAutoImproveRunRef,
   isRecord,
   isTerminalAutoImproveRunStatus,
   isValidAutoImproveLoopId,
@@ -37,6 +38,7 @@ import {
   writeAutoImproveLoopState,
   type AutoImproveLoopState,
   type AutoImproveRunRecord,
+  type AutoImproveRunRef,
 } from './autoImproveState.js';
 import type {
   HistoryItemAutoImproveRun,
@@ -255,14 +257,16 @@ function makeLoopId(targetBranch: string): string {
   return `${stamp}-${slugify(targetBranch)}-${suffix}`;
 }
 
-function makePendingRunRef(): { runId: string; status: string } {
-  const stamp = new Date()
+function makePendingRunRef(): AutoImproveRunRef {
+  const now = new Date();
+  const stamp = now
     .toISOString()
     .replace(/\.\d{3}Z$/, 'Z')
     .replace(/[:.]/g, '-');
   return {
     runId: `pending-${stamp}`,
     status: 'implementing',
+    startedAt: now.toISOString(),
   };
 }
 
@@ -270,7 +274,7 @@ async function markRunCompleted(
   _config: Config,
   repoRoot: string,
   loopId: string,
-  opts?: { errored?: boolean },
+  opts?: { errored?: boolean; expectedRunId?: string },
 ): Promise<void> {
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state || !state.currentRun) {
@@ -282,6 +286,19 @@ async function markRunCompleted(
         `(state=${state ? 'present' : 'missing'}, currentRun=${
           state?.currentRun ? 'present' : 'missing'
         })`,
+    );
+    return;
+  }
+  // Ownership guard: only finalize the run this completion belongs to. A stale
+  // onComplete (e.g. from a cancelled/reclaimed run) must not clobber the
+  // currentRun a newer tick has since claimed.
+  if (
+    opts?.expectedRunId !== undefined &&
+    state.currentRun.runId !== opts.expectedRunId
+  ) {
+    debugLogger.warn(
+      `markRunCompleted: ignoring stale completion for loop ${loopId} ` +
+        `(expected runId ${opts.expectedRunId}, on-disk ${state.currentRun.runId})`,
     );
     return;
   }
@@ -699,11 +716,17 @@ async function startAutoImprove(
     );
   }
 
+  // Capture the runId this submission owns so a stale completion can't clobber
+  // a run a later tick claimed (see markRunCompleted's ownership guard).
+  const submittedRunId = state.currentRun?.runId;
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(state) }],
     onComplete: (opts?: { errored?: boolean }) =>
-      markRunCompleted(config, repoRoot, loopId, opts),
+      markRunCompleted(config, repoRoot, loopId, {
+        errored: opts?.errored,
+        expectedRunId: submittedRunId,
+      }),
   };
 }
 
@@ -892,11 +915,27 @@ async function tickAutoImproveClaim(
   }
 
   if (isActiveAutoImproveRunRef(state.currentRun)) {
-    debugLogger.info(`tick ${loopId}: skipped — previous run still active`);
-    return message(
-      'info',
-      t('Auto-improve tick skipped: previous run is still active.'),
-    );
+    if (isStaleAutoImproveRunRef(state.currentRun, Date.now())) {
+      // The previous run is stuck: its completion write failed, or the process
+      // was killed before onComplete cleared currentRun. Reclaim it as failed
+      // and let this tick proceed instead of skipping forever. A late
+      // completion from the reclaimed run is ignored by markRunCompleted's
+      // runId-ownership guard.
+      debugLogger.warn(
+        `tick ${loopId}: reclaiming stale run ${state.currentRun.runId} ` +
+          `(startedAt=${state.currentRun.startedAt ?? 'unknown'})`,
+      );
+      state.lastRun = { ...state.currentRun, status: 'failed' };
+      delete state.currentRun;
+      await writeAutoImproveLoopState(repoRoot, state);
+      // Fall through to the re-read + claim below.
+    } else {
+      debugLogger.info(`tick ${loopId}: skipped — previous run still active`);
+      return message(
+        'info',
+        t('Auto-improve tick skipped: previous run is still active.'),
+      );
+    }
   }
 
   // Re-read state to close the TOCTOU window between initial check and write.
@@ -934,16 +973,27 @@ async function tickAutoImproveClaim(
     );
   }
 
-  // Use freshState (if available) as the write base to avoid overwriting any
-  // concurrent changes that landed between the initial read and the re-read.
-  const baseState = freshState ?? state;
+  // The state file vanished or became unreadable between the initial read and
+  // the re-read (deleted, corrupted, or failed normalization). Don't fall back
+  // to the stale in-memory copy and claim a run on top of it — skip this tick.
+  if (!freshState) {
+    debugLogger.warn(`tick ${loopId}: skipped — state unreadable on re-read`);
+    return message(
+      'info',
+      t('Auto-improve tick skipped: state became unavailable.'),
+    );
+  }
+  // Use freshState as the write base to avoid overwriting any concurrent
+  // changes that landed between the initial read and the re-read.
+  const baseState = freshState;
   // Override repoRoot with the freshly-resolved (trusted) value before it is
   // persisted or interpolated into the tick prompt: repoRootDisplay sits before
   // the USER-PROVIDED DATA fence, so a tampered state.json must not control it.
   baseState.repoRoot = repoRoot;
   baseState.currentRun = makePendingRunRef();
+  const submittedRunId = baseState.currentRun.runId;
   await writeAutoImproveLoopState(repoRoot, baseState);
-  debugLogger.info(`tick ${loopId}: claimed run, submitting prompt`);
+  debugLogger.info(`tick ${loopId}: claimed run ${submittedRunId}, submitting`);
 
   return {
     type: 'submit_prompt',
@@ -952,7 +1002,12 @@ async function tickAutoImproveClaim(
       debugLogger.info(
         `tick ${loopId}: onComplete (errored=${opts?.errored ?? false})`,
       );
-      return markRunCompleted(config, repoRoot, loopId, opts);
+      // Pass the owning runId so a stale completion can't clobber a run a
+      // later tick claimed (markRunCompleted ownership guard).
+      return markRunCompleted(config, repoRoot, loopId, {
+        errored: opts?.errored,
+        expectedRunId: submittedRunId,
+      });
     },
   };
 }
