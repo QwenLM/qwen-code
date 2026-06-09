@@ -300,33 +300,15 @@ jobs:
         with:
           node-version: '22.x'
 
-      - name: 'Install Qwen CLI'
+      - name: 'Check Qwen CLI'
         if: "steps.context.outputs.should_run == 'true'"
-        env:
-          QWEN_CLI_PACKAGE: '@qwen-code/qwen-code'
-          QWEN_CLI_VERSION: "${{ vars.QWEN_PR_REVIEW_CLI_VERSION || '0.17.1' }}"
         run: |-
           set -euo pipefail
 
-          if [ "$QWEN_CLI_VERSION" != "latest" ] &&
-             command -v qwen >/dev/null 2>&1; then
-            current_version="$(qwen --version | tr -d '\r')"
-            if [ "$current_version" = "$QWEN_CLI_VERSION" ]; then
-              qwen --version
-              exit 0
-            fi
-            echo "Existing qwen version ${current_version}; installing ${QWEN_CLI_VERSION}."
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "qwen must be installed on the self-hosted runner." >&2
+            exit 1
           fi
-
-          npm install -g "${QWEN_CLI_PACKAGE}@${QWEN_CLI_VERSION}" &
-          install_pid="$!"
-          while kill -0 "$install_pid" 2>/dev/null; do
-            sleep 15
-            if kill -0 "$install_pid" 2>/dev/null; then
-              echo 'qwen npm install still running...'
-            fi
-          done
-          wait "$install_pid"
           qwen --version
 
       - name: 'Prepare review workspace'
@@ -380,7 +362,17 @@ jobs:
           if [ -z "${OPENAI_BASE_URL:-}" ]; then
             fail "REVIEW_OPENAI_BASE_URL secret is required for Qwen PR review."
           fi
+          if ! command -v qwen >/dev/null 2>&1; then
+            fail "qwen must be installed on the self-hosted runner."
+          fi
           qwen --version
+
+          QWEN_COMMAND=".qwen/tmp/qwen-command.sh"
+          cat > "$QWEN_COMMAND" <<'EOF'
+          #!/usr/bin/env bash
+          exec qwen "$@"
+          EOF
+          chmod +x "$QWEN_COMMAND"
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
@@ -419,7 +411,7 @@ jobs:
             --log-path "$LOG_PATH" \
             --quiet \
             --heartbeat-seconds 15 \
-            -- qwen \
+            -- bash "$QWEN_COMMAND" \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \

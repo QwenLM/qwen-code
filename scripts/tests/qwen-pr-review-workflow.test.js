@@ -40,14 +40,10 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
     'Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File',
   );
   expect(workflow).not.toContain("cache: 'npm'");
-  expect(workflow).toContain("QWEN_CLI_PACKAGE: '@qwen-code/qwen-code'");
-  expect(workflow).toContain(
-    'QWEN_CLI_VERSION: "${{ vars.QWEN_PR_REVIEW_CLI_VERSION || \'0.17.1\' }}"',
-  );
-  expect(workflow).toContain(
-    'npm install -g "${QWEN_CLI_PACKAGE}@${QWEN_CLI_VERSION}"',
-  );
+  expect(workflow).toContain('command -v qwen');
   expect(workflow).toContain('qwen --version');
+  expect(workflow).toContain('exec qwen "$@"');
+  expect(workflow).not.toContain('npm install -g');
   expect(workflow).not.toContain('npm ci still running...');
   expect(workflow).not.toContain('QWEN_BIN="${RUNNER_TEMP}/qwen-bin"');
   expect(workflow).not.toContain(
@@ -58,7 +54,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain("MSYSTEM: 'MINGW64'");
   expect(workflow).toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))');
   expect(workflow).toContain('node scripts/run-qwen-pr-review.js');
-  expect(workflow).toContain('-- qwen \\');
+  expect(workflow).toContain('-- bash "$QWEN_COMMAND" \\');
   expect(workflow).toContain('--quiet');
   expect(workflow).toContain('--heartbeat-seconds 15');
   expect(workflow).not.toContain('timeout --kill-after');
