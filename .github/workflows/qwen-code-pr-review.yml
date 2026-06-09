@@ -31,7 +31,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '90'
+        default: '60'
         type: 'number'
 
 concurrency:
@@ -186,7 +186,7 @@ jobs:
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR')))
-    timeout-minutes: 90
+    timeout-minutes: 60
     runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
     defaults:
       run:
@@ -245,7 +245,7 @@ jobs:
             exit 1
           fi
 
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
+          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '60' }}"
 
           {
             echo "should_run=true"
@@ -382,8 +382,8 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 10 ]; then
             fail "timeout_minutes must be greater than 10"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
-            fail "timeout_minutes must not exceed the 90 minute job timeout"
+          if [ "$TIMEOUT_MINUTES" -gt 60 ]; then
+            fail "timeout_minutes must not exceed the 60 minute job timeout"
           fi
 
           if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then

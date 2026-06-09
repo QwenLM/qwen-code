@@ -15,11 +15,11 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain(
     "runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']",
   );
-  expect(workflow).toContain("default: '90'");
-  expect(workflow).toContain('timeout-minutes: 90');
-  expect(workflow).toContain("github.event.inputs.timeout_minutes || '90'");
+  expect(workflow).toContain("default: '60'");
+  expect(workflow).toContain('timeout-minutes: 60');
+  expect(workflow).toContain("github.event.inputs.timeout_minutes || '60'");
   expect(workflow).toContain(
-    'timeout_minutes must not exceed the 90 minute job timeout',
+    'timeout_minutes must not exceed the 60 minute job timeout',
   );
   expect(workflow).toContain(
     "${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.repository.default_branch }}",
