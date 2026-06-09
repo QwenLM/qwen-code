@@ -86,3 +86,9 @@ export {
   recordActivity,
 } from './routing/workingDevice.js';
 export { createRoutingRouter } from './routes/routing.js';
+export {
+  searchTranscripts,
+  resolveChatsDir,
+  type SearchHit,
+  type SearchOptions,
+} from './search/transcripts.js';
