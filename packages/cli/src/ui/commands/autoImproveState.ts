@@ -169,9 +169,18 @@ export function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const result: string[] = [];
+  // Collapse control characters (incl. newlines) to spaces so a custom
+  // source cannot forge extra lines inside the USER-PROVIDED DATA fence of
+  // the tick prompt (prompt-injection hardening); `trim()` alone only strips
+  // the ends and would leave embedded newlines intact.
+  // eslint-disable-next-line no-control-regex
+  const controlChars = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
   for (const item of value) {
     if (typeof item !== 'string') continue;
-    const trimmed = item.trim().slice(0, MAX_CUSTOM_SOURCE_LENGTH);
+    const trimmed = item
+      .replace(controlChars, ' ')
+      .trim()
+      .slice(0, MAX_CUSTOM_SOURCE_LENGTH);
     if (!trimmed || seen.has(trimmed)) continue;
     if (result.length >= MAX_CUSTOM_SOURCES) break;
     seen.add(trimmed);
