@@ -405,6 +405,8 @@ jobs:
           node scripts/run-qwen-pr-review.js \
             --timeout-minutes "$QWEN_TIMEOUT" \
             --log-path "$LOG_PATH" \
+            --quiet \
+            --heartbeat-seconds 60 \
             -- node dist/cli.js \
             --auth-type openai \
             --approval-mode yolo \

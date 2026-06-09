@@ -30,6 +30,8 @@ export async function runQwenReviewCommand({
   logPath,
   timeoutMs,
   killAfterMs = DEFAULT_KILL_AFTER_MS,
+  mirrorStdout = true,
+  heartbeatMs,
   stdout = process.stdout,
   stderr = process.stderr,
 }) {
@@ -40,6 +42,8 @@ export async function runQwenReviewCommand({
     let settled = false;
     let timedOut = false;
     let killTimer;
+    let heartbeatTimer;
+    const startedAt = Date.now();
 
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
@@ -51,9 +55,20 @@ export async function runQwenReviewCommand({
       );
     }, timeoutMs);
 
+    if (heartbeatMs) {
+      heartbeatTimer = setInterval(() => {
+        const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1_000);
+        stderr.write(
+          `Qwen review still running (${elapsedSeconds}s elapsed).\n`,
+        );
+      }, heartbeatMs);
+      heartbeatTimer.unref?.();
+    }
+
     const finish = (callback) => {
       clearTimeout(timeoutTimer);
       clearTimeout(killTimer);
+      clearInterval(heartbeatTimer);
       logStream.end(callback);
     };
 
@@ -71,7 +86,7 @@ export async function runQwenReviewCommand({
     });
 
     child.stdout.on('data', (chunk) => {
-      stdout.write(chunk);
+      if (mirrorStdout) stdout.write(chunk);
       logStream.write(chunk);
     });
     child.stderr.on('data', (chunk) => stderr.write(chunk));
@@ -106,6 +121,8 @@ function parseCliArgs(argv) {
   let logPath;
   let timeoutMinutes;
   let killAfterSeconds = 10;
+  let heartbeatSeconds;
+  let mirrorStdout = true;
   const commandSeparator = argv.indexOf('--');
 
   if (commandSeparator < 0) {
@@ -127,6 +144,11 @@ function parseCliArgs(argv) {
         'kill-after-seconds',
       );
       i += 1;
+    } else if (arg === '--heartbeat-seconds') {
+      heartbeatSeconds = parsePositiveInteger(value ?? '', 'heartbeat-seconds');
+      i += 1;
+    } else if (arg === '--quiet') {
+      mirrorStdout = false;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -144,6 +166,8 @@ function parseCliArgs(argv) {
     logPath,
     timeoutMs: timeoutMinutes * 60_000,
     killAfterMs: killAfterSeconds * 1_000,
+    heartbeatMs: heartbeatSeconds ? heartbeatSeconds * 1_000 : undefined,
+    mirrorStdout,
   };
 }
 

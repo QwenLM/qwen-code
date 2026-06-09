@@ -63,3 +63,42 @@ test('returns 124 when the command times out', async () => {
     expect(result).toEqual({ status: 124, timedOut: true });
   });
 });
+
+test('can keep full stream output out of stdout while emitting heartbeats', async () => {
+  await withTempDir(async (dir) => {
+    const child = join(dir, 'child.js');
+    const logPath = join(dir, 'review.jsonl');
+    await writeFile(
+      child,
+      "process.stdout.write('event one\\n'); setTimeout(() => process.stdout.write('event two\\n'), 80); setTimeout(() => {}, 120);",
+    );
+
+    let stdoutText = '';
+    let stderrText = '';
+    const result = await runQwenReviewCommand({
+      command: process.execPath,
+      args: [child],
+      logPath,
+      timeoutMs: 5_000,
+      mirrorStdout: false,
+      heartbeatMs: 20,
+      stdout: {
+        write(chunk) {
+          stdoutText += String(chunk);
+        },
+      },
+      stderr: {
+        write(chunk) {
+          stderrText += String(chunk);
+        },
+      },
+    });
+
+    expect(result).toEqual({ status: 0, timedOut: false });
+    expect(stdoutText).toBe('');
+    expect(stderrText).toContain('Qwen review still running');
+    await expect(readFile(logPath, 'utf8')).resolves.toBe(
+      'event one\nevent two\n',
+    );
+  });
+});
