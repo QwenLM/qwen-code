@@ -164,9 +164,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setSelectedIndex: setBgSelectedIndex,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
-  // Includes terminal entries — the pill stays open so users can reopen
-  // the dialog to inspect final state after the last agent finishes.
-  const hasBgAgents = bgEntries.length > 0;
+  // Live-panel roster: count only `kind === 'agent'` entries — exactly what the
+  // LiveAgentPanel renders, so it's the right gate for focusing the panel.
   const bgAgentCount = useMemo(
     () => bgEntries.filter((e) => e.kind === 'agent').length,
     [bgEntries],
@@ -531,6 +530,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           const maxIdx = bgAgentCount; // 0=main, 1..N=agents
           if (livePanelSelectedIndex < maxIdx) {
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          } else if (hasAgents) {
+            // Bottom of the panel → descend to the tab bar below it
+            // (only rendered when Arena agents exist; else stay put).
+            setLivePanelFocused(false);
+            setAgentTabBarFocused(true);
           }
           return true;
         }
@@ -1146,12 +1150,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
+          // Down from an empty composer, in visual top→bottom order:
+          // live agent panel (if bg sub-agents) → tab bar (if Arena) → stay.
+          if (bgAgentCount > 0) {
+            setLivePanelFocused(true);
             return true;
           }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
             return true;
           }
           return true;
@@ -1187,15 +1193,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks
-          // dialog (if any bg agents) → otherwise stay put.
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
+          // Down from an empty composer, in visual top→bottom order:
+          // live agent panel (if bg sub-agents) → tab bar (if Arena) → stay.
+          if (bgAgentCount > 0) {
+            setLivePanelFocused(true);
             return true;
           }
-          if (hasBgAgents) {
-            setLivePanelFocused(true);
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
             return true;
           }
           return true;
@@ -1389,7 +1394,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
-      hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setLivePanelFocused,
