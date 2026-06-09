@@ -83,6 +83,78 @@ describe('PushNotifier', () => {
     });
   });
 
+  it('SECURITY: does NOT deliver another session’s push to a session-locked share token', async () => {
+    const share = await tokens.issueShare({
+      scopes: [SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    await store.add(share.id, {
+      endpoint: 'https://push.example.com/guest',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifier = new PushNotifier(tokens, store, sender);
+    // Event for a DIFFERENT session s2 — the s1-locked guest must not receive it.
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's2' },
+    );
+    expect(sent).toHaveLength(0);
+  });
+
+  it('delivers the locked session’s OWN push to a share token', async () => {
+    const share = await tokens.issueShare({
+      scopes: [SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    await store.add(share.id, {
+      endpoint: 'https://push.example.com/guest',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifier = new PushNotifier(tokens, store, sender);
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].endpoint).toBe('https://push.example.com/guest');
+  });
+
+  it('SECURITY: does NOT deliver to an EXPIRED share token, even for its own session', async () => {
+    // ttlSec negative → expiresAt in the past → scopesFor drops it (no push).
+    const share = await tokens.issueShare({
+      scopes: [SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: -10,
+      parentId: 'owner',
+    });
+    await store.add(share.id, {
+      endpoint: 'https://push.example.com/guest',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifier = new PushNotifier(tokens, store, sender);
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(0);
+  });
+
   it('honors per-subscription prefs in the fan-out (absent=all, list=filter, []=none)', async () => {
     const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
     // A: no prefs → receives all kinds.

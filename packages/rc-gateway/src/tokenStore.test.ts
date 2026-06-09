@@ -207,4 +207,34 @@ describe('TokenStore', () => {
     expect(serialized).not.toContain('tokenHash');
     expect(serialized).not.toContain(a.token);
   });
+
+  it('scopesFor drops an expired share (no push delivery after TTL)', async () => {
+    let now = 1_000_000;
+    const store = await TokenStore.open(path, () => now);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    expect(store.scopesFor(share.id)).toEqual([SHARE, SESSION_READ, APPROVE]);
+    now = share.expiresAt; // expired (strict >=)
+    expect(store.scopesFor(share.id)).toBeUndefined();
+  });
+
+  it('sessionLockFor returns the lock for a share and undefined for a normal token', async () => {
+    const store = await TokenStore.open(path);
+    const normal = await store.issue([SESSION_READ], 'normal');
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    expect(store.sessionLockFor(share.id)).toBe('s1');
+    expect(store.sessionLockFor(normal.id)).toBeUndefined();
+    expect(store.sessionLockFor('does-not-exist')).toBeUndefined();
+  });
 });

@@ -63,6 +63,11 @@ export class PushNotifier {
       this.store.listAll().map(async (r) => {
         const scopes = this.tokens.scopesFor(r.tokenId);
         if (!scopes || !scopes.includes(need)) return;
+        // Session-lock confinement: a share token is locked to one session and
+        // must never receive another session's notification metadata via push.
+        // (scopesFor already drops expired tokens, so an expired share is gone.)
+        const lock = this.tokens.sessionLockFor(r.tokenId);
+        if (lock !== undefined && lock !== ctx.sessionId) return;
         // Per-subscription prefs filter (cycle 16): absent prefs → receive all;
         // a list → only those kinds; [] → nothing. Skip is silent (no audit),
         // matching the cycle-9 scope-skip posture. Runs after scope + snooze.

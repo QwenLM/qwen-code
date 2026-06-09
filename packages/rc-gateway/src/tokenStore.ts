@@ -163,11 +163,27 @@ export class TokenStore {
 
   /**
    * Resolve a token id to a copy of its scopes (pure read, no I/O). Used by the
-   * push notifier to scope-gate fan-out. Returns undefined for an unknown id.
+   * push notifier to scope-gate fan-out. Returns undefined for an unknown id OR
+   * an expired token — an expired share token must grant no push delivery, just
+   * as `resolve()` rejects it for requests.
    */
   scopesFor(id: string): RcScope[] | undefined {
     const rec = this.records.find((r) => r.id === id);
-    return rec ? [...rec.scopes] : undefined;
+    if (!rec) return undefined;
+    if (rec.expiresAt !== undefined && this.nowFn() >= rec.expiresAt) {
+      return undefined;
+    }
+    return [...rec.scopes];
+  }
+
+  /**
+   * The session a token is locked to, or undefined if it is not session-locked
+   * (normal tokens) or the id is unknown. Used by the push notifier to keep a
+   * session-locked share token from receiving another session's notification
+   * metadata via the push fan-out.
+   */
+  sessionLockFor(id: string): string | undefined {
+    return this.records.find((r) => r.id === id)?.sessionLockId;
   }
 
   /** List issued tokens as metadata only (no hash, no raw token). */
