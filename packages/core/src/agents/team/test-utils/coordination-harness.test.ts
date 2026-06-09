@@ -461,5 +461,52 @@ describe('TeamCoordinationHarness', () => {
       // inside the envelope (not interpreted as a closing tag).
       expect(formatted).toContain(spoof);
     });
+
+    it('delivers a compact display line alongside the full envelope', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker');
+
+      const captured: Array<{ modelText: string; display: string }> = [];
+      h.teamManager.setLeaderMessageCallback((modelText, display) =>
+        captured.push({ modelText, display }),
+      );
+
+      const report = 'a very long report '.repeat(50);
+      await h.teamManager.sendMessage('leader', report, 'worker');
+      await h.teamManager.drainLeaderInbox();
+
+      expect(captured).toHaveLength(1);
+      const { modelText, display } = captured[0]!;
+      // The model still receives the full nonce-tagged envelope + body.
+      expect(modelText).toMatch(
+        /^<teammate_message_[a-f0-9]{16} from="worker"/,
+      );
+      expect(modelText).toContain('a very long report');
+      // The UI display line is compact: names the sender only — no
+      // envelope scaffolding, no report body.
+      expect(display).toBe('**worker** reported back');
+      expect(display).not.toContain('teammate_message');
+      expect(display).not.toContain('a very long report');
+    });
+
+    it('formatLeaderDisplay summarizes one, many, and summarized batches', async () => {
+      const h = await createHarness();
+      const fmt = (msgs: Array<{ from: string; summary?: string }>) =>
+        h.teamManager.formatLeaderDisplay(msgs);
+
+      expect(fmt([{ from: 'scout' }])).toBe('**scout** reported back');
+      // A teammate-provided summary is surfaced verbatim.
+      expect(fmt([{ from: 'scout', summary: 'core pkg done' }])).toBe(
+        '**scout**: core pkg done',
+      );
+      // Multiple distinct senders are listed.
+      expect(fmt([{ from: 'a' }, { from: 'b' }])).toBe(
+        '**a**, **b** reported back',
+      );
+      // Duplicate senders collapse to one name.
+      expect(fmt([{ from: 'a' }, { from: 'a' }])).toBe('**a** reported back');
+      // Defensive fallback for an empty batch.
+      expect(fmt([])).toBe('Teammate reported back');
+    });
   });
 });

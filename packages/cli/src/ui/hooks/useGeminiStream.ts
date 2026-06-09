@@ -796,10 +796,15 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        // Cron prompts are already rendered as a `● Cron: …` notification by
-        // the queue drain, so skip the user-message history item to avoid
-        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
-        if (submitType !== SendMessageType.Cron) {
+        // Cron prompts and teammate reports are already rendered as a
+        // `● …` notification by their queue drains, so skip the
+        // user-message history item to avoid a duplicate `> …` line (and,
+        // for teammates, dumping the whole nonce-tagged envelope on screen).
+        // Preprocessing (@/slash/shell) still runs.
+        if (
+          submitType !== SendMessageType.Cron &&
+          submitType !== SendMessageType.Teammate
+        ) {
           const insertedId = addItem(
             {
               type: MessageType.USER,
@@ -2628,7 +2633,14 @@ export const useGeminiStream = (
   }, [streamingState, submitQuery, notificationTrigger, addItem]);
 
   // ─── Teammate message integration ─────────────────────────
-  const teammateQueueRef = useRef<string[]>([]);
+  // Each entry carries the full nonce-tagged envelope (`modelText`,
+  // sent to the leader's model) and a compact `display` line (shown
+  // to the user in its place) — the same two-text split the unified
+  // notification queue uses, so teammate reports no longer dump the
+  // whole raw envelope into the conversation as a user bubble.
+  const teammateQueueRef = useRef<
+    Array<{ modelText: string; display: string }>
+  >([]);
   const [teammateTrigger, setTeammateTrigger] = useState(0);
 
   // Subscribe to TeamManager's leader message callback.
@@ -2654,10 +2666,12 @@ export const useGeminiStream = (
       }
       boundManager = manager;
       if (manager) {
-        manager.setLeaderMessageCallback((formatted: string) => {
-          teammateQueueRef.current.push(formatted);
-          setTeammateTrigger((n) => n + 1);
-        });
+        manager.setLeaderMessageCallback(
+          (modelText: string, display: string) => {
+            teammateQueueRef.current.push({ modelText, display });
+            setTeammateTrigger((n) => n + 1);
+          },
+        );
       }
     };
 
@@ -2691,9 +2705,22 @@ export const useGeminiStream = (
       teammateQueueRef.current.length > 0
     ) {
       const batch = teammateQueueRef.current.splice(0);
-      submitQuery(batch.join('\n\n'), SendMessageType.Teammate);
+      // Render one compact `● …` line per teammate report; the full
+      // envelope goes only to the model (the USER bubble is suppressed
+      // for SendMessageType.Teammate in prepareQueryForGemini).
+      for (const entry of batch) {
+        addItem(
+          { type: 'notification' as const, text: entry.display },
+          Date.now(),
+        );
+      }
+      const modelText = batch.map((e) => e.modelText).join('\n\n');
+      const display = batch.map((e) => e.display).join('; ');
+      submitQuery(modelText, SendMessageType.Teammate, undefined, {
+        notificationDisplayText: display,
+      });
     }
-  }, [streamingState, submitQuery, teammateTrigger]);
+  }, [streamingState, submitQuery, teammateTrigger, addItem]);
 
   return {
     streamingState,

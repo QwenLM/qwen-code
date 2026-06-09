@@ -140,8 +140,16 @@ export class TeamManager {
   /** Leader inbox polling interval. */
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
 
-  /** Callback to inject teammate messages into the leader. */
-  private leaderMessageCallback: ((message: string) => void) | null = null;
+  /**
+   * Callback to inject teammate messages into the leader. Receives the
+   * full model-bound text (the nonce-tagged envelope) and a compact,
+   * human-readable `display` line for the leader's UI — the two-text
+   * split that lets the on-screen line stay short while the model still
+   * gets the whole report.
+   */
+  private leaderMessageCallback:
+    | ((message: string, display: string) => void)
+    | null = null;
 
   /** Tracks how far we've read in the leader inbox. */
   private lastInboxOffset = 0;
@@ -650,7 +658,9 @@ export class TeamManager {
    * to the leader's conversation. Called by the CLI layer.
    * Pass `null` to detach a previously-installed callback.
    */
-  setLeaderMessageCallback(cb: ((message: string) => void) | null): void {
+  setLeaderMessageCallback(
+    cb: ((message: string, display: string) => void) | null,
+  ): void {
     this.leaderMessageCallback = cb;
   }
 
@@ -725,7 +735,10 @@ export class TeamManager {
     // is being torn down or replaced.
     const callback = this.leaderMessageCallback;
     if (callback) {
-      callback(this.formatLeaderEnvelope(newMessages).join('\n\n'));
+      callback(
+        this.formatLeaderEnvelope(newMessages).join('\n\n'),
+        this.formatLeaderDisplay(newMessages),
+      );
     }
   }
 
@@ -748,6 +761,34 @@ export class TeamManager {
     return messages.map(
       (m) => `${open} from="${m.from}">\n${m.text}\n${close}`,
     );
+  }
+
+  /**
+   * Build a compact, one-line summary of a batch of teammate→leader
+   * messages for the leader's UI. The full `formatLeaderEnvelope` text
+   * still goes to the model; this is the short line the user sees in
+   * its place (rendered as a `●` notification), so the conversation
+   * isn't flooded with the entire raw report.
+   *
+   * Uses each message's `summary` when the teammate provided one, else
+   * a "{name} reported back" fallback. Names are wrapped in `**` so the
+   * UI's inline-markdown renderer bolds them. Kept separate from
+   * `formatLeaderEnvelope` so the model payload and the on-screen line
+   * can diverge.
+   */
+  formatLeaderDisplay(
+    messages: ReadonlyArray<{ from: string; summary?: string }>,
+  ): string {
+    const first = messages[0];
+    if (messages.length === 1 && first) {
+      return first.summary
+        ? `**${first.from}**: ${first.summary}`
+        : `**${first.from}** reported back`;
+    }
+    const names = [...new Set(messages.map((m) => m.from))];
+    return names.length > 0
+      ? `**${names.join('**, **')}** reported back`
+      : 'Teammate reported back';
   }
 
   /**
@@ -844,7 +885,7 @@ export class TeamManager {
 
         // Resolve when a message is delivered.
         const origCb = this.leaderMessageCallback;
-        const wrappedCallback = (msg: string) => {
+        const wrappedCallback = (msg: string, display: string) => {
           // Restore early so a second message doesn't re-enter the
           // wrapper after we've already finished. Same identity-
           // check as in finish() — don't stomp on an externally-set
@@ -852,7 +893,7 @@ export class TeamManager {
           if (this.leaderMessageCallback === wrappedCallback) {
             this.leaderMessageCallback = origCb;
           }
-          origCb?.(msg);
+          origCb?.(msg, display);
           finish('message');
         };
         this.leaderMessageCallback = wrappedCallback;
@@ -1049,6 +1090,7 @@ export class TeamManager {
       try {
         this.leaderMessageCallback?.(
           `<team_error>Coordination step "${label}" failed: ${msg}</team_error>`,
+          `Team coordination step "${label}" failed`,
         );
       } catch (cbErr) {
         const cbMsg = cbErr instanceof Error ? cbErr.message : String(cbErr);
