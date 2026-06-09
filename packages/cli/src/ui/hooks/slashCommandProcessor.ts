@@ -207,11 +207,28 @@ export const useSlashCommandProcessor = (
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
   );
-  const gitService = useMemo(() => {
+  const createGitService = useCallback(() => {
     if (!config?.getProjectRoot()) {
       return;
     }
-    return new GitService(config.getProjectRoot(), config.storage);
+    const fallback = new GitService(config.getProjectRoot(), config.storage);
+    return new Proxy(fallback, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== 'function') {
+          return value;
+        }
+
+        return async (...args: unknown[]) => {
+          const git = await config.getGitService();
+          const method = Reflect.get(git, property, git);
+          if (typeof method !== 'function') {
+            return Reflect.get(target, property, receiver);
+          }
+          return method.apply(git, args);
+        };
+      },
+    });
   }, [config]);
 
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
@@ -326,7 +343,7 @@ export const useSlashCommandProcessor = (
       services: {
         config,
         settings,
-        git: gitService,
+        git: createGitService(),
         logger,
       },
       ui: {
@@ -366,7 +383,7 @@ export const useSlashCommandProcessor = (
     [
       config,
       settings,
-      gitService,
+      createGitService,
       logger,
       loadHistory,
       addItem,
@@ -487,7 +504,12 @@ export const useSlashCommandProcessor = (
                   name,
                   args,
                 },
-                services: { config, settings, git: gitService, logger: null },
+                services: {
+                  config,
+                  settings,
+                  git: createGitService(),
+                  logger: null,
+                },
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
@@ -552,7 +574,7 @@ export const useSlashCommandProcessor = (
     reloadTrigger,
     isConfigInitialized,
     settings,
-    gitService,
+    createGitService,
     resolveCommandReloads,
   ]);
 
@@ -633,6 +655,10 @@ export const useSlashCommandProcessor = (
           if (commandToExecute.action) {
             const fullCommandContext: CommandContext = {
               ...commandContext,
+              services: {
+                ...commandContext.services,
+                git: createGitService(),
+              },
               ui: {
                 ...commandContext.ui,
                 addItem: addItemWithRecording,
@@ -1063,6 +1089,7 @@ export const useSlashCommandProcessor = (
       actions,
       commands,
       commandContext,
+      createGitService,
       addMessage,
       setShellConfirmationRequest,
       setSessionShellAllowlist,

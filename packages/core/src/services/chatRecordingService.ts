@@ -810,6 +810,16 @@ export class ChatRecordingService {
   }
 
   /**
+   * Clears cached filesystem paths after Config swaps to a new working
+   * directory. The recorder keeps session state, but future appends must
+   * resolve the JSONL path through the updated Config.storage.
+   */
+  resetStoragePaths(): void {
+    this.chatsDirEnsured = false;
+    this.cachedConversationFile = undefined;
+  }
+
+  /**
    * Records a user message.
    * Writes immediately to disk.
    *

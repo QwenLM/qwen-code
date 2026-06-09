@@ -1064,7 +1064,7 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly sandbox: SandboxConfig | undefined;
-  private readonly targetDir: string;
+  private targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -1126,7 +1126,7 @@ export class Config {
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
-  private readonly cwd: string;
+  private cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private readonly outputLanguageFilePath?: string;
@@ -1180,7 +1180,8 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
-  readonly storage: Storage;
+  storage: Storage;
+  private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
@@ -2235,18 +2236,14 @@ export class Config {
       const cliVersion = this.cliVersion ?? null;
       const workDir = this.targetDir;
       const newSessionId = this.sessionId;
-      void (async () => {
-        try {
-          await clearRuntimeStatus(oldPath);
-          await writeRuntimeStatus(newPath, {
-            sessionId: newSessionId,
-            workDir,
-            qwenVersion: cliVersion,
-          });
-        } catch {
-          // ignored: best-effort cleanup
-        }
-      })();
+      this.queueRuntimeStatusWrite(async () => {
+        await clearRuntimeStatus(oldPath);
+        await writeRuntimeStatus(newPath, {
+          sessionId: newSessionId,
+          workDir,
+          qwenVersion: cliVersion,
+        });
+      });
     }
 
     return this.sessionId;
@@ -2263,6 +2260,40 @@ export class Config {
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
+  }
+
+  private queueRuntimeStatusWrite(write: () => Promise<void>): void {
+    this.runtimeStatusWrite = this.runtimeStatusWrite
+      .catch(() => {
+        // Keep later writes alive after a best-effort sidecar failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: runtime status must not disrupt session control flow.
+      });
+  }
+
+  private async flushRuntimeStatusWrites(): Promise<void> {
+    await this.runtimeStatusWrite.catch(() => {
+      // ignored: runtime status is best-effort.
+    });
+  }
+
+  private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
+    if (!this.runtimeStatusEnabled) {
+      return;
+    }
+    this.queueRuntimeStatusWrite(async () => {
+      await writeRuntimeStatus(
+        this.storage.getRuntimeStatusPath(this.sessionId),
+        {
+          sessionId: this.sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        },
+      );
+    });
+    await this.flushRuntimeStatusWrites();
   }
 
   /**
@@ -2550,6 +2581,153 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  private getCurrentSessionArtifactMoves(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): Array<{ from: string; to: string }> {
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    return [
+      `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
+      `${this.sessionId}.worktree.json`,
+    ].map((fileName) => ({
+      from: path.join(oldChatsDir, fileName),
+      to: path.join(newChatsDir, fileName),
+    }));
+  }
+
+  private moveFile(from: string, to: string): void {
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw error;
+      }
+      let copied = false;
+      try {
+        fs.copyFileSync(from, to);
+        copied = true;
+        fs.unlinkSync(from);
+      } catch (fallbackError) {
+        if (copied) {
+          try {
+            fs.unlinkSync(to);
+          } catch {
+            // Best-effort cleanup; surface the original fallback failure.
+          }
+        }
+        throw fallbackError;
+      }
+    }
+  }
+
+  private moveCurrentSessionArtifacts(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): void {
+    const moved: Array<{ from: string; to: string }> = [];
+    for (const { from, to } of this.getCurrentSessionArtifactMoves(
+      oldStorage,
+      newStorage,
+    )) {
+      if (!fs.existsSync(from)) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      try {
+        this.moveFile(from, to);
+        moved.push({ from, to });
+      } catch (error) {
+        for (const movedArtifact of moved.reverse()) {
+          try {
+            fs.mkdirSync(path.dirname(movedArtifact.from), {
+              recursive: true,
+            });
+            this.moveFile(movedArtifact.to, movedArtifact.from);
+          } catch (rollbackError) {
+            this.debugLogger.warn(
+              'Failed to roll back moved session artifact',
+              rollbackError,
+            );
+          }
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async prepareSessionArtifactMigration(
+    oldStorage: Storage,
+    newStorage: Storage,
+    oldDir: string,
+  ): Promise<void> {
+    this.chatRecordingService?.finalize();
+    await this.chatRecordingService?.flush();
+    await this.flushRuntimeStatusWrites();
+    try {
+      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+    } catch (error) {
+      try {
+        process.chdir(oldDir);
+      } catch (rollbackError) {
+        this.debugLogger.warn(
+          'Failed to roll back working directory after session artifact migration failed',
+          rollbackError,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async relocateWorkingDirectory(
+    newDir: string,
+    expectedCanonicalDir?: string,
+  ): Promise<{ memoryRefreshError?: unknown }> {
+    const oldDir = fs.realpathSync(process.cwd());
+    const targetPath = path.resolve(newDir);
+    const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
+    if (!fs.statSync(targetPath).isDirectory()) {
+      throw new Error(`Path is not a directory: ${targetPath}`);
+    }
+    const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
+      expected,
+      this.explicitIncludeDirectories,
+    );
+
+    process.chdir(targetPath);
+    const actualCwd = fs.realpathSync(process.cwd());
+    if (actualCwd !== expected) {
+      process.chdir(oldDir);
+      throw new Error(
+        `Changed directory to ${actualCwd}, expected ${expected}.`,
+      );
+    }
+
+    const oldStorage = this.storage;
+    const newStorage = new Storage(expected);
+    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+
+    this.targetDir = expected;
+    this.cwd = expected;
+    this.storage = newStorage;
+    this.chatRecordingService?.resetStoragePaths();
+    await this.refreshCurrentRuntimeStatus(expected);
+    this.workspaceContext.applyRootDirectories(workspaceDirectories);
+    this.fileDiscoveryService = null;
+    this.gitService = undefined;
+    this.sessionService = undefined;
+    this.fileHistoryService = undefined;
+    this.getFileReadCache().clear();
+
+    try {
+      await this.refreshHierarchicalMemory();
+      return {};
+    } catch (error) {
+      return { memoryRefreshError: error };
+    }
   }
 
   /**

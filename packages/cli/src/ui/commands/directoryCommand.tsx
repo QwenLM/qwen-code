@@ -73,6 +73,19 @@ export function getDirPathCompletions(
       ? partialArg.substring(lastComma + 1).trimStart()
       : partialArg;
 
+  return getPathCompletions(prefix, partial);
+}
+
+export function getSingleDirPathCompletions(
+  partialArg: string,
+): CommandCompletionItem[] {
+  return getPathCompletions('', partialArg);
+}
+
+function getPathCompletions(
+  prefix: string,
+  partial: string,
+): CommandCompletionItem[] {
   const trimmed = partial.trim();
   if (!trimmed) return [];
 
