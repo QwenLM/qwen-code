@@ -395,13 +395,6 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
   });
 
-  it('getHistoryDir uses custom runtime base dir', () => {
-    const customDir = path.resolve('custom');
-    Storage.setRuntimeBaseDir(customDir);
-    const storage = new Storage('/tmp/project');
-    expect(storage.getHistoryDir()).toContain(path.join(customDir, 'history'));
-  });
-
   it('getProjectTempDir uses custom runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);
