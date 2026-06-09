@@ -54,6 +54,7 @@ export function StatusBar({ onSelectMode }: StatusBarProps) {
             onClick={onSelectMode}
             onMouseDown={(e) => e.stopPropagation()}
             title={t('mode.select')}
+            aria-haspopup="listbox"
           >
             <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
               {modeIndicator.label}

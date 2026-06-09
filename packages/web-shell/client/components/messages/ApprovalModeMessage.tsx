@@ -59,24 +59,31 @@ export function ApprovalModeMessage({
     return () => emitActive(false);
   }, [emitActive]);
 
-  // Close when the user presses the mouse outside the panel. The panel is
-  // rendered inline (no modal backdrop), so we listen on the document. The
-  // click that opened the panel has already finished propagating by the time
-  // this effect runs, so it cannot self-close.
+  // Close when the user presses outside the panel. The panel is rendered
+  // inline (no modal backdrop), so we listen on the document. The press that
+  // opened the panel has already finished propagating by the time this effect
+  // runs, so it cannot self-close. We cover touch as well so a tap outside
+  // dismisses on touch devices, not only via Escape / a row click.
   useEffect(() => {
-    const onMouseDownOutside = (event: MouseEvent) => {
-      // Only the primary (left) button dismisses. Middle-click on Linux/X11
-      // pastes, and right-click opens a context menu — neither should close
-      // the panel out from under the user.
-      if (event.button !== 0) return;
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) mouse button dismisses. Middle-click on
+      // Linux/X11 pastes, and right-click opens a context menu — neither should
+      // close the panel out from under the user. (Touch events have no button.)
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      // If another handler already consumed the press, leave the panel alone.
+      if (event.defaultPrevented) return;
       const panel = panelRef.current;
       const target = event.target;
       if (panel && target instanceof Node && !panel.contains(target)) {
         onCloseRef.current();
       }
     };
-    window.addEventListener('mousedown', onMouseDownOutside);
-    return () => window.removeEventListener('mousedown', onMouseDownOutside);
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    return () => {
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+    };
   }, []);
 
   useEffect(() => {

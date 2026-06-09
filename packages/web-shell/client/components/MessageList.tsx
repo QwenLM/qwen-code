@@ -429,7 +429,11 @@ export function MessageList({
       !prevHasTailContent.current
     ) {
       shouldFollow.current = true;
-      requestAnimationFrame(scrollToBottom);
+      // Re-check follow inside the frame: if the user scrolls up in the gap
+      // before it fires (Rule 2 clears the flag), don't fight them.
+      requestAnimationFrame(() => {
+        if (shouldFollow.current) scrollToBottom();
+      });
     }
     prevHasTailContent.current = hasTailContent;
   }, [autoScrollTailIntoView, hasTailContent, scrollToBottom]);
