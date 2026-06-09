@@ -81,6 +81,10 @@ export const McpServerActionsView = ({
         (tool): tool is DiscoveredMCPTool =>
           tool instanceof DiscoveredMCPTool && tool.serverName === serverName,
       );
+      const promptRegistry = config.getPromptRegistry();
+      const serverPrompts = (promptRegistry?.getAllPrompts() || []).filter(
+        (p) => 'serverName' in p && p.serverName === serverName,
+      );
 
       let source: 'user' | 'project' | 'extension' = 'user';
       if (serverConfig.extensionName) {
@@ -109,7 +113,7 @@ export const McpServerActionsView = ({
         toolCount: serverTools.length,
         invalidToolCount: serverTools.filter((x) => !x.name || !x.description)
           .length,
-        promptCount: 0,
+        promptCount: serverPrompts.length,
         isDisabled: config.isMcpServerDisabled(serverName),
         hasOAuthTokens,
       };
