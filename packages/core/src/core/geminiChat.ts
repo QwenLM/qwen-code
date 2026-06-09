@@ -53,7 +53,14 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
-import { estimatePromptTokens } from '../services/tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from '../services/tokenEstimation.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -915,7 +922,7 @@ function copyContentContainer(content: Content): Content {
   };
 }
 
-function stripThoughtPartsFromContent(content: Content): Content | null {
+export function stripThoughtPartsFromContent(content: Content): Content | null {
   if (!content.parts) {
     return content;
   }
@@ -1487,6 +1494,110 @@ export class GeminiChat {
     }
 
     return info;
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   *
+   * - `tool-calls`: force-run microcompaction (clear old tool results + media,
+   *   keep recent N) then strip thinking parts from all model turns.
+   * - `keep-last`: keep only the last user message and the last model reply.
+   */
+  compressFast(mode: 'tool-calls' | 'keep-last'): {
+    info: ChatCompressionInfo;
+    microcompactMeta?: MicrocompactMeta;
+  } {
+    const beforeTokens = this.lastPromptTokenCount;
+    let newHistory: Content[];
+    let mcMeta: MicrocompactMeta | undefined;
+
+    if (mode === 'tool-calls') {
+      // Step 1: force microcompaction (clear old tool results + media)
+      const mcResult = microcompactHistory(
+        this.history,
+        null,
+        this.config.getClearContextOnIdle(),
+        { force: true },
+      );
+      mcMeta = mcResult.meta;
+
+      // Step 2: strip thinking parts from model turns
+      newHistory = mcResult.history
+        .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
+        .filter((c): c is Content => c !== null);
+    } else {
+      // --keep-last: find last user/model pair
+      let lastModelIdx = -1;
+      let lastUserIdx = -1;
+      for (let i = this.history.length - 1; i >= 0; i--) {
+        const role = this.history[i]!.role;
+        if (lastModelIdx < 0 && role === 'model') lastModelIdx = i;
+        if (lastUserIdx < 0 && role === 'user') lastUserIdx = i;
+        if (lastModelIdx >= 0 && lastUserIdx >= 0) break;
+      }
+
+      // Guard: missing user/model or user after model → NOOP
+      if (lastModelIdx < 0 || lastUserIdx < 0 || lastUserIdx >= lastModelIdx) {
+        return {
+          info: {
+            originalTokenCount: beforeTokens,
+            newTokenCount: beforeTokens,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        };
+      }
+
+      const strippedModel = stripThoughtPartsFromContent(
+        this.history[lastModelIdx]!,
+      );
+      // Guard: model had only thinking, no text → NOOP
+      if (
+        !strippedModel ||
+        !strippedModel.parts ||
+        strippedModel.parts.length === 0
+      ) {
+        return {
+          info: {
+            originalTokenCount: beforeTokens,
+            newTokenCount: beforeTokens,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        };
+      }
+
+      newHistory = [this.history[lastUserIdx]!, strippedModel];
+    }
+
+    const afterTokens = estimateContentTokens(newHistory);
+
+    if (afterTokens >= beforeTokens) {
+      return {
+        info: {
+          originalTokenCount: beforeTokens,
+          newTokenCount: beforeTokens,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    const info: ChatCompressionInfo = {
+      originalTokenCount: beforeTokens,
+      newTokenCount: afterTokens,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      triggerReason: 'manual',
+    };
+
+    this.chatRecordingService?.recordChatCompression({
+      info,
+      compressedHistory: newHistory,
+    });
+    this.setHistory(newHistory);
+    clearDetailedSpanState();
+    this.lastPromptTokenCount = afterTokens;
+    this.telemetryService?.setLastPromptTokenCount(afterTokens);
+    this.consecutiveFailures = 0;
+
+    return { info, microcompactMeta: mcMeta };
   }
 
   setSystemInstruction(sysInstr: string) {
