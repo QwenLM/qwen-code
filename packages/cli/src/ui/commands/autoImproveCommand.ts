@@ -7,6 +7,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { type Config, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
@@ -673,10 +674,17 @@ async function startAutoImprove(
     if (cronJobId) {
       scheduler.delete(cronJobId);
     }
-    state.status = 'stopped';
-    state.stopRequested = true;
-    await writeAutoImproveLoopState(repoRoot, state).catch(() => undefined);
+    // The cron job couldn't be created — tear down the half-initialized loop
+    // (active pointer + the directory tree initializeAutoImproveLoopFiles just
+    // created) instead of leaving an orphaned 'stopped' loop that
+    // listAutoImproveLoopStates / statusAutoImprove would later surface.
     await clearActiveAutoImproveLoop(repoRoot).catch(() => undefined);
+    await fs
+      .rm(getAutoImproveLoopDir(repoRoot, state.loopId), {
+        recursive: true,
+        force: true,
+      })
+      .catch(() => undefined);
     return message(
       'error',
       t('Failed to create auto-improve cron job: {{error}}', {
@@ -883,6 +891,25 @@ async function tickAutoImproveClaim(
   // The per-loopId mutex (withTickMutex) serializes ticks in this process; this
   // re-read additionally guards against changes a concurrent process wrote.
   const freshState = await readAutoImproveLoopState(repoRoot, loopId);
+  // Re-verify stop/status too, not just currentRun: a concurrent `stop` between
+  // the initial read and here would set stopRequested/status, and we must not
+  // start a new LLM session after the user stopped the loop.
+  if (
+    freshState &&
+    (freshState.stopRequested || freshState.status !== 'running')
+  ) {
+    debugLogger.info(
+      `tick ${loopId}: skipped — ${
+        freshState.stopRequested ? 'stop requested' : `status=${freshState.status}`
+      } (re-read)`,
+    );
+    return message(
+      'info',
+      freshState.stopRequested
+        ? t('Auto-improve tick skipped: stop was requested.')
+        : t('Auto-improve tick skipped: loop is not running.'),
+    );
+  }
   if (freshState && isActiveAutoImproveRunRef(freshState.currentRun)) {
     debugLogger.info(
       `tick ${loopId}: skipped — previous run still active (re-read)`,
