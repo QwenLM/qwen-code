@@ -6,12 +6,16 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   convertGeminiToQwenConfig,
+  convertGeminiExtensionPackage,
   isGeminiExtensionConfig,
   type GeminiExtensionConfig,
 } from './gemini-converter.js';
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 // Mock fs module
 vi.mock('node:fs', async (importOriginal) => {
@@ -173,5 +177,139 @@ describe('isGeminiExtensionConfig', () => {
   });
 });
 
-// Note: convertGeminiExtensionPackage() is tested through integration tests
-// as it requires real file system operations
+describe('convertGeminiExtensionPackage - auto-detection', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualFs.existsSync);
+    vi.mocked(fs.readFileSync).mockImplementation(
+      actualFs.readFileSync as typeof fs.readFileSync,
+    );
+    testDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'gemini-test-'));
+    actualFs.writeFileSync(
+      path.join(testDir, 'gemini-extension.json'),
+      JSON.stringify({ name: 'test-ext', version: '1.0.0' }),
+    );
+  });
+
+  afterEach(() => {
+    actualFs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('should auto-detect non-empty agents directory', async () => {
+    const agentsDir = path.join(testDir, 'agents');
+    actualFs.mkdirSync(agentsDir);
+    actualFs.writeFileSync(path.join(agentsDir, 'helper.md'), '# Agent');
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.agents).toBe('agents');
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should auto-detect non-empty skills directory', async () => {
+    const skillsDir = path.join(testDir, 'skills');
+    actualFs.mkdirSync(skillsDir);
+    actualFs.writeFileSync(path.join(skillsDir, 'deploy.md'), '# Skill');
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.skills).toBe('skills');
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should auto-detect non-empty commands directory', async () => {
+    const cmdsDir = path.join(testDir, 'commands');
+    actualFs.mkdirSync(cmdsDir);
+    actualFs.writeFileSync(path.join(cmdsDir, 'run.md'), '# Command');
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.commands).toBe('commands');
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should NOT auto-detect empty directories', async () => {
+    actualFs.mkdirSync(path.join(testDir, 'agents'));
+    actualFs.mkdirSync(path.join(testDir, 'skills'));
+    actualFs.mkdirSync(path.join(testDir, 'commands'));
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.agents).toBeUndefined();
+      expect(config.skills).toBeUndefined();
+      expect(config.commands).toBeUndefined();
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should NOT auto-detect when directories do not exist', async () => {
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.agents).toBeUndefined();
+      expect(config.skills).toBeUndefined();
+      expect(config.commands).toBeUndefined();
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should NOT auto-detect regular files named agents/skills/commands', async () => {
+    actualFs.writeFileSync(path.join(testDir, 'agents'), 'not a directory');
+    actualFs.writeFileSync(path.join(testDir, 'skills'), 'not a directory');
+    actualFs.writeFileSync(path.join(testDir, 'commands'), 'not a directory');
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.agents).toBeUndefined();
+      expect(config.skills).toBeUndefined();
+      expect(config.commands).toBeUndefined();
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should not pass through custom directory paths from gemini config', async () => {
+    actualFs.writeFileSync(
+      path.join(testDir, 'gemini-extension.json'),
+      JSON.stringify({
+        name: 'test-ext',
+        version: '1.0.0',
+        agents: 'custom-agents',
+        skills: 'custom-skills',
+        commands: 'custom-cmds',
+      }),
+    );
+
+    const { config, convertedDir } =
+      await convertGeminiExtensionPackage(testDir);
+
+    try {
+      expect(config.agents).toBeUndefined();
+      expect(config.skills).toBeUndefined();
+      expect(config.commands).toBeUndefined();
+    } finally {
+      actualFs.rmSync(convertedDir, { recursive: true, force: true });
+    }
+  });
+});

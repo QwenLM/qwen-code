@@ -50,16 +50,13 @@ export function convertGeminiToQwenConfig(
 
   const settings: ExtensionSetting[] | undefined = geminiConfig.settings;
 
-  // Direct field mapping, including auto-detected fields
+  // Direct field mapping
   return {
     name: geminiConfig.name,
     version: geminiConfig.version,
     mcpServers: geminiConfig.mcpServers as ExtensionConfig['mcpServers'],
     contextFileName: geminiConfig.contextFileName,
     settings,
-    agents: geminiConfig.agents,
-    skills: geminiConfig.skills,
-    commands: geminiConfig.commands,
   };
 }
 
@@ -69,7 +66,7 @@ export function convertGeminiToQwenConfig(
  * 1. Converted qwen-extension.json
  * 2. Commands converted from TOML to MD
  * 3. All other files/folders preserved
- * 4. Auto-detected agents/skills/commands directory references
+ * 4. Auto-detected agents/skills/commands directory references added to config
  *
  * @param extensionDir Path to the Gemini extension directory
  * @returns Object containing converted config and the temporary directory path
@@ -92,20 +89,27 @@ export async function convertGeminiExtensionPackage(
       await convertCommandsDirectory(commandsDir);
     }
 
-    // Step 3: Auto-detect and add agents/skills/commands directory references
-    // if they exist but are not declared in the config
+    // Step 3: Auto-detect agents/skills/commands directories and add references
+    // to the config when they exist as non-empty directories
     const agentsDir = path.join(tmpDir, 'agents');
     const skillsDir = path.join(tmpDir, 'skills');
-    const commandsDirAfterConvert = path.join(tmpDir, 'commands');
 
-    if (fs.existsSync(agentsDir) && !geminiConfig.agents) {
+    if (
+      fs.existsSync(agentsDir) &&
+      fs.statSync(agentsDir).isDirectory() &&
+      fs.readdirSync(agentsDir).length > 0
+    ) {
       geminiConfig.agents = 'agents';
       debugLogger.info(
         `Auto-detected agents directory at ${agentsDir}, adding to config`,
       );
     }
 
-    if (fs.existsSync(skillsDir) && !geminiConfig.skills) {
+    if (
+      fs.existsSync(skillsDir) &&
+      fs.statSync(skillsDir).isDirectory() &&
+      fs.readdirSync(skillsDir).length > 0
+    ) {
       geminiConfig.skills = 'skills';
       debugLogger.info(
         `Auto-detected skills directory at ${skillsDir}, adding to config`,
@@ -113,13 +117,13 @@ export async function convertGeminiExtensionPackage(
     }
 
     if (
-      fs.existsSync(commandsDirAfterConvert) &&
-      !geminiConfig.commands &&
-      fs.readdirSync(commandsDirAfterConvert).length > 0
+      fs.existsSync(commandsDir) &&
+      fs.statSync(commandsDir).isDirectory() &&
+      fs.readdirSync(commandsDir).length > 0
     ) {
       geminiConfig.commands = 'commands';
       debugLogger.info(
-        `Auto-detected commands directory at ${commandsDirAfterConvert}, adding to config`,
+        `Auto-detected commands directory at ${commandsDir}, adding to config`,
       );
     }
 
