@@ -619,19 +619,16 @@ export function DaemonSessionProvider({
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               setPromptStatus('idle');
+              console.warn('[DaemonSessionProvider] SSE stream ended');
               store.dispatch({
                 type: 'assistant.done',
                 reason: 'stream_ended',
               });
             }
-            store.dispatch({
-              type: 'status',
-              text: 'SSE stream ended',
-            });
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
-              error: 'SSE stream ended',
+              error: undefined,
             }));
           }
         } catch (error) {

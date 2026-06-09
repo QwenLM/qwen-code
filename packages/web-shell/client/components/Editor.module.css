@@ -10,7 +10,7 @@
 
 .line {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   padding: 6px 0;
 }
 
@@ -237,6 +237,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+:global(.cm-tooltip-autocomplete ul li.cm-file-completion .cm-completionLabel) {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
 }
 
 :global(.cm-tooltip-autocomplete ul li.cm-skill-completion) {

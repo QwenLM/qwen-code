@@ -24,14 +24,14 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { compactThinking } = useWebShellCustomization();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const thinkingExpandedRef = useRef(thinkingExpanded);
 
   const collapsed = compactThinking && !thinkingExpanded;
   thinkingExpandedRef.current = thinkingExpanded;
 
   useEffect(() => {
-    const el = bodyRef.current;
+    const el = previewRef.current;
     if (!el || !compactThinking) return;
 
     const check = () => {
@@ -44,7 +44,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     const observer = new ResizeObserver(check);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [compactThinking]);
+  }, [compactThinking, thinkingExpanded]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
@@ -56,27 +56,36 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.thinking}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.thinkingBody}>
-            <div
-              ref={bodyRef}
-              className={
-                collapsed
-                  ? overflowing
-                    ? `${styles.thinkingCollapsed} ${styles.thinkingCollapsedMask}`
-                    : styles.thinkingCollapsed
-                  : undefined
-              }
-            >
-              <Markdown content={thinking} source="thinking" />
-            </div>
-            {compactThinking && (overflowing || thinkingExpanded) && (
-              <button
-                className={styles.expandToggle}
-                onClick={handleToggle}
-                aria-expanded={!collapsed}
-                aria-label="Toggle thinking details"
-              >
-                {collapsed ? '···' : '▲'}
-              </button>
+            {collapsed ? (
+              <div className={styles.thinkingPreviewWrap}>
+                <div ref={previewRef} className={styles.thinkingPreview}>
+                  {thinking}
+                </div>
+                {compactThinking && overflowing && (
+                  <button
+                    className={styles.expandToggle}
+                    onClick={handleToggle}
+                    aria-expanded={false}
+                    aria-label="Toggle thinking details"
+                  >
+                    ▼
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className={styles.thinkingExpandedWrap}>
+                <Markdown content={thinking} source="thinking" />
+                {compactThinking && thinkingExpanded && (
+                  <button
+                    className={styles.expandToggle}
+                    onClick={handleToggle}
+                    aria-expanded={true}
+                    aria-label="Toggle thinking details"
+                  >
+                    ▲
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>

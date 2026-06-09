@@ -66,6 +66,7 @@ interface EditorProps {
 
 export interface EditorHandle {
   blur(): void;
+  clearText(): void;
   focus(): void;
   getText(): string;
   insertText(text: string): void;
@@ -577,7 +578,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           activateOnTyping: true,
           icons: false,
           optionClass: (completion) =>
-            completion.type === 'skill' ? 'cm-skill-completion' : '',
+            completion.type === 'skill'
+              ? 'cm-skill-completion'
+              : completion.type === 'file'
+                ? 'cm-file-completion'
+                : '',
           aboveCursor: true,
           activateOnCompletion: (completion) =>
             typeof completion.apply === 'string' &&
@@ -755,6 +760,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           },
+          '.cm-tooltip-autocomplete ul li.cm-file-completion .cm-completionLabel':
+            {
+              flex: '1 1 auto',
+              minWidth: '0',
+              maxWidth: 'none',
+            },
           '.cm-tooltip-autocomplete ul li.cm-skill-completion': {
             alignItems: 'flex-start',
           },
@@ -945,6 +956,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     return viewRef.current?.state.doc.toString() ?? '';
   }, []);
 
+  const clearText = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || view.state.doc.length === 0) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: '' },
+    });
+    setPastedImages([]);
+    pendingPastesRef.current.clear();
+    nextPasteIdRef.current = 1;
+  }, []);
+
   const retryLast = useCallback(() => {
     const last = historyActionsRef.current.getLastEntry(
       (e) => !e.startsWith('/') && !e.startsWith('!'),
@@ -959,12 +981,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ref,
     () => ({
       blur,
+      clearText,
       focus,
       getText,
       insertText,
       retryLast,
     }),
-    [blur, focus, getText, insertText, retryLast],
+    [blur, clearText, focus, getText, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

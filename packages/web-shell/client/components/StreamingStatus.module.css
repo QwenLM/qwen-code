@@ -5,6 +5,7 @@
   gap: 6px;
   padding: 4px 0;
   font-size: 14px;
+  margin: 0 24px;
   color: var(--text-dimmed);
 }
 
