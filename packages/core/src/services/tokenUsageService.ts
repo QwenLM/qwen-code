@@ -211,6 +211,8 @@ function calculateInputTokens(event: ApiResponseEvent): number {
   if (inputTokens > 0) {
     return inputTokens;
   }
+  // When the API omits prompt tokens, cached tokens are only a lower-bound
+  // proxy for input usage and can undercount the actual input.
   return toNonNegativeInteger(event.cached_content_token_count);
 }
 

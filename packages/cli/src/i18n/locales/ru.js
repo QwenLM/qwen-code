@@ -497,6 +497,8 @@ export default {
     'Использование: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
   'Token usage export path must be within the project working directory.':
     'Путь экспорта использования токенов должен находиться внутри рабочего каталога проекта.',
+  'Export target does not exist: {{path}}':
+    'Цель экспорта не существует: {{path}}',
   'Cannot resolve export path within the working directory.':
     'Не удалось определить путь экспорта внутри рабочего каталога.',
   'Could not create a temporary export file.':

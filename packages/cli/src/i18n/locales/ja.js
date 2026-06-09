@@ -412,6 +412,8 @@ export default {
     '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
   'Token usage export path must be within the project working directory.':
     'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Export target does not exist: {{path}}':
+    'エクスポート先が存在しません: {{path}}',
   'Cannot resolve export path within the working directory.':
     '作業ディレクトリ内でエクスポートパスを解決できません。',
   'Could not create a temporary export file.':
