@@ -213,15 +213,6 @@ export class WorkspaceContext {
     }
   }
 
-  setRootDirectories(
-    directory: string,
-    additionalDirectories: readonly string[] = [],
-  ): void {
-    this.applyRootDirectories(
-      WorkspaceContext.resolveRootDirectories(directory, additionalDirectories),
-    );
-  }
-
   applyRootDirectories(resolved: ResolvedWorkspaceDirectories): void {
     const newDirectories = resolved.directories;
     const newInitialDirectories = resolved.initialDirectories;

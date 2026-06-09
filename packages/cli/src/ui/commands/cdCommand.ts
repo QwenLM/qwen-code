@@ -16,6 +16,7 @@ import {
 } from '../../config/trustedFolders.js';
 import { t } from '../../i18n/index.js';
 
+const MAX_PENDING_TRUST_CONFIRMATIONS = 50;
 const pendingTrustedPathConfirmations = new Map<string, string>();
 
 function parsePathArgument(input: string): string {
@@ -156,6 +157,13 @@ export const cdCommand: SlashCommand = {
           pendingTrustedPathConfirmations.delete(rawInvocation);
           trustedTargetPath = realTargetPath;
         } else {
+          if (
+            !pendingTrustedPathConfirmations.has(rawInvocation) &&
+            pendingTrustedPathConfirmations.size >=
+              MAX_PENDING_TRUST_CONFIRMATIONS
+          ) {
+            pendingTrustedPathConfirmations.clear();
+          }
           pendingTrustedPathConfirmations.set(rawInvocation, realTargetPath);
           return {
             type: 'confirm_action' as const,

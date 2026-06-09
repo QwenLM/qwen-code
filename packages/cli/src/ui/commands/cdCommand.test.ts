@@ -324,6 +324,59 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 
+  it('drops stale trust confirmations after the pending cap', async () => {
+    const services = {
+      config: context.services.config,
+      settings: {
+        merged: {
+          security: {
+            folderTrust: {
+              enabled: true,
+            },
+          },
+        },
+      },
+    };
+
+    for (let i = 0; i <= 50; i++) {
+      const dir = path.join(currentDir, `pending-${i}`);
+      fs.mkdirSync(dir);
+      context = createMockCommandContext({
+        invocation: {
+          raw: `/cd pending-${i}`,
+          name: 'cd',
+          args: `pending-${i}`,
+        },
+        services,
+      });
+
+      const result = (await cdCommand.action?.(
+        context,
+        `pending-${i}`,
+      )) as ConfirmActionReturn;
+
+      expect(result.type).toBe('confirm_action');
+    }
+
+    context = createMockCommandContext({
+      invocation: {
+        raw: '/cd pending-0',
+        name: 'cd',
+        args: 'pending-0',
+      },
+      services,
+    });
+    context.overwriteConfirmed = true;
+
+    const result = (await cdCommand.action?.(
+      context,
+      'pending-0',
+    )) as ConfirmActionReturn;
+
+    expect(result.type).toBe('confirm_action');
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
   it('asks again when confirmed path resolves to a different directory', async () => {
     const changedDir = path.join(tmpDir, 'changed');
     fs.mkdirSync(changedDir);
