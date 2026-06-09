@@ -187,7 +187,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
         : 'tab \xB7 r dates \xB7 esc';
 
   return (
-    <Box flexDirection="column" width={safeWidth}>
+    <Box flexDirection="column" width={safeWidth} flexShrink={0}>
       <Box
         borderColor={theme.border.default}
         borderStyle="single"
