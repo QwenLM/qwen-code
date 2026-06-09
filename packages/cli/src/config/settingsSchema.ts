@@ -16,6 +16,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -1960,6 +1961,16 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         description: 'The number of lines to keep when truncating tool output.',
+        showInDialog: false,
+      },
+      toolOutputBatchBudget: {
+        type: 'number',
+        label: 'Tool Output Batch Budget',
+        category: 'General',
+        requiresRestart: true,
+        default: DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
+        description:
+          'Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.',
         showInDialog: false,
       },
       computerUse: {

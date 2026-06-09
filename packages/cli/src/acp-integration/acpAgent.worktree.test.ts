@@ -118,6 +118,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
   SessionStartSource: { Startup: 'startup', Resume: 'resume' },
   SessionEndReason: { PromptInputExit: 'prompt_input_exit', Other: 'other' },

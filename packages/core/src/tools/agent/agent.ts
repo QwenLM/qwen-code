@@ -437,6 +437,14 @@ export async function createApprovalModeOverride(
 export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   static readonly Name: string = ToolNames.AGENT;
 
+  override get maxOutputChars(): number {
+    return 32_000;
+  }
+
+  override get truncateKeep(): 'tail' {
+    return 'tail';
+  }
+
   private subagentManager: SubagentManager;
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();

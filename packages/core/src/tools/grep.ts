@@ -596,6 +596,10 @@ class GrepToolInvocation extends BaseToolInvocation<
 export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   static readonly Name = ToolNames.GREP;
 
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       GrepTool.Name,
