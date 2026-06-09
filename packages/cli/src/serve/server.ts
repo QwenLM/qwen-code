@@ -188,7 +188,6 @@ export interface ListWorkspaceSessionsOptions {
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
   nextCursor?: string;
-  hasMore: boolean;
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -244,7 +243,6 @@ export async function listWorkspaceSessionsForResponse(
   return {
     sessions,
     nextCursor: persisted.nextCursor ? String(persisted.nextCursor) : undefined,
-    hasMore: persisted.hasMore,
   };
 }
 
