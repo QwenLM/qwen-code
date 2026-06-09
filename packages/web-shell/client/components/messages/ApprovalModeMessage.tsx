@@ -29,6 +29,11 @@ export function ApprovalModeMessage({
     `approval-mode-${Math.random().toString(36).slice(2)}`,
   );
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
     id,
@@ -53,6 +58,22 @@ export function ApprovalModeMessage({
     emitActive(true);
     return () => emitActive(false);
   }, [emitActive]);
+
+  // Close when the user presses the mouse outside the panel. The panel is
+  // rendered inline (no modal backdrop), so we listen on the document. The
+  // click that opened the panel has already finished propagating by the time
+  // this effect runs, so it cannot self-close.
+  useEffect(() => {
+    const onMouseDownOutside = (event: MouseEvent) => {
+      const panel = panelRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('mousedown', onMouseDownOutside);
+    return () => window.removeEventListener('mousedown', onMouseDownOutside);
+  }, []);
 
   useEffect(() => {
     if (selectedIdx >= approvalModes.length && approvalModes.length > 0) {
@@ -111,7 +132,7 @@ export function ApprovalModeMessage({
   );
 
   return (
-    <div className={styles.panel}>
+    <div ref={panelRef} className={styles.panel}>
       <div className={styles.header}>
         <span className={styles.title}>{t('mode.select')}</span>
       </div>
