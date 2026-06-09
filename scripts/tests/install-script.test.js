@@ -1804,7 +1804,7 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
     const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "name: 'Create GitHub Release and Tag'",
+      "- name: 'Create GitHub Release and Tag'",
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
     const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
@@ -1844,21 +1844,30 @@ describe('standalone release packaging', () => {
     );
 
     const syncStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Release Assets to Aliyun OSS'",
+      "- name: 'Sync Release Assets to Aliyun OSS'",
+    );
+    const packageHostedStepIndex = ossWorkflow.indexOf(
+      "- name: 'Package Hosted Installation Assets'",
     );
     const verifyStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Release Assets'",
+      "- name: 'Verify Aliyun OSS Release Assets'",
+    );
+    const validateHostedStepIndex = ossWorkflow.indexOf(
+      "- name: 'Validate Hosted Installation Assets'",
     );
     const publishLatestStepIndex = ossWorkflow.indexOf(
-      "name: 'Publish Aliyun OSS Latest VERSION'",
+      "- name: 'Publish Aliyun OSS Latest VERSION'",
     );
     const syncHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Hosted Installation Assets to Aliyun OSS'",
+      "- name: 'Sync Hosted Installation Assets to Aliyun OSS'",
     );
     const verifyHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Hosted Installation Assets'",
+      "- name: 'Verify Aliyun OSS Hosted Installation Assets'",
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
+    expect(packageHostedStepIndex).toBeGreaterThanOrEqual(0);
+    expect(validateHostedStepIndex).toBeGreaterThan(packageHostedStepIndex);
+    expect(validateHostedStepIndex).toBeLessThan(syncHostedStepIndex);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
     expect(syncHostedStepIndex).toBeGreaterThan(verifyStepIndex);
     expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
@@ -1898,6 +1907,13 @@ describe('standalone release packaging', () => {
     expect(syncHostedStep).toContain(
       'dist/installation/install-qwen-standalone.sh',
     );
+    const validateHostedStep = ossWorkflow.slice(
+      validateHostedStepIndex,
+      syncHostedStepIndex,
+    );
+    expect(validateHostedStep).toContain('--repair-path');
+    expect(validateHostedStep).toContain('--path-scope');
+    expect(validateHostedStep).toContain('install-qwen-standalone.bat');
     const uploadScript = readScript('scripts/upload-aliyun-oss-assets.js');
     expect(uploadScript).toContain("'--acl'");
     expect(uploadScript).toContain("'public-read'");

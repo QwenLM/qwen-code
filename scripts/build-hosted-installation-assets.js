@@ -71,6 +71,14 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
       name: '--version parser',
       pattern: /ARG_KEY!"=="--version"|"%~1"=="--version"/,
     },
+    {
+      name: '--repair-path parser',
+      pattern: /--repair-path/,
+    },
+    {
+      name: '--path-scope parser',
+      pattern: /--path-scope/,
+    },
   ],
   'install-qwen-standalone.ps1': [
     {

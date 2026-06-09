@@ -150,22 +150,25 @@ function Test-QwenStandaloneInstallDir {
     return $true
 }
 
-function Remove-UserPathEntry {
-    param([string]$BinDir)
+function Remove-PathEntry {
+    param(
+        [string]$BinDir,
+        [string]$Scope
+    )
 
     $target = Get-NormalizedPath -PathValue $BinDir
     if ([string]::IsNullOrEmpty($target)) {
         return
     }
 
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ([string]::IsNullOrEmpty($userPath)) {
+    $pathValue = [Environment]::GetEnvironmentVariable('Path', $Scope)
+    if ([string]::IsNullOrEmpty($pathValue)) {
         return
     }
 
     $kept = New-Object System.Collections.Generic.List[string]
     $removed = $false
-    foreach ($entry in @($userPath -split ';')) {
+    foreach ($entry in @($pathValue -split ';')) {
         if ([string]::IsNullOrEmpty($entry)) {
             continue
         }
@@ -179,9 +182,25 @@ function Remove-UserPathEntry {
     }
 
     if ($removed) {
-        [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
-        Write-Success "Removed $BinDir from user PATH."
+        try {
+            [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), $Scope)
+            Write-Success "Removed $BinDir from $Scope PATH."
+        } catch {
+            Write-WarningMessage "Could not remove $BinDir from $Scope PATH: $($_.Exception.Message)"
+        }
     }
+}
+
+function Remove-UserPathEntry {
+    param([string]$BinDir)
+
+    $target = Get-NormalizedPath -PathValue $BinDir
+    if ([string]::IsNullOrEmpty($target)) {
+        return
+    }
+
+    Remove-PathEntry -BinDir $BinDir -Scope 'User'
+    Remove-PathEntry -BinDir $BinDir -Scope 'Machine'
 
     $current = New-Object System.Collections.Generic.List[string]
     foreach ($entry in @($env:Path -split ';')) {
