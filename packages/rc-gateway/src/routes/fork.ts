@@ -54,6 +54,25 @@ export function createForkRoute(
   const { audit } = deps;
 
   return async (req, res) => {
+    try {
+      await handleFork(req, res);
+    } catch {
+      // No global Express error middleware is mounted, and Express 4 does not
+      // catch rejections from async handlers — an uncaught throw here (e.g. an
+      // EACCES/ENOTDIR from reading the parent or writing the fork) would
+      // otherwise hang the request until socket timeout. Map any unexpected
+      // failure to a clean 500. Guard against a double-send in case a response
+      // was already partially written before the throw.
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Fork failed', code: 'fork_failed' });
+      }
+    }
+  };
+
+  async function handleFork(
+    req: Parameters<RequestHandler>[0],
+    res: Parameters<RequestHandler>[1],
+  ): Promise<void> {
     const body = (req.body ?? {}) as {
       transcript?: unknown;
       fromEventId?: unknown;
@@ -64,12 +83,10 @@ export function createForkRoute(
       (body.transcript !== undefined && body.transcript !== 'include') ||
       body.fromEventId !== undefined
     ) {
-      res
-        .status(400)
-        .json({
-          error: 'Unsupported fork mode',
-          code: 'unsupported_fork_mode',
-        });
+      res.status(400).json({
+        error: 'Unsupported fork mode',
+        code: 'unsupported_fork_mode',
+      });
       return;
     }
 
@@ -105,6 +122,13 @@ export function createForkRoute(
 
     // 5. Replicate forkSession's copy and write the new file exclusively.
     const newId = randomId();
+    // Defense-in-depth: the default generator is randomUUID (always valid), but
+    // a misconfigured injected `randomId` must never produce an id that escapes
+    // the chats dir on the path join below.
+    if (!isValidSessionId(newId)) {
+      res.status(500).json({ error: 'Fork failed', code: 'fork_failed' });
+      return;
+    }
     const forked = serializeForked(forkRecords(records, parentId, newId));
     try {
       await writeFork(chatsDir, newId, forked);
@@ -141,5 +165,5 @@ export function createForkRoute(
       parentSessionId: parentId,
       forkedAt: now().toISOString(),
     });
-  };
+  }
 }

@@ -25,6 +25,10 @@ import { createForkRoute } from './fork.js';
 // A cwd whose sanitizeCwd is stable and lands under our tmp runtime base.
 const CWD = '/fork-test/ws';
 const PARENT_ID = '11111111111111111111111111111111';
+// Injected fork ids must be valid hex session ids (the route guards `newId`
+// against `isValidSessionId` as defense-in-depth), so use 32-hex literals.
+const NEW_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const ROLLBACK_ID = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 let server: Server | undefined;
 let runtimeBase: string;
@@ -174,24 +178,24 @@ describe('fork route', () => {
     await writeParent();
     const { daemon, calls } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
-    const url = await mount({ daemon, audit, randomId: () => 'NEWFORKID' });
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
     const res = await postFork(url, {});
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.sessionId).toBe('NEWFORKID');
+    expect(body.sessionId).toBe(NEW_ID);
     expect(body.parentSessionId).toBe(PARENT_ID);
     expect(typeof body.forkedAt).toBe('string');
 
     // The fork file exists with the rewritten sessionId.
-    const forkPath = join(chatsDir, 'NEWFORKID.jsonl');
+    const forkPath = join(chatsDir, `${NEW_ID}.jsonl`);
     await stat(forkPath); // throws if missing
     const written = await readFile(forkPath, 'utf8');
     const first = JSON.parse(written.split('\n')[0]);
-    expect(first.sessionId).toBe('NEWFORKID');
+    expect(first.sessionId).toBe(NEW_ID);
     expect(first.cwd).toBe(CWD); // cwd untouched
 
     // loadSession called with the new id.
-    expect(calls).toEqual(['NEWFORKID']);
+    expect(calls).toEqual([NEW_ID]);
 
     // Audit: ids + count only, never record content.
     const entry = audit.calls.find((c) => c.action === 'session_forked');
@@ -199,7 +203,7 @@ describe('fork route', () => {
     expect(entry!.actorTokenId).toBe('tok1');
     expect(entry!.target).toBe(PARENT_ID);
     expect(entry!.detail).toMatchObject({
-      newSessionId: 'NEWFORKID',
+      newSessionId: NEW_ID,
       copiedCount: 1,
     });
     expect(JSON.stringify(entry)).not.toContain('hello');
@@ -211,11 +215,27 @@ describe('fork route', () => {
       throw new Error('daemon down');
     });
     const audit = fakeAudit();
-    const url = await mount({ daemon, audit, randomId: () => 'ROLLBACKID' });
+    const url = await mount({ daemon, audit, randomId: () => ROLLBACK_ID });
     const res = await postFork(url, {});
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe('daemon_unavailable');
     // The just-written fork file was rolled back.
-    await expect(stat(join(chatsDir, 'ROLLBACKID.jsonl'))).rejects.toThrow();
+    await expect(
+      stat(join(chatsDir, `${ROLLBACK_ID}.jsonl`)),
+    ).rejects.toThrow();
+  });
+
+  it('500s (does not hang) when reading the parent throws a non-ENOENT error', async () => {
+    // Make the parent "transcript" a directory: readFile → EISDIR, which
+    // readParentRecords re-throws (only ENOENT maps to null). With no global
+    // error middleware, an uncaught throw would hang the request; the route's
+    // catch-all must map it to a clean 500 instead.
+    await mkdir(join(chatsDir, `${PARENT_ID}.jsonl`), { recursive: true });
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe('fork_failed');
   });
 });
