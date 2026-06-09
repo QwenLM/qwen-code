@@ -98,8 +98,9 @@ jobs:
           EXISTING_ACK_ID="$(
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --paginate \
-              --jq 'map(select(.body | contains("<!-- qwen-review-ack -->")))[-1].id // ""'
-          )"
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
           if [ -n "$EXISTING_ACK_ID" ]; then
             gh api \
               --method PATCH \
