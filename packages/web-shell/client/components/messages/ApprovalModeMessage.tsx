@@ -29,6 +29,11 @@ export function ApprovalModeMessage({
     `approval-mode-${Math.random().toString(36).slice(2)}`,
   );
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
     id,
@@ -53,6 +58,33 @@ export function ApprovalModeMessage({
     emitActive(true);
     return () => emitActive(false);
   }, [emitActive]);
+
+  // Close when the user presses outside the panel. The panel is rendered
+  // inline (no modal backdrop), so we listen on the document. The press that
+  // opened the panel has already finished propagating by the time this effect
+  // runs, so it cannot self-close. We cover touch as well so a tap outside
+  // dismisses on touch devices, not only via Escape / a row click.
+  useEffect(() => {
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) mouse button dismisses. Middle-click on
+      // Linux/X11 pastes, and right-click opens a context menu — neither should
+      // close the panel out from under the user. (Touch events have no button.)
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      // If another handler already consumed the press, leave the panel alone.
+      if (event.defaultPrevented) return;
+      const panel = panelRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    return () => {
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedIdx >= approvalModes.length && approvalModes.length > 0) {
@@ -90,15 +122,17 @@ export function ApprovalModeMessage({
       if (e.key === 'ArrowDown' || e.key === 'j') {
         claim();
         setSelectedIdx((idx) =>
-          approvalModes.length > 0
-            ? Math.min(idx + 1, approvalModes.length - 1)
-            : 0,
+          approvalModes.length > 0 ? (idx + 1) % approvalModes.length : 0,
         );
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'k') {
         claim();
-        setSelectedIdx((idx) => Math.max(idx - 1, 0));
+        setSelectedIdx((idx) =>
+          approvalModes.length > 0
+            ? (idx - 1 + approvalModes.length) % approvalModes.length
+            : 0,
+        );
         return;
       }
       if (e.key === 'Enter') {
@@ -111,17 +145,24 @@ export function ApprovalModeMessage({
   );
 
   return (
-    <div className={styles.panel}>
+    <div ref={panelRef} className={styles.panel}>
       <div className={styles.header}>
         <span className={styles.title}>{t('mode.select')}</span>
       </div>
 
-      <div className={styles.list} ref={listRef}>
+      <div
+        className={styles.list}
+        ref={listRef}
+        role="listbox"
+        aria-label={t('mode.select')}
+      >
         {approvalModes.map((m, index) => {
           const selected = index === selectedIdx;
           return (
             <div
               key={m.id}
+              role="option"
+              aria-selected={selected}
               className={`${styles.row} ${selected ? styles.selected : ''}`}
               onClick={() => {
                 onSelect(m.id);
