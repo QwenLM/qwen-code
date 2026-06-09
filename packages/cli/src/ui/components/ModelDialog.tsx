@@ -530,9 +530,14 @@ export function ModelDialog({
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        // Use parsed modelId for display to avoid showing raw selection key
+        // (which contains invisible \0 separator between modelId and baseUrl)
+        const displayModelId = isRuntime
+          ? effectiveModelId
+          : parseModelSelectionKey(selected).modelId;
         const errorPrefix = isRuntime
           ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+          : `Failed to switch model to '${displayModelId}'.`;
         setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
         return;
       }
