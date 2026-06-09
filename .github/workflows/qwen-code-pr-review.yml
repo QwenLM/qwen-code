@@ -204,7 +204,7 @@ jobs:
           fetch-depth: 0
 
       - name: 'Prefer Git Bash'
-        shell: 'pwsh'
+        shell: 'powershell'
         run: |-
           $gitBash = 'C:\Program Files\Git\bin'
           if (!(Test-Path "$gitBash\bash.exe")) {

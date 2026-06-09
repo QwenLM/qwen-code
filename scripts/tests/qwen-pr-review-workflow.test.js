@@ -16,7 +16,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
     "runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']",
   );
   expect(workflow).toContain('shell: bash');
-  expect(workflow).toContain("shell: 'pwsh'");
+  expect(workflow).toContain("shell: 'powershell'");
   expect(workflow).toContain("$gitBash = 'C:\\Program Files\\Git\\bin'");
   expect(workflow).toContain('$gitBash | Out-File -FilePath $env:GITHUB_PATH');
   expect(workflow).toContain("MSYSTEM: 'MINGW64'");
