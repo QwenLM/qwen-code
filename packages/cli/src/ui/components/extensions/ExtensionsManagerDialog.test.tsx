@@ -359,6 +359,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       expect(lastFrame()).toContain('Add new marketplace');
     });
     const frame = lastFrame();
+    // 'Add new' is the section title for the action rows; it also appears inside
+    // '+ Add new marketplace', so assert it renders at least twice (title + row).
+    expect((frame?.split('Add new').length ?? 1) - 1).toBeGreaterThanOrEqual(2);
     expect(frame).toContain('Install new extension');
     expect(frame).toContain('Claude plugin marketplace'); // (Claude) annotation
     expect(frame).toContain('Marketplaces'); // section header
@@ -471,6 +474,13 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       const frame = lastFrame();
       expect(frame).toContain('Project');
       expect(frame).toContain('Disable'); // enabled -> Disable label
+    });
+    // Re-entering the scope selector reflects the now-current scope (Project),
+    // not a default of Global — so the change is visibly in effect.
+    stdin.write('\x1B[B'); // highlight Change scope
+    stdin.write('\r'); // enter scope-select again
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Current: Project (All Collaborators)');
     });
   });
 

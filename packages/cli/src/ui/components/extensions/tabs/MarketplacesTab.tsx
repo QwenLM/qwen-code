@@ -620,13 +620,18 @@ export const MarketplacesTab = ({
 
   return (
     <Box flexDirection="column">
-      {renderRow(0, t('+ Install new extension'), undefined, true)}
-      {renderRow(
-        1,
-        t('+ Add new marketplace'),
-        t('Claude plugin marketplace'),
-        true,
-      )}
+      <Box flexDirection="column">
+        <Text color={theme.text.accent} bold>
+          {t('Add new')}
+        </Text>
+        {renderRow(0, t('+ Install new extension'), undefined, true)}
+        {renderRow(
+          1,
+          t('+ Add new marketplace'),
+          t('Claude plugin marketplace'),
+          true,
+        )}
+      </Box>
 
       {extensions.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>

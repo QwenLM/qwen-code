@@ -223,13 +223,26 @@ export const ExtensionActionsView = ({
   );
 
   if (sub === 'scope-select') {
+    const items = scopeItems();
+    // Default the cursor to the extension's current scope so the user can see
+    // what is in effect (and that a prior change took hold).
+    const currentIndex = Math.max(
+      0,
+      items.findIndex((item) => item.value === scope),
+    );
     return (
       <Box flexDirection="column" gap={1}>
-        <Text color={theme.text.primary}>
-          {t('Change scope for "{{name}}":', { name: extension.name })}
-        </Text>
+        <Box flexDirection="column">
+          <Text color={theme.text.primary}>
+            {t('Change scope for "{{name}}":', { name: extension.name })}
+          </Text>
+          <Text color={theme.text.secondary}>
+            {t('Current: {{scope}}', { scope: items[currentIndex].label })}
+          </Text>
+        </Box>
         <RadioButtonSelect
-          items={scopeItems()}
+          items={items}
+          initialIndex={currentIndex}
           isFocused={isActive}
           showNumbers={false}
           onSelect={(value) => void handleScope(value)}
