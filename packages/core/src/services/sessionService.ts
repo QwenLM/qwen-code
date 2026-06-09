@@ -787,7 +787,10 @@ export class SessionService {
         let deserialized: FileHistorySnapshot[];
         try {
           deserialized = deserializeSnapshots(payload.snapshots);
-        } catch {
+        } catch (e) {
+          debugLogger.warn(
+            `loadSession: skipping malformed file_history_snapshot: ${e}`,
+          );
           continue;
         }
         for (const s of deserialized) {
