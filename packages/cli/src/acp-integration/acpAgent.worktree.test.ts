@@ -122,6 +122,27 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionStartSource: { Startup: 'startup', Resume: 'resume' },
   SessionEndReason: { PromptInputExit: 'prompt_input_exit', Other: 'other' },
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  HookEventName: {
+    PreToolUse: 'PreToolUse',
+    PostToolUse: 'PostToolUse',
+    PostToolUseFailure: 'PostToolUseFailure',
+    PostToolBatch: 'PostToolBatch',
+    Notification: 'Notification',
+    UserPromptSubmit: 'UserPromptSubmit',
+    UserPromptExpansion: 'UserPromptExpansion',
+    SessionStart: 'SessionStart',
+    Stop: 'Stop',
+    SubagentStart: 'SubagentStart',
+    SubagentStop: 'SubagentStop',
+    PreCompact: 'PreCompact',
+    PostCompact: 'PostCompact',
+    SessionEnd: 'SessionEnd',
+    PermissionRequest: 'PermissionRequest',
+    PermissionDenied: 'PermissionDenied',
+    StopFailure: 'StopFailure',
+    TodoCreated: 'TodoCreated',
+    TodoCompleted: 'TodoCompleted',
+  },
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
