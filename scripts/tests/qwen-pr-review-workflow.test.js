@@ -33,6 +33,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain(
     'Get-ChildItem -Path $installRoot -Recurse -Filter gh.exe -File',
   );
+  expect(workflow).not.toContain("cache: 'npm'");
   expect(workflow).toContain("MSYSTEM: 'MINGW64'");
   expect(workflow).toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))');
   expect(workflow).toContain('node scripts/run-qwen-pr-review.js');
