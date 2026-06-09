@@ -43,16 +43,27 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewDecision,reviews,comments
 
 ### 2. Check tmux-testing Artifact
 
-If tmux-testing ran, its output is available as a workflow artifact or passed via the `TMUX_VERDICT` env var. If the tmux comment wasn't posted yet (because tmux-testing has no write access), post it now on behalf of tmux-testing:
+If tmux-testing ran, its output is downloaded to `/tmp/tmux-results/`. The `TMUX_VERDICT` env var indicates the result (`pass`, `fail`, or `timeout`).
+
+If the tmux results file exists but no tmux comment has been posted yet (because tmux-testing has no write access), post it now on behalf of tmux-testing:
 
 ```bash
-if [ -n "${TMUX_COMMENT_BODY:-}" ]; then
-  # Post or update the tmux stage comment
+TMUX_RESULTS="/tmp/tmux-results/output.jsonl"
+if [ -f "$TMUX_RESULTS" ]; then
+  # Summarize tmux results into a comment body
+  cat > /tmp/tmux-comment.md << 'EOF'
+<!-- qwen-triage:tmux -->
+
+<tmux testing summary based on output.jsonl>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+
   EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:tmux -->")) | .id' | head -1)
   if [ -n "$EXISTING" ]; then
-    gh api -X PATCH "/repos/$REPO/issues/comments/$EXISTING" -F body=@"$TMUX_COMMENT_BODY"
+    gh api -X PATCH "/repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/tmux-comment.md
   else
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$TMUX_COMMENT_BODY"
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/tmux-comment.md
   fi
 fi
 ```

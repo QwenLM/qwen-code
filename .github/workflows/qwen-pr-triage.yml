@@ -26,6 +26,9 @@ jobs:
   # ─── Resolve PR number and determine trigger type ───────────────────
   resolve:
     runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
     outputs:
       pr_number: '${{ steps.resolve.outputs.pr_number }}'
       trigger_type: '${{ steps.resolve.outputs.trigger_type }}'
@@ -329,10 +332,13 @@ jobs:
 
           if [ "$EXIT_CODE" -eq 124 ]; then
             echo "::warning::Tmux testing timed out after 15 minutes"
+            echo "verdict=timeout" >> "$GITHUB_OUTPUT"
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Tmux testing exited with code $EXIT_CODE"
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=pass" >> "$GITHUB_OUTPUT"
           fi
-          echo "verdict=pass" >> "$GITHUB_OUTPUT"
 
       - name: 'Upload tmux results'
         if: always()

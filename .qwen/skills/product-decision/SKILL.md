@@ -148,8 +148,8 @@ VERDICT_EOF
 Possible `verdict` values:
 
 - `pass` — direction and approach are acceptable, proceed to review
-- `fail` — template missing, hard product rejection
-- `needs_human` — escalated to maintainer, cannot decide autonomously
+- `fail` — template check failed (missing required sections). This is the ONLY case for `fail` — direction and approach concerns never auto-reject
+- `needs_human` — escalated to maintainer. Use for: direction concerns, scope questions, touches sensitive areas (auth/sandbox/model/telemetry/release)
 
 For `fail` or `needs_human`, populate `blocking_reasons` with specific concerns.
 
