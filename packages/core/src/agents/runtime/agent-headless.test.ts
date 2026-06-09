@@ -464,6 +464,7 @@ describe('subagent.ts', () => {
         const history = callArgs[2];
         expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
           includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: false,
         });
         expect(history).toEqual([
           {
