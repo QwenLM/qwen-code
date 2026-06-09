@@ -165,7 +165,7 @@ export function extensionConsentString(
   output.push(
     t('Installing extension "{{name}}".', { name: extensionConfig.name }),
   );
-  if (extensionConfig.description) {
+  if (typeof extensionConfig.description === 'string' && extensionConfig.description) {
     output.push(stripAnsi(extensionConfig.description));
   }
   output.push(

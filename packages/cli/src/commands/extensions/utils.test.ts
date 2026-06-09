@@ -156,6 +156,41 @@ describe('extensionToOutputString', () => {
     expect(result).toContain('A helpful test extension');
   });
 
+  it('should strip ANSI escape codes from description', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: '\x1b[31mMalicious\x1b[0m description',
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).toContain('Malicious description');
+    expect(result).not.toContain('\x1b[31m');
+  });
+
+  it('should handle non-string description gracefully', () => {
+    const extension = createMockExtension({
+      config: {
+        name: 'test-extension',
+        version: '1.0.0',
+        description: 42,
+      },
+    });
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+
+    expect(result).not.toContain('Description:');
+  });
+
   it('should not include description line when absent', () => {
     const extension = createMockExtension();
     const result = extensionToOutputString(

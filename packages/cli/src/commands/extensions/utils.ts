@@ -54,7 +54,7 @@ export function extensionToOutputString(
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
-  if (extension.config.description) {
+  if (typeof extension.config.description === 'string' && extension.config.description) {
     output += `\n ${t('Description:')} ${stripAnsi(extension.config.description)}`;
   }
   output += `\n ${t('Path:')} ${extension.path}`;
