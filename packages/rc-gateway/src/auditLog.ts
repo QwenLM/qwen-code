@@ -38,7 +38,8 @@ export type AuditAction =
   | 'share_revoked'
   | 'search_performed'
   | 'command_collision_workspace_wins'
-  | 'slash_command_invoked';
+  | 'slash_command_invoked'
+  | 'session_forked';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -66,6 +67,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'search_performed',
   'command_collision_workspace_wins',
   'slash_command_invoked',
+  'session_forked',
 ];
 
 export interface AuditEntry {
