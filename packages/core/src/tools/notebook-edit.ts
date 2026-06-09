@@ -794,7 +794,7 @@ export class NotebookEditTool
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.notebook_path)) {
-      return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileNamesDisplay()} pattern(s).`;
+      return `File path '${params.notebook_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.notebook_path)} pattern(s).`;
     }
 
     return null;

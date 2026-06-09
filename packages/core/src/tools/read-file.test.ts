@@ -1090,7 +1090,7 @@ describe('ReadFileTool', () => {
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
         };
-        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore, .agentignore, .aiignore pattern(s).`;
+        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
       });
 
@@ -1109,10 +1109,10 @@ describe('ReadFileTool', () => {
         await fsp.writeFile(aiIgnoredFilePath, 'content', 'utf-8');
 
         expect(() => tool.build({ file_path: agentIgnoredFilePath })).toThrow(
-          /\.qwenignore, \.agentignore, \.aiignore/,
+          /\.agentignore/,
         );
         expect(() => tool.build({ file_path: aiIgnoredFilePath })).toThrow(
-          /\.qwenignore, \.agentignore, \.aiignore/,
+          /\.aiignore/,
         );
       });
 
@@ -1147,7 +1147,7 @@ describe('ReadFileTool', () => {
         await fsp.writeFile(ignoredFilePath, 'content', 'utf-8');
 
         expect(() => customTool.build({ file_path: ignoredFilePath })).toThrow(
-          /\.qwenignore, \.cursorignore/,
+          /\.cursorignore/,
         );
       });
 
@@ -1159,7 +1159,7 @@ describe('ReadFileTool', () => {
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
         };
-        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore, .agentignore, .aiignore pattern(s).`;
+        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
       });
 

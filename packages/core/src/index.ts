@@ -317,6 +317,7 @@ export * from './utils/gitDiff.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export * from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';

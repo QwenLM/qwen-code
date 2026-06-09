@@ -149,6 +149,13 @@ export class FileDiscoveryService {
     return this.qwenIgnoreFilter?.getPatterns() ?? [];
   }
 
+  getQwenIgnoreFileDisplayForPath(filePath: string): string {
+    return (
+      this.qwenIgnoreFilter?.getIgnoreFileNameForPath(filePath) ??
+      this.getQwenIgnoreFileNamesDisplay()
+    );
+  }
+
   getQwenIgnoreFileNamesDisplay(): string {
     return formatQwenIgnoreFileNames(this.customIgnoreFiles);
   }

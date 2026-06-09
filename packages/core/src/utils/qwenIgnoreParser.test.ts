@@ -55,7 +55,13 @@ describe('QwenIgnoreParser', () => {
       const parser = new QwenIgnoreParser(projectRoot);
       expect(parser.getPatterns()).toEqual(['ignored.txt', '/ignored_dir/']);
       expect(parser.isIgnored('ignored.txt')).toBe(true);
+      expect(parser.getIgnoreFileNameForPath('ignored.txt')).toBe(
+        '.qwenignore',
+      );
       expect(parser.isIgnored('not_ignored.txt')).toBe(false);
+      expect(parser.getIgnoreFileNameForPath('not_ignored.txt')).toBe(
+        undefined,
+      );
       expect(parser.isIgnored(path.join('ignored_dir', 'file.txt'))).toBe(true);
       expect(parser.isIgnored(path.join('subdir', 'not_ignored.txt'))).toBe(
         false,
@@ -79,7 +85,13 @@ describe('QwenIgnoreParser', () => {
         'ai-secret.txt',
       ]);
       expect(parser.isIgnored('agent-secret.txt')).toBe(true);
+      expect(parser.getIgnoreFileNameForPath('agent-secret.txt')).toBe(
+        '.agentignore',
+      );
       expect(parser.isIgnored('ai-secret.txt')).toBe(true);
+      expect(parser.getIgnoreFileNameForPath('ai-secret.txt')).toBe(
+        '.aiignore',
+      );
       expect(parser.isIgnored('visible.txt')).toBe(false);
     });
   });
@@ -102,6 +114,9 @@ describe('QwenIgnoreParser', () => {
       ]);
       expect(parser.getPatterns()).toEqual(['cursor-secret.txt']);
       expect(parser.isIgnored('cursor-secret.txt')).toBe(true);
+      expect(parser.getIgnoreFileNameForPath('cursor-secret.txt')).toBe(
+        '.cursorignore',
+      );
       expect(parser.isIgnored('agent-secret.txt')).toBe(false);
       expect(parser.isIgnored('visible.txt')).toBe(false);
     });

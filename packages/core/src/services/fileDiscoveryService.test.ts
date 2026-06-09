@@ -58,6 +58,9 @@ describe('FileDiscoveryService', () => {
       const service = new FileDiscoveryService(projectRoot);
 
       expect(service.shouldQwenIgnoreFile('secrets.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('secrets.txt')).toBe(
+        '.qwenignore',
+      );
       expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
     });
 
@@ -67,7 +70,13 @@ describe('FileDiscoveryService', () => {
       const service = new FileDiscoveryService(projectRoot);
 
       expect(service.shouldQwenIgnoreFile('agent-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('agent-secret.txt')).toBe(
+        '.agentignore',
+      );
       expect(service.shouldQwenIgnoreFile('ai-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('ai-secret.txt')).toBe(
+        '.aiignore',
+      );
       expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
     });
 
@@ -80,6 +89,9 @@ describe('FileDiscoveryService', () => {
         '.qwenignore, .cursorignore',
       );
       expect(service.shouldQwenIgnoreFile('cursor-secret.txt')).toBe(true);
+      expect(service.getQwenIgnoreFileDisplayForPath('cursor-secret.txt')).toBe(
+        '.cursorignore',
+      );
       expect(service.shouldQwenIgnoreFile('agent-secret.txt')).toBe(false);
       expect(service.shouldQwenIgnoreFile('src/index.js')).toBe(false);
     });

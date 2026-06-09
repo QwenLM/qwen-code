@@ -24,8 +24,9 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
   const ignorer = new Ignore();
   if (options.useGitignore) {
     const gitignorePath = path.join(options.projectRoot, '.gitignore');
-    if (fs.existsSync(gitignorePath)) {
-      ignorer.add(fs.readFileSync(gitignorePath, 'utf8'));
+    const gitignoreContent = readIgnoreFile(gitignorePath);
+    if (gitignoreContent !== undefined) {
+      ignorer.add(gitignoreContent);
     }
   }
 
@@ -34,8 +35,9 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
       options.customIgnoreFiles,
     )) {
       const qwenignorePath = path.join(options.projectRoot, ignoreFileName);
-      if (fs.existsSync(qwenignorePath)) {
-        ignorer.add(fs.readFileSync(qwenignorePath, 'utf8'));
+      const qwenignoreContent = readIgnoreFile(qwenignorePath);
+      if (qwenignoreContent !== undefined) {
+        ignorer.add(qwenignoreContent);
       }
     }
   }
@@ -51,6 +53,14 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
   );
 
   return ignorer;
+}
+
+function readIgnoreFile(filePath: string): string | undefined {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 export class Ignore {

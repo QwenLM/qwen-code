@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'node:fs';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Ignore, loadIgnoreRules } from './ignore.js';
 import {
   createTmpDir,
@@ -72,6 +73,7 @@ describe('loadIgnoreRules', () => {
   let tmpDir: string;
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
     }
@@ -182,6 +184,31 @@ describe('loadIgnoreRules', () => {
     });
     const fileFilter = ignore.getFileFilter();
     expect(fileFilter('anyfile.txt')).toBe(false);
+  });
+
+  it('should handle ignore files that cannot be read gracefully', async () => {
+    tmpDir = await createTmpDir({
+      '.qwenignore': '*.log',
+    });
+    const originalReadFileSync = fs.readFileSync;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      filePath: fs.PathOrFileDescriptor,
+      options?: BufferEncoding | null,
+    ) => {
+      if (String(filePath).endsWith('.qwenignore')) {
+        throw new Error('ignore file disappeared');
+      }
+      return originalReadFileSync(filePath, options);
+    }) as typeof fs.readFileSync);
+
+    expect(() =>
+      loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: true,
+        ignoreDirs: [],
+      }),
+    ).not.toThrow();
   });
 
   it('should always add .git to the ignore list', async () => {
