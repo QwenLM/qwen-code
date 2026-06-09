@@ -2474,6 +2474,52 @@ describe('Session', () => {
         );
       });
 
+      it('runs a slash-command cron tick through submit_prompt and fires slashOnComplete', async () => {
+        const onCompleteSpy = vi.fn().mockResolvedValue(undefined);
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'do the cron work' }],
+          onComplete: onCompleteSpy,
+        } as never);
+        const scheduler = {
+          size: 1,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: '/auto-improve tick test-loop' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(onCompleteSpy).toHaveBeenCalledTimes(1);
+        });
+        // The isSlashCommand branch resolved a submit_prompt, ran the model
+        // turn, and the finally fired slashOnComplete with a clean (success)
+        // result — not errored/cancelled.
+        expect(
+          vi.mocked(nonInteractiveCliCommands.handleSlashCommand),
+        ).toHaveBeenCalledWith(
+          '/auto-improve tick test-loop',
+          expect.anything(),
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(onCompleteSpy).toHaveBeenCalledWith(undefined);
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
