@@ -35,7 +35,8 @@ export type AuditAction =
   | 'routing_unsnoozed'
   | 'push_prefs_updated'
   | 'share_created'
-  | 'share_revoked';
+  | 'share_revoked'
+  | 'search_performed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -60,6 +61,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'push_prefs_updated',
   'share_created',
   'share_revoked',
+  'search_performed',
 ];
 
 export interface AuditEntry {
