@@ -1406,8 +1406,8 @@ describe('ContentGenerationPipeline', () => {
       );
 
       // Assert
-      // The stream should handle the error internally - errors during iteration don't propagate to the consumer
-      // Instead, they are handled internally by the pipeline
+      // The error propagates to the consumer via the async generator;
+      // errorHandler.handle() is also called internally by the pipeline.
       const results = [];
       let caughtError: unknown;
       try {
@@ -1685,7 +1685,6 @@ describe('ContentGenerationPipeline', () => {
       const sdkSignal = (mockClient.chat.completions.create as Mock).mock
         .calls[0][1]?.signal as AbortSignal;
 
-       
       for await (const _result of resultGenerator) {
         break;
       }
