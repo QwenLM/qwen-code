@@ -673,6 +673,35 @@ describe('autoImproveCommand', () => {
     });
   });
 
+  it('records a cancelled run as cancelled, not failed', async () => {
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 30m',
+    );
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+
+    // An explicit abort (session shutdown / Ctrl+C) reports cancelled, not
+    // errored — the run must be recorded 'cancelled', not 'failed'.
+    await (
+      result as {
+        onComplete?: (opts?: { cancelled?: boolean }) => Promise<void>;
+      }
+    ).onComplete?.({ cancelled: true });
+
+    const updated = await readAutoImproveLoopState(
+      tempDir,
+      active.activeLoopId,
+    );
+    expect(updated?.currentRun).toBeUndefined();
+    expect(updated?.lastRun).toMatchObject({
+      status: 'cancelled',
+    });
+  });
+
   it('runs a tick only for the active loop', async () => {
     await autoImproveCommand.action?.(context, 'start --every 30m');
     const activeRaw = await fs.readFile(

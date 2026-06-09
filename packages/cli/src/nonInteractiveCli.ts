@@ -334,7 +334,7 @@ export async function runNonInteractive(
     // deadlock every subsequent cron tick. No-op for normal prompts (guarded by
     // the `if (slashOnComplete)` checks below).
     let slashOnComplete:
-      | ((opts?: { errored?: boolean }) => Promise<void>)
+      | ((opts?: { errored?: boolean; cancelled?: boolean }) => Promise<void>)
       | undefined;
 
     try {
@@ -1123,7 +1123,10 @@ export async function runNonInteractive(
                   const label = job.prompt.slice(0, 40);
                   let modelText = job.prompt;
                   let slashOnComplete:
-                    | ((opts?: { errored?: boolean }) => Promise<void>)
+                    | ((opts?: {
+                        errored?: boolean;
+                        cancelled?: boolean;
+                      }) => Promise<void>)
                     | undefined;
                   let slashOnCompleteErrored = false;
                   if (isSlashCommand(job.prompt)) {

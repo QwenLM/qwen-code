@@ -318,7 +318,7 @@ export class Session implements SessionContext {
   // /auto-improve start → markRunCompleted). Prompts are serialized, so a single
   // field is safe; the caller fires it after the turn so the run isn't stranded.
   private pendingSlashOnComplete:
-    | ((opts?: { errored?: boolean }) => Promise<void>)
+    | ((opts?: { errored?: boolean; cancelled?: boolean }) => Promise<void>)
     | undefined;
   private turn: number = 0;
   private readonly runtimeBaseDir: string;
@@ -682,9 +682,7 @@ export class Session implements SessionContext {
       if (onComplete) {
         await onComplete(
           result.stopReason === 'end_turn' ? undefined : { errored: true },
-        ).catch((e: unknown) =>
-          debugLogger.warn('slash onComplete threw:', e),
-        );
+        ).catch((e: unknown) => debugLogger.warn('slash onComplete threw:', e));
       }
       this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
@@ -1559,9 +1557,16 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
 
         let slashOnComplete:
-          | ((opts?: { errored?: boolean }) => Promise<void>)
+          | ((opts?: {
+              errored?: boolean;
+              cancelled?: boolean;
+            }) => Promise<void>)
           | undefined;
         let slashOnCompleteErrored = false;
+        // Distinguish an explicit abort (session shutdown / Ctrl+C / cancelled
+        // stream) from a genuine error so the run is recorded 'cancelled' rather
+        // than 'failed'.
+        let slashOnCompleteCancelled = false;
 
         try {
           let promptParts: Part[] = [{ text: prompt }];
@@ -1611,7 +1616,7 @@ export class Session implements SessionContext {
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
-              slashOnCompleteErrored = true;
+              slashOnCompleteCancelled = true;
               return;
             }
 
@@ -1635,8 +1640,13 @@ export class Session implements SessionContext {
               }
               // The turn produced no response (cancelled / token-limited) — it
               // did not complete successfully, so don't let the finally mark it
-              // as a successful run.
-              slashOnCompleteErrored = true;
+              // as a successful run. A cancelled stream is a cancellation, not
+              // a failure; anything else (e.g. token limit) is recorded failed.
+              if (sendResult.stopReason === 'cancelled') {
+                slashOnCompleteCancelled = true;
+              } else {
+                slashOnCompleteErrored = true;
+              }
               return;
             }
             const responseStream = sendResult.responseStream;
@@ -1644,7 +1654,7 @@ export class Session implements SessionContext {
 
             for await (const resp of responseStream) {
               if (ac.signal.aborted) {
-                slashOnCompleteErrored = true;
+                slashOnCompleteCancelled = true;
                 return;
               }
 
@@ -1703,8 +1713,11 @@ export class Session implements SessionContext {
             }
           }
         } catch (error) {
+          if (ac.signal.aborted) {
+            slashOnCompleteCancelled = true;
+            return;
+          }
           slashOnCompleteErrored = true;
-          if (ac.signal.aborted) return;
           debugLogger.error('Error processing cron prompt:', error);
           const msg = error instanceof Error ? error.message : String(error);
           await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
@@ -1714,7 +1727,11 @@ export class Session implements SessionContext {
           if (slashOnComplete) {
             try {
               await slashOnComplete(
-                slashOnCompleteErrored ? { errored: true } : undefined,
+                slashOnCompleteCancelled
+                  ? { cancelled: true }
+                  : slashOnCompleteErrored
+                    ? { errored: true }
+                    : undefined,
               );
             } catch (e) {
               // swallow — markRunCompleted is idempotent

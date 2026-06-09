@@ -210,7 +210,10 @@ export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes. */
-  onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
+  onComplete?: (opts?: {
+    errored?: boolean;
+    cancelled?: boolean;
+  }) => Promise<void>;
 }
 
 /**

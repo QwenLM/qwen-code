@@ -274,7 +274,7 @@ async function markRunCompleted(
   _config: Config,
   repoRoot: string,
   loopId: string,
-  opts?: { errored?: boolean; expectedRunId?: string },
+  opts?: { errored?: boolean; cancelled?: boolean; expectedRunId?: string },
 ): Promise<void> {
   const state = await readAutoImproveLoopState(repoRoot, loopId);
   if (!state || !state.currentRun) {
@@ -308,9 +308,11 @@ async function markRunCompleted(
   // default to 'success'.
   const finalStatus = isTerminalAutoImproveRunStatus(state.currentRun.status)
     ? state.currentRun.status
-    : opts?.errored
-      ? 'failed'
-      : 'success';
+    : opts?.cancelled
+      ? 'cancelled'
+      : opts?.errored
+        ? 'failed'
+        : 'success';
   state.lastRun = {
     ...state.currentRun,
     status: finalStatus,
@@ -722,9 +724,10 @@ async function startAutoImprove(
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(state) }],
-    onComplete: (opts?: { errored?: boolean }) =>
+    onComplete: (opts?: { errored?: boolean; cancelled?: boolean }) =>
       markRunCompleted(config, repoRoot, loopId, {
         errored: opts?.errored,
+        cancelled: opts?.cancelled,
         expectedRunId: submittedRunId,
       }),
   };
@@ -998,14 +1001,16 @@ async function tickAutoImproveClaim(
   return {
     type: 'submit_prompt',
     content: [{ text: buildTickPrompt(baseState) }],
-    onComplete: (opts?: { errored?: boolean }) => {
+    onComplete: (opts?: { errored?: boolean; cancelled?: boolean }) => {
       debugLogger.info(
-        `tick ${loopId}: onComplete (errored=${opts?.errored ?? false})`,
+        `tick ${loopId}: onComplete (errored=${opts?.errored ?? false}, ` +
+          `cancelled=${opts?.cancelled ?? false})`,
       );
       // Pass the owning runId so a stale completion can't clobber a run a
       // later tick claimed (markRunCompleted ownership guard).
       return markRunCompleted(config, repoRoot, loopId, {
         errored: opts?.errored,
+        cancelled: opts?.cancelled,
         expectedRunId: submittedRunId,
       });
     },

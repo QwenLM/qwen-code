@@ -433,7 +433,8 @@ export const useGeminiStream = (
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<
-    ((opts?: { errored?: boolean }) => Promise<void>) | null
+    | ((opts?: { errored?: boolean; cancelled?: boolean }) => Promise<void>)
+    | null
   >(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // --- Real-time token display ---
