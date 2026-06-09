@@ -31,6 +31,25 @@ Use this file to choose the correct destination page under `docs/`.
 - If you create a page and do not add it to the right `_meta.ts`, the docs will
   be incomplete even if the markdown exists.
 
+## Doc-path consumers outside `docs/`
+
+Several files outside the `docs/` tree maintain hardcoded references to doc
+paths. When pages are added, moved, renamed, or removed, these consumers must
+be updated alongside the docs themselves:
+
+- `packages/core/src/skills/bundled/qc-helper/SKILL.md` — The `qc-helper`
+  bundled skill ships with the CLI. Its topic-to-path index tables (under
+  "Documentation Index" and "Common Config Categories") are used at runtime
+  to locate the right doc for `/qc-helper` invocations. Stale entries cause
+  the skill to miss documentation or point at nonexistent files.
+- `.qwen/skills/*/SKILL.md` and `.qwen/skills/*/references/*.md` — Project-
+  level skills may hardcode `docs/users/` or `docs/developers/` paths.
+  Notable examples: `docs-update-from-diff`, `docs-audit-and-refresh`,
+  `qwen-code-claw`.
+- Source code comments in `packages/cli/src/` and `packages/core/src/`
+  occasionally reference doc paths as contracts between code behavior and
+  documentation. These are low-risk but should stay accurate.
+
 ## Placement heuristics
 
 - Put the change where a reader would naturally look first.

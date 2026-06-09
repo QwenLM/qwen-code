@@ -16,6 +16,13 @@ export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
 
+/**
+ * Top-level directory name (under getMemoryBaseDir()) for the user-level
+ * auto-memory layer — cross-project facts about the user (preferences,
+ * working style, background). Mirror layout of the per-project memory dir.
+ */
+export const USER_AUTO_MEMORY_DIRNAME = 'memories';
+
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
 
@@ -201,4 +208,48 @@ export function getAutoMemoryFilePath(
   relativePath: string,
 ): string {
   return path.join(getAutoMemoryRoot(projectRoot), relativePath);
+}
+
+/**
+ * Returns the user-level (cross-project) auto-memory root.
+ * Lives at `${getMemoryBaseDir()}/memories/` — typically `~/.qwen/memories/`.
+ * Unlike project memory, this is NOT scoped to a git root; it is shared
+ * across every project the user works in.
+ */
+export function getUserAutoMemoryRoot(): string {
+  return path.join(getMemoryBaseDir(), USER_AUTO_MEMORY_DIRNAME);
+}
+
+export function getUserAutoMemoryIndexPath(): string {
+  return path.join(getUserAutoMemoryRoot(), AUTO_MEMORY_INDEX_FILENAME);
+}
+
+export function getUserAutoMemoryTopicPath(type: AutoMemoryType): string {
+  return path.join(getUserAutoMemoryRoot(), getAutoMemoryTopicFilename(type));
+}
+
+/**
+ * Returns true if the given absolute path is inside the user-level
+ * auto-memory root. Uses path.relative() (not startsWith) so platform
+ * path-separator differences and path-traversal edge cases are handled.
+ */
+export function isUserAutoMemPath(absolutePath: string): boolean {
+  const normalizedPath = path.normalize(absolutePath);
+  const memRoot = path.normalize(getUserAutoMemoryRoot());
+  const rel = path.relative(memRoot, normalizedPath);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * True if the path lives in EITHER the project-level memory root for the
+ * given project OR the user-level memory root. Used by the extraction
+ * agent's sandbox to allow writes to both scopes.
+ */
+export function isAnyAutoMemPath(
+  absolutePath: string,
+  projectRoot: string,
+): boolean {
+  return (
+    isAutoMemPath(absolutePath, projectRoot) || isUserAutoMemPath(absolutePath)
+  );
 }

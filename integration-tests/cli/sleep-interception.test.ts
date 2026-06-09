@@ -34,7 +34,7 @@ describe('sleep-interception', () => {
 
     // The model's output should mention it was blocked
     expect(result.toLowerCase()).toContain('blocked');
-  }, 30000);
+  });
 
   it('should allow sleep < 2s', async () => {
     rig = new TestRig();
@@ -51,7 +51,7 @@ describe('sleep-interception', () => {
 
     // Should not be blocked — model should complete successfully
     expect(result.toLowerCase()).not.toContain('blocked');
-  }, 30000);
+  });
 
   it('should allow retrying blocked sleep with an intentional sleep comment', async () => {
     rig = new TestRig();
@@ -70,7 +70,7 @@ describe('sleep-interception', () => {
     expect(foundShell).toBeTruthy();
 
     expect(result.toLowerCase()).toContain('done');
-  }, 30000);
+  });
 
   it('should block sleep >= 2s even when followed by a trailing comment', async () => {
     // The `trimTrailingShellComment` state machine strips trailing `#...`
@@ -93,5 +93,5 @@ describe('sleep-interception', () => {
 
     // Model must report it was blocked despite the trailing comment.
     expect(result.toLowerCase()).toContain('blocked');
-  }, 30000);
+  });
 });
