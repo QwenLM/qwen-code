@@ -149,18 +149,247 @@ rules:
     expect(d.requireScope).toBe('owner');
   });
 
-  it('SAFETY: a matched deny rule with expiresAt is downgraded to prompt', () => {
+  it('a deny rule with a future expiresAt now applies (no longer downgraded)', () => {
     const policy = loadPolicy(`
 rules:
   - id: temp-deny
     match:
       tool: bash
     action: deny
-    expiresAt: "2030-01-01"
+    expiresAt: "2030-01-01T00:00:00Z"
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('deny');
+    expect(d.usedDeferredField).toBe(false);
+    expect(d.ruleId).toBe('temp-deny');
+  });
+
+  it('an expired allow rule is skipped and falls through to default', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: expired-allow
+    match:
+      tool: bash
+    action: allow
+    expiresAt: "2020-01-01T00:00:00Z"
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('prompt');
+    expect(d.ruleId).toBeUndefined();
+    expect(d.usedDeferredField).toBe(false);
+  });
+
+  it('a not-yet-expired allow rule applies as allow', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: future-allow
+    match:
+      tool: bash
+    action: allow
+    expiresAt: "2026-06-09T13:00:00Z"
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('allow');
+    expect(d.usedDeferredField).toBe(false);
+    expect(d.ruleId).toBe('future-allow');
+  });
+
+  it('a well-formed allow IN the timeOfDay window applies as allow (not prompt)', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: daytime-allow
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: UTC
+    action: allow
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('allow');
+    expect(d.usedDeferredField).toBe(false);
+    expect(d.ruleId).toBe('daytime-allow');
+  });
+
+  it('a well-formed allow OUT of the timeOfDay window is skipped, falls through', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: daytime-allow
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: UTC
+    action: allow
+  - id: catch-all
+    match:
+      tool: bash
+    action: deny
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T20:00:00Z'),
+    );
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('catch-all');
+  });
+
+  it('a prompt rule OUT of its timeOfDay window is skipped (does not prompt out of window)', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: night-prompt
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: UTC
+    action: prompt
+    requireScope: owner
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T20:00:00Z'),
+    );
+    // Falls through to default prompt (requireScope 'approve'), NOT the owner
+    // rule — the out-of-window rule does not match at all.
+    expect(d.action).toBe('prompt');
+    expect(d.ruleId).toBeUndefined();
+    expect(d.requireScope).toBe('approve');
+  });
+
+  it('SAFETY: a malformed timeOfDay (bad timezone) on an allow rule downgrades to prompt', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: bad-tz
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: Not/AReal_Zone
+    action: allow
+    requireScope: owner
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(true);
+    expect(d.ruleId).toBe('bad-tz');
+    expect(d.requireScope).toBe('owner');
+  });
+
+  it('SAFETY: a malformed expiresAt downgrades to prompt', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: bad-expiry
+    match:
+      tool: bash
+    action: allow
+    expiresAt: "not-a-date"
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('prompt');
+    expect(d.usedDeferredField).toBe(true);
+    expect(d.ruleId).toBe('bad-expiry');
+  });
+
+  it('maxPerWindow remains deferred → allow still downgrades to prompt', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: quota-allow
+    match:
+      tool: bash
+    action: allow
+    maxPerWindow: 5
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('prompt');
+    expect(d.usedDeferredField).toBe(true);
+    expect(d.ruleId).toBe('quota-allow');
+  });
+
+  it('a rule that is BOTH expired (well-formed) AND has a malformed timeOfDay is skipped (no-match wins)', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: dead-and-malformed
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: Not/AReal_Zone
+    action: allow
+    expiresAt: "2020-01-01T00:00:00Z"
+  - id: fallthrough
+    match:
+      tool: bash
+    action: deny
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T12:00:00Z'),
+    );
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('fallthrough');
+  });
+
+  it('a rule with malformed expiresAt AND out-of-window timeOfDay is skipped (no-match wins over unevaluable)', () => {
+    const policy = loadPolicy(`
+rules:
+  - id: malformed-expiry-out-of-window
+    match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: UTC
+    action: allow
+    expiresAt: "not-a-date"
+  - id: fallthrough
+    match:
+      tool: bash
+    action: deny
+`);
+    const d = evaluate(
+      policy,
+      { tool: 'bash', args: 'ls' },
+      new Date('2026-06-09T20:00:00Z'),
+    );
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('fallthrough');
   });
 
   it('SAFETY: a deferred field with a FALSY value still downgrades (presence, not truthiness)', () => {

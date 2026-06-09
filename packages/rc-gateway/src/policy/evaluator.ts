@@ -6,6 +6,12 @@
 
 import type { Policy, PolicyAction, PolicyRule } from './loader.js';
 import { globMatch, matchesAny } from './glob.js';
+import {
+  parseTimeOfDay,
+  isWithinTimeOfDay,
+  parseExpiresAt,
+  isExpired,
+} from './conditions.js';
 
 export interface ToolCallContext {
   tool: string;
@@ -24,10 +30,13 @@ export interface PolicyDecision {
   /** Carried for deny decisions. */
   reason?: string;
   /**
-   * True when the matched rule used a deferred (unevaluated) field
-   * (`match.timeOfDay`, `rule.maxPerWindow`, or `rule.expiresAt`). Such an
-   * allow/deny is downgraded to prompt — we never auto-decide on a constraint
-   * this cycle does not evaluate.
+   * True when the matched rule carried a condition we could NOT evaluate — a
+   * still-deferred field (`rule.maxPerWindow`) or a MALFORMED
+   * `match.timeOfDay`/`rule.expiresAt` (unparseable HH:MM, bad IANA zone,
+   * unparseable instant). Such an allow/deny is downgraded to prompt — we never
+   * auto-decide on a constraint we could not evaluate. Well-formed timeOfDay /
+   * expiresAt are now evaluated (false here): satisfied → real action,
+   * unsatisfied → the rule does not match at all.
    */
   usedDeferredField: boolean;
 }
@@ -95,17 +104,78 @@ function ruleMatches(
   if (m.sessionTag !== undefined && m.sessionTag !== ctx.sessionTag) {
     return false;
   }
-  // timeOfDay/expiresAt/maxPerWindow are deferred → treated as satisfied.
+  // timeOfDay/expiresAt/maxPerWindow are handled by classifyConditions, after
+  // this static match passes.
   return true;
 }
 
 /**
- * Map a proposed tool call to allow/deny/prompt by first match over rules
- * ordered `(priority desc, specificity desc, index asc)`. PURE: no I/O, no
- * clock dependence. A matched allow/deny rule using a deferred field is
- * downgraded to prompt (the safety invariant).
+ * Classify a rule's time/quota conditions against `now` (called only after the
+ * static {@link ruleMatches} has passed):
+ *
+ * - `'no-match'`: a well-formed condition is NOT satisfied (expired, or current
+ *   time outside the timeOfDay window). The rule is dead → the evaluator skips
+ *   it and falls through, exactly like a non-matching tool/argsGlob.
+ * - `'unevaluable'`: a present condition could not be parsed (malformed
+ *   timeOfDay / expiresAt) OR a still-deferred field (`maxPerWindow`) is
+ *   present. The evaluator downgrades a non-prompt action to prompt.
+ * - `'match'`: all present conditions are well-formed and satisfied → the rule
+ *   applies with its real action.
+ *
+ * A definitive `'no-match'` ALWAYS wins over `'unevaluable'`: a dead /
+ * out-of-window rule is skipped even if it also carries a malformed sibling
+ * field, so we never prompt for a rule that does not actually apply.
  */
-export function evaluate(policy: Policy, ctx: ToolCallContext): PolicyDecision {
+function classifyConditions(
+  rule: PolicyRule,
+  now: Date,
+): 'no-match' | 'match' | 'unevaluable' {
+  let unevaluable = false;
+
+  // 1. expiresAt — definitively dead when in the past.
+  if (rule.expiresAt !== undefined) {
+    const expiresMs = parseExpiresAt(rule.expiresAt);
+    if (expiresMs === null) {
+      unevaluable = true;
+    } else if (isExpired(expiresMs, now)) {
+      return 'no-match';
+    }
+  }
+
+  // 2. timeOfDay — definitively dead when current time is outside the window.
+  //    Checked even if expiresAt was malformed, so a no-match (out-of-window)
+  //    still wins over the unevaluable expiresAt sibling.
+  if (rule.match.timeOfDay !== undefined) {
+    const parsed = parseTimeOfDay(rule.match.timeOfDay);
+    if (parsed === null) {
+      unevaluable = true;
+    } else if (!isWithinTimeOfDay(parsed, now)) {
+      return 'no-match';
+    }
+  }
+
+  // 3. maxPerWindow — still deferred (Phase 2b).
+  if (rule.maxPerWindow !== undefined) {
+    unevaluable = true;
+  }
+
+  return unevaluable ? 'unevaluable' : 'match';
+}
+
+/**
+ * Map a proposed tool call to allow/deny/prompt by first match over rules
+ * ordered `(priority desc, specificity desc, index asc)`. PURE: no I/O; the
+ * clock is injected as `now` (defaults to the real wall-clock) so the result is
+ * deterministic under a fixed `now` + fixed timezone. A matched rule whose
+ * time/quota conditions are UNEVALUABLE (malformed timeOfDay/expiresAt, or a
+ * deferred maxPerWindow) is downgraded to prompt (the safety invariant); a
+ * well-formed-but-unsatisfied condition makes the rule not match (fall through).
+ */
+export function evaluate(
+  policy: Policy,
+  ctx: ToolCallContext,
+  now: Date = new Date(),
+): PolicyDecision {
   const argString = canonicalArgString(ctx.args);
   const paths = candidatePaths(ctx.args);
 
@@ -126,17 +196,15 @@ export function evaluate(policy: Policy, ctx: ToolCallContext): PolicyDecision {
     const rule = policy.rules[idx];
     if (!ruleMatches(rule, ctx, argString, paths)) continue;
 
-    // Presence, NOT truthiness: a deferred field set to a falsy/placeholder
-    // value (e.g. `expiresAt: 0` or a bare `expiresAt:` → null) must still
-    // trigger the downgrade. Using `||` here would let such a rule auto-decide
-    // on a constraint we don't evaluate this cycle.
-    const usedDeferred =
-      rule.match.timeOfDay !== undefined ||
-      rule.maxPerWindow !== undefined ||
-      rule.expiresAt !== undefined;
+    // Evaluate time/quota conditions. A definitive 'no-match' (expired /
+    // out-of-window, well-formed) skips the rule BEFORE we decide an action.
+    const status = classifyConditions(rule, now);
+    if (status === 'no-match') continue;
 
-    if (usedDeferred && rule.action !== 'prompt') {
-      // SAFETY: never auto-allow/deny on an unevaluated time/quota constraint.
+    const unevaluable = status === 'unevaluable';
+
+    if (unevaluable && rule.action !== 'prompt') {
+      // SAFETY: never auto-allow/deny on a constraint we could not evaluate.
       return {
         action: 'prompt',
         ruleId: rule.id,
@@ -150,7 +218,7 @@ export function evaluate(policy: Policy, ctx: ToolCallContext): PolicyDecision {
       ruleId: rule.id,
       requireScope: rule.requireScope,
       reason: rule.reason,
-      usedDeferredField: usedDeferred,
+      usedDeferredField: unevaluable,
     };
   }
 
