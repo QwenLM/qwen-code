@@ -1,6 +1,6 @@
 {
   "name": "@craft-agent/shared",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "Apache-2.0",
   "description": "Shared business logic for Qwen Code - agent, auth, config, credentials, MCP integration",
   "type": "module",
