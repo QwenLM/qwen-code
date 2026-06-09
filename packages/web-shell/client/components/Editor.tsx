@@ -962,6 +962,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: '' },
     });
+    setPastedImages([]);
+    pendingPastesRef.current.clear();
+    nextPasteIdRef.current = 1;
   }, []);
 
   const retryLast = useCallback(() => {

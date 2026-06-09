@@ -1867,6 +1867,7 @@ export function App({
       }
 
       if (streamingState !== 'idle') {
+        e.preventDefault();
         handleCancel();
         resetEscapeState();
         return;

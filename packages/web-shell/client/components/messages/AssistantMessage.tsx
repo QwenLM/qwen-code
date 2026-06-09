@@ -44,7 +44,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     const observer = new ResizeObserver(check);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [compactThinking]);
+  }, [compactThinking, thinkingExpanded]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
