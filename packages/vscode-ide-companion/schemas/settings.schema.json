@@ -864,7 +864,7 @@
       "type": "object",
       "properties": {
         "permissionStrategy": {
-          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token mechanism is a future PR), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via permissionTimeoutMs. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — F3 v1 keeps cancel cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — F3 v1 reads this once at boot. Options: first-responder, designated, consensus, local-only",
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via permissionTimeoutMs. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
           "enum": [
             "first-responder",
             "designated",
@@ -876,7 +876,7 @@
         "consensusQuorum": {
           "type": "integer",
           "minimum": 1,
-          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — F3 v1 reads this once at boot."
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — read once at boot."
         }
       }
     },

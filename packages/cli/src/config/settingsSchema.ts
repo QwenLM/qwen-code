@@ -1882,7 +1882,7 @@ const SETTINGS_SCHEMA = {
           '`designated` = only the prompt originator decides; falls back to ' +
           'first-responder if originator is anonymous. ' +
           'NOTE: client identity comes from self-declared X-Qwen-Client-Id ' +
-          'with no proof-of-possession (pair-token mechanism is a future PR), ' +
+          'with no proof-of-possession (pair-token identity is not implemented yet), ' +
           'so any client observing originatorClientId on SSE frames can ' +
           'register with the same id and impersonate the originator. ' +
           '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
