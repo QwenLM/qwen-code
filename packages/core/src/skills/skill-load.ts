@@ -8,23 +8,9 @@ import {
 import { validateSymlinkTarget } from './symlinkScope.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { parse as parseYamlSimple } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
+import { parse as parseYaml } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
-
-/**
- * Parses a YAML string with full spec support (block scalars, nested
- * structures, etc.), falling back to the simple parser on failure so
- * that slightly malformed frontmatter still loads where possible.
- */
-function parseYaml(input: string): Record<string, unknown> {
-  try {
-    return yaml.parse(input) as Record<string, unknown>;
-  } catch {
-    return parseYamlSimple(input);
-  }
-}
 
 const debugLogger = createDebugLogger('SKILL_LOAD');
 

@@ -238,25 +238,6 @@ Body.
       expect(config.priority).toBeUndefined();
     });
 
-    it('should parse YAML folded block scalar description (>)', () => {
-      const markdown =
-        '---\nname: test-skill\ndescription: >\n  This is a folded\n  multiline description.\n---\nBody';
-      const config = parseSkillContent(markdown, testFilePath);
-      expect(config.name).toBe('test-skill');
-      expect(config.description).toBe(
-        'This is a folded multiline description.\n',
-      );
-    });
-
-    it('should parse YAML literal block scalar description (|)', () => {
-      const markdown =
-        '---\nname: test-skill\ndescription: |\n  Line one.\n  Line two.\n---\nBody';
-      const config = parseSkillContent(markdown, testFilePath);
-      expect(config.name).toBe('test-skill');
-      expect(config.description).toContain('Line one.');
-      expect(config.description).toContain('Line two.');
-    });
-
     it('should throw error for invalid format without frontmatter', () => {
       const invalidMarkdown = `# Just a heading
 Some content without frontmatter.

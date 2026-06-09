@@ -4,20 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Simple YAML parser for subagent frontmatter.
- * This is a minimal implementation that handles the basic YAML structures
- * needed for subagent configuration files.
- */
+import * as yaml from 'yaml';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('YAML_PARSER');
 
 /**
- * Parses a simple YAML string into a JavaScript object.
- * Supports basic key-value pairs, arrays, and nested objects.
+ * Parses a YAML string with full spec support (block scalars, nested
+ * structures, etc.), falling back to the simple parser on failure so
+ * that slightly malformed frontmatter still loads where possible.
  *
  * @param yamlString - YAML string to parse
  * @returns Parsed object
  */
 export function parse(yamlString: string): Record<string, unknown> {
+  try {
+    const result = yaml.parse(yamlString);
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      return result as Record<string, unknown>;
+    }
+  } catch (error) {
+    debugLogger.debug(
+      `Full YAML parser failed, falling back to simple parser: ${error}`,
+    );
+  }
+  return parseSimple(yamlString);
+}
+
+/**
+ * Simple YAML parser for subagent frontmatter.
+ * This is a minimal implementation that handles the basic YAML structures
+ * needed for subagent configuration files.
+ *
+ * @param yamlString - YAML string to parse
+ * @returns Parsed object
+ */
+export function parseSimple(yamlString: string): Record<string, unknown> {
   const lines = yamlString
     .split('\n')
     .filter((line) => line.trim() && !line.trim().startsWith('#'));

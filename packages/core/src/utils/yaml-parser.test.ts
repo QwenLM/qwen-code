@@ -36,6 +36,32 @@ describe('yaml-parser', () => {
         },
       });
     });
+
+    it('should parse YAML folded block scalar (>)', () => {
+      const input =
+        'name: test-skill\ndescription: >\n  This is a folded\n  multiline description.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe(
+        'This is a folded multiline description.\n',
+      );
+    });
+
+    it('should parse YAML literal block scalar (|)', () => {
+      const input =
+        'name: test-skill\ndescription: |\n  Line one.\n  Line two.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe('Line one.\nLine two.\n');
+    });
+
+    it('should parse YAML block scalar with strip chomping (>-)', () => {
+      const input =
+        'name: test-skill\ndescription: >-\n  Folded without trailing newline.';
+      const result = parse(input);
+      expect(result['name']).toBe('test-skill');
+      expect(result['description']).toBe('Folded without trailing newline.');
+    });
   });
 
   describe('stringify', () => {
