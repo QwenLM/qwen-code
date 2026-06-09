@@ -44,6 +44,7 @@ export {
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './routes/tokens.js';
+export { createShareRouter } from './routes/share.js';
 export { selectAllowOnceOptionId } from './permissionOptions.js';
 export { runServe, type ServeOptions } from './cli.js';
 export { createPermissionVoteRoute } from './routes/permission.js';
