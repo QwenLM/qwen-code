@@ -272,6 +272,7 @@ export function MessageList({
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
   const catchingUpRef = useRef(catchingUp);
+  const prevHasTailContent = useRef(false);
   catchingUpRef.current = catchingUp;
 
   const hasTailApproval = useMemo(() => {
@@ -408,6 +409,19 @@ export function MessageList({
     }
     prevCatchingUp.current = catchingUp;
   }, [catchingUp, scrollToBottom]);
+
+  // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
+  // at the very bottom of the virtualized list, so if the user had scrolled
+  // up it would open below the fold and the action would look like a no-op.
+  // Force-follow once so it scrolls into view — applies to every entry point
+  // (mouse click, Shift+Tab, slash command).
+  useEffect(() => {
+    if (hasTailContent && !prevHasTailContent.current) {
+      shouldFollow.current = true;
+      requestAnimationFrame(scrollToBottom);
+    }
+    prevHasTailContent.current = hasTailContent;
+  }, [hasTailContent, scrollToBottom]);
 
   const renderVirtualItem = useCallback(
     (index: number) => {

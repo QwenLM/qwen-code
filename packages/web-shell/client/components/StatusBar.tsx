@@ -22,10 +22,10 @@ function getModeIndicator(
 
 interface StatusBarProps {
   /** Open the approval-mode picker so the mode can be chosen with the mouse. */
-  onSelectMode?: () => void;
+  onSelectMode: () => void;
 }
 
-export function StatusBar({ onSelectMode }: StatusBarProps = {}) {
+export function StatusBar({ onSelectMode }: StatusBarProps) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
   const currentModel = connection.currentModel ?? '';
@@ -37,31 +37,25 @@ export function StatusBar({ onSelectMode }: StatusBarProps = {}) {
   const pctDisplay = pct.toFixed(1);
   const modeIndicator = getModeIndicator(currentMode, t);
 
-  const modeContent = modeIndicator && (
-    <>
-      <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
-        {modeIndicator.label}
-      </span>
-      <span className={styles.modeHint}>{t('status.modeHint')}</span>
-    </>
-  );
-
   return (
     <div className={styles.bar}>
       <div className={styles.left}>
-        {!modeIndicator ? (
-          <span>{t('status.shortcuts')}</span>
-        ) : onSelectMode ? (
+        {modeIndicator ? (
+          // The hint advertises "click to switch", so the indicator is always
+          // a real button — never a non-interactive label.
           <button
             type="button"
             className={styles.modeButton}
             onClick={onSelectMode}
             title={t('mode.select')}
           >
-            {modeContent}
+            <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
+              {modeIndicator.label}
+            </span>
+            <span className={styles.modeHint}>{t('status.modeHint')}</span>
           </button>
         ) : (
-          modeContent
+          <span>{t('status.shortcuts')}</span>
         )}
       </div>
 
