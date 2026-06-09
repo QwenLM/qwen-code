@@ -45,7 +45,7 @@ function footerHint(tab: ExtensionsTab): string {
         '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
       );
     case EXTENSIONS_TABS.MARKETPLACES:
-      return t('↑↓ navigate · Enter open · d remove · Esc close');
+      return t('↑↓ navigate · Enter select · d remove marketplace · Esc close');
     default:
       return '';
   }
