@@ -51,11 +51,15 @@ jobs:
 
       - name: 'Resolve target number'
         id: 'resolve'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          INPUT_NUMBER: '${{ github.event.inputs.number }}'
+          ISSUE_NUMBER: '${{ github.event.issue.number }}'
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "number=$INPUT_NUMBER" >> "$GITHUB_OUTPUT"
           else
-            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Run Qwen Issue Triage'

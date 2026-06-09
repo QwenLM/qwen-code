@@ -2,7 +2,7 @@ name: 'Qwen PR Triage Pipeline'
 
 on:
   pull_request_target:
-    types: ['opened', 'ready_for_review']
+    types: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'review_requested']
   issue_comment:
     types: ['created']
   workflow_dispatch:
@@ -31,6 +31,7 @@ jobs:
       trigger_type: '${{ steps.resolve.outputs.trigger_type }}'
       is_fork: '${{ steps.resolve.outputs.is_fork }}'
       should_run: '${{ steps.resolve.outputs.should_run }}'
+      review_environment: '${{ steps.resolve.outputs.review_environment }}'
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
         (github.event_name == 'pull_request_target' &&
@@ -80,11 +81,21 @@ jobs:
           # Check if fork
           IS_FORK=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')
 
+          # Auto-triggered PRs (opened/synchronize) get a 10-minute delay
+          # via environment protection rule to debounce rapid pushes.
+          # Manual triggers skip the delay.
+          if [ "$TRIGGER_TYPE" = "full" ] && [ "$EVENT_NAME" = "pull_request_target" ]; then
+            REVIEW_ENV="qwen-pr-review-delay"
+          else
+            REVIEW_ENV=""
+          fi
+
           {
             echo "pr_number=$PR_NUMBER"
             echo "trigger_type=$TRIGGER_TYPE"
             echo "is_fork=$IS_FORK"
             echo "should_run=true"
+            echo "review_environment=$REVIEW_ENV"
           } >> "$GITHUB_OUTPUT"
 
   # ─── Stage 1: Product Decision ─────────────────────────────────────
@@ -153,7 +164,7 @@ jobs:
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "::notice::Product decision verdict: $VERDICT"
 
-  # ─── Stage 2a: Code Review (parallel) ──────────────────────────────
+  # ─── Stage 2: Code Review ───────────────────────────────────────────
   # Security: review reads PR diff via API (no code execution). Fork PRs
   # are safe here because settings_json restricts commands to gh/curl only.
   review:
@@ -165,10 +176,9 @@ jobs:
         needs.resolve.outputs.trigger_type == 'review_only'
       )
     timeout-minutes: 45
-    # 10-minute wait timer prevents reviewing rapid consecutive pushes.
-    # Only applies to auto-triggered PRs; comment/dispatch triggers skip the wait.
-    environment:
-      name: '${{ needs.resolve.outputs.trigger_type == ''full'' && ''qwen-pr-review-delay'' || '''' }}'
+    # 10-minute wait timer (via environment protection rule) debounces
+    # rapid consecutive pushes. Empty string = no environment = no delay.
+    environment: '${{ needs.resolve.outputs.review_environment }}'
     concurrency:
       group: 'qwen-pr-triage-review-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
@@ -221,13 +231,21 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
+          set +e
           timeout --kill-after=10s 35m qwen \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
             --prompt "/review ${REVIEW_URL} --comment" \
-            --output-format stream-json \
-            || true
+            --output-format stream-json
+          EXIT_CODE=$?
+          set -e
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Review timed out after 35 minutes"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Review exited with code $EXIT_CODE"
+          fi
 
       - name: 'Check review verdict'
         id: 'verdict'
@@ -235,10 +253,10 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
         run: |
-          # Check if the review posted REQUEST_CHANGES
+          # Check if the bot's latest review requested changes
           REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json latestReviews --jq '
-              [.latestReviews[] | select(.authorAssociation == "NONE" or .author.login == "qwen-code-ci-bot")] |
+              [.latestReviews[] | select(.author.login == "qwen-code-ci-bot")] |
               if length > 0 then .[0].state else "NONE" end
             ' 2>/dev/null || echo "NONE")
 
@@ -297,15 +315,22 @@ jobs:
 
           # Run tmux testing — output goes to a file for artifact upload
           mkdir -p /tmp/tmux-results
+          set +e
           timeout --kill-after=10s 15m qwen \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
-            | tee /tmp/tmux-results/output.jsonl \
-            || true
+            | tee /tmp/tmux-results/output.jsonl
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
 
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Tmux testing timed out after 15 minutes"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Tmux testing exited with code $EXIT_CODE"
+          fi
           echo "verdict=pass" >> "$GITHUB_OUTPUT"
 
       - name: 'Upload tmux results'
@@ -383,3 +408,23 @@ jobs:
           else
             echo "::warning::Approval skill did not write verdict file"
           fi
+
+  # ─── Fallback: post comment if pipeline fails unexpectedly ─────────
+  fallback-comment:
+    needs: ['resolve', 'product-decision', 'review', 'approval-decision']
+    if: >-
+      failure() &&
+      needs.resolve.outputs.pr_number != ''
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Post failure notice'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "_Qwen triage pipeline did not complete successfully. See [workflow logs]($RUN_URL)._"
