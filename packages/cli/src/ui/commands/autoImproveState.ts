@@ -797,6 +797,11 @@ async function resolveRepoRoot(cwd: string): Promise<string> {
       execFile(
         'git',
         ['-C', cwd, 'rev-parse', '--show-toplevel'],
+        // Bound the call so a blocked git credential helper (headless/SSH)
+        // can't leak the child / hang markActiveAutoImproveRunCancelled; on
+        // timeout the catch below falls back to cwd. Mirrors the sibling
+        // resolveRepoRoot in AutoImproveSourceDialog.tsx.
+        { timeout: 10_000 },
         (error, stdout) => {
           if (error) {
             reject(error);

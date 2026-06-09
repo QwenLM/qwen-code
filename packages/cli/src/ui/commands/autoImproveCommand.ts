@@ -27,6 +27,7 @@ import {
   isStaleAutoImproveRunRef,
   isRecord,
   isTerminalAutoImproveRunStatus,
+  MAX_AUTO_IMPROVE_PROMPT_LENGTH,
   isValidAutoImproveLoopId,
   readMostRecentLoopState,
   readActiveAutoImproveLoop,
@@ -678,7 +679,10 @@ async function startAutoImprove(
     deliveryPolicy: 'source-aware-local-commit',
     stopRequested: false,
     sourceSnapshot,
-    prompt: parsed.prompt,
+    // Cap at write time too: normalize-on-read caps subsequent ticks, but the
+    // first tick embeds state.prompt directly, so without this the initial
+    // submission could carry an over-length prompt.
+    prompt: parsed.prompt.slice(0, MAX_AUTO_IMPROVE_PROMPT_LENGTH),
     ...(context.session.stats.sessionId
       ? { sessionId: context.session.stats.sessionId }
       : {}),
@@ -686,10 +690,12 @@ async function startAutoImprove(
 
   const scheduler = config.getCronScheduler();
   const cronPrompt = `/auto-improve tick ${loopId}`;
-  await initializeAutoImproveLoopFiles(repoRoot, state);
-  await writeActiveAutoImproveLoop(repoRoot, loopId);
   let cronJobId: string | undefined;
   try {
+    // Inside the try so a failure here (disk full / permissions) hits the
+    // cleanup below instead of orphaning the loop dir + active pointer.
+    await initializeAutoImproveLoopFiles(repoRoot, state);
+    await writeActiveAutoImproveLoop(repoRoot, loopId);
     const job = scheduler.create(interval.cron, cronPrompt, true);
     cronJobId = job.id;
     state.cronJobId = job.id;
@@ -697,7 +703,12 @@ async function startAutoImprove(
     await writeAutoImproveLoopState(repoRoot, state);
   } catch (error) {
     if (cronJobId) {
-      scheduler.delete(cronJobId);
+      // Best-effort: a throw here must not skip the remaining cleanup.
+      try {
+        scheduler.delete(cronJobId);
+      } catch {
+        // ignore
+      }
     }
     // The cron job couldn't be created — tear down the half-initialized loop
     // (active pointer + the directory tree initializeAutoImproveLoopFiles just

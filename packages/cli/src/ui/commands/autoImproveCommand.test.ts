@@ -15,6 +15,7 @@ import {
   getAutoImproveConfigPath,
   getAutoImproveRunIndexPath,
   markActiveAutoImproveRunCancelled,
+  MAX_AUTO_IMPROVE_PROMPT_LENGTH,
   readAutoImproveLoopState,
   readAutoImproveConfig,
   writeAutoImproveConfig,
@@ -316,6 +317,30 @@ describe('autoImproveCommand', () => {
       .readdir(path.join(tempDir, '.qwen', 'auto-improve', 'loops'))
       .catch(() => [] as string[]);
     expect(remaining).toEqual([]);
+  });
+
+  it('caps an over-length start prompt at write time', async () => {
+    await writeAutoImproveConfig(tempDir, {
+      version: 1,
+      sources: { githubIssues: false, githubPrs: false, localSignals: false },
+      customSources: [],
+    });
+    const longPrompt = 'p'.repeat(MAX_AUTO_IMPROVE_PROMPT_LENGTH + 5000);
+
+    await autoImproveCommand.action?.(
+      context,
+      `start --every 2h ${longPrompt}`,
+    );
+
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'auto-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const state = await readAutoImproveLoopState(tempDir, active.activeLoopId);
+    // Stored prompt is capped, so the first tick (which embeds state.prompt
+    // directly) can't carry an over-length prompt.
+    expect(state?.prompt).toHaveLength(MAX_AUTO_IMPROVE_PROMPT_LENGTH);
   });
 
   it('accepts spaced intervals and rejects unsupported cadences', async () => {
