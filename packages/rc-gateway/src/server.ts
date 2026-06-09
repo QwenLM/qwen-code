@@ -32,7 +32,7 @@ import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute } from './routes/search.js';
-import { resolveChatsDir } from './search/transcripts.js';
+import { resolveChatsDir } from './sessions/chatsPath.js';
 import { CommandLoader } from './commands/loader.js';
 import {
   createListCommandsRoute,

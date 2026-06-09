@@ -69,6 +69,17 @@ describe('resolveChatsDir', () => {
       join(homedir(), '.qwen', 'projects', '-work-proj', 'chats'),
     );
   });
+
+  it('dashes every non-alphanumeric char — the cycle-19 divergence (regression)', () => {
+    // This is the case the cycle-23 unification exists to fix. Cycle-19's
+    // search resolver used `replace(/[/.]/g,'-')`, which KEPT the underscore →
+    // `-home-u-my_proj` → a dir the daemon never wrote → search silently
+    // returned []. The exact resolver dashes the `_` like core's sanitizeCwd,
+    // matching the daemon's actual write path.
+    expect(resolveChatsDir('/home/u/my_proj', {})).toBe(
+      join(homedir(), '.qwen', 'projects', '-home-u-my-proj', 'chats'),
+    );
+  });
 });
 
 describe('isValidSessionId / SESSION_FILE_RE', () => {

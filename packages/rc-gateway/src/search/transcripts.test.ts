@@ -6,9 +6,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { searchTranscripts, resolveChatsDir } from './transcripts.js';
+import { searchTranscripts } from './transcripts.js';
 
 interface Rec {
   uuid: string;
@@ -52,20 +52,6 @@ function writeJsonl(name: string, recs: Array<Rec | string>): void {
     .join('\n');
   writeFileSync(join(dir, name), lines + '\n');
 }
-
-describe('resolveChatsDir', () => {
-  it('encodes the whole cwd into one dir segment (slashes → dashes)', () => {
-    expect(resolveChatsDir('/home/u/proj')).toBe(
-      join(homedir(), '.qwen', 'projects', '-home-u-proj', 'chats'),
-    );
-  });
-
-  it('encodes dots as dashes too (the /. → -- case)', () => {
-    expect(resolveChatsDir('/home/u/.x')).toBe(
-      join(homedir(), '.qwen', 'projects', '-home-u--x', 'chats'),
-    );
-  });
-});
 
 describe('searchTranscripts', () => {
   it('AND-matches all whitespace terms (case-insensitive)', async () => {

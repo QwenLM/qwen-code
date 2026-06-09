@@ -5,7 +5,6 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /** One search result: a matched transcript record. */
@@ -67,21 +66,10 @@ function collectStrings(value: unknown, out: string[], budget = 200): void {
 
 const SNIPPET_MAX = 200;
 
-/**
- * The on-disk chats dir for a workspace cwd. The daemon encodes the whole cwd
- * into ONE directory segment by replacing every '/' and '.' with '-'. This is
- * the ONLY place a filesystem path is derived, and only from the trusted
- * daemon-reported workspaceCwd (never from user query input).
- */
-export function resolveChatsDir(workspaceCwd: string): string {
-  return join(
-    homedir(),
-    '.qwen',
-    'projects',
-    workspaceCwd.replace(/[/.]/g, '-'),
-    'chats',
-  );
-}
+// The on-disk chats dir for a workspace cwd is derived by `resolveChatsDir` in
+// `../sessions/chatsPath.ts` (the exact, daemon-byte-identical resolver, proven
+// against the real daemon by the fork e2e). `searchTranscripts` below takes the
+// already-resolved dir; it never derives a path itself.
 
 /** Concatenated searchable text of a record's message parts. */
 function recordText(rec: TranscriptRecord): string {

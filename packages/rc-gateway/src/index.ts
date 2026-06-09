@@ -88,16 +88,17 @@ export {
 export { createRoutingRouter } from './routes/routing.js';
 export {
   searchTranscripts,
-  resolveChatsDir,
   type SearchHit,
   type SearchOptions,
 } from './search/transcripts.js';
 export { createSearchRoute } from './routes/search.js';
 export { createForkRoute, type ForkRouteDeps } from './routes/fork.js';
 export {
-  // Aliased to avoid colliding with the (legacy, approximate) resolveChatsDir
-  // re-exported above from search/transcripts.js. This is the corrected,
-  // sanitizeCwd/runtime-base-exact resolver used by the fork route + e2e.
+  // The single canonical chats-path resolver: sanitizeCwd + runtime-base exact,
+  // byte-identical to the daemon's write path (proven by the fork e2e). Used by
+  // the search route, the fork route, and the e2e. `resolveForkChatsDir` is a
+  // back-compat alias kept only so scripts/rc-gateway-e2e.mjs stays untouched.
+  resolveChatsDir,
   resolveChatsDir as resolveForkChatsDir,
   isValidSessionId,
   SESSION_FILE_RE,
