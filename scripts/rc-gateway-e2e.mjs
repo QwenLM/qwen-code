@@ -6,7 +6,14 @@
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  existsSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +30,7 @@ import {
   APPROVE,
   WRITE,
   OWNER,
+  resolveForkChatsDir,
 } from '../packages/rc-gateway/dist/index.js';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -35,6 +43,11 @@ const workspace = mkdtempSync(join(tmpdir(), 'rc-e2e-ws-'));
 // gateway's on-demand loader picks it up from <workspaceCwd>/.qwen/commands.
 const cmdDir = join(workspace, '.qwen', 'commands');
 const cmdFile = join(cmdDir, 'echo.md');
+
+// Session-fork (cycle 21) transcript files written under the REAL
+// ~/.qwen/.../chats dir (outside the repo) — tracked here so the finally
+// block removes them and never pollutes the user's real sessions.
+const forkArtifacts = [];
 
 let pass = 0;
 let fail = 0;
@@ -103,6 +116,14 @@ const cleanup = async () => {
     rmSync(cmdFile, { force: true });
   } catch {
     /* ignore */
+  }
+  // Remove the fork transcript files written under the real ~/.qwen chats dir.
+  for (const f of forkArtifacts) {
+    try {
+      rmSync(f, { force: true });
+    } catch {
+      /* ignore */
+    }
   }
 };
 
@@ -620,6 +641,146 @@ try {
     nr.status === 401
       ? ok('GET /rc/commands without token -> 401')
       : bad(`commands no-token ${nr.status}`);
+  }
+
+  // Session forking (cycle 21): THE drift detector. Write a real parent
+  // transcript into the REAL daemon's derived chats dir, POST the fork, then
+  // assert the fork (a) responds 200, (b) has a JSONL on disk, and — the
+  // make-or-break signal — (c) APPEARS in listWorkspaceSessions, which proves
+  // the real daemon restored our gateway-written file by path (loadSession
+  // resolves purely by path; a 502 here would mean loadSession rejected the
+  // fabricated record; a 404 would mean the chats-dir derivation diverged).
+  {
+    // Single source of truth: derive the chats dir from the daemon's REPORTED
+    // workspaceCwd (it may realpath/normalize the --workspace arg), and use the
+    // SAME string for the fabricated record's cwd so loadSession's ownership
+    // re-check passes.
+    const caps = await dc.capabilities();
+    const wsCwd = caps.workspaceCwd;
+    const chatsDir = resolveForkChatsDir(wsCwd);
+    mkdirSync(chatsDir, { recursive: true });
+
+    const parentId = randomUUID();
+    const parentPath = join(chatsDir, `${parentId}.jsonl`);
+    forkArtifacts.push(parentPath);
+    const parentRecord = {
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: parentId,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: wsCwd,
+      version: '0.0.0',
+      message: { role: 'user', parts: [{ text: 'hello from e2e parent' }] },
+    };
+    writeFileSync(parentPath, JSON.stringify(parentRecord) + '\n', {
+      mode: 0o600,
+    });
+
+    // A write-scoped token forks.
+    const { code: fc } = pairing.mint([SESSION_READ, WRITE]);
+    const frr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: fc, label: 'forker' }),
+    });
+    const forkToken = (await frr.json()).token;
+
+    const fr = await fetch(`${gw}/rc/session/${parentId}/fork`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${forkToken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    const fb = await fr.json().catch(() => ({}));
+    let newId;
+    if (
+      fr.status === 200 &&
+      typeof fb.sessionId === 'string' &&
+      fb.parentSessionId === parentId &&
+      typeof fb.forkedAt === 'string'
+    ) {
+      newId = fb.sessionId;
+      forkArtifacts.push(join(chatsDir, `${newId}.jsonl`));
+      ok(`fork POST -> 200 {sessionId, parentSessionId, forkedAt}`);
+    } else {
+      bad(
+        `fork POST ${fr.status} ${JSON.stringify(fb)} ` +
+          `(502 = loadSession rejected the fabricated record; ` +
+          `404 = chats-dir derivation diverged = DRIFT DETECTOR FIRING)`,
+      );
+    }
+
+    // (b) The fork's JSONL exists on disk.
+    if (newId) {
+      existsSync(join(chatsDir, `${newId}.jsonl`))
+        ? ok('fork JSONL written to the derived chats dir')
+        : bad('fork JSONL missing on disk');
+    }
+
+    // (c) THE make-or-break signal: the fork appears in listWorkspaceSessions,
+    //     proving the real daemon restored our gateway-written file by path.
+    if (newId) {
+      try {
+        const summaries = await dc.listWorkspaceSessions(wsCwd);
+        summaries.some((s) => s.sessionId === newId)
+          ? ok(
+              'RESTORE-BY-PATH: fork appears in listWorkspaceSessions ' +
+                '(real daemon restored our gateway-written file)',
+            )
+          : bad(
+              'RESTORE-BY-PATH FAILED: fork NOT in listWorkspaceSessions ' +
+                `(restored ids: ${JSON.stringify(summaries.map((s) => s.sessionId))})`,
+            );
+      } catch (e) {
+        bad(`listWorkspaceSessions threw: ${e?.message ?? e}`);
+      }
+    }
+
+    // Error case: forking an unknown parent -> 404 parent_transcript_not_found.
+    {
+      const ur = await fetch(`${gw}/rc/session/${randomUUID()}/fork`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${forkToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      const ub = await ur.json().catch(() => ({}));
+      ur.status === 404 && ub.code === 'parent_transcript_not_found'
+        ? ok('fork unknown parent -> 404 parent_transcript_not_found')
+        : bad(`fork unknown parent ${ur.status} ${JSON.stringify(ub)}`);
+    }
+
+    // Error case: forking without a token -> 401.
+    {
+      const nr = await fetch(`${gw}/rc/session/${parentId}/fork`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      nr.status === 401
+        ? ok('fork without token -> 401')
+        : bad(`fork no-token ${nr.status}`);
+    }
+
+    // Error case: forking with a session:read-only token -> 403 (WRITE gate).
+    {
+      const wr = await fetch(`${gw}/rc/session/${parentId}/fork`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${userToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      wr.status === 403
+        ? ok('fork with insufficient (session:read) token -> 403')
+        : bad(`fork insufficient-scope ${wr.status}`);
+    }
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
