@@ -95,7 +95,7 @@ export const DiscoverTab = ({
   // the tab bar, header, search box, scroll hints, status and footer.
   const visibleCount = Math.max(
     3,
-    Math.min(8, Math.floor(((rows || 24) - 13) / 3)),
+    Math.min(6, Math.floor(((rows || 24) - 13) / 3)),
   );
 
   const extensionManager = config.getExtensionManager();
