@@ -19,6 +19,10 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
+**Terminal gate exception:** if Stage 1a template check fails, submit exactly
+one `CHANGES_REQUESTED` review and stop. Do not also post or update a Stage 1
+issue comment, and do not continue to Stage 2, Stage 3, or approval.
+
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
 ```bash
@@ -49,7 +53,7 @@ This is the most important stage — catch problems before anyone spends time re
 
 **1a. Template check:**
 
-PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop.
+PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop. This is the only public output for this terminal gate.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
@@ -119,7 +123,8 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 — _Qwen Code · qwen3.7-max_
 ```
 
-Save this comment's ID. If template fails or direction is escalated → stop here.
+Save this comment's ID. If direction is escalated → stop here. Template
+failures already stopped in Stage 1a.
 
 ### Stage 2: Review + Test
 
