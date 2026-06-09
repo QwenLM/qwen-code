@@ -1588,6 +1588,14 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
       expect(client['lastInjectedDate']).toBeUndefined();
     });
+
+    it('resets Hook microcompaction checkpoint', async () => {
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      await client.resetChat();
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
   });
 
   describe('history mutation invalidates FileReadCache', () => {
@@ -1828,6 +1836,25 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastApiCompletionTimestamp']).toBeNull();
+    });
+
+    it('seeds Hook microcompaction checkpoint on user turns', async () => {
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-hook-seed',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
     });
   });
 
