@@ -182,3 +182,5 @@ export {
   truncateContent,
   clearDetailedSpanState,
 } from './detailed-span-attributes.js';
+export { getTraceContext, formatTraceparent, ZERO_TRACE_ID } from './trace-context.js';
+export type { TraceContext } from './trace-context.js';
