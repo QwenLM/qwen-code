@@ -20,6 +20,16 @@ export function getStableClientId(clientId: string | undefined): string {
   }
 }
 
+export function persistStableClientId(clientId: string | undefined): void {
+  if (!clientId || typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(WEBUI_CLIENT_ID_KEY, clientId);
+  } catch {
+    // Best-effort persistence only. Private-mode or quota failures should not
+    // break an already attached daemon session.
+  }
+}
+
 export async function detachDaemonClient(opts: {
   baseUrl: string;
   token?: string;

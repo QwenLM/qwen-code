@@ -7,7 +7,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
+import {
+  detachDaemonClient,
+  getStableClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 
 describe('getStableClientId', () => {
   beforeEach(() => {
@@ -33,6 +37,28 @@ describe('getStableClientId', () => {
   it('does not use localStorage (multi-tab isolation)', () => {
     getStableClientId(undefined);
     expect(window.localStorage.getItem('qwen-code-webui-client-id')).toBeNull();
+  });
+});
+
+describe('persistStableClientId', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  it('persists daemon-issued client ID for later reconnects', () => {
+    const initial = getStableClientId(undefined);
+    expect(initial).toMatch(/^webui_/);
+
+    persistStableClientId('client-daemon');
+
+    expect(getStableClientId(undefined)).toBe('client-daemon');
+  });
+
+  it('ignores missing client ID', () => {
+    persistStableClientId(undefined);
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
   });
 });
 

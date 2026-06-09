@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../adapters/types';
-import { groupParallelAgents } from './MessageList';
+import { getDisplayItemVirtualKey, groupParallelAgents } from './MessageList';
 
 function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
   return {
@@ -151,5 +151,24 @@ describe('groupParallelAgents', () => {
     expect(items[1].type).toBe('parallel_agents');
     expect(items[2].type).toBe('message');
     expect(items[3].type).toBe('message');
+  });
+});
+
+describe('getDisplayItemVirtualKey', () => {
+  it('keeps message and grouped rows in separate key namespaces', () => {
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'message',
+        key: 'header',
+        message: makeUserMessage('header'),
+      }),
+    ).toBe('msg:header');
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'parallel_agents',
+        key: 'header',
+        agents: [makeAgentToolGroup('a').tools[0]],
+      }),
+    ).toBe('group:header');
   });
 });

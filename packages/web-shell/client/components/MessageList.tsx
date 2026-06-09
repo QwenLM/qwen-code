@@ -195,6 +195,12 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   return items;
 }
 
+export function getDisplayItemVirtualKey(item: DisplayItem): string {
+  return item.type === 'parallel_agents'
+    ? `group:${item.key}`
+    : `msg:${item.key}`;
+}
+
 const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
@@ -316,13 +322,17 @@ export function MessageList({
     count: totalCount,
     getScrollElement: () => containerRef.current,
     getItemKey: (index) => {
-      if (hasHeader && index === HEADER_INDEX) return 'header';
+      if (hasHeader && index === HEADER_INDEX) return 'slot:header';
       if (hasTailApproval && index === tailApprovalIndex) {
-        return pendingApproval ? `approval-${pendingApproval.id}` : 'approval';
+        return pendingApproval
+          ? `slot:approval:${pendingApproval.id}`
+          : 'slot:approval';
       }
-      if (hasTailContent && index === tailContentIndex) return tailKey;
+      if (hasTailContent && index === tailContentIndex) {
+        return `slot:tail:${tailKey}`;
+      }
       const item = displayItems[index - headerOffset];
-      return item?.key ?? `row-${index}`;
+      return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
     },
     estimateSize: (index) => {
       if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;

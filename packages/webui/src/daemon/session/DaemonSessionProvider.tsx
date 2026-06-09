@@ -31,7 +31,11 @@ import {
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
 import { createDaemonSessionActions } from './actions.js';
-import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
+import {
+  detachDaemonClient,
+  getStableClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -275,6 +279,10 @@ export function DaemonSessionProvider({
                     },
                     clientIdRef.current,
                   );
+            if (!clientId && nextSession.clientId) {
+              clientIdRef.current = nextSession.clientId;
+              persistStableClientId(nextSession.clientId);
+            }
             if (disposed || abort.signal.aborted) {
               void detachDaemonClient({
                 baseUrl: resolvedBaseUrl!,
@@ -757,6 +765,7 @@ export function DaemonSessionProvider({
     restoreMode,
     restoreSessionNonce,
     newSessionNonce,
+    clientId,
   ]);
 
   useEffect(() => {
