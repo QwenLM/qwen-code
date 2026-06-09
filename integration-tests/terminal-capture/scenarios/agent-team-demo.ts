@@ -170,10 +170,18 @@ async function main(): Promise<void> {
     await press(ARROW.up); // release tab-bar focus
 
     // ── Phase C: stream reports → combined summary → cleanup ──
+    // The leader sits idle (no Main-view output) while teammates read
+    // their files, so this stretch captures no frames until a report
+    // lands. `maxPolls` is therefore the real wall-clock budget: it must
+    // outlast the *slowest* scout plus the combined summary and delete,
+    // or the GIF cuts off mid-run. ~200 polls (~5min) tolerates glm-5.1's
+    // per-teammate latency variance; the loop exits early the instant it
+    // sees `deleted`, and idle polls capture no frames, so a generous cap
+    // doesn't bloat the GIF.
     await stream('deleted', {
       intervalMs: 1400,
-      maxFrames: 34,
-      maxPolls: 80,
+      maxFrames: 40,
+      maxPolls: 200,
     });
     await terminal.idle(1500, 8000);
     await snap('slow'); // final consolidated state (scrolled to live bottom)
