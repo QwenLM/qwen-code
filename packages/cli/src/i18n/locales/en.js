@@ -224,6 +224,8 @@ export default {
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    'Fast context compression without AI. Strips old tool outputs and thinking parts.',
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',

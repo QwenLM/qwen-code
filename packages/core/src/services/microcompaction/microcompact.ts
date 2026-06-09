@@ -266,6 +266,9 @@ export interface MicrocompactMeta {
  * Microcompact history: clear old compactable tool results when the
  * time-based trigger fires.
  *
+ * Pass `opts.force: true` to skip the time-based trigger check and
+ * always run the clearing logic (used by `/compress-fast`).
+ *
  * Returns the (potentially modified) history and optional metadata
  * about what was cleared (for logging by the caller).
  */
@@ -273,11 +276,11 @@ export function microcompactHistory(
   history: Content[],
   lastApiCompletionTimestamp: number | null,
   settings: ClearContextOnIdleSettings,
+  opts?: { force?: boolean },
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const trigger = evaluateTimeBasedTrigger(
-    lastApiCompletionTimestamp,
-    settings,
-  );
+  const trigger = opts?.force
+    ? { gapMs: 0 }
+    : evaluateTimeBasedTrigger(lastApiCompletionTimestamp, settings);
   if (!trigger) {
     return { history };
   }

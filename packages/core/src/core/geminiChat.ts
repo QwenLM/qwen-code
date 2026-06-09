@@ -53,7 +53,14 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
-import { estimatePromptTokens } from '../services/tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from '../services/tokenEstimation.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -1487,6 +1494,64 @@ export class GeminiChat {
     }
 
     return info;
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   *
+   * Force-runs microcompaction (clear old tool results + media, keep recent N)
+   * then strips thinking parts from all model turns.
+   */
+  compressFast(): {
+    info: ChatCompressionInfo;
+    microcompactMeta?: MicrocompactMeta;
+  } {
+    const beforeTokens = this.lastPromptTokenCount;
+
+    // Step 1: force microcompaction (clear old tool results + media)
+    const mcResult = microcompactHistory(
+      this.history,
+      null,
+      this.config.getClearContextOnIdle(),
+      { force: true },
+    );
+    const mcMeta = mcResult.meta;
+
+    // Step 2: strip thinking parts from model turns
+    const newHistory = mcResult.history
+      .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
+      .filter((c): c is Content => c !== null);
+
+    const afterTokens = estimateContentTokens(newHistory);
+
+    if (afterTokens >= beforeTokens) {
+      return {
+        info: {
+          originalTokenCount: beforeTokens,
+          newTokenCount: beforeTokens,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    const info: ChatCompressionInfo = {
+      originalTokenCount: beforeTokens,
+      newTokenCount: afterTokens,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      triggerReason: 'manual',
+    };
+
+    this.chatRecordingService?.recordChatCompression({
+      info,
+      compressedHistory: newHistory,
+    });
+    this.setHistory(newHistory);
+    clearDetailedSpanState();
+    this.lastPromptTokenCount = afterTokens;
+    this.telemetryService?.setLastPromptTokenCount(afterTokens);
+    this.consecutiveFailures = 0;
+
+    return { info, microcompactMeta: mcMeta };
   }
 
   setSystemInstruction(sysInstr: string) {

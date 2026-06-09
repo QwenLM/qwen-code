@@ -2397,4 +2397,48 @@ export class GeminiClient {
     }
     return info;
   }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * FileReadCache disarming.
+   */
+  async tryCompressChatFast(): Promise<ChatCompressionInfo> {
+    const { info, microcompactMeta } = this.getChat().compressFast();
+
+    if (info.compressionStatus !== CompressionStatus.COMPRESSED) {
+      return info;
+    }
+
+    // Lightweight: setHistory() already called in compressFast().
+    // Reuse microcompaction's surgical FileReadCache disarm pattern.
+    const m = microcompactMeta;
+    const fileReadCache = this.config.getFileReadCache();
+    if (m && m.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after compress-fast ` +
+          `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+    } else if (m && m.evictedReadPaths.length > 0) {
+      const statResults = await Promise.all(
+        m.evictedReadPaths.map((p) =>
+          fsPromises.stat(p).catch(() => undefined),
+        ),
+      );
+      let fullyDisarmed = true;
+      for (const stats of statResults) {
+        if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+          fullyDisarmed = false;
+        }
+      }
+      if (!fullyDisarmed) {
+        fileReadCache.clear();
+      }
+    }
+    this.forceFullIdeContext = true;
+
+    this.getChat().setLastPromptTokenCount(info.newTokenCount);
+    return info;
+  }
 }
