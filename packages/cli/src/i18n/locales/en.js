@@ -8,6 +8,134 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  // ==========================================================================
+  // Extensions manager dialog (Installed / Discover / Sources tabs)
+  // ==========================================================================
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab to clear)',
+  '"{{name}}" {{state}}.': '"{{name}}" {{state}}.',
+  '(Tab / ←→ to switch)': '(Tab / ←→ to switch)',
+  '+ Add new marketplace': '+ Add new marketplace',
+  '+ Install new extension': '+ Install new extension',
+  Actions: 'Actions',
+  'Add Marketplace': 'Add Marketplace',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    'Add a marketplace in the Sources tab to discover extensions.',
+  'Add new': 'Add new',
+  'Add to Favorites': 'Add to Favorites',
+  'Added "{{name}}" to favorites.': 'Added "{{name}}" to favorites.',
+  'Added marketplace "{{name}}".': 'Added marketplace "{{name}}".',
+  'Adding...': 'Adding...',
+  'Back to extension list': 'Back to extension list',
+  'Browse extensions ({{count}})': 'Browse extensions ({{count}})',
+  'By: {{a}}': 'By: {{a}}',
+  'Change scope': 'Change scope',
+  'Change scope for "{{name}}":': 'Change scope for "{{name}}":',
+  'Checked "{{name}}" for updates.': 'Checked "{{name}}" for updates.',
+  'Claude plugin marketplace': 'Claude plugin marketplace',
+  Commands: 'Commands',
+  'Components:': 'Components:',
+  'Could not load this marketplace.': 'Could not load this marketplace.',
+  'Current: {{scope}}': 'Current: {{scope}}',
+  Disabled: 'Disabled',
+  Discover: 'Discover',
+  'Discover extensions': 'Discover extensions',
+  'Discovering extensions...': 'Discovering extensions...',
+  'Enter extension source:': 'Enter extension source:',
+  'Enter marketplace source (Claude format):':
+    'Enter marketplace source (Claude format):',
+  'Examples:': 'Examples:',
+  'Extension details': 'Extension details',
+  'Extension v{{version}}': 'Extension v{{version}}',
+  'Extensions are not available in this environment.':
+    'Extensions are not available in this environment.',
+  'Failed to open {{url}}': 'Failed to open {{url}}',
+  Favorites: 'Favorites',
+  'Global (User Scope)': 'Global (User Scope)',
+  'Install Extension': 'Install Extension',
+  'Install for all collaborators on this repository (project scope)':
+    'Install for all collaborators on this repository (project scope)',
+  'Install for you (user scope)': 'Install for you (user scope)',
+  'Install for you, in this repo only (local scope)':
+    'Install for you, in this repo only (local scope)',
+  'Install {{count}} extension(s) to which scope?':
+    'Install {{count}} extension(s) to which scope?',
+  Installed: 'Installed',
+  'Installed extension "{{name}}".': 'Installed extension "{{name}}".',
+  'Installed extensions ({{count}}):': 'Installed extensions ({{count}}):',
+  'Installed {{count}} extension(s).': 'Installed {{count}} extension(s).',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    'Installed {{ok}}, failed {{fail}}: {{detail}}',
+  'Installing...': 'Installing...',
+  'Last updated: {{date}}': 'Last updated: {{date}}',
+  Local: 'Local',
+  'Local (Only You)': 'Local (Only You)',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}.',
+  'MCP Server': 'MCP Server',
+  'MCP servers': 'MCP servers',
+  'Mark for Update': 'Mark for Update',
+  Marketplaces: 'Marketplaces',
+  'No extensions discovered.': 'No extensions discovered.',
+  'No extensions match your search.': 'No extensions match your search.',
+  'No extensions or marketplaces added yet.':
+    'No extensions or marketplaces added yet.',
+  'No homepage available.': 'No homepage available.',
+  'No installable extensions selected.': 'No installable extensions selected.',
+  'No plugins or MCP servers installed.':
+    'No plugins or MCP servers installed.',
+  None: 'None',
+  'Note: Uninstall permanently removes this extension.':
+    'Note: Uninstall permanently removes this extension.',
+  'Open homepage': 'Open homepage',
+  'Project (All Collaborators)': 'Project (All Collaborators)',
+  'Remove from Favorites': 'Remove from Favorites',
+  'Remove marketplace': 'Remove marketplace',
+  'Remove marketplace "{{name}}"?': 'Remove marketplace "{{name}}"?',
+  'Removed "{{name}}" from favorites.': 'Removed "{{name}}" from favorites.',
+  'Removed marketplace "{{name}}".': 'Removed marketplace "{{name}}".',
+  'Scope:': 'Scope:',
+  'Set "{{name}}" scope to {{scope}}.': 'Set "{{name}}" scope to {{scope}}.',
+  Sources: 'Sources',
+  'Transport:': 'Transport:',
+  'Type to search · Space to toggle · Enter to view · Esc to go back':
+    'Type to search · Space to toggle · Enter to view · Esc to go back',
+  Uninstall: 'Uninstall',
+  'Uninstalled "{{name}}".': 'Uninstalled "{{name}}".',
+  'Update Now': 'Update Now',
+  'Update marketplace': 'Update marketplace',
+  'Update marketplace (last updated {{date}})':
+    'Update marketplace (last updated {{date}})',
+  'Updated "{{name}}".': 'Updated "{{name}}".',
+  'Updated marketplace "{{name}}".': 'Updated marketplace "{{name}}".',
+  'Use the Discover tab to find and install plugins.':
+    'Use the Discover tab to find and install plugins.',
+  'Version: {{v}}': 'Version: {{v}}',
+  'Will install:': 'Will install:',
+  'Would open: {{url}}': 'Would open: {{url}}',
+  'Y/Enter to confirm · N/Esc to cancel':
+    'Y/Enter to confirm · N/Esc to cancel',
+  'from {{marketplace}}': 'from {{marketplace}}',
+  installed: 'installed',
+  '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Commands': '{{count}} Commands',
+  '{{count}} MCP': '{{count}} MCP',
+  '{{count}} Skills': '{{count}} Skills',
+  '{{count}} available extensions': '{{count}} available extensions',
+  '↑ more above': '↑ more above',
+  '↑↓ navigate · Enter details · Esc close':
+    '↑↓ navigate · Enter details · Esc close',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ navigate · Enter open · d remove marketplace · Esc close',
+  '↑↓ navigate · Enter select · Esc close':
+    '↑↓ navigate · Enter select · Esc close',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ navigate · Enter select · d remove marketplace · Esc close',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
+  '↓ more below': '↓ more below',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================

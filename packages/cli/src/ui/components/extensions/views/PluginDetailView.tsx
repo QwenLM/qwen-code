@@ -149,9 +149,6 @@ export const PluginDetailView = ({
           showNumbers={false}
           onSelect={onAction}
         />
-        <Text color={theme.status.error}>
-          {t('Note: Uninstall permanently removes this extension.')}
-        </Text>
       </Box>
     </Box>
   );

@@ -57,8 +57,8 @@ export function UninstallConfirmStep({
           name: selectedExtension.name,
         })}
       </Text>
-      <Text color={theme.text.secondary}>
-        {t('This action cannot be undone.')}
+      <Text color={theme.status.error}>
+        {t('Note: Uninstall permanently removes this extension.')}
       </Text>
     </Box>
   );
