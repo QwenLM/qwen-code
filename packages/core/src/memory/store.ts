@@ -11,6 +11,8 @@ import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import {
   AUTO_MEMORY_SCHEMA_VERSION,
@@ -84,6 +86,31 @@ export async function readAutoMemoryIndex(
 ): Promise<string | null> {
   try {
     return await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Ensure the user-level (cross-project) auto-memory dir + empty index exist.
+ * Unlike the per-project scaffold, this does NOT seed meta.json or
+ * extract-cursor.json — user memory has no per-project state to track.
+ */
+export async function ensureUserAutoMemoryScaffold(): Promise<void> {
+  await fs.mkdir(getUserAutoMemoryRoot(), { recursive: true });
+  await writeFileIfMissing(
+    getUserAutoMemoryIndexPath(),
+    createDefaultAutoMemoryIndex(),
+  );
+}
+
+export async function readUserAutoMemoryIndex(): Promise<string | null> {
+  try {
+    return await fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8');
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {

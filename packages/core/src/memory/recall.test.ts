@@ -20,6 +20,11 @@ vi.mock('./scan.js', async (importOriginal) => {
   return {
     ...actual,
     scanAutoMemoryTopicDocuments: vi.fn(),
+    // Explicit mock — recall now unions user-level docs into the pool, so
+    // leaving this on the real implementation would silently fall through
+    // to the filesystem (only "works" because the path doesn't exist and
+    // listMarkdownFiles swallows ENOENT). Defaults to an empty pool.
+    scanUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
   };
 });
 

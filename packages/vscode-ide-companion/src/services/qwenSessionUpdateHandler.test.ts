@@ -20,6 +20,7 @@ describe('QwenSessionUpdateHandler', () => {
       onThoughtChunk: vi.fn(),
       onToolCall: vi.fn(),
       onPlan: vi.fn(),
+      onMessage: vi.fn(),
       onModeChanged: vi.fn(),
       onModelChanged: vi.fn(),
       onUsageUpdate: vi.fn(),
@@ -60,6 +61,80 @@ describe('QwenSessionUpdateHandler', () => {
       handler.handleSessionUpdate(messageUpdate);
 
       expect(mockCallbacks.onStreamChunk).toHaveBeenCalledWith('Hello, world!');
+    });
+
+    it('routes background notification chunks as discrete assistant messages', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Background agent "worker" completed.',
+          },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 1234,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onMessage).toHaveBeenCalledWith({
+        role: 'assistant',
+        content: 'Background agent "worker" completed.',
+        timestamp: 1234,
+        source: 'background_notification',
+        sessionId: 'test-session',
+      });
+      expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
+    });
+
+    it('forwards the originating sessionId on discrete messages so the receiver can attribute notifications to the owning conversation', () => {
+      const messageUpdate: SessionNotification = {
+        sessionId: 'session-A',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Task done.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 5000,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      expect(mockCallbacks.onMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'session-A' }),
+      );
+    });
+
+    it('omits sessionId on the emitted message when the notification has no sessionId', () => {
+      const messageUpdate: SessionNotification = {
+        // Cast: SessionNotification.sessionId is required by the SDK type but
+        // we want to verify defensive handling if a malformed update arrives.
+        sessionId: undefined as unknown as string,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'No session id.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            timestamp: 7000,
+          },
+        },
+      };
+
+      handler.handleSessionUpdate(messageUpdate);
+
+      const onMessage = vi.mocked(mockCallbacks.onMessage!);
+      const call = onMessage.mock.calls[0]?.[0];
+      expect(call).toBeDefined();
+      expect(call).not.toHaveProperty('sessionId');
     });
 
     it('emits usage metadata when present', () => {

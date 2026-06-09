@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core';
+import {
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type {
   CommandContext,
@@ -40,9 +43,17 @@ export const rememberCommand: SlashCommand = {
       };
     }
 
-    if (config.getManagedAutoMemoryEnabled()) {
-      const memoryDir = getAutoMemoryRoot(config.getProjectRoot());
-      const dirHint = ` Save it to \`${memoryDir}\`.`;
+    const useManagedMemory = config?.getManagedAutoMemoryEnabled() ?? false;
+
+    if (useManagedMemory) {
+      const projectDir = config
+        ? getAutoMemoryRoot(config.getProjectRoot())
+        : undefined;
+      const userDir = getUserAutoMemoryRoot();
+      const dirHint =
+        projectDir !== undefined
+          ? ` Choose the destination directory by the type's \`<scope>\`: USER memory at \`${userDir}\` for cross-project facts, PROJECT memory at \`${projectDir}\` for this-project-only facts.`
+          : '';
       return {
         type: 'submit_prompt',
         content: `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${fact}`,

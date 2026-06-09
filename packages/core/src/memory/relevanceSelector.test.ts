@@ -48,7 +48,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
 
   it('returns documents chosen by the side-query selector', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['user.md'],
+      selected_memories: ['/tmp/user.md'],
     });
 
     const result = await selectRelevantAutoMemoryDocumentsByModel(
@@ -179,10 +179,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     ).toBe(false);
   });
 
-  it('throws when selector returns unknown relative paths', async () => {
+  it('throws when selector returns unknown file paths', async () => {
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
       const error = options.validate?.({
-        selected_memories: ['unknown.md'],
+        selected_memories: ['/tmp/unknown.md'],
       });
       if (error) {
         throw new Error(error);
@@ -197,6 +197,54 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         docs,
         2,
       ),
-    ).rejects.toThrow('Recall selector returned unknown relative path');
+    ).rejects.toThrow('Recall selector returned unknown file path');
+  });
+
+  it('distinguishes docs with identical relativePath across scopes', async () => {
+    // Regression for the dual-scope dedupe bug — same `user/role.md` exists in
+    // both project-level and user-level memory dirs. Keying by relativePath
+    // collapsed them; keying by filePath (absolute, unique) must surface both.
+    const dualScopeDocs: ScannedAutoMemoryDocument[] = [
+      {
+        type: 'user',
+        filePath: '/qwen/projects/proj/memory/user/role.md',
+        relativePath: 'user/role.md',
+        filename: 'role.md',
+        title: 'Project User',
+        description: 'Project-scoped user note',
+        body: '- Project-specific.',
+        mtimeMs: 1,
+      },
+      {
+        type: 'user',
+        filePath: '/qwen/memories/user/role.md',
+        relativePath: 'user/role.md',
+        filename: 'role.md',
+        title: 'Cross-Project User',
+        description: 'User-scoped cross-project note',
+        body: '- Applies everywhere.',
+        mtimeMs: 2,
+      },
+    ];
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [
+        '/qwen/projects/proj/memory/user/role.md',
+        '/qwen/memories/user/role.md',
+      ],
+    });
+
+    const result = await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'who is the user',
+      dualScopeDocs,
+      5,
+      [],
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result.map((d) => d.filePath)).toEqual([
+      '/qwen/projects/proj/memory/user/role.md',
+      '/qwen/memories/user/role.md',
+    ]);
   });
 });

@@ -14,17 +14,29 @@ import {
 } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
-import { QWEN_DIR } from './paths.js';
+import { isSubpath, QWEN_DIR } from './paths.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
 import { findProjectRoot } from './projectRoot.js';
 import { loadRules, type RuleFile } from './rulesDiscovery.js';
+import type {
+  InstructionLoadReason,
+  InstructionMemoryType,
+} from '../hooks/types.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
 
 interface GeminiFileContent {
   filePath: string;
   content: string | null;
+}
+
+export interface InstructionsLoadedNotification {
+  filePath: string;
+  memoryType: InstructionMemoryType;
+  loadReason: InstructionLoadReason;
+  triggerFilePath?: string;
+  parentFilePath?: string;
 }
 
 async function getGeminiMdFilePathsInternal(
@@ -203,10 +215,27 @@ async function getGeminiMdFilePathsInternalForEachDir(
 async function readGeminiMdFiles(
   filePaths: string[],
   importFormat: 'flat' | 'tree' = 'tree',
+  getMemoryType: (filePath: string) => InstructionMemoryType,
+  onInstructionsLoaded?: (
+    notification: InstructionsLoadedNotification,
+  ) => void | Promise<void>,
+  loadReason: Exclude<InstructionLoadReason, 'include'> = 'session_start',
 ): Promise<GeminiFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 20; // Higher limit for file reads as they're typically faster
   const results: GeminiFileContent[] = [];
+  const notifyInstructionsLoaded = async (
+    notification: InstructionsLoadedNotification,
+  ) => {
+    try {
+      await onInstructionsLoaded?.(notification);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        `InstructionsLoaded notification failed for ${notification.filePath}: ${message}`,
+      );
+    }
+  };
 
   for (let i = 0; i < filePaths.length; i += CONCURRENT_LIMIT) {
     const batch = filePaths.slice(i, i + CONCURRENT_LIMIT);
@@ -219,10 +248,33 @@ async function readGeminiMdFiles(
           const processedResult = await processImports(
             content,
             path.dirname(filePath),
-            undefined,
+            {
+              processedFiles: new Set([path.resolve(filePath)]),
+              maxDepth: 5,
+              currentDepth: 0,
+              currentFile: path.resolve(filePath),
+            },
             undefined,
             importFormat,
+            {
+              onFileImported: async (notification) => {
+                const parentFilePath = notification.parentFilePath;
+                await notifyInstructionsLoaded({
+                  filePath: notification.filePath,
+                  // Included files inherit the root instruction file's memory type.
+                  memoryType: getMemoryType(filePath),
+                  loadReason: 'include',
+                  triggerFilePath: filePath,
+                  parentFilePath,
+                });
+              },
+            },
           );
+          await notifyInstructionsLoaded({
+            filePath,
+            memoryType: getMemoryType(filePath),
+            loadReason,
+          });
           logger.debug(
             `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
           );
@@ -296,6 +348,58 @@ export interface LoadServerHierarchicalMemoryResponse {
 
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
+  loadReason?: Exclude<InstructionLoadReason, 'include'>;
+  onInstructionsLoaded?: (
+    notification: InstructionsLoadedNotification,
+  ) => void | Promise<void>;
+}
+
+function createMemoryTypeClassifier(
+  userHomePath: string,
+  foundRoot: string | null,
+  extensionContextFilePaths: string[],
+): (filePath: string) => InstructionMemoryType {
+  const resolvedHome = path.resolve(userHomePath);
+  const globalQwenDir = path.resolve(Storage.getGlobalQwenDir());
+  const resolvedRoot = foundRoot ? path.resolve(foundRoot) : undefined;
+  const extensionPaths = new Set(
+    extensionContextFilePaths.map((filePath) => path.resolve(filePath)),
+  );
+  const extensionRoots = extensionContextFilePaths.map((filePath) =>
+    path.dirname(path.resolve(filePath)),
+  );
+
+  return (filePath) => {
+    const resolvedPath = path.resolve(filePath);
+
+    if (
+      extensionPaths.has(resolvedPath) ||
+      extensionRoots.some((root) => isSubpath(root, resolvedPath))
+    ) {
+      return 'extension';
+    }
+
+    if (resolvedPath.startsWith(`${globalQwenDir}${path.sep}`)) {
+      return 'user';
+    }
+
+    if (
+      resolvedRoot &&
+      resolvedPath === path.join(resolvedRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME)
+    ) {
+      return 'local';
+    }
+
+    if (resolvedRoot && isSubpath(resolvedRoot, resolvedPath)) {
+      return 'project';
+    }
+
+    if (path.dirname(resolvedPath) === resolvedHome) {
+      return 'user';
+    }
+
+    return 'project';
+  };
 }
 
 /**
@@ -374,7 +478,18 @@ export async function loadServerHierarchicalMemory(
   let fileCount = 0;
 
   if (filePaths.length > 0) {
-    const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
+    const loadReason = options.loadReason ?? 'session_start';
+    const contentsWithPaths = await readGeminiMdFiles(
+      filePaths,
+      importFormat,
+      createMemoryTypeClassifier(
+        userHomePath,
+        foundRoot,
+        extensionContextFilePaths,
+      ),
+      options.onInstructionsLoaded,
+      loadReason,
+    );
     // Pass CWD for relative path display in concatenated content
     combinedInstructions = concatenateInstructions(
       contentsWithPaths,

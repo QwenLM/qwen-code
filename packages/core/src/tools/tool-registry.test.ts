@@ -422,6 +422,27 @@ describe('ToolRegistry', () => {
       ]);
     });
 
+    it('getDeferredToolSummary includes MCP server names', () => {
+      const mcpCallable = {} as CallableTool;
+      toolRegistry.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'schedule-server',
+          'cron_list',
+          'list scheduled jobs',
+          {},
+        ),
+      );
+
+      expect(toolRegistry.getDeferredToolSummary()).toEqual([
+        {
+          name: 'mcp__schedule-server__cron_list',
+          description: 'list scheduled jobs',
+          serverName: 'schedule-server',
+        },
+      ]);
+    });
+
     it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {
       // Pin the regression: a server-disconnect-then-reconnect cycle that
       // re-registers a tool of the same name must NOT inherit

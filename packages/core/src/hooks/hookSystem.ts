@@ -34,6 +34,8 @@ import type {
   StopFailureErrorType,
   TodoItem,
   TodoStatus,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -149,6 +151,49 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
+      : undefined;
+  }
+
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireInstructionsLoadedEvent(
+      filePath,
+      memoryType,
+      loadReason,
+      options,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('InstructionsLoaded', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a UserPromptExpansion event after a slash command returns a prompt and
+   * before that expanded prompt is submitted to the model.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireUserPromptExpansionEvent(
+      commandName,
+      commandArgs,
+      prompt,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('UserPromptExpansion', result.finalOutput)
       : undefined;
   }
 

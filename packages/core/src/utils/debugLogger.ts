@@ -21,6 +21,7 @@ export interface DebugLogSession {
 }
 
 export interface DebugLogger {
+  isEnabled: () => boolean;
   debug: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
@@ -240,6 +241,7 @@ export function runWithDebugLogSession<T>(
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {
+    isEnabled: () => getActiveSession() !== null,
     debug: (...args: unknown[]) => {
       const session = getActiveSession();
       if (!session) return;

@@ -11,7 +11,7 @@ import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -198,7 +198,7 @@ export function useStatusLine(): {
   const settings = useSettings();
   const uiState = useUIState();
   const config = useConfig();
-  const { vimEnabled, vimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -393,7 +393,7 @@ export function useStatusLine(): {
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: ui.currentModel || cfg.getModel(),
+        modelDisplayName: cfg.getModelDisplayName(),
         reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
@@ -444,7 +444,7 @@ export function useStatusLine(): {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: cfg.getModelDisplayName(),
       },
       context_window: {
         context_window_size: contextWindowSize,
