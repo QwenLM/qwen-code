@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { VapidStore } from './vapid.js';
 import { PushStore, type PushSubscriptionRecord } from '../pushStore.js';
+import { WebPushError } from 'web-push';
 import { PushSender, type PushTransport } from './sender.js';
 import type { PushPayload } from './payload.js';
 
@@ -128,6 +129,27 @@ describe('PushSender', () => {
     expect(
       audit.calls.some((c) => c.action === 'push_subscription_expired'),
     ).toBe(false);
+  });
+
+  it('thrown WebPushError(403) → mapped to auth error (keep + fail fast)', async () => {
+    // The production path: web-push.sendNotification THROWS a WebPushError on a
+    // non-2xx status rather than returning a code. This exercises the catch →
+    // err.statusCode extraction that makes the real 403 fix work.
+    let calls = 0;
+    const transport: PushTransport = async () => {
+      calls++;
+      throw new WebPushError('Forbidden', 403, {}, '', '');
+    };
+    const sender = new PushSender(vapid, store, audit, { transport, ...FAST });
+    await sender.send(record, PAYLOAD);
+    expect(calls).toBe(1);
+    expect(store.get(record.id)).toBeDefined();
+    const failed = audit.calls.filter((c) => c.action === 'push_send_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].detail).toMatchObject({
+      statusCode: 403,
+      reason: 'auth_error',
+    });
   });
 
   it('503 then 201 → retried then push_sent', async () => {
