@@ -64,7 +64,6 @@ async function handleNew(args: NewArgs) {
       const extensionName = basename(args.path);
       const manifest = {
         name: extensionName,
-        description: '',
         version: '1.0.0',
       };
       await writeFile(

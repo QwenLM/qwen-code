@@ -8,6 +8,7 @@ import type {
 import type { ConfirmationRequest } from '../../ui/types.js';
 import chalk from 'chalk';
 import prompts from 'prompts';
+import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
@@ -165,7 +166,7 @@ export function extensionConsentString(
     t('Installing extension "{{name}}".', { name: extensionConfig.name }),
   );
   if (extensionConfig.description) {
-    output.push(extensionConfig.description);
+    output.push(stripAnsi(extensionConfig.description));
   }
   output.push(
     t(

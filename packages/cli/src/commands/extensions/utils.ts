@@ -18,6 +18,7 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import * as os from 'node:os';
 import chalk from 'chalk';
+import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
 
 export async function getExtensionManager(): Promise<ExtensionManager> {
@@ -54,7 +55,7 @@ export function extensionToOutputString(
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
   if (extension.config.description) {
-    output += `\n ${t('Description:')} ${extension.config.description}`;
+    output += `\n ${t('Description:')} ${stripAnsi(extension.config.description)}`;
   }
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
