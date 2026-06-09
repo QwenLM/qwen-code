@@ -39,7 +39,7 @@ export function parse(yamlString: string): Record<string, unknown> {
  * @param yamlString - YAML string to parse
  * @returns Parsed object
  */
-export function parseSimple(yamlString: string): Record<string, unknown> {
+function parseSimple(yamlString: string): Record<string, unknown> {
   const lines = yamlString
     .split('\n')
     .filter((line) => line.trim() && !line.trim().startsWith('#'));
