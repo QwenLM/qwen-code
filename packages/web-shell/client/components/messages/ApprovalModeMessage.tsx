@@ -111,15 +111,17 @@ export function ApprovalModeMessage({
       if (e.key === 'ArrowDown' || e.key === 'j') {
         claim();
         setSelectedIdx((idx) =>
-          approvalModes.length > 0
-            ? Math.min(idx + 1, approvalModes.length - 1)
-            : 0,
+          approvalModes.length > 0 ? (idx + 1) % approvalModes.length : 0,
         );
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'k') {
         claim();
-        setSelectedIdx((idx) => Math.max(idx - 1, 0));
+        setSelectedIdx((idx) =>
+          approvalModes.length > 0
+            ? (idx - 1 + approvalModes.length) % approvalModes.length
+            : 0,
+        );
         return;
       }
       if (e.key === 'Enter') {
