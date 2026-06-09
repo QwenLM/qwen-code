@@ -53,6 +53,13 @@ export const SUPPORTED_EVENTS = [
 export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
 
 /**
+ * Maximum bytes buffered in the Node.js WriteStream before the bridge
+ * self-disables. Guards against unbounded memory growth when the output
+ * target is a FIFO opened with O_RDWR (no EPIPE on reader disconnect).
+ */
+const MAX_BUFFERED_BYTES = 1024 * 1024; // 1 MB
+
+/**
  * Optional metadata wired into the `session_start` capability handshake.
  */
 export interface DualOutputBridgeOptions {
@@ -117,9 +124,19 @@ export class DualOutputBridge {
         this.stream = createWriteStream('', { fd });
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        // ENXIO: FIFO has no reader yet — fall back to blocking open.
-        // ENOENT: regular file doesn't exist yet — create it.
-        if (code === 'ENXIO' || code === 'ENOENT') {
+        if (code === 'ENXIO') {
+          // FIFO with no reader connected yet. Use O_RDWR | O_NONBLOCK so
+          // the open returns immediately (POSIX: process is both reader and
+          // writer, satisfying the "at least one reader" requirement).
+          // Trade-off: EPIPE won't fire on reader disconnect; the bridge
+          // self-disables when the pipe buffer fills instead.
+          const fd = openSync(
+            target.filePath,
+            constants.O_RDWR | constants.O_NONBLOCK,
+          );
+          this.stream = createWriteStream('', { fd });
+        } else if (code === 'ENOENT') {
+          // Regular file doesn't exist yet — create it.
           this.stream = createWriteStream(target.filePath, { flags: 'w' });
         } else {
           throw err;
@@ -165,6 +182,7 @@ export class DualOutputBridge {
 
   processEvent(event: ServerGeminiStreamEvent): void {
     if (!this.active) return;
+    if (this.isBufferOverflowing()) return;
     try {
       this.adapter.processEvent(event);
     } catch (err) {
@@ -219,6 +237,17 @@ export class DualOutputBridge {
   /** Whether the underlying stream is still writable. */
   get isConnected(): boolean {
     return this.active;
+  }
+
+  private isBufferOverflowing(): boolean {
+    if (this.stream.writableLength > MAX_BUFFERED_BYTES) {
+      debugLogger.warn(
+        'DualOutput: buffered data exceeds limit, disabling (no consumer draining?)',
+      );
+      this.active = false;
+      return true;
+    }
+    return false;
   }
 
   /**

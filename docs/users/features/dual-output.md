@@ -199,10 +199,10 @@ wrappers that throw away stdout anyway.
 
 ## Quick start
 
-Run Qwen Code with all three channels enabled:
+Run Qwen Code with both channels enabled using regular files:
 
 ```bash
-mkfifo /tmp/qwen-events.jsonl /tmp/qwen-input.jsonl
+touch /tmp/qwen-events.jsonl /tmp/qwen-input.jsonl
 qwen \
   --json-file /tmp/qwen-events.jsonl \
   --input-file /tmp/qwen-input.jsonl
@@ -211,7 +211,7 @@ qwen \
 In a second terminal, tail the event stream:
 
 ```bash
-cat /tmp/qwen-events.jsonl
+tail -f /tmp/qwen-events.jsonl
 ```
 
 In a third terminal, push a prompt into the running TUI:
@@ -222,6 +222,28 @@ echo '{"type":"submit","text":"Explain this repo"}' >> /tmp/qwen-input.jsonl
 
 The prompt appears in the TUI exactly as if the user typed it, and the
 streaming response is mirrored on `/tmp/qwen-events.jsonl`.
+
+### Using FIFOs (named pipes)
+
+FIFOs deliver lower latency than regular files (no disk I/O) and work
+well when both sides are on the same host. The bridge opens FIFOs with
+`O_RDWR | O_NONBLOCK`, so it **does not block** even if no reader is
+connected yet — events are buffered in the kernel pipe buffer until a
+reader attaches.
+
+```bash
+mkfifo /tmp/qwen-events.jsonl /tmp/qwen-input.jsonl
+qwen \
+  --json-file /tmp/qwen-events.jsonl \
+  --input-file /tmp/qwen-input.jsonl
+# TUI starts immediately — no need to start a reader first.
+
+# In a second terminal, connect whenever ready:
+cat /tmp/qwen-events.jsonl
+```
+
+If no reader ever connects, the bridge auto-disables once the internal
+buffer exceeds 1 MB. The TUI continues running normally.
 
 ## Output event schema
 
@@ -325,6 +347,10 @@ polling — events are written synchronously as the TUI emits them.
 - **Consumer disconnect.** If the reader on the other side of the channel
   goes away (`EPIPE`), the bridge silently disables itself and the TUI
   keeps running. No retry.
+- **FIFO buffer overflow.** When writing to a FIFO with no reader
+  attached, the bridge buffers events internally. If the buffer exceeds
+  1 MB (no consumer is draining), the bridge disables itself. The TUI
+  continues running normally.
 - **Adapter exception.** Any exception thrown while emitting an event is
   caught, logged, and disables the bridge. The TUI is never crashed by a
   dual-output failure.

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   DualOutputBridge,
@@ -197,6 +198,68 @@ describe('DualOutputBridge', () => {
         bridge!.emitPermissionRequest('req', 'tool', 'tu', {}),
       ).not.toThrow();
       expect(() => bridge!.emitControlResponse('req', true)).not.toThrow();
+    });
+  });
+
+  describe('FIFO (named pipe) support', () => {
+    let fifoPath: string;
+
+    beforeEach(() => {
+      fifoPath = path.join(tmpDir, 'events.fifo');
+      try {
+        execSync(`mkfifo "${fifoPath}"`);
+      } catch {
+        // mkfifo not available (Windows) — skip these tests
+      }
+    });
+
+    it('does not block when opened without a reader connected', () => {
+      if (!fs.existsSync(fifoPath) || !fs.statSync(fifoPath).isFIFO()) {
+        return; // skip on platforms without mkfifo
+      }
+
+      const start = Date.now();
+      bridge = new DualOutputBridge(config, { filePath: fifoPath });
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(500);
+      expect(bridge.isConnected).toBe(true);
+    });
+
+    it('delivers events to a reader that connects after construction', async () => {
+      if (!fs.existsSync(fifoPath) || !fs.statSync(fifoPath).isFIFO()) {
+        return; // skip on platforms without mkfifo
+      }
+
+      bridge = new DualOutputBridge(config, { filePath: fifoPath });
+      bridge.emitSystemMessage('test_event', { key: 'value' });
+
+      // Connect a reader after writes
+      const received = await new Promise<string>((resolve) => {
+        const chunks: Buffer[] = [];
+        const reader = fs.createReadStream(fifoPath);
+        reader.on('data', (chunk) => chunks.push(chunk as Buffer));
+        // Close the bridge to flush + EOF
+        bridge!.shutdown().then(() => {
+          reader.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        });
+      });
+
+      const lines = received
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      expect(lines[0]).toMatchObject({
+        type: 'system',
+        subtype: 'session_start',
+      });
+      const testEvent = lines.find(
+        (l: Record<string, unknown>) =>
+          l['type'] === 'system' && l['subtype'] === 'test_event',
+      );
+      expect(testEvent).toMatchObject({
+        data: { key: 'value' },
+      });
     });
   });
 });
