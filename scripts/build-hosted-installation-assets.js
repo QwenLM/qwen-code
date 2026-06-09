@@ -73,11 +73,11 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
     },
     {
       name: '--repair-path parser',
-      pattern: /--repair-path/,
+      pattern: /if \/i "%~1"=="--repair-path"/,
     },
     {
       name: '--path-scope parser',
-      pattern: /--path-scope/,
+      pattern: /if \/i "!ARG_KEY!"=="--path-scope"/,
     },
     {
       name: 'QWEN_INSTALL_REPAIR_PATH',
@@ -127,7 +127,7 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
     },
     {
       name: 'PATH cleanup',
-      pattern: /Remove-UserPathEntry/,
+      pattern: /Remove-PathEntryFromAllScopes/,
     },
     {
       name: 'current cmd shim cleanup',

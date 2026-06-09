@@ -345,7 +345,7 @@ echo   --version VERSION    Release version (default: latest)
 echo   --registry URL       npm registry (default: https://registry.npmmirror.com)
 echo   --no-modify-path     Do not modify PATH
 echo   --repair-path        Repair PATH for an existing standalone install
-echo   --path-scope SCOPE   PATH scope: user or machine (default: user)
+echo   --path-scope SCOPE   PATH scope: user or machine (default: user, auto machine for SYSTEM)
 echo   -s, --source SOURCE  Record installation source
 echo   -h, --help           Show this help message
 exit /b 0
@@ -658,7 +658,7 @@ rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
 set "QWEN_NEW_BIN=%~1"
 if "!QWEN_NEW_BIN!"=="" exit /b 0
 set "QWEN_PATH_SCOPE=!PATH_SCOPE!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $scope = $env:QWEN_PATH_SCOPE; $target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }; $pathValue = [Environment]::GetEnvironmentVariable('Path', $target); if ([string]::IsNullOrEmpty($pathValue)) { $pathValue = '' }; $entries = @($pathValue -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { -not [string]::Equals($_, $bin, [StringComparison]::OrdinalIgnoreCase) }); if ($entries.Count -gt 0 -and [string]::Equals($entries[0], $bin, [StringComparison]::OrdinalIgnoreCase) -and $remaining.Count -eq ($entries.Count - 1)) { exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, $target); exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $bin = $env:QWEN_NEW_BIN; $scope = $env:QWEN_PATH_SCOPE; $target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }; $pathValue = [Environment]::GetEnvironmentVariable('Path', $target); if ([string]::IsNullOrEmpty($pathValue)) { $pathValue = '' }; $entries = @($pathValue -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { -not [string]::Equals($_, $bin, [StringComparison]::OrdinalIgnoreCase) }); if ($entries.Count -gt 0 -and [string]::Equals($entries[0], $bin, [StringComparison]::OrdinalIgnoreCase) -and $remaining.Count -eq ($entries.Count - 1)) { exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, $target); exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_NEW_BIN="
 set "QWEN_PATH_SCOPE="

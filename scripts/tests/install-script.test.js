@@ -347,6 +347,8 @@ describe('installation scripts', () => {
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
     expect(script).toContain('Failed to update !PATH_SCOPE! PATH');
+    expect(script).toContain("$ErrorActionPreference = 'Stop'; try");
+    expect(script).toContain('catch { exit 1 }');
     expect(script).toContain('PRE_INSTALL_QWENS_LIST');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
@@ -1062,8 +1064,9 @@ describe('standalone release packaging', () => {
           'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
           'set "VERSION=latest"\r\n' +
           'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
-          'if "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
-          'if "%~1"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
+          'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+          'set "ARG_KEY=%~1"\r\n' +
+          'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
       );
       // The ps1 shim has every required behavior pattern but also contains
       // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
@@ -1086,7 +1089,7 @@ describe('standalone release packaging', () => {
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
         'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
+          'function Remove-PathEntryFromAllScopes { }\n' +
           'function Remove-CurrentCmdPathShim { }\n' +
           '$env:QWEN_UNINSTALL_PURGE = ""\n',
       );
@@ -1127,8 +1130,9 @@ describe('standalone release packaging', () => {
           'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
           'set "VERSION=latest"\r\n' +
           'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
-          'if "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
-          'if "%~1"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
+          'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+          'set "ARG_KEY=%~1"\r\n' +
+          'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
       );
       // ps1 contains the exact docstring shipped in production
       // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
@@ -1152,7 +1156,7 @@ describe('standalone release packaging', () => {
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
         'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
+          'function Remove-PathEntryFromAllScopes { }\n' +
           'function Remove-CurrentCmdPathShim { }\n' +
           '$env:QWEN_UNINSTALL_PURGE = ""\n',
       );
@@ -2022,7 +2026,9 @@ describe('standalone release packaging', () => {
     expect(uninstallPowerShellSource).toContain(
       'Test-QwenStandaloneInstallDir',
     );
-    expect(uninstallPowerShellSource).toContain('Remove-UserPathEntry');
+    expect(uninstallPowerShellSource).toContain(
+      'Remove-PathEntryFromAllScopes',
+    );
     expect(uninstallPowerShellSource).toContain('Remove-CurrentCmdPathShim');
     expect(uninstallPowerShellSource).toContain(
       'Remove-RecordedCurrentCmdPathShim',

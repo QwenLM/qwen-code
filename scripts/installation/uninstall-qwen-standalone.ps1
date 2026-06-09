@@ -191,7 +191,7 @@ function Remove-PathEntry {
     }
 }
 
-function Remove-UserPathEntry {
+function Remove-PathEntryFromAllScopes {
     param([string]$BinDir)
 
     $target = Get-NormalizedPath -PathValue $BinDir
@@ -379,7 +379,7 @@ if ($installWasManaged) {
     Write-Info "Leaving $(Join-Path $installBinDir 'qwen.cmd') unchanged because no managed standalone runtime was removed."
 }
 
-Remove-UserPathEntry -BinDir $installBinDir
+Remove-PathEntryFromAllScopes -BinDir $installBinDir
 Remove-SourceMarker
 if ([string]::IsNullOrEmpty($env:QWEN_INSTALL_BIN_DIR)) {
     Remove-EmptyDirectory -Directory $installBinDir
