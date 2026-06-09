@@ -35,6 +35,10 @@ import {
   toSummary as agentToSummary,
   toDetail as agentToDetail,
 } from '../workspaceAgents.js';
+import {
+  InvalidCursorError,
+  listWorkspaceSessionsForResponse,
+} from '../server.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -670,10 +674,22 @@ export class AcpDispatcher {
         }
 
         case 'session/list': {
-          const sessions = this.bridge.listWorkspaceSessions(
+          const cursor =
+            typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const result = await listWorkspaceSessionsForResponse(
+            this.bridge,
             this.boundWorkspace,
+            { cursor },
           );
-          this.replyConn(conn, id, { sessions });
+          this.replyConn(conn, id, {
+            sessions: result.sessions.map((s) => ({
+              sessionId: s.sessionId,
+              cwd: s.workspaceCwd,
+              title: s.title,
+              updatedAt: s.updatedAt,
+            })),
+            ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+          });
           return;
         }
 

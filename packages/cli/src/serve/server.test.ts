@@ -3101,7 +3101,131 @@ describe('createServeApp', () => {
         .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ sessions: [] });
+      expect(res.body).toEqual({ sessions: [], hasMore: false });
+    });
+
+    it('returns nextCursor and hasMore when more persisted sessions exist', async () => {
+      const pageSize = 3;
+      const total = 5;
+      for (let i = 0; i < total; i++) {
+        const id = `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`;
+        await writeStoredSession({
+          sessionId: id,
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T12:0${i}:00.000Z`,
+          prompt: `prompt ${i}`,
+          mtime: new Date(`2026-05-17T12:1${i}:00.000Z`),
+        });
+      }
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=${pageSize}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(pageSize);
+      expect(res.body.hasMore).toBe(true);
+      expect(res.body.nextCursor).toBeDefined();
+    });
+
+    it('paginates with cursor query param', async () => {
+      const total = 5;
+      for (let i = 0; i < total; i++) {
+        const id = `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`;
+        await writeStoredSession({
+          sessionId: id,
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T12:0${i}:00.000Z`,
+          prompt: `prompt ${i}`,
+          mtime: new Date(`2026-05-17T12:1${i}:00.000Z`),
+        });
+      }
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const page1 = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=3`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      expect(page1.body.sessions).toHaveLength(3);
+      expect(page1.body.hasMore).toBe(true);
+
+      const page2 = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=3&cursor=${page1.body.nextCursor}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      expect(page2.body.sessions).toHaveLength(2);
+      expect(page2.body.hasMore).toBe(false);
+      expect(page2.body.nextCursor).toBeUndefined();
+
+      const page1Ids = page1.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      const page2Ids = page2.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      const overlap = page1Ids.filter((id: string) => page2Ids.includes(id));
+      expect(overlap).toHaveLength(0);
+    });
+
+    it('merges live sessions only on first page (no cursor)', async () => {
+      const storedId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId: storedId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:10:00.000Z'),
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'live-only',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:30:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const firstPage = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(firstPage.status).toBe(200);
+      const ids = firstPage.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      expect(ids).toContain('live-only');
+
+      const cursoredPage = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=${String(Date.now() + 100000)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(cursoredPage.status).toBe(200);
+      const cursoredIds = cursoredPage.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+      expect(cursoredIds).not.toContain('live-only');
     });
 
     it('400 workspace_mismatch when querying a cross-workspace path (#3803 §02)', async () => {

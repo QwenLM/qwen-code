@@ -177,14 +177,34 @@ export function resolveBridgeFsFactory(input: {
   });
 }
 
-const WORKSPACE_SESSION_LIST_SIZE = 100;
+const DEFAULT_SESSION_PAGE_SIZE = 20;
+const MAX_SESSION_PAGE_SIZE = 100;
 
-async function listWorkspaceSessionsForResponse(
+export interface ListWorkspaceSessionsOptions {
+  cursor?: string;
+  size?: number;
+}
+
+export interface ListWorkspaceSessionsResult {
+  sessions: BridgeSessionSummary[];
+  nextCursor?: string;
+  hasMore: boolean;
+}
+
+export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
-): Promise<BridgeSessionSummary[]> {
+  options?: ListWorkspaceSessionsOptions,
+): Promise<ListWorkspaceSessionsResult> {
+  const pageSize = Math.min(
+    Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
+    MAX_SESSION_PAGE_SIZE,
+  );
+  const numericCursor = options?.cursor ? Number(options.cursor) : undefined;
+
   const persisted = await new SessionService(workspaceCwd).listSessions({
-    size: WORKSPACE_SESSION_LIST_SIZE,
+    cursor: numericCursor,
+    size: pageSize,
   });
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
@@ -200,24 +220,32 @@ async function listWorkspaceSessionsForResponse(
     });
   }
 
-  for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
-    const existing = bySessionId.get(live.sessionId);
-    bySessionId.set(live.sessionId, {
-      ...existing,
-      ...live,
-      createdAt: existing?.createdAt ?? live.createdAt,
-      title: live.title ?? existing?.title,
-      updatedAt: live.updatedAt ?? existing?.updatedAt,
-      clientCount: live.clientCount,
-      hasActivePrompt: live.hasActivePrompt,
-    });
+  if (!options?.cursor) {
+    for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+      const existing = bySessionId.get(live.sessionId);
+      bySessionId.set(live.sessionId, {
+        ...existing,
+        ...live,
+        createdAt: existing?.createdAt ?? live.createdAt,
+        title: live.title ?? existing?.title,
+        updatedAt: live.updatedAt ?? existing?.updatedAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    }
   }
 
-  return [...bySessionId.values()].sort((a, b) => {
+  const sessions = [...bySessionId.values()].sort((a, b) => {
     const aTime = Date.parse(a.updatedAt ?? a.createdAt);
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
+
+  return {
+    sessions,
+    nextCursor: persisted.nextCursor ? String(persisted.nextCursor) : undefined,
+    hasMore: persisted.hasMore,
+  };
 }
 
 export interface ServeAppDeps {
@@ -1985,8 +2013,18 @@ export function createServeApp(
       return;
     }
     try {
-      const sessions = await listWorkspaceSessionsForResponse(bridge, key);
-      res.status(200).json({ sessions });
+      const cursor =
+        typeof req.query['cursor'] === 'string'
+          ? req.query['cursor']
+          : undefined;
+      const sizeParam = req.query['size'];
+      const size =
+        typeof sizeParam === 'string' ? parseInt(sizeParam, 10) : undefined;
+      const result = await listWorkspaceSessionsForResponse(bridge, key, {
+        cursor,
+        size: Number.isFinite(size) ? size : undefined,
+      });
+      res.status(200).json(result);
     } catch (err) {
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
