@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -92,6 +92,61 @@ rules:
 `);
     expect(policy.rules).toHaveLength(1);
     expect(policy.rules[0].action).toBe('allow');
+  });
+});
+
+describe('deferred-field warning', () => {
+  // `warnedDeferred` is a module-global once-latch; reset the module so each
+  // test starts unlatched, and import the fresh copy dynamically (a static
+  // top-of-file import would share the original module's latch).
+  beforeEach(() => {
+    vi.resetModules();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT warn for a rule with ONLY timeOfDay (now evaluated)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { loadPolicy: load } = await import('./loader.js');
+    load(`
+rules:
+  - match:
+      tool: bash
+      timeOfDay:
+        from: "09:00"
+        to: "17:00"
+        timezone: UTC
+    action: allow
+`);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does NOT warn for a rule with ONLY expiresAt (now evaluated)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { loadPolicy: load } = await import('./loader.js');
+    load(`
+rules:
+  - match:
+      tool: bash
+    action: deny
+    expiresAt: "2030-01-01T00:00:00Z"
+`);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns for a rule with maxPerWindow (still deferred)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { loadPolicy: load } = await import('./loader.js');
+    load(`
+rules:
+  - match:
+      tool: bash
+    action: allow
+    maxPerWindow: 5
+`);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('maxPerWindow');
   });
 });
 

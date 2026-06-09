@@ -123,19 +123,16 @@ export function loadPolicy(text: string): Policy {
       rule.maxPerWindow = raw['maxPerWindow'];
     if (raw['expiresAt'] !== undefined) rule.expiresAt = raw['expiresAt'];
 
-    // Presence, not truthiness — mirrors the evaluator's downgrade gate so a
-    // falsy-valued deferred field (e.g. `expiresAt: 0`) is still flagged.
-    if (
-      match['timeOfDay'] !== undefined ||
-      rule.maxPerWindow !== undefined ||
-      rule.expiresAt !== undefined
-    ) {
+    // Only maxPerWindow is still deferred (timeOfDay/expiresAt are now
+    // evaluated by the evaluator). Presence, not truthiness — a falsy-valued
+    // maxPerWindow (e.g. `maxPerWindow: 0`) is still flagged.
+    if (rule.maxPerWindow !== undefined) {
       if (!warnedDeferred) {
         warnedDeferred = true;
         // eslint-disable-next-line no-console
         console.warn(
           `[policy] rule ${rule.id ?? `[${i}]`} uses an unevaluated field ` +
-            '(timeOfDay/expiresAt/maxPerWindow); will downgrade to prompt',
+            '(maxPerWindow); will downgrade to prompt',
         );
       }
     }
