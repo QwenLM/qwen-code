@@ -1734,48 +1734,32 @@ describe('Session', () => {
       expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
     });
 
-    it('aborts an in-flight background task notification prompt when cancelled', async () => {
+    it('does not abort background tasks when cancelling the active prompt drain', async () => {
       let notificationCallback:
         | ((displayText: string, modelText: string) => void)
         | undefined;
-      let notificationSignal: AbortSignal | undefined;
       mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
         (callback?: (displayText: string, modelText: string) => void) => {
           if (callback) notificationCallback = callback;
         },
       );
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(createEmptyStream())
-        .mockImplementationOnce(
-          async (
-            _model: string,
-            request: { config?: { abortSignal?: AbortSignal } },
-          ) => {
-            notificationSignal = request.config?.abortSignal;
-            return (async function* () {
-              if (!notificationSignal) return;
-              await new Promise<void>((resolve) => {
-                notificationSignal!.addEventListener('abort', () => resolve(), {
-                  once: true,
-                });
-              });
-              yield { type: core.StreamEventType.CHUNK, value: {} };
-            })();
-          },
-        );
+      mockBackgroundTaskRegistry.hasUnfinalizedTasks.mockReturnValue(true);
+      mockChat.sendMessageStream = vi.fn().mockImplementationOnce(async () =>
+        (async function* () {
+          notificationCallback?.('task running', 'task still running');
+          await session.cancelPendingPrompt();
+          yield { type: core.StreamEventType.CHUNK, value: {} };
+        })(),
+      );
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      } as PromptRequest);
-      expect(notificationCallback).toBeDefined();
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        } as PromptRequest),
+      ).resolves.toEqual({ stopReason: 'cancelled' });
 
-      notificationCallback?.('task finished', 'notification task output');
-      await vi.waitFor(() => expect(notificationSignal).toBeDefined());
-
-      await expect(session.cancelPendingPrompt()).resolves.toBeUndefined();
-      expect(notificationSignal!.aborted).toBe(true);
+      expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

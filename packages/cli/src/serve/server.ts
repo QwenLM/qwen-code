@@ -359,6 +359,12 @@ function parseIPv4MappedHexSuffix(suffix: string): string | undefined {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
+function parseIPv6FirstHextet(host: string): number | undefined {
+  const first = host.split(':', 1)[0];
+  if (!first || !/^[0-9a-f]{1,4}$/i.test(first)) return undefined;
+  return Number.parseInt(first, 16);
+}
+
 function isBlockedAuthProviderHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
@@ -380,8 +386,15 @@ function isBlockedAuthProviderHost(hostname: string): boolean {
   }
 
   if (ipVersion === 6) {
-    if (bareHost === '::1' || bareHost.startsWith('fe80:')) return true;
-    if (bareHost.startsWith('fc') || bareHost.startsWith('fd')) return true;
+    if (bareHost === '::' || bareHost === '::1') return true;
+    const firstHextet = parseIPv6FirstHextet(bareHost);
+    if (
+      firstHextet !== undefined &&
+      ((firstHextet >= 0xfe80 && firstHextet <= 0xfebf) ||
+        (firstHextet & 0xfe00) === 0xfc00)
+    ) {
+      return true;
+    }
     if (bareHost.startsWith('::ffff:')) {
       const suffix = bareHost.slice('::ffff:'.length);
       if (net.isIP(suffix) === 4) {

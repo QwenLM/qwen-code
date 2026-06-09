@@ -1824,7 +1824,6 @@ export class Session implements SessionContext {
 
       while (true) {
         if (pendingSend.signal.aborted) {
-          registry.abortAll();
           break;
         }
 
