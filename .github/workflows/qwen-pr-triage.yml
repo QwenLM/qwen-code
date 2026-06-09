@@ -149,13 +149,14 @@ jobs:
       - name: 'Read verdict from skill output'
         if: always()
         id: 'capture'
+        env:
+          RUN_OUTCOME: '${{ steps.run.outcome }}'
         run: |
           VERDICT_FILE="/tmp/triage-results/product-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
             VERDICT=$(jq -r '.verdict // "pass"' "$VERDICT_FILE")
           else
-            # Skill didn't write verdict file — treat action exit code as signal
-            if [ "${{ steps.run.outcome }}" = "success" ]; then
+            if [ "$RUN_OUTCOME" = "success" ]; then
               VERDICT="pass"
             else
               VERDICT="fail"
