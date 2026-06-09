@@ -1123,15 +1123,21 @@ export async function runNonInteractive(
                       modelText = partListToText(slashCommandResult.content);
                       slashOnComplete = slashCommandResult.onComplete;
                     } else if (slashCommandResult.type === 'message') {
-                      // Terminal response — emit and skip model submission
-                      await emitNonInteractiveFinalMessage({
-                        message: slashCommandResult.content,
-                        isError: slashCommandResult.messageType === 'error',
-                        adapter,
-                        config,
-                        startTimeMs: startTime,
-                      });
-                      checkCronDone();
+                      // Terminal response — emit and skip model submission.
+                      // Run checkCronDone() in finally so an emit failure can't
+                      // leave the cron run hanging (the throw would otherwise
+                      // skip it and only reach .catch(onDrainError)).
+                      try {
+                        await emitNonInteractiveFinalMessage({
+                          message: slashCommandResult.content,
+                          isError: slashCommandResult.messageType === 'error',
+                          adapter,
+                          config,
+                          startTimeMs: startTime,
+                        });
+                      } finally {
+                        checkCronDone();
+                      }
                       return;
                     } else {
                       checkCronDone();

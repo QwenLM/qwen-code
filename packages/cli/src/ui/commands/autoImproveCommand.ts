@@ -55,14 +55,9 @@ const HOURLY_CRON_MINUTE_OFFSET = 7;
 // Entries are keyed by cwd, so distinct working directories resolve correctly;
 // the only accepted limitation is a `.git` move under a stable cwd within one
 // long-lived process (session-scoped, as with other CLI caches). The map is
-// bounded to avoid unbounded growth in a hypothetical multi-project daemon, and
-// clearRepoRootCache() is exported for lifecycle hooks that need a reset.
+// bounded to avoid unbounded growth in a hypothetical multi-project daemon.
 const REPO_ROOT_CACHE_MAX = 16;
 const repoRootCache = new Map<string, Promise<string>>();
-
-export function clearRepoRootCache(): void {
-  repoRootCache.clear();
-}
 
 // Serialize the state-claiming critical section of ticks per loopId so a manual
 // `/auto-improve tick` racing the cron tick within the same process cannot both
@@ -804,9 +799,15 @@ async function stopAutoImprove(config: Config): Promise<MessageActionReturn> {
   if (state.cronJobId && config.isCronEnabled()) {
     try {
       config.getCronScheduler().delete(state.cronJobId);
-    } catch {
-      // Best-effort: ensure clearActiveAutoImproveLoop runs even if
-      // the scheduler throws (e.g. unknown job ID).
+    } catch (error) {
+      // Best-effort: ensure clearActiveAutoImproveLoop runs even if the
+      // scheduler throws (e.g. unknown job ID). Log it though — a silently
+      // failed delete leaves an orphaned cron job firing ticks for the rest
+      // of the session.
+      debugLogger.warn(
+        `stop ${state.loopId}: failed to delete cron job ${state.cronJobId}`,
+        error,
+      );
     }
   }
   await clearActiveAutoImproveLoop(repoRoot);

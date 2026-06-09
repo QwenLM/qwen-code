@@ -406,12 +406,19 @@ function normalizeRunRecord(value: unknown): AutoImproveRunRecord | null {
   };
 }
 
+// The run index is appended to by the LLM tick prompt and never trimmed, so it
+// grows unbounded over a long-lived loop. Bound what a read loads/returns to the
+// most recent records (consumers only show the last few) so `/auto-improve
+// status` stays O(MAX) rather than degrading with total run count.
+const MAX_RUN_INDEX_RECORDS = 100;
+
 function normalizeRunIndex(value: unknown): AutoImproveRunIndex {
   const runsValue = isRecord(value) ? value['runs'] : undefined;
   const runs = Array.isArray(runsValue)
     ? runsValue
         .map((record) => normalizeRunRecord(record))
         .filter((record): record is AutoImproveRunRecord => record !== null)
+        .slice(-MAX_RUN_INDEX_RECORDS)
     : [];
   return { version: 1, runs };
 }
