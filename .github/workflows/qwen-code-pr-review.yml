@@ -406,7 +406,7 @@ jobs:
             --timeout-minutes "$QWEN_TIMEOUT" \
             --log-path "$LOG_PATH" \
             --quiet \
-            --heartbeat-seconds 60 \
+            --heartbeat-seconds 15 \
             -- node dist/cli.js \
             --auth-type openai \
             --approval-mode yolo \

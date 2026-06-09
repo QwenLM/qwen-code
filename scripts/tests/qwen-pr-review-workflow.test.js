@@ -48,7 +48,7 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))');
   expect(workflow).toContain('node scripts/run-qwen-pr-review.js');
   expect(workflow).toContain('--quiet');
-  expect(workflow).toContain('--heartbeat-seconds 60');
+  expect(workflow).toContain('--heartbeat-seconds 15');
   expect(workflow).not.toContain('timeout --kill-after');
   expect(workflow).not.toContain('PIPESTATUS');
 });
