@@ -213,7 +213,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
-      f !== 'session_branch',
+      f !== 'session_branch' &&
+      f !== 'rate_limit',
   ),
   'workspace_settings',
   'workspace_init',
@@ -235,6 +236,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  'rate_limit',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1365,6 +1367,18 @@ describe('createServeApp', () => {
             getAdvertisedServeFeatures(undefined, {
               persistSettingAvailable: true,
             }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'rate_limit') {
+          expect(predicate({ rateLimit: true })).toBe(true);
+          expect(predicate({ rateLimit: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { rateLimit: true }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -6458,10 +6472,10 @@ describe('GET /session/:id/events (SSE)', () => {
   });
 
   it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {
-    // The daemon stamps `_meta.serverTimestamp` at the SSE write
-    // boundary so multi-client UIs use the server clock for transcript
-    // ordering / "X minutes ago" instead of each client's drifting
-    // local clock. The chiga0 SDK PR #4353 reads this via a 3-
+    // The daemon stamps `_meta.serverTimestamp` so multi-client UIs
+    // use the server clock for transcript ordering / "X minutes ago"
+    // instead of each client's drifting local clock. The chiga0 SDK
+    // PR #4353 reads this via a 3-
     // location probe (`event.serverTimestamp` / `event._meta.
     // serverTimestamp` / `event.data._meta.serverTimestamp`); we
     // pick `_meta.serverTimestamp` (Anthropic convention) so the
@@ -6529,6 +6543,32 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(parsed._meta.toolName).toBe('Read');
     expect(parsed._meta.timestamp).toBe(1234567890);
     expect(typeof parsed._meta.serverTimestamp).toBe('number');
+  });
+
+  it('preserves pre-existing _meta.serverTimestamp on SSE frames', async () => {
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { foo: 'bar' },
+          _meta: { serverTimestamp: 1234567890 },
+        };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    const frames = await readSseFrames(res.body!, 1);
+
+    const parsed = JSON.parse(frames[0]!.data!);
+    expect(parsed._meta.serverTimestamp).toBe(1234567890);
   });
 
   it('forwards Last-Event-ID to the bridge', async () => {

@@ -103,6 +103,11 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rateLimit.js';
 
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
@@ -810,6 +815,7 @@ export function createServeApp(
         status: 'ok',
         sessions: bridge.sessionCount,
         pendingPermissions: bridge.pendingPermissionCount,
+        ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
       writeStderrLine(
@@ -883,6 +889,38 @@ export function createServeApp(
 
   app.use(bearerAuth(opts.token));
 
+  // Rate limiter: after auth (only count authenticated requests),
+  // before body parser (reject early without burning JSON.parse CPU).
+  let rateLimiter: RateLimiterInstance | undefined;
+  if (opts.rateLimit) {
+    const windowMs = opts.rateLimitWindowMs ?? 60_000;
+    rateLimiter = createRateLimiter({
+      tiers: {
+        prompt: { windowMs, max: opts.rateLimitPrompt ?? 10 },
+        mutation: { windowMs, max: opts.rateLimitMutation ?? 30 },
+        read: { windowMs, max: opts.rateLimitRead ?? 120 },
+      },
+      hostname: opts.hostname,
+      onLimitReached: daemonLog
+        ? (tier, key, suppressed) => {
+            daemonLog.warn(
+              `rate limit hit${suppressed > 0 ? ` (${suppressed} suppressed)` : ''}`,
+              { tier, key: key.slice(0, 64) },
+            );
+          }
+        : undefined,
+      onError: daemonLog
+        ? (err, path) => {
+            daemonLog.warn(
+              `rate limiter error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
+              { path },
+            );
+          }
+        : undefined,
+    });
+    app.use(rateLimiter.middleware);
+  }
+
   app.use(express.json({ limit: '10mb' }));
   app.use(
     (
@@ -947,6 +985,7 @@ export function createServeApp(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
+        rateLimit: opts.rateLimit === true,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -3043,6 +3082,10 @@ export function createServeApp(
     },
   );
 
+  if (rateLimiter) {
+    setRateLimiter(app, rateLimiter);
+  }
+
   return app;
 }
 
@@ -3590,16 +3633,19 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
   //
-  // `_meta.serverTimestamp`: stamp the daemon's wall-clock at SSE write
-  // time so multi-client transcript ordering uses the server's clock.
-  // Stamped at the wire boundary (NOT at EventBus.publish) so the
-  // in-memory `BridgeEvent` type stays unchanged. The top-level merge
-  // with `event._meta` is a forward-compat escape hatch for future
-  // envelope-level metadata; today `existingMeta` is always `undefined`.
+  // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
+  // are published so SSE and load/replay share the same event time. Keep this
+  // fallback for synthetic frames that do not pass through EventBus.
   const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const existingServerTimestamp = existingMeta?.['serverTimestamp'];
+  const serverTimestamp =
+    typeof existingServerTimestamp === 'number' &&
+    Number.isFinite(existingServerTimestamp)
+      ? existingServerTimestamp
+      : Date.now();
   const stamped = {
     ...event,
-    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+    _meta: { ...(existingMeta ?? {}), serverTimestamp },
   };
   const dataJson = JSON.stringify(stamped);
   const idLine =
