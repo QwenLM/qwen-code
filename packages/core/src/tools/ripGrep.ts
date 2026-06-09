@@ -66,7 +66,7 @@ function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
  * each invocation pays 2-3 sync syscalls per searchPath. Bounded so a
  * pathologically long session can't grow without limit.
  *
- * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
+ * `dirIsDir`: resolved searchPath -> boolean (is the path itself a directory?)
  * `qwenIgnore`: dir → string[] (cached supported ignore-file paths)
  *
  * **Known staleness window:** an ignore file created mid-session, or a
@@ -467,17 +467,17 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
     }
 
-    let isDir = dirIsDirCache.get(searchPath);
+    let isDir = dirIsDirCache.get(resolvedSearchPath);
     if (isDir === undefined) {
       try {
-        isDir = fs.statSync(searchPath).isDirectory();
+        isDir = fs.statSync(resolvedSearchPath).isDirectory();
       } catch {
         isDir = false;
       }
-      dirIsDirCache.set(searchPath, isDir);
+      dirIsDirCache.set(resolvedSearchPath, isDir);
       trimCache(dirIsDirCache);
     }
-    return isDir ? searchPath : path.dirname(searchPath);
+    return isDir ? resolvedSearchPath : path.dirname(resolvedSearchPath);
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {

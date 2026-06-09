@@ -14,7 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import type { RipGrepToolParams } from './ripGrep.js';
-import { RipGrepTool } from './ripGrep.js';
+import { _resetRipGrepCachesForTest, RipGrepTool } from './ripGrep.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os, { EOL } from 'node:os';
@@ -56,6 +56,7 @@ describe('RipGrepTool', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockSpawn.mockReset();
+    _resetRipGrepCachesForTest();
     Object.assign(mockConfig, {
       getTruncateToolOutputThreshold: () => 25000,
     });
@@ -841,6 +842,66 @@ describe('RipGrepTool', () => {
       expect(ignoreFileArgs).not.toContain(
         path.join(tempRootDir, 'sub', '.cursorignore'),
       );
+    });
+
+    it('should resolve fallback ignore files with absolute roots for relative external search paths', async () => {
+      const testCwd = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-cwd-'),
+      );
+      const outsideDir = path.join(testCwd, 'outside');
+      const originalCwd = process.cwd();
+
+      try {
+        await fs.mkdir(outsideDir);
+        await fs.writeFile(
+          path.join(outsideDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        Object.assign(mockConfig, {
+          getFileFilteringOptions: () => ({
+            respectGitIgnore: true,
+            respectQwenIgnore: true,
+            customIgnoreFiles: ['.cursorignore'],
+          }),
+        });
+
+        (runRipgrep as Mock).mockResolvedValue({
+          stdout: '',
+          truncated: false,
+          error: undefined,
+        });
+
+        process.chdir(testCwd);
+
+        const invocation = grepTool.build({
+          pattern: 'secret',
+        }) as unknown as {
+          performRipgrepSearch(options: {
+            pattern: string;
+            paths: string[];
+            signal: AbortSignal;
+          }): Promise<{ stdout: string; truncated: boolean }>;
+        };
+        await invocation.performRipgrepSearch({
+          pattern: 'secret',
+          paths: ['outside'],
+          signal: abortSignal,
+        });
+
+        const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+        const ignoreFileArgs = rgArgs.filter(
+          (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+        );
+        expect(ignoreFileArgs).toContain(
+          path.join(outsideDir, '.cursorignore'),
+        );
+        expect(ignoreFileArgs).not.toContain(
+          path.join('outside', '.cursorignore'),
+        );
+      } finally {
+        process.chdir(originalCwd);
+        await fs.rm(testCwd, { recursive: true, force: true });
+      }
     });
 
     it('should deduplicate matches from overlapping workspace directories', async () => {
