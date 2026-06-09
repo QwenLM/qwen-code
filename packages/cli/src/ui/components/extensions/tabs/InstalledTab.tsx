@@ -48,11 +48,11 @@ const groupLabel = (group: InstalledGroup): string => {
     case 'favorites':
       return t('Favorites');
     case 'local':
-      return t('Local');
+      return t('Local level');
     case 'user':
-      return t('User');
+      return t('User level');
     case 'project':
-      return t('Project');
+      return t('Project level');
     case 'disabled':
       return t('Disabled');
     default:

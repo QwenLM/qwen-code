@@ -7,6 +7,10 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'User level': '用户级',
+  'Project level': '项目级',
+  'Local level': '本地级',
+
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
   // ==========================================================================

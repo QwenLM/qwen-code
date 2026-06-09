@@ -8,6 +8,10 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'User level': 'User level',
+  'Project level': 'Project level',
+  'Local level': 'Local level',
+
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
   // ==========================================================================

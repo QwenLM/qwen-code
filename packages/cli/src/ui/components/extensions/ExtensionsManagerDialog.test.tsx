@@ -289,7 +289,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       expect(lastFrame()).toContain('alpha');
     });
     const frame = lastFrame();
-    expect(frame).toContain('User');
+    expect(frame).toContain('User level');
     expect(frame).toContain('Disabled');
     expect(frame).toContain('beta');
     // Plugins show their type + version (parallel to "MCP"), not a bare version.

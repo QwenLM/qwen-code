@@ -9,6 +9,10 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'User level': '使用者層級',
+  'Project level': '專案層級',
+  'Local level': '本機層級',
+
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
   // ==========================================================================
