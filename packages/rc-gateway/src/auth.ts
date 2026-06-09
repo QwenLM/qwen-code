@@ -28,6 +28,29 @@ export function bearerResolve(
   };
 }
 
+/**
+ * Confine a session-locked token (a share) to its one session. When
+ * `req.rcClient.sessionLockId` is set and does not match `req.params.id`, 403
+ * `session_locked` (audited via the existing `scope_denied` action). A token
+ * with no lock (normal owner/paired tokens) passes through unaffected. Mount
+ * AFTER `requireScope(...)` on the session routes.
+ */
+export function enforceSessionLock(audit?: AuditRecorder): RequestHandler {
+  return (req, res, next) => {
+    const lock = req.rcClient?.sessionLockId;
+    if (lock !== undefined && lock !== req.params.id) {
+      void audit?.record({
+        action: 'scope_denied',
+        actorTokenId: req.rcClient?.id,
+        detail: { reason: 'session_locked', path: req.path },
+      });
+      res.status(403).json({ error: 'Session locked', code: 'session_locked' });
+      return;
+    }
+    next();
+  };
+}
+
 /** Require a scope on the resolved client, or 403 (+ audit scope_denied). */
 export function requireScope(
   scope: RcScope,

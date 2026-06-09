@@ -29,7 +29,7 @@ export {
   type AuditReader,
 } from './auditLog.js';
 export { createAuditQueryRoute } from './routes/audit.js';
-export { bearerResolve, requireScope } from './auth.js';
+export { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
 export {
   SESSION_READ,
   OWNER,

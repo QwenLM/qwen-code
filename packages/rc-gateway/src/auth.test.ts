@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Request, Response } from 'express';
 import { TokenStore } from './tokenStore.js';
-import { bearerResolve, requireScope } from './auth.js';
+import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
 import { SESSION_READ } from './scopes.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
 
@@ -118,5 +118,71 @@ describe('auth middleware', () => {
       actorTokenId: 'x',
       detail: { required: SESSION_READ },
     });
+  });
+
+  it('bearerResolve carries sessionLockId onto rcClient for a share token', async () => {
+    const share = await store.issueShare({
+      scopes: [SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const req = {
+      headers: { authorization: `Bearer ${share.token}` },
+    } as Request;
+    bearerResolve(store)(req, fakeRes(), () => {});
+    expect(req.rcClient).toMatchObject({ id: share.id, sessionLockId: 's1' });
+  });
+
+  it('enforceSessionLock passes a locked token onto its own session', () => {
+    const req = {
+      rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
+      params: { id: 's1' },
+      path: '/rc/session/s1/events',
+    } as unknown as Request;
+    const res = fakeRes();
+    let called = false;
+    enforceSessionLock()(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+  });
+
+  it('enforceSessionLock 403s a locked token on a different session + audits scope_denied', () => {
+    const audit = fakeAudit();
+    const req = {
+      rcClient: { id: 'x', scopes: [SESSION_READ], sessionLockId: 's1' },
+      params: { id: 's2' },
+      path: '/rc/session/s2/events',
+    } as unknown as Request;
+    const res = fakeRes();
+    let called = false;
+    enforceSessionLock(audit)(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(false);
+    expect(res._status).toBe(403);
+    expect(res._json).toMatchObject({ code: 'session_locked' });
+    expect(audit.calls).toHaveLength(1);
+    expect(audit.calls[0]).toMatchObject({
+      action: 'scope_denied',
+      actorTokenId: 'x',
+      detail: { reason: 'session_locked', path: '/rc/session/s2/events' },
+    });
+  });
+
+  it('enforceSessionLock passes an unlocked (normal) token unaffected', () => {
+    const req = {
+      rcClient: { id: 'x', scopes: [SESSION_READ] },
+      params: { id: 's2' },
+      path: '/rc/session/s2/events',
+    } as unknown as Request;
+    const res = fakeRes();
+    let called = false;
+    enforceSessionLock()(req, res, () => {
+      called = true;
+    });
+    expect(called).toBe(true);
   });
 });
