@@ -2014,6 +2014,92 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('does not abort Hook continuations when microcompaction cleanup fails', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockImplementation(() => {
+        throw new Error('hook cache disarm failed');
+      });
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+      mockClientDebugLogger.error.mockClear();
+
+      const events: ServerGeminiStreamEvent[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-error-boundary',
+        { type: SendMessageType.Hook },
+      );
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'response' },
+      ]);
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'microcompactHistory failed: hook cache disarm failed',
+        ),
+      );
+    });
+
+    it('skips the next Hook microcompaction after one just ran', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const firstStream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-fire',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of firstStream) {
+        /* drain */
+      }
+
+      const checkpointAfterFire = client['lastHookMicrocompactionTimestamp'];
+      expect(setHistory).toHaveBeenCalled();
+      expect(checkpointAfterFire).toBeGreaterThan(Date.now() - 60_000);
+
+      setHistory.mockClear();
+      clear.mockClear();
+      markReadEvictedFromHistory.mockClear();
+
+      const secondStream = client.sendMessageStream(
+        [{ text: 'continue goal again' }],
+        new AbortController().signal,
+        'prompt-mc-hook-skip',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of secondStream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(
+        checkpointAfterFire,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
     it('initializes Hook microcompaction from the last API completion timestamp', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
 
