@@ -92,3 +92,4 @@ export {
   type SearchHit,
   type SearchOptions,
 } from './search/transcripts.js';
+export { createSearchRoute } from './routes/search.js';
