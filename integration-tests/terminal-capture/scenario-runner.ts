@@ -104,9 +104,15 @@ export async function loadScenarios(
 ): Promise<{ configs: ScenarioConfig[]; basedir: string }> {
   const absPath = isAbsolute(tsPath) ? tsPath : resolve(tsPath);
   const mod = (await import(absPath)) as {
-    default: ScenarioConfig | ScenarioConfig[];
+    default?: ScenarioConfig | ScenarioConfig[];
   };
   const raw = mod.default;
+  if (raw == null) {
+    // A .ts file in scenarios/ with no default export is not a declarative
+    // scenario — e.g. agent-team-demo.ts, a standalone driver script that
+    // guards its own entrypoint. Skip it so batch runs don't choke on it.
+    return { configs: [], basedir: dirname(absPath) };
+  }
   const configs = Array.isArray(raw) ? raw : [raw];
 
   for (const config of configs) {
