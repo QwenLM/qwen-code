@@ -259,8 +259,6 @@ describe('MemoryDiagnosticsDumper', () => {
         heapUsed: 400_000_000,
         heapTotal: 600_000_000,
         external: 10_000_000,
-        cpuUserMs: 120,
-        cpuSystemMs: 30,
         cpuPercent: 15.5,
       },
     ];

@@ -28,27 +28,30 @@ export interface RuntimeSample {
   heapUsed: number;
   heapTotal: number;
   external: number;
-  cpuUserMs: number;
-  cpuSystemMs: number;
+  /** CPU usage percentage normalized by core count (0–100 per core). */
   cpuPercent: number;
 }
 
 const RING_BUFFER_SIZE = 60;
+const CPU_CORE_COUNT = os.cpus().length || 1;
 
 /**
- * Lightweight ring buffer that holds the most recent N runtime samples.
- * Only active when telemetry is enabled — zero overhead otherwise.
- * Stored in memory; written to disk when a diagnostics dump is triggered.
+ * Ring buffer that holds the most recent N runtime samples.
+ * Always active for local diagnostics dumps; OTel metric reporting is
+ * gated separately by `isPerformanceMonitoringActive()`.
  */
-class RuntimeSampleRing {
+export class RuntimeSampleRing {
   private readonly samples: RuntimeSample[] = [];
   private prevCpuUsage = process.cpuUsage();
   private prevSampleTime = Date.now();
 
-  record(): RuntimeSample {
+  /**
+   * Record a sample. Accepts a pre-fetched memoryUsage snapshot to avoid
+   * a redundant syscall when the caller already has one.
+   */
+  record(mem: NodeJS.MemoryUsage): RuntimeSample {
     const now = Date.now();
     const elapsed = now - this.prevSampleTime;
-    const m = process.memoryUsage();
     const absCpu = process.cpuUsage();
     const deltaUser = absCpu.user - this.prevCpuUsage.user;
     const deltaSystem = absCpu.system - this.prevCpuUsage.system;
@@ -58,30 +61,26 @@ class RuntimeSampleRing {
     // prevCpuUsage/prevSampleTime so the CPU delta accumulates into the
     // next sample instead of being permanently lost.
     if (elapsed <= 0) {
-      return (
-        this.samples[this.samples.length - 1] ?? {
-          ts: now,
-          rss: m.rss,
-          heapUsed: m.heapUsed,
-          heapTotal: m.heapTotal,
-          external: m.external,
-          cpuUserMs: 0,
-          cpuSystemMs: 0,
-          cpuPercent: 0,
-        }
-      );
+      const last = this.samples[this.samples.length - 1];
+      if (last) return { ...last };
+      return {
+        ts: now,
+        rss: mem.rss,
+        heapUsed: mem.heapUsed,
+        heapTotal: mem.heapTotal,
+        external: mem.external,
+        cpuPercent: 0,
+      };
     }
 
-    const cpuPercent = (cpuTotalUs / (elapsed * 1000)) * 100;
+    const cpuPercent = ((cpuTotalUs / (elapsed * 1000)) * 100) / CPU_CORE_COUNT;
 
     const sample: RuntimeSample = {
       ts: now,
-      rss: m.rss,
-      heapUsed: m.heapUsed,
-      heapTotal: m.heapTotal,
-      external: m.external,
-      cpuUserMs: deltaUser / 1000,
-      cpuSystemMs: deltaSystem / 1000,
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external,
       cpuPercent: Math.round(cpuPercent * 100) / 100,
     };
 
@@ -277,7 +276,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   }
 
   private performCheckInternal(): void {
-    const pressure = this.getPressureLevel();
+    const { level: pressure, mem } = this.getPressureLevelWithMem();
     if (pressure !== 'critical') {
       this.consecutiveIneffectiveAggressiveCleanups = 0;
     }
@@ -285,19 +284,21 @@ export class MemoryPressureMonitor extends EventEmitter {
     // Always record a runtime sample so the ring buffer has history for
     // local diagnostics dumps, regardless of telemetry state.
     // Telemetry metric reporting is gated separately by isPerformanceMonitoringActive.
-    try {
-      const sample = this.runtimeSamples.record();
-      if (isPerformanceMonitoringActive()) {
-        recordMemoryUsage(this.coreConfig, sample.rss, {
-          memory_type: MemoryMetricType.RSS,
-        });
-        recordMemoryUsage(this.coreConfig, sample.heapUsed, {
-          memory_type: MemoryMetricType.HEAP_USED,
-        });
-        recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
+    if (mem) {
+      try {
+        const sample = this.runtimeSamples.record(mem);
+        if (isPerformanceMonitoringActive()) {
+          recordMemoryUsage(this.coreConfig, sample.rss, {
+            memory_type: MemoryMetricType.RSS,
+          });
+          recordMemoryUsage(this.coreConfig, sample.heapUsed, {
+            memory_type: MemoryMetricType.HEAP_USED,
+          });
+          recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
+        }
+      } catch (err) {
+        debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
       }
-    } catch (err) {
-      debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
     }
 
     if (pressure === 'normal') return;
@@ -333,6 +334,13 @@ export class MemoryPressureMonitor extends EventEmitter {
    *  - V8 heap usage as a fraction of V8's heap size limit.
    */
   getPressureLevel(): 'normal' | 'soft' | 'hard' | 'critical' {
+    return this.getPressureLevelWithMem().level;
+  }
+
+  private getPressureLevelWithMem(): {
+    level: 'normal' | 'soft' | 'hard' | 'critical';
+    mem?: NodeJS.MemoryUsage;
+  } {
     let mem: ReturnType<typeof process.memoryUsage>;
     try {
       mem = process.memoryUsage();
@@ -340,7 +348,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       debugLogger.error(
         `Failed to read memory usage for pressure check: ${getErrorMessage(err)}`,
       );
-      return 'normal';
+      return { level: 'normal' };
     }
 
     const rssRatio =
@@ -349,10 +357,13 @@ export class MemoryPressureMonitor extends EventEmitter {
     const heapRatio = heapSizeLimit > 0 ? mem.heapUsed / heapSizeLimit : 0;
     const ratio = Math.max(rssRatio, heapRatio);
 
-    if (ratio >= this.config.criticalRatio) return 'critical';
-    if (ratio >= this.config.hardPressureRatio) return 'hard';
-    if (ratio >= this.config.softPressureRatio) return 'soft';
-    return 'normal';
+    let level: 'normal' | 'soft' | 'hard' | 'critical';
+    if (ratio >= this.config.criticalRatio) level = 'critical';
+    else if (ratio >= this.config.hardPressureRatio) level = 'hard';
+    else if (ratio >= this.config.softPressureRatio) level = 'soft';
+    else level = 'normal';
+
+    return { level, mem };
   }
 
   // Cleanup
