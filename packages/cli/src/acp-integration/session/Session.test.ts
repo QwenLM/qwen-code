@@ -2744,6 +2744,78 @@ describe('Session', () => {
       );
     });
 
+    it('emits terminalSequence returned by permission notification hooks over ACP', async () => {
+      const notificationHookSpy = vi
+        .spyOn(core, 'fireNotificationHook')
+        .mockResolvedValue({ terminalSequence: '\x07' });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { path: '/tmp/file.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Need permission',
+          prompt: 'Allow?',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Inspect file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-terminal-sequence',
+                  name: 'read_file',
+                  args: { path: '/tmp/file.txt' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        notificationHookSpy.mockRestore();
+      }
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/terminal-sequence',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          terminalSequence: '\x07',
+        },
+      );
+    });
+
     it('allows info confirmation tools in plan mode', async () => {
       const executeSpy = vi.fn().mockResolvedValue({
         llmContent: 'ok',

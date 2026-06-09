@@ -2587,7 +2587,7 @@ export class Session implements SessionContext {
           );
 
           if (hooksEnabled && messageBus) {
-            void fireNotificationHook(
+            this.fireNotificationHookWithTerminalSequence(
               messageBus,
               `Qwen Code needs your permission to use ${fc.name}`,
               NotificationType.PermissionPrompt,
@@ -3166,5 +3166,37 @@ export class Session implements SessionContext {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
     }
+  }
+
+  /**
+   * Fire a notification hook and forward any terminalSequence to the ACP
+   * client as an extNotification. Fire-and-forget — errors are logged at
+   * debug level.
+   */
+  private fireNotificationHookWithTerminalSequence(
+    messageBus: MessageBus,
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): void {
+    void fireNotificationHook(messageBus, message, notificationType, title)
+      .then((hookResult) => {
+        if (!hookResult.terminalSequence) return;
+        return this.client.extNotification(
+          'qwen/notify/session/terminal-sequence',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence: hookResult.terminalSequence,
+          },
+        );
+      })
+      .catch((err: unknown) => {
+        debugLogger.debug(
+          `ACP terminalSequence notification dropped ` +
+            `(session=${this.sessionId}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 }
