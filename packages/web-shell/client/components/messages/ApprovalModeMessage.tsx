@@ -150,12 +150,19 @@ export function ApprovalModeMessage({
         <span className={styles.title}>{t('mode.select')}</span>
       </div>
 
-      <div className={styles.list} ref={listRef}>
+      <div
+        className={styles.list}
+        ref={listRef}
+        role="listbox"
+        aria-label={t('mode.select')}
+      >
         {approvalModes.map((m, index) => {
           const selected = index === selectedIdx;
           return (
             <div
               key={m.id}
+              role="option"
+              aria-selected={selected}
               className={`${styles.row} ${selected ? styles.selected : ''}`}
               onClick={() => {
                 onSelect(m.id);

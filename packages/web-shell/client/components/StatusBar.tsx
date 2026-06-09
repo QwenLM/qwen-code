@@ -46,13 +46,16 @@ export function StatusBar({ onSelectMode }: StatusBarProps) {
         {modeIndicator ? (
           // The hint advertises "click to switch", so the indicator is always
           // a real button — never a non-interactive label. stopPropagation on
-          // mousedown keeps the trigger from counting as an "outside" press for
-          // the picker's own dismiss handler, so re-clicking toggles cleanly.
+          // both mousedown and touchstart keeps the trigger from counting as an
+          // "outside" press for the picker's own dismiss handler (it listens on
+          // exactly those two), so re-activating toggles cleanly on mouse and
+          // touch alike.
           <button
             type="button"
             className={styles.modeButton}
             onClick={onSelectMode}
             onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
             title={t('mode.select')}
             aria-haspopup="listbox"
           >
