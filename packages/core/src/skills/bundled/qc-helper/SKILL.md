@@ -120,7 +120,7 @@ When the user asks about configuration, the primary reference is `docs/configura
 | Permissions   | `permissions.allow/ask/deny`                                         | `docs/configuration/settings.md`, `docs/features/approval-mode.md`                               |
 | MCP Servers   | `mcpServers.*`, `mcp.*`                                              | `docs/configuration/settings.md`, `docs/features/mcp.md`                                         |
 | Tool Approval | `tools.approvalMode`                                                 | `docs/configuration/settings.md`, `docs/features/approval-mode.md`, `docs/features/auto-mode.md` |
-| Hooks         | `hooks.*`                                                            | `docs/features/hooks.md`                                                                         |
+| Hooks         | `hooks.*`                                                            | `docs/configuration/settings.md`, `docs/features/hooks.md`                                        |
 | Model         | `model.name`, `modelProviders`                                       | `docs/configuration/settings.md`, `docs/configuration/model-providers.md`                        |
 | General/UI    | `general.*`, `ui.*`, `ide.*`, `output.*`                             | `docs/configuration/settings.md`                                                                 |
 | Context       | `context.*`                                                          | `docs/configuration/settings.md`                                                                 |
