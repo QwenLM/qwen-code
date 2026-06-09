@@ -7,6 +7,8 @@ function getModeIndicator(
   t: ReturnType<typeof useI18n>['t'],
 ): { label: string; className: string } | null {
   switch (mode) {
+    case 'default':
+      return { label: t('mode.default'), className: styles.modeDefault };
     case 'plan':
       return { label: t('mode.plan'), className: styles.modePlan };
     case 'auto-edit':
@@ -16,6 +18,7 @@ function getModeIndicator(
     case 'yolo':
       return { label: t('mode.yolo'), className: styles.modeYolo };
     default:
+      // Only reached before a mode is known (e.g. while disconnected).
       return null;
   }
 }
@@ -42,11 +45,14 @@ export function StatusBar({ onSelectMode }: StatusBarProps) {
       <div className={styles.left}>
         {modeIndicator ? (
           // The hint advertises "click to switch", so the indicator is always
-          // a real button — never a non-interactive label.
+          // a real button — never a non-interactive label. stopPropagation on
+          // mousedown keeps the trigger from counting as an "outside" press for
+          // the picker's own dismiss handler, so re-clicking toggles cleanly.
           <button
             type="button"
             className={styles.modeButton}
             onClick={onSelectMode}
+            onMouseDown={(e) => e.stopPropagation()}
             title={t('mode.select')}
           >
             <span className={`${styles.modeLabel} ${modeIndicator.className}`}>

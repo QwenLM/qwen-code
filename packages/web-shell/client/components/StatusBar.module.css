@@ -41,6 +41,10 @@
   font-size: 13px;
 }
 
+.modeDefault {
+  color: var(--text-secondary);
+}
+
 .modePlan {
   color: var(--success-color);
 }
