@@ -437,8 +437,15 @@ jobs:
         # so the generator picks it up. The release branch was already pushed
         # above, so push this follow-up commit too — otherwise the PR opened
         # below (whose head is the remote branch) would not include it.
+        #
+        # Non-blocking by design: the only realistic failures are transient
+        # (the gh API read or the git push). The changelog is rebuilt from the
+        # full release history on every run, so a skipped update self-heals on
+        # the next stable release — never worth blocking the version-bump PR to
+        # main that follows.
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        continue-on-error: true
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
