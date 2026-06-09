@@ -65,6 +65,10 @@ export function ApprovalModeMessage({
   // this effect runs, so it cannot self-close.
   useEffect(() => {
     const onMouseDownOutside = (event: MouseEvent) => {
+      // Only the primary (left) button dismisses. Middle-click on Linux/X11
+      // pastes, and right-click opens a context menu — neither should close
+      // the panel out from under the user.
+      if (event.button !== 0) return;
       const panel = panelRef.current;
       const target = event.target;
       if (panel && target instanceof Node && !panel.contains(target)) {
