@@ -3612,7 +3612,7 @@ export class Config {
         this.cwd,
       );
       const snapshots = this.sessionData?.fileHistorySnapshots;
-      if (snapshots?.length) {
+      if (snapshots?.length && this.fileHistoryService.isEnabled()) {
         this.fileHistoryService.restoreFromSnapshots(snapshots);
         void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
           this.debugLogger.error(

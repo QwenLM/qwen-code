@@ -774,7 +774,7 @@ export class SessionService {
 
     // Extract file history snapshots for /rewind across resume
     const fileHistorySnapshots: FileHistorySnapshot[] = [];
-    const seenPromptIds = new Set<string>();
+    const seenPromptIds = new Map<string, number>();
     for (const msg of messages) {
       if (
         msg.type === 'system' &&
@@ -791,8 +791,11 @@ export class SessionService {
           continue;
         }
         for (const s of deserialized) {
-          if (!seenPromptIds.has(s.promptId)) {
-            seenPromptIds.add(s.promptId);
+          const existingIdx = seenPromptIds.get(s.promptId);
+          if (existingIdx !== undefined) {
+            fileHistorySnapshots[existingIdx] = s;
+          } else {
+            seenPromptIds.set(s.promptId, fileHistorySnapshots.length);
             fileHistorySnapshots.push(s);
           }
         }
