@@ -12,6 +12,7 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   getAgentName,
   isTeammate,
@@ -57,6 +58,18 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       parts.push(`owner: ${this.params.owner}`);
     }
     return parts.join(' ');
+  }
+
+  /**
+   * Mutating a task's `subject`/`description` rewrites the prompt an idle
+   * teammate will auto-claim and execute with full tool access — the same
+   * privileged-sink shape as `send_message` and `task_create`. The base
+   * default `'allow'` short-circuits the classifier in AUTO mode, so
+   * override to `'ask'` to keep that injection path under the classifier /
+   * human-in-the-loop.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
   }
 
   async execute(): Promise<ToolResult> {
