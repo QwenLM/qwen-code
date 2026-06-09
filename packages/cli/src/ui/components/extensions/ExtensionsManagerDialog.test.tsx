@@ -55,6 +55,8 @@ const createManager = (o: ManagerOverrides = {}) => {
     getLoadedExtensions: vi.fn(() => extensions),
     getFavorites: vi.fn(() => o.favorites ?? []),
     getExtensionScopes: vi.fn(() => o.scopes ?? {}),
+    isFavorite: vi.fn((name: string) => (o.favorites ?? []).includes(name)),
+    getExtensionScope: vi.fn((name: string) => o.scopes?.[name] ?? 'user'),
     getMarketplaces: vi.fn(() => o.marketplaces ?? []),
     discoverPlugins: vi.fn().mockResolvedValue(o.discovered ?? []),
     toggleFavorite: vi.fn(() => true),
@@ -360,6 +362,33 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Claude plugin marketplace'); // (Claude) annotation
     expect(frame).toContain('Marketplaces'); // section header
     expect(frame).toContain('Skills');
+  });
+
+  it('shows full extension actions (incl. Change scope) in the Marketplaces extension detail', async () => {
+    const manager = createManager({
+      extensions: [mockExtension('alpha', true)],
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha'); // Extensions section row
+    });
+    // Rows: Install ext (0), Add marketplace (1), alpha extension (2).
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● alpha');
+    });
+    stdin.write('\r'); // Enter -> shared extension actions view
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Change scope');
+    });
+    const frame = lastFrame();
+    expect(frame).toContain('Disable'); // alpha is active
+    expect(frame).toContain('Add to Favorites');
+    expect(frame).toContain('Mark for Update');
+    expect(frame).toContain('Uninstall');
   });
 
   it('shows a CC-style marketplace detail with installed plugins and actions', async () => {

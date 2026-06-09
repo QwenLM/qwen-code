@@ -22,6 +22,7 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
+import { ExtensionActionsView } from '../views/ExtensionActionsView.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('MARKETPLACES_TAB');
@@ -34,7 +35,6 @@ type MarketplacesView =
   | 'extension-detail'
   | 'remove-confirm';
 type MarketplaceDetailAction = 'browse' | 'update' | 'remove';
-type ExtensionDetailAction = 'uninstall' | 'back';
 
 // Flat, navigable entries shown on the Marketplaces tab list.
 type Entry =
@@ -51,6 +51,8 @@ interface MarketplacesTabProps {
   onChanged: () => void;
   /** Switch to the Discover tab filtered to the given marketplace. */
   onBrowse: (marketplaceName: string) => void;
+  /** Provide a context-aware footer hint for the list (null = default). */
+  onFooter: (hint: string | null) => void;
   reloadSignal: number;
 }
 
@@ -74,6 +76,7 @@ export const MarketplacesTab = ({
   onStatus,
   onChanged,
   onBrowse,
+  onFooter,
   reloadSignal,
 }: MarketplacesTabProps) => {
   const [sources, setSources] = useState<MarketplaceSource[]>([]);
@@ -132,6 +135,25 @@ export const MarketplacesTab = ({
   }, [entries.length, selectedIndex]);
 
   const selectedEntry = entries[selectedIndex];
+
+  // Context-aware footer hint based on the highlighted row (list view only).
+  useEffect(() => {
+    if (!isActive || view !== 'list') {
+      onFooter(null);
+      return;
+    }
+    const kind = selectedEntry?.kind;
+    if (kind === 'marketplace') {
+      onFooter(
+        t('↑↓ navigate · Enter open · d remove marketplace · Esc close'),
+      );
+    } else if (kind === 'extension') {
+      onFooter(t('↑↓ navigate · Enter details · Esc close'));
+    } else {
+      onFooter(t('↑↓ navigate · Enter select · Esc close'));
+    }
+    return () => onFooter(null);
+  }, [isActive, view, selectedEntry?.kind, onFooter]);
 
   const goToList = useCallback(() => {
     setView('list');
@@ -231,27 +253,6 @@ export const MarketplacesTab = ({
     goToList();
   }, [extensionManager, detailSource, onStatus, load, onChanged, goToList]);
 
-  const uninstallExtension = useCallback(async () => {
-    if (!extensionManager || !detailExtension) return;
-    try {
-      await extensionManager.uninstallExtension(detailExtension.name, false);
-      onStatus({
-        type: 'success',
-        text: t('Uninstalled extension "{{name}}".', {
-          name: detailExtension.name,
-        }),
-      });
-      await load();
-      onChanged();
-    } catch (error) {
-      onStatus({
-        type: 'error',
-        text: redactUrlCredentials(getErrorMessage(error)),
-      });
-    }
-    goToList();
-  }, [extensionManager, detailExtension, onStatus, load, onChanged, goToList]);
-
   const updateMarketplace = useCallback(async () => {
     if (!extensionManager || !detailSource) return;
     setDetailLoading(true);
@@ -287,17 +288,6 @@ export const MarketplacesTab = ({
       }
     },
     [detailSource, onBrowse, updateMarketplace],
-  );
-
-  const handleExtensionDetailAction = useCallback(
-    (action: ExtensionDetailAction) => {
-      if (action === 'uninstall') {
-        setView('remove-confirm');
-      } else {
-        goToList();
-      }
-    },
-    [goToList],
   );
 
   // List keyboard: navigate entries, Enter dispatches by kind, d removes.
@@ -361,36 +351,24 @@ export const MarketplacesTab = ({
     },
   );
 
-  // Detail views: Escape goes back; the selector owns Enter.
+  // Marketplace detail: Escape goes back; the selector owns Enter. (The
+  // extension detail view owns its own keyboard handling.)
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
         goToList();
       }
     },
-    {
-      isActive: isActive && (view === 'detail' || view === 'extension-detail'),
-    },
+    { isActive: isActive && view === 'detail' },
   );
 
-  // Remove/uninstall confirmation.
+  // Remove-marketplace confirmation.
   useKeypress(
     (key) => {
       if (key.name === 'return' || key.sequence === 'y') {
-        if (detailExtension) {
-          void uninstallExtension();
-        } else {
-          removeMarketplace();
-        }
+        removeMarketplace();
       } else if (key.name === 'escape' || key.sequence === 'n') {
-        // Return to the originating detail view if there was one.
-        if (detailExtension) {
-          setView('extension-detail');
-        } else if (detailSource) {
-          setView('detail');
-        } else {
-          goToList();
-        }
+        goToList();
       }
     },
     { isActive: isActive && view === 'remove-confirm' },
@@ -465,46 +443,18 @@ export const MarketplacesTab = ({
   }
 
   if (view === 'extension-detail' && detailExtension) {
-    const ext = detailExtension;
-    const parts: string[] = [];
-    const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
-    if (mcpCount) parts.push(t('{{count}} MCP', { count: String(mcpCount) }));
-    if (ext.skills?.length)
-      parts.push(t('{{count}} Skills', { count: String(ext.skills.length) }));
-    if (ext.commands?.length)
-      parts.push(
-        t('{{count}} Commands', { count: String(ext.commands.length) }),
-      );
-    if (ext.agents?.length)
-      parts.push(t('{{count}} Agents', { count: String(ext.agents.length) }));
-
     return (
-      <Box flexDirection="column" gap={1}>
-        <Text color={theme.text.primary} bold>
-          {t('Extension details')}
-        </Text>
-        <Box flexDirection="column">
-          <Text color={theme.text.primary} bold>
-            {ext.name}
-          </Text>
-          <Text color={theme.text.secondary}>{`v${ext.version}`}</Text>
-          <Text color={theme.text.secondary}>{extensionSourceLabel(ext)}</Text>
-          <Text color={theme.text.secondary}>
-            {t('Components: {{summary}}', {
-              summary: parts.length ? parts.join(' · ') : t('None'),
-            })}
-          </Text>
-        </Box>
-        <RadioButtonSelect
-          items={[
-            { key: 'uninstall', label: t('Uninstall'), value: 'uninstall' },
-            { key: 'back', label: t('Back'), value: 'back' },
-          ]}
-          isFocused={isActive}
-          showNumbers={false}
-          onSelect={handleExtensionDetailAction}
-        />
-      </Box>
+      <ExtensionActionsView
+        config={config}
+        extension={detailExtension}
+        isActive={isActive}
+        onStatus={onStatus}
+        onReload={() => {
+          void load();
+          onChanged();
+        }}
+        onExit={goToList}
+      />
     );
   }
 
@@ -620,14 +570,12 @@ export const MarketplacesTab = ({
   }
 
   if (view === 'remove-confirm') {
-    const isExtension = !!detailExtension;
-    const name = isExtension ? detailExtension!.name : detailSource?.name;
     return (
       <Box flexDirection="column" gap={1}>
         <Text color={theme.status.warning}>
-          {isExtension
-            ? t('Uninstall extension "{{name}}"?', { name: name ?? '' })
-            : t('Remove marketplace "{{name}}"?', { name: name ?? '' })}
+          {t('Remove marketplace "{{name}}"?', {
+            name: detailSource?.name ?? '',
+          })}
         </Text>
         <Text color={theme.text.secondary}>
           {t('Y/Enter to confirm · N/Esc to cancel')}

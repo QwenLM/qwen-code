@@ -17,6 +17,7 @@ import { t } from '../../../../i18n/index.js';
 export type PluginDetailAction =
   | 'toggle'
   | 'favorite'
+  | 'change-scope'
   | 'mark-update'
   | 'update'
   | 'uninstall';
@@ -90,6 +91,11 @@ export const PluginDetailView = ({
         value: 'favorite',
       },
       {
+        key: 'change-scope',
+        label: t('Change scope'),
+        value: 'change-scope',
+      },
+      {
         key: 'mark-update',
         label: t('Mark for Update'),
         value: 'mark-update',
@@ -135,7 +141,7 @@ export const PluginDetailView = ({
           onSelect={onAction}
         />
         <Text color={theme.status.error}>
-          {t('Note: Uninstall permanently removes this plugin.')}
+          {t('Note: Uninstall permanently removes this extension.')}
         </Text>
       </Box>
     </Box>

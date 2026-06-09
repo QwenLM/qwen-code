@@ -71,10 +71,13 @@ export function ExtensionsManagerDialog({
   // When set, the Discover tab is restricted to this marketplace (set by the
   // Marketplaces tab's "Browse plugins" action; cleared on manual tab switch).
   const [discoverFilter, setDiscoverFilter] = useState<string | null>(null);
+  // Optional context-aware footer hint provided by the active tab.
+  const [tabFooter, setTabFooter] = useState<string | null>(null);
 
   const cycleTab = useCallback((direction: 1 | -1) => {
     setStatus(null);
     setDiscoverFilter(null);
+    setTabFooter(null);
     setActiveTab((current) => {
       const index = TABS.findIndex((tab) => tab.id === current);
       const next = (index + direction + TABS.length) % TABS.length;
@@ -173,6 +176,7 @@ export function ExtensionsManagerDialog({
               onStatus={setStatus}
               onChanged={bumpReload}
               onBrowse={handleBrowseMarketplace}
+              onFooter={setTabFooter}
               reloadSignal={reloadSignal}
             />
           )}
@@ -195,7 +199,7 @@ export function ExtensionsManagerDialog({
         <Text color={theme.text.secondary}>
           {tabLocked
             ? t('Enter to select · Esc to go back')
-            : footerHint(activeTab)}
+            : (tabFooter ?? footerHint(activeTab))}
         </Text>
       </Box>
     </Box>

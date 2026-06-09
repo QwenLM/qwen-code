@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -23,18 +23,13 @@ import {
   SettingScope as CliSettingScope,
 } from '../../../../config/settings.js';
 import { getErrorMessage } from '../../../../utils/errors.js';
-import { ExtensionUpdateState } from '../../../state/extensions.js';
 import type {
   InstalledItem,
   InstalledGroup,
   InstalledMcpInfo,
 } from '../types.js';
-import {
-  PluginDetailView,
-  type PluginDetailAction,
-} from '../views/PluginDetailView.js';
 import { McpDetailView } from '../views/McpDetailView.js';
-import { UninstallConfirmStep } from '../steps/UninstallConfirmStep.js';
+import { ExtensionActionsView } from '../views/ExtensionActionsView.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('INSTALLED_TAB');
@@ -65,11 +60,7 @@ const groupLabel = (group: InstalledGroup): string => {
   }
 };
 
-type InstalledView =
-  | 'list'
-  | 'plugin-detail'
-  | 'mcp-detail'
-  | 'uninstall-confirm';
+type InstalledView = 'list' | 'plugin-detail' | 'mcp-detail';
 
 interface InstalledTabProps {
   config: Config;
@@ -340,84 +331,6 @@ export const InstalledTab = ({
     [extensionManager, load, onStatus],
   );
 
-  const handlePluginAction = useCallback(
-    async (action: PluginDetailAction) => {
-      if (!selectedItem || selectedItem.kind !== 'plugin' || !extensionManager)
-        return;
-      const item = selectedItem;
-      switch (action) {
-        case 'toggle':
-          await togglePlugin(item);
-          goToList();
-          break;
-        case 'favorite':
-          await toggleFavorite(item);
-          break;
-        case 'mark-update':
-          try {
-            await extensionManager.checkForAllExtensionUpdates(() => {});
-            onStatus({
-              type: 'info',
-              text: t('Checked "{{name}}" for updates.', { name: item.name }),
-            });
-          } catch (error) {
-            onStatus({ type: 'error', text: getErrorMessage(error) });
-          }
-          break;
-        case 'update':
-          try {
-            await extensionManager.updateExtension(
-              item.extension,
-              ExtensionUpdateState.UPDATE_AVAILABLE,
-              () => {},
-            );
-            onStatus({
-              type: 'success',
-              text: t('Updated "{{name}}".', { name: item.name }),
-            });
-            await load();
-            goToList();
-          } catch (error) {
-            onStatus({ type: 'error', text: getErrorMessage(error) });
-          }
-          break;
-        case 'uninstall':
-          setView('uninstall-confirm');
-          break;
-        default:
-          break;
-      }
-    },
-    [
-      selectedItem,
-      extensionManager,
-      togglePlugin,
-      toggleFavorite,
-      onStatus,
-      load,
-      goToList,
-    ],
-  );
-
-  const handleUninstall = useCallback(
-    async (extension: Extension) => {
-      if (!extensionManager) return;
-      try {
-        await extensionManager.uninstallExtension(extension.name, false);
-        onStatus({
-          type: 'success',
-          text: t('Uninstalled "{{name}}".', { name: extension.name }),
-        });
-        await load();
-        goToList();
-      } catch (error) {
-        onStatus({ type: 'error', text: getErrorMessage(error) });
-        goToList();
-      }
-    },
-    [extensionManager, load, onStatus, goToList],
-  );
-
   // List keyboard handling.
   useKeypress(
     (key) => {
@@ -451,22 +364,6 @@ export const InstalledTab = ({
     },
     { isActive: isActive && view === 'mcp-detail' },
   );
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        goToList();
-      }
-    },
-    { isActive: isActive && view === 'plugin-detail' },
-  );
-
-  const hasUpdateAvailable = useMemo(() => {
-    if (!selectedItem || selectedItem.kind !== 'plugin') return false;
-    return (
-      extensionsUpdateState.get(selectedItem.name) ===
-      ExtensionUpdateState.UPDATE_AVAILABLE
-    );
-  }, [selectedItem, extensionsUpdateState]);
 
   if (loading) {
     return <Text color={theme.text.secondary}>{t('Loading...')}</Text>;
@@ -474,29 +371,20 @@ export const InstalledTab = ({
 
   if (view === 'plugin-detail' && selectedItem?.kind === 'plugin') {
     return (
-      <PluginDetailView
+      <ExtensionActionsView
+        config={config}
         extension={selectedItem.extension}
-        scope={groupLabel(selectedItem.scope)}
-        isFavorite={selectedItem.isFavorite}
-        hasUpdateAvailable={hasUpdateAvailable}
-        isFocused={isActive}
-        onAction={handlePluginAction}
+        isActive={isActive}
+        updateState={extensionsUpdateState.get(selectedItem.name)}
+        onStatus={onStatus}
+        onReload={load}
+        onExit={goToList}
       />
     );
   }
 
   if (view === 'mcp-detail' && selectedItem?.kind === 'mcp') {
     return <McpDetailView mcp={selectedItem.mcp} />;
-  }
-
-  if (view === 'uninstall-confirm' && selectedItem?.kind === 'plugin') {
-    return (
-      <UninstallConfirmStep
-        selectedExtension={selectedItem.extension}
-        onConfirm={handleUninstall}
-        onNavigateBack={() => setView('plugin-detail')}
-      />
-    );
   }
 
   if (items.length === 0) {
