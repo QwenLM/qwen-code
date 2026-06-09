@@ -3101,10 +3101,10 @@ describe('createServeApp', () => {
         .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ sessions: [], hasMore: false });
+      expect(res.body).toEqual({ sessions: [] });
     });
 
-    it('returns nextCursor and hasMore when more persisted sessions exist', async () => {
+    it('returns nextCursor when more persisted sessions exist', async () => {
       const pageSize = 3;
       const total = 5;
       for (let i = 0; i < total; i++) {
@@ -3131,7 +3131,6 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(pageSize);
-      expect(res.body.hasMore).toBe(true);
       expect(res.body.nextCursor).toBeDefined();
     });
 
@@ -3159,7 +3158,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(page1.status).toBe(200);
       expect(page1.body.sessions).toHaveLength(3);
-      expect(page1.body.hasMore).toBe(true);
+      expect(page1.body.nextCursor).toBeDefined();
 
       const page2 = await request(app)
         .get(
@@ -3168,7 +3167,6 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(page2.status).toBe(200);
       expect(page2.body.sessions).toHaveLength(2);
-      expect(page2.body.hasMore).toBe(false);
       expect(page2.body.nextCursor).toBeUndefined();
 
       const page1Ids = page1.body.sessions.map(
