@@ -110,7 +110,6 @@ describe('formatEvidence', () => {
   it('should include all provided sections', () => {
     const bundle: EvidenceBundle = {
       originalRequest: 'Add a button',
-      userAdditions: ['Make it blue'],
       plan: 'Step 1: create button',
       researchSummary: 'Found Button.tsx',
       keyContext: ['file: src/Button.tsx'],
@@ -127,7 +126,6 @@ describe('formatEvidence', () => {
     };
     const text = formatEvidence(bundle);
     expect(text).toContain('Add a button');
-    expect(text).toContain('Make it blue');
     expect(text).toContain('Step 1: create button');
     expect(text).toContain('Found Button.tsx');
     expect(text).toContain('src/Button.tsx');
@@ -139,13 +137,11 @@ describe('formatEvidence', () => {
   it('should omit empty optional sections', () => {
     const bundle: EvidenceBundle = {
       originalRequest: 'Do X',
-      userAdditions: [],
       plan: 'Step 1',
     };
     const text = formatEvidence(bundle);
     expect(text).toContain('Do X');
     expect(text).toContain('Step 1');
-    expect(text).not.toContain('User Additions');
     expect(text).not.toContain('Research Summary');
     expect(text).not.toContain('Previous Gate Findings');
   });

@@ -90,7 +90,6 @@ describe('runPlanApprovalGate', () => {
 
   const bundle: EvidenceBundle = {
     originalRequest: 'Add a button',
-    userAdditions: [],
     plan: 'Step 1: add button component',
   };
 

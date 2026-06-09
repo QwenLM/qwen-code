@@ -198,7 +198,6 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
         const bundle: EvidenceBundle = {
           originalRequest: originalRequest ?? '(not provided)',
-          userAdditions: [],
           plan,
           researchSummary,
           resolutionSummary: gateState.lastResolutionSummary,

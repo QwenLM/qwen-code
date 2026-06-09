@@ -67,7 +67,6 @@ export interface MergedGateFinding {
  */
 export interface EvidenceBundle {
   originalRequest: string;
-  userAdditions: string[];
   plan: string;
   researchSummary?: string;
   keyContext?: string[];

@@ -61,12 +61,6 @@ export function formatEvidence(bundle: EvidenceBundle): string {
 
   sections.push(`## Original User Request\n${bundle.originalRequest}`);
 
-  if (bundle.userAdditions.length > 0) {
-    sections.push(
-      `## User Additions (higher priority than plan text)\n${bundle.userAdditions.join('\n\n')}`,
-    );
-  }
-
   sections.push(`## Current Plan\n${bundle.plan}`);
 
   if (bundle.researchSummary) {
