@@ -85,6 +85,51 @@ describe('PushSender', () => {
     expect(audit.calls.some((c) => c.action === 'push_sent')).toBe(false);
   });
 
+  it('403 → keep subscription + push_send_failed{reason:auth_error}, no retry', async () => {
+    let calls = 0;
+    const transport: PushTransport = async () => {
+      calls++;
+      return { statusCode: 403 };
+    };
+    const sender = new PushSender(vapid, store, audit, { transport, ...FAST });
+    await sender.send(record, PAYLOAD);
+    // Auth/config error (e.g. VAPID misconfig) must NOT wipe the sub and must
+    // NOT retry — a single misconfig would otherwise clear the whole store.
+    expect(calls).toBe(1);
+    expect(store.get(record.id)).toBeDefined();
+    const failed = audit.calls.filter((c) => c.action === 'push_send_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].detail).toMatchObject({
+      subscriptionId: record.id,
+      statusCode: 403,
+      reason: 'auth_error',
+    });
+    expect(
+      audit.calls.some((c) => c.action === 'push_subscription_expired'),
+    ).toBe(false);
+  });
+
+  it('401 → same as 403 (auth error: keep + fail fast)', async () => {
+    let calls = 0;
+    const transport: PushTransport = async () => {
+      calls++;
+      return { statusCode: 401 };
+    };
+    const sender = new PushSender(vapid, store, audit, { transport, ...FAST });
+    await sender.send(record, PAYLOAD);
+    expect(calls).toBe(1);
+    expect(store.get(record.id)).toBeDefined();
+    const failed = audit.calls.filter((c) => c.action === 'push_send_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].detail).toMatchObject({
+      statusCode: 401,
+      reason: 'auth_error',
+    });
+    expect(
+      audit.calls.some((c) => c.action === 'push_subscription_expired'),
+    ).toBe(false);
+  });
+
   it('503 then 201 → retried then push_sent', async () => {
     const codes = [503, 201];
     let i = 0;
@@ -110,6 +155,7 @@ describe('PushSender', () => {
     expect(failed[0].detail).toMatchObject({
       subscriptionId: record.id,
       statusCode: 503,
+      reason: 'transient_exhausted',
     });
     expect(store.get(record.id)).toBeDefined();
   });

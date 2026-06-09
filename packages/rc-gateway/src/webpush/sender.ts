@@ -37,8 +37,21 @@ function is2xx(code: number): boolean {
   return code >= 200 && code <= 299;
 }
 
-function isPermanent(code: number): boolean {
-  return code === 404 || code === 410 || code === 403;
+/** HTTP statuses meaning the endpoint is gone — safe to remove the sub. */
+function isGone(code: number): boolean {
+  return code === 404 || code === 410;
+}
+
+/**
+ * Auth/config rejections (401/403). These are NOT a dead endpoint — they mean
+ * the push request itself was rejected (bad VAPID JWT signature, wrong subject,
+ * application-server-key mismatch). The condition is identical across every
+ * subscription, so a single VAPID misconfig would otherwise wipe the entire
+ * store; we KEEP the sub and fail fast (no retry — the config won't change
+ * mid-loop).
+ */
+function isAuthError(code: number): boolean {
+  return code === 401 || code === 403;
 }
 
 /**
@@ -46,9 +59,12 @@ function isPermanent(code: number): boolean {
  *
  * Classification per attempt:
  *  - 2xx                  → audit push_sent, stop.
- *  - 404 / 410 / 403      → store.remove(id) + push_subscription_expired, stop.
+ *  - 404 / 410            → store.remove(id) + push_subscription_expired, stop.
+ *  - 401 / 403            → push_send_failed{reason:'auth_error'}, KEEP the sub,
+ *                           no retry (auth/config error — see isAuthError).
  *  - 429 / 5xx / network  → retry per backoff (max 5 attempts); after the last
- *                           attempt → push_send_failed, keep the subscription.
+ *                           attempt → push_send_failed{reason:
+ *                           'transient_exhausted'}, keep the subscription.
  *
  * send() is best-effort and NEVER throws (like the audit log): the entire body
  * is wrapped in an outer try/catch, and each transport call has its own inner
@@ -135,11 +151,23 @@ export class PushSender {
           return;
         }
 
-        if (isPermanent(code)) {
+        if (isGone(code)) {
           await this.store.remove(record.id);
           await this.safeAudit('push_subscription_expired', {
             subscriptionId: record.id,
             statusCode: code,
+          });
+          return;
+        }
+
+        if (isAuthError(code)) {
+          // Keep the sub (don't wipe the store on one VAPID misconfig) and fail
+          // fast (no retry — the config won't change across the backoff window).
+          await this.safeAudit('push_send_failed', {
+            subscriptionId: record.id,
+            kind: payload.kind,
+            statusCode: code,
+            reason: 'auth_error',
           });
           return;
         }
@@ -154,6 +182,7 @@ export class PushSender {
         subscriptionId: record.id,
         kind: payload.kind,
         statusCode: lastCode,
+        reason: 'transient_exhausted',
       });
     } catch {
       // Outer guard: send() is best-effort and must never throw.
