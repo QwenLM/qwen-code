@@ -155,7 +155,8 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const displayText = useMemo(
     () =>
       isLong
-        ? [
+        ? // Match CLI behavior: long shell output shows a fixed tail preview.
+          [
             `... first ${hiddenLinesCount} lines hidden ...`,
             ...lines.slice(-MAX_BASH_LINES),
           ].join('\n')

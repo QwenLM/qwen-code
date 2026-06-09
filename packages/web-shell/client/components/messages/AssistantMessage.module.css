@@ -56,33 +56,42 @@
   word-break: break-word;
 }
 
-.thinkingCollapsed {
+.thinkingPreviewWrap,
+.thinkingExpandedWrap {
   position: relative;
-  max-height: calc(5 * 1.5em);
+}
+
+.thinkingPreview {
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
   overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .expandToggle {
-  display: inline-block;
+  display: block;
   background: none;
   border: none;
-  color: var(--text-dimmed);
+  color: color-mix(in srgb, var(--text-dimmed) 60%, transparent);
   font-size: 12px;
   cursor: pointer;
   padding: 0 4px;
-  margin-top: 2px;
+  margin: 2px 0 0 auto;
 }
 
-.thinkingCollapsed .expandToggle {
+.thinkingPreviewWrap .expandToggle,
+.thinkingExpandedWrap .expandToggle {
   position: absolute;
   right: 0;
-  bottom: 0;
+  bottom: 2px;
   background: var(--bg-primary);
-  padding-left: 4px;
+  margin: 0;
 }
 
 .expandToggle:hover {
-  color: var(--accent-color);
+  color: var(--text-dimmed);
 }
 
 .content {

@@ -505,7 +505,7 @@ export function App({
   slashCommandCategoryOrder,
   renderToolHeaderExtra,
   renderWelcomeHeader,
-  compactThinking,
+  compactThinking = true,
   markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -1826,7 +1826,7 @@ export function App({
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || e.isComposing) return;
 
       if (e.key !== 'Escape') {
         if (escPressCountRef.current > 0) {
@@ -1875,6 +1875,8 @@ export function App({
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
+      escPressCountRef.current = 0;
+      setEscapeHintVisible(false);
       if (escapeTimerRef.current) {
         clearTimeout(escapeTimerRef.current);
         escapeTimerRef.current = null;
