@@ -22,6 +22,7 @@ describe('AskUserQuestionTool', () => {
       getChatRecordingService: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue(undefined),
+      getPlanGateState: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     tool = new AskUserQuestionTool(mockConfig);
@@ -308,8 +309,9 @@ describe('AskUserQuestionTool', () => {
     };
 
     beforeEach(() => {
-      (mockConfig as unknown as Record<string, unknown>).getPlanGateState =
-        vi.fn(() => gateState);
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        gateState,
+      );
       gateState.gateMode = 'capped';
       gateState.reviewCount = 3;
       gateState.capEscalationPending = true;
