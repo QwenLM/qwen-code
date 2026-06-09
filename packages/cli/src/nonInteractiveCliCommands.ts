@@ -307,7 +307,7 @@ export const handleSlashCommand = async (
           name,
           args,
         },
-        services: { config, settings, git: undefined, logger: null },
+        services: { config, settings, logger: null },
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
       if (!result || result.type !== 'submit_prompt') return null;
@@ -402,7 +402,6 @@ export const handleSlashCommand = async (
     services: {
       config,
       settings,
-      git: undefined,
       logger,
     },
     ui: createNonInteractiveUI(),

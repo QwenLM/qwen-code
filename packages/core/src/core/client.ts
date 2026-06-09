@@ -12,6 +12,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import process from 'node:process';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -573,6 +574,17 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    const memBefore = process.memoryUsage();
+    const historyLength = this.chat?.getHistoryLength() ?? 0;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[RESET_CHAT_START] Starting resetChat, ` +
+          `historyLength=${historyLength}, ` +
+          `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
+
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
@@ -595,6 +607,19 @@ export class GeminiClient {
     this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat(undefined, SessionStartSource.Clear);
     this.initializedSessionId = this.config.getSessionId();
+
+    const memAfter = process.memoryUsage();
+    const newHistoryLength = this.chat?.getHistoryLength() ?? 0;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[RESET_CHAT_END] resetChat completed, ` +
+          `oldHistoryLength=${historyLength}, ` +
+          `newHistoryLength=${newHistoryLength}, ` +
+          `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+          `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
+          `heapDiff=${((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)}MB`,
+      );
+    }
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -1500,66 +1525,85 @@ export class GeminiClient {
         } else {
           this.config.getChatRecordingService()?.recordUserMessage(request);
         }
+      }
 
-        // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages (not tool result submissions or
-        // retries/hooks) so that model latency during a tool-call loop
-        // doesn't count as user idle time.
-        const mcResult = microcompactHistory(
-          this.getHistoryShallow(),
-          this.lastApiCompletionTimestamp,
-          this.config.getClearContextOnIdle(),
-        );
-        if (mcResult.meta) {
-          const m = mcResult.meta;
-          this.getChat().setHistory(mcResult.history);
-          // Disarm only the blanked files' fast-path, keeping
-          // read-before-write state intact (issue #4239; rationale on
-          // FileReadEntry.readResidentInHistory). Any blanked read we
-          // can't disarm surgically forces the old blanket wipe so a
-          // later Read can't get a dangling file_unchanged placeholder.
-          const fileReadCache = this.config.getFileReadCache();
-          if (m.unresolvedEvictedReads > 0) {
-            debugLogger.debug(
-              `[FILE_READ_CACHE] clear after microcompaction ` +
-                `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-            );
-            fileReadCache.clear();
-          } else {
-            // Concurrent stats — don't serialize N FS round-trips
-            // before the next turn.
-            const statResults = await Promise.all(
-              m.evictedReadPaths.map((p) =>
-                fsPromises.stat(p).catch(() => undefined),
-              ),
-            );
-            // A path is surgically disarmed only if it stats AND its
-            // inode matches the recorded entry. A failed stat or inode
-            // miss could leave a stale entry armed, so fall back to the
-            // blanket wipe if any path is unresolvable.
-            let fullyDisarmed = true;
-            for (const stats of statResults) {
-              if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-                fullyDisarmed = false;
-              }
-            }
-            if (fullyDisarmed) {
+      // Idle cleanup: clear old tool results when idle > threshold.
+      // Runs on UserQuery, Cron, and Hook messages. Hook is required
+      // for goal-mode loops where the model drives continuation without
+      // user input — without this, tool results accumulate indefinitely
+      // and cause OOM (old_space exhaustion).
+      // ToolResult, Retry, Notification are excluded: ToolResult fires
+      // on every tool-call return (O(history) overhead per call), and
+      // mid-loop compaction could blank results the model still needs.
+      const shouldCompact =
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Hook;
+      if (shouldCompact) {
+        try {
+          const mcResult = microcompactHistory(
+            this.getHistoryShallow(),
+            this.lastApiCompletionTimestamp,
+            this.config.getClearContextOnIdle(),
+          );
+          if (mcResult.meta) {
+            const m = mcResult.meta;
+            this.getChat().setHistory(mcResult.history);
+            // Disarm only the blanked files' fast-path, keeping
+            // read-before-write state intact (issue #4239; rationale on
+            // FileReadEntry.readResidentInHistory). Any blanked read we
+            // can't disarm surgically forces the old blanket wipe so a
+            // later Read can't get a dangling file_unchanged placeholder.
+            const fileReadCache = this.config.getFileReadCache();
+            if (m.unresolvedEvictedReads > 0) {
               debugLogger.debug(
-                `[FILE_READ_CACHE] disarmed fast-path for ` +
-                  `${m.evictedReadPaths.length} file(s) after microcompaction`,
-              );
-            } else {
-              debugLogger.debug(
-                '[FILE_READ_CACHE] clear after microcompaction ' +
-                  '(an evicted path was unresolvable)',
+                `[FILE_READ_CACHE] clear after microcompaction ` +
+                  `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
               );
               fileReadCache.clear();
+            } else {
+              // Concurrent stats — don't serialize N FS round-trips
+              // before the next turn.
+              const statResults = await Promise.all(
+                m.evictedReadPaths.map((p) =>
+                  fsPromises.stat(p).catch(() => undefined),
+                ),
+              );
+              // A path is surgically disarmed only if it stats AND its
+              // inode matches the recorded entry. A failed stat or inode
+              // miss could leave a stale entry armed, so fall back to the
+              // blanket wipe if any path is unresolvable.
+              let fullyDisarmed = true;
+              for (const stats of statResults) {
+                if (
+                  !stats ||
+                  !fileReadCache.markReadEvictedFromHistory(stats)
+                ) {
+                  fullyDisarmed = false;
+                }
+              }
+              if (fullyDisarmed) {
+                debugLogger.debug(
+                  `[FILE_READ_CACHE] disarmed fast-path for ` +
+                    `${m.evictedReadPaths.length} file(s) after microcompaction`,
+                );
+              } else {
+                debugLogger.debug(
+                  '[FILE_READ_CACHE] clear after microcompaction ' +
+                    '(an evicted path was unresolvable)',
+                );
+                fileReadCache.clear();
+              }
             }
+            debugLogger.debug(
+              `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+                `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+                `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+            );
           }
-          debugLogger.debug(
-            `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-              `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-              `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+        } catch (err) {
+          debugLogger.error(
+            `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }

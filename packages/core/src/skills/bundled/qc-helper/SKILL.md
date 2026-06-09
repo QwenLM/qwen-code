@@ -43,25 +43,29 @@ Use this index to locate the right document for the user's question. Load only t
 | Model providers (OpenAI-compatible, etc.) | `docs/configuration/model-providers.md` |
 | .qwenignore file                          | `docs/configuration/qwen-ignore.md`     |
 | Themes                                    | `docs/configuration/themes.md`          |
-| Memory                                    | `docs/configuration/memory.md`          |
 | Trusted folders                           | `docs/configuration/trusted-folders.md` |
 
 ### Features
 
-| Topic                                       | Doc Path                         |
-| ------------------------------------------- | -------------------------------- |
-| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md` |
-| MCP (Model Context Protocol)                | `docs/features/mcp.md`           |
-| Skills system                               | `docs/features/skills.md`        |
-| Sub-agents                                  | `docs/features/sub-agents.md`    |
-| Sandbox / security                          | `docs/features/sandbox.md`       |
-| Slash commands                              | `docs/features/commands.md`      |
-| Headless / non-interactive mode             | `docs/features/headless.md`      |
-| LSP integration                             | `docs/features/lsp.md`           |
-| Checkpointing                               | `docs/features/checkpointing.md` |
-| Token caching                               | `docs/features/token-caching.md` |
-| Language / i18n                             | `docs/features/language.md`      |
-| Arena mode                                  | `docs/features/arena.md`         |
+| Topic                                       | Doc Path                           |
+| ------------------------------------------- | ---------------------------------- |
+| Approval mode (plan/default/auto_edit/yolo) | `docs/features/approval-mode.md`   |
+| Auto mode (AI-driven approval)              | `docs/features/auto-mode.md`       |
+| Hooks (lifecycle hooks)                     | `docs/features/hooks.md`           |
+| MCP (Model Context Protocol)                | `docs/features/mcp.md`             |
+| Memory                                      | `docs/features/memory.md`          |
+| Skills system                               | `docs/features/skills.md`          |
+| Sub-agents                                  | `docs/features/sub-agents.md`      |
+| Sandbox / security                          | `docs/features/sandbox.md`         |
+| Slash commands                              | `docs/features/commands.md`        |
+| Headless / non-interactive mode             | `docs/features/headless.md`        |
+| LSP integration                             | `docs/features/lsp.md`             |
+| Token caching                               | `docs/features/token-caching.md`   |
+| Language / i18n                             | `docs/features/language.md`        |
+| Arena mode                                  | `docs/features/arena.md`           |
+| Status line                                 | `docs/features/status-line.md`     |
+| Scheduled tasks (cron/loop)                 | `docs/features/scheduled-tasks.md` |
+| Worktree                                    | `docs/features/worktree.md`        |
 
 ### IDE Integration
 
@@ -111,15 +115,16 @@ When the user asks about configuration, the primary reference is `docs/configura
 
 ### Common Config Categories
 
-| Category      | Key Config Keys                                                               | Reference                                                                 |
-| ------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Permissions   | `permissions.allow/ask/deny`                                                  | `docs/configuration/settings.md`, `docs/features/approval-mode.md`        |
-| MCP Servers   | `mcpServers.*`, `mcp.*`                                                       | `docs/configuration/settings.md`, `docs/features/mcp.md`                  |
-| Tool Approval | `tools.approvalMode`                                                          | `docs/configuration/settings.md`, `docs/features/approval-mode.md`        |
-| Model         | `model.name`, `modelProviders`                                                | `docs/configuration/settings.md`, `docs/configuration/model-providers.md` |
-| General/UI    | `general.*`, `ui.*`, `ide.*`, `output.*`                                      | `docs/configuration/settings.md`                                          |
-| Context       | `context.*`                                                                   | `docs/configuration/settings.md`                                          |
-| Advanced      | `hooks`, `env`, `webSearch`, `security`, `privacy`, `telemetry`, `advanced.*` | `docs/configuration/settings.md`                                          |
+| Category      | Key Config Keys                                                      | Reference                                                                                        |
+| ------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Permissions   | `permissions.allow/ask/deny`                                         | `docs/configuration/settings.md`, `docs/features/approval-mode.md`                               |
+| MCP Servers   | `mcpServers.*`, `mcp.*`                                              | `docs/configuration/settings.md`, `docs/features/mcp.md`                                         |
+| Tool Approval | `tools.approvalMode`                                                 | `docs/configuration/settings.md`, `docs/features/approval-mode.md`, `docs/features/auto-mode.md` |
+| Hooks         | `hooks.*`                                                            | `docs/features/hooks.md`                                                                         |
+| Model         | `model.name`, `modelProviders`                                       | `docs/configuration/settings.md`, `docs/configuration/model-providers.md`                        |
+| General/UI    | `general.*`, `ui.*`, `ide.*`, `output.*`                             | `docs/configuration/settings.md`                                                                 |
+| Context       | `context.*`                                                          | `docs/configuration/settings.md`                                                                 |
+| Advanced      | `env`, `webSearch`, `security`, `privacy`, `telemetry`, `advanced.*` | `docs/configuration/settings.md`                                                                 |
 
 ---
 

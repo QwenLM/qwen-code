@@ -225,23 +225,6 @@ describe('Configuration Integration Tests', () => {
     });
   });
 
-  describe('Checkpointing Configuration', () => {
-    it('should enable checkpointing when the setting is true', async () => {
-      const configParams: ConfigParameters = {
-        cwd: '/tmp',
-        generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
-        embeddingModel: 'test-embedding-model',
-        targetDir: tempDir,
-        debugMode: false,
-        checkpointing: true,
-      };
-
-      const config = new Config(configParams);
-
-      expect(config.getCheckpointingEnabled()).toBe(true);
-    });
-  });
-
   describe('Extension Context Files', () => {
     it('should have an empty array for extension context files by default', () => {
       const configParams: ConfigParameters = {
