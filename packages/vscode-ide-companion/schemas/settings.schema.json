@@ -91,17 +91,6 @@
             }
           ]
         },
-        "checkpointing": {
-          "description": "Session checkpointing settings.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "description": "Enable session checkpointing for recovery",
-              "type": "boolean",
-              "default": false
-            }
-          }
-        },
         "debugKeystrokeLogging": {
           "description": "Enable debug logging of keystrokes to the console.",
           "type": "boolean",
