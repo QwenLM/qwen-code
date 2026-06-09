@@ -79,6 +79,14 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
       name: '--path-scope parser',
       pattern: /--path-scope/,
     },
+    {
+      name: 'QWEN_INSTALL_REPAIR_PATH',
+      pattern: /QWEN_INSTALL_REPAIR_PATH/,
+    },
+    {
+      name: 'QWEN_INSTALL_PATH_SCOPE',
+      pattern: /QWEN_INSTALL_PATH_SCOPE/,
+    },
   ],
   'install-qwen-standalone.ps1': [
     {

@@ -94,6 +94,8 @@ jobs:
 
           grep -F -- '--repair-path' dist/installation/install-qwen-standalone.bat
           grep -F -- '--path-scope' dist/installation/install-qwen-standalone.bat
+          grep -F -- 'QWEN_INSTALL_REPAIR_PATH' dist/installation/install-qwen-standalone.bat
+          grep -F -- 'QWEN_INSTALL_PATH_SCOPE' dist/installation/install-qwen-standalone.bat
 
       - name: 'Install ossutil'
         env:

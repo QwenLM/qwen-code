@@ -346,7 +346,7 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
-    expect(script).toContain('Failed to update user PATH');
+    expect(script).toContain('Failed to update !PATH_SCOPE! PATH');
     expect(script).toContain('PRE_INSTALL_QWENS_LIST');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
@@ -1055,7 +1055,15 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        '@echo off\r\n' +
+          'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
+          'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
+          'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
+          'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
+          'set "VERSION=latest"\r\n' +
+          'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
+          'if "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+          'if "%~1"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
       );
       // The ps1 shim has every required behavior pattern but also contains
       // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
@@ -1112,7 +1120,15 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        '@echo off\r\n' +
+          'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
+          'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
+          'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
+          'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
+          'set "VERSION=latest"\r\n' +
+          'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
+          'if "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+          'if "%~1"=="--path-scope" set "PATH_SCOPE=%~2"\r\n',
       );
       // ps1 contains the exact docstring shipped in production
       // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
@@ -1913,6 +1929,8 @@ describe('standalone release packaging', () => {
     );
     expect(validateHostedStep).toContain('--repair-path');
     expect(validateHostedStep).toContain('--path-scope');
+    expect(validateHostedStep).toContain('QWEN_INSTALL_REPAIR_PATH');
+    expect(validateHostedStep).toContain('QWEN_INSTALL_PATH_SCOPE');
     expect(validateHostedStep).toContain('install-qwen-standalone.bat');
     const uploadScript = readScript('scripts/upload-aliyun-oss-assets.js');
     expect(uploadScript).toContain("'--acl'");
