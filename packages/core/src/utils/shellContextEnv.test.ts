@@ -113,12 +113,12 @@ describe('getShellContextEnvVars', () => {
       );
     });
 
-    it('does not inject TRACEPARENT when propagation is enabled but no context', () => {
+    it('clears TRACEPARENT when propagation is enabled but no context', () => {
       vi.mocked(isShellTracePropagationEnabled).mockReturnValue(true);
       vi.mocked(getTraceContext).mockReturnValue(null);
 
       const env = getShellContextEnvVars();
-      expect(env['TRACEPARENT']).toBeUndefined();
+      expect(env['TRACEPARENT']).toBe('');
     });
   });
 });

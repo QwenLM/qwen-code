@@ -46,6 +46,8 @@ export function getShellContextEnvVars(): Record<string, string> {
     const ctx = getTraceContext();
     if (ctx) {
       env['TRACEPARENT'] = formatTraceparent(ctx);
+    } else {
+      env['TRACEPARENT'] = '';
     }
   }
 
