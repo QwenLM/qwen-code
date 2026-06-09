@@ -358,55 +358,33 @@ export async function updateTask(
 /**
  * Delete a task file.
  *
- * Cleans up reciprocal dependency edges first so dependents don't end
- * up permanently blocked by a phantom id. Without this, deleting a
- * task X that appears in another task's `blockedBy` (or whose own
- * `blocks` list points to other tasks) would leave the deleted id in
- * those neighbors — and `tryAutoClaimTask` skips any task with a
- * non-empty `blockedBy`, so a dependent becomes unclaimable forever.
+ * Acquires the same per-task lock that `updateTask` uses, then
+ * re-reads and re-checks ownership *inside* the lock before unlinking.
+ * Doing the check under the lock closes a TOCTOU hole: a pre-lock read
+ * could pass the ownership guard, then a concurrent `claimTask` /
+ * `updateTask` reassign the owner before the unlink, and we'd silently
+ * destroy a task that now belongs to a different teammate. Holding the
+ * lock also stops a concurrent read-modify-write cycle from writing
+ * back to a path we just unlinked (which would resurrect the task with
+ * stale data). Lock-acquisition / read failures with ENOENT are treated
+ * as already-deleted.
  *
- * Acquires the same per-task lock that `updateTask` uses so a
- * concurrent read-modify-write cycle can't write back to a path
- * we just unlinked (which would resurrect the task with stale
- * data). Lock-acquisition failures with ENOENT are treated as
- * already-deleted.
+ * Reciprocal dependency edges are cleaned up *after* the file is
+ * unlinked and this task's lock is released — never holding two
+ * per-task locks at once, which would risk deadlock against a
+ * concurrent multi-task update that locks in the opposite order — but
+ * before the single tasks-updated notification fires, so no listener
+ * observes a dependent still blocked by the phantom id. Without this,
+ * deleting a task X that appears in another task's `blockedBy` would
+ * leave the deleted id in that neighbor, and `tryAutoClaimTask` skips
+ * any task with a non-empty `blockedBy`, so a dependent would become
+ * unclaimable forever.
  */
 export async function deleteTask(
   teamName: string,
   taskId: string,
   opts?: { callerName?: string },
 ): Promise<boolean> {
-  // Read the task's edges first so we can clean up reciprocal references
-  // before unlinking the file. This is intentionally outside the file
-  // lock to avoid holding multiple per-task locks simultaneously (which
-  // would risk deadlock against any concurrent multi-task update).
-  const existing = await getTask(teamName, taskId);
-  if (existing) {
-    // Ownership guard for teammate callers, mirroring `updateTask`. A
-    // teammate (callerName set) may only delete its own tasks or unowned
-    // ones; the leader (callerName undefined) can delete anything.
-    // Without this, `task_update(status:'deleted')` is a hole in the
-    // ownership model — the most destructive operation would bypass the
-    // guard that every other mutation path enforces.
-    if (
-      opts?.callerName !== undefined &&
-      existing.owner &&
-      existing.owner !== opts.callerName
-    ) {
-      throw new TaskOwnershipError(taskId, opts.callerName, existing.owner);
-    }
-    const dependentIds = new Set<string>([
-      ...existing.blocks,
-      ...existing.blockedBy,
-    ]);
-    dependentIds.delete(taskId);
-    await Promise.all(
-      Array.from(dependentIds).map((depId) =>
-        removeEdgesReferencing(teamName, depId, taskId),
-      ),
-    );
-  }
-
   const taskPath = getTaskPath(teamName, taskId);
 
   let release: (() => Promise<void>) | undefined;
@@ -416,16 +394,58 @@ export async function deleteTask(
     if (isNodeError(err) && err.code === 'ENOENT') return false;
     throw err;
   }
+
+  // Captured from the in-lock read so the post-unlink edge cleanup uses
+  // fresh data. Empty until the read succeeds; on any early return/throw
+  // below it is never consumed.
+  let dependentIds = new Set<string>();
   try {
-    await fs.unlink(taskPath);
-    notifyTasksUpdated(teamName);
-    return true;
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return false;
-    throw err;
+    let task: SwarmTask;
+    try {
+      const raw = await fs.readFile(taskPath, 'utf-8');
+      task = JSON.parse(raw) as SwarmTask;
+    } catch (err) {
+      // Already gone (a concurrent delete won the lock first, or the
+      // file never existed) — nothing to unlink.
+      if (isNodeError(err) && err.code === 'ENOENT') return false;
+      throw err;
+    }
+
+    // Ownership guard for teammate callers, mirroring `updateTask`, and
+    // re-checked inside the lock against the just-read owner. A teammate
+    // (callerName set) may only delete its own tasks or unowned ones; the
+    // leader (callerName undefined) can delete anything. Without this,
+    // `task_update(status:'deleted')` is a hole in the ownership model —
+    // the most destructive operation would bypass the guard that every
+    // other mutation path enforces.
+    if (
+      opts?.callerName !== undefined &&
+      task.owner &&
+      task.owner !== opts.callerName
+    ) {
+      throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
+    }
+
+    dependentIds = new Set<string>([...task.blocks, ...task.blockedBy]);
+    dependentIds.delete(taskId);
+
+    try {
+      await fs.unlink(taskPath);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') return false;
+      throw err;
+    }
   } finally {
     await release();
   }
+
+  await Promise.all(
+    Array.from(dependentIds).map((depId) =>
+      removeEdgesReferencing(teamName, depId, taskId),
+    ),
+  );
+  notifyTasksUpdated(teamName);
+  return true;
 }
 
 /**
@@ -615,10 +635,14 @@ export async function blockTask(
   fromId: string,
   toId: string,
 ): Promise<void> {
-  await Promise.all([
-    updateTask(teamName, fromId, { addBlocks: [toId] }),
-    updateTask(teamName, toId, { addBlockedBy: [fromId] }),
-  ]);
+  // Sequential, not `Promise.all`: each `updateTask` takes a per-task
+  // lock, so two concurrent `blockTask` calls over the same pair in
+  // opposite directions — blockTask(A, B) and blockTask(B, A) — could
+  // deadlock, call 1 holding A's lock waiting on B while call 2 holds B
+  // waiting on A. Serialising the two writes removes the lock-ordering
+  // hazard (and keeps the two edges from being half-written on failure).
+  await updateTask(teamName, fromId, { addBlocks: [toId] });
+  await updateTask(teamName, toId, { addBlockedBy: [fromId] });
 }
 
 // ─── Claiming ───────────────────────────────────────────────
