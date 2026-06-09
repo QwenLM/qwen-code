@@ -1352,7 +1352,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'General coding model',
           authType: 'qwen',
           contextWindowSize: 65_536,
-          baseUrl: 'https://api.example.com',
+          baseUrl: 'https://user:sk-secret@api.example.com',
           envKey: 'DASHSCOPE_API_KEY',
         },
       ]),
@@ -1470,7 +1470,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               name: 'Qwen Plus',
               description: 'General coding model',
               contextLimit: 65_536,
-              baseUrl: 'https://secret.example.com',
+              baseUrl: 'https://api.example.com',
               envKey: 'DASHSCOPE_API_KEY',
               isCurrent: true,
               isRuntime: false,
@@ -1479,7 +1479,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
     });
-
+    expect(JSON.stringify(providers)).not.toContain('sk-secret');
     mockConnectionState.resolve();
     await agentPromise;
   });

@@ -215,6 +215,24 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 
+function sanitizeProviderBaseUrl(baseUrl: string): string {
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) {
+    return baseUrl;
+  }
+
+  const authorityStart = scheme[0].length;
+  const rest = baseUrl.slice(authorityStart);
+  const authorityEnd = rest.search(/[/?#]/);
+  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf('@');
+  if (at === -1) {
+    return baseUrl;
+  }
+
+  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
+}
+
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
  * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
@@ -3724,7 +3742,9 @@ class QwenAgent implements Agent {
           ...(model.modalities !== undefined
             ? { modalities: model.modalities }
             : {}),
-          ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+          ...(model.baseUrl !== undefined
+            ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl) }
+            : {}),
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
@@ -3746,7 +3766,9 @@ class QwenAgent implements Agent {
               current: {
                 ...(currentAuth ? { authType: String(currentAuth) } : {}),
                 ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
-                ...(baseUrl ? { baseUrl } : {}),
+                ...(baseUrl
+                  ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
+                  : {}),
                 ...(fastModelId ? { fastModelId } : {}),
               },
             }
