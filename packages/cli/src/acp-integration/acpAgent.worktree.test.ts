@@ -101,6 +101,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   AuthType: {},
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
   clearCachedCredentialFile: vi.fn(),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
