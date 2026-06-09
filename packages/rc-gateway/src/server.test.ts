@@ -415,6 +415,57 @@ describe('gateway app', () => {
     expect((await res.json()).stopReason).toBe('end_turn');
   });
 
+  it('403s the fork route for a token lacking write', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]); // no write
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(
+      `${url}/rc/session/11111111111111111111111111111111/fork`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('mounts the fork route: 404s a missing parent for a write token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'forker' }),
+    });
+    const writeToken = ((await redeem.json()) as { token: string }).token;
+
+    // A syntactically-valid but nonexistent parent id under the stub's
+    // /stub/workspace chats dir → 404 parent_transcript_not_found.
+    const res = await fetch(
+      `${url}/rc/session/22222222222222222222222222222222/fork`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${writeToken}`,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe('parent_transcript_not_found');
+  });
+
   it('records activity on a prompt POST without breaking the route (working-device middleware wired)', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, APPROVE, WRITE]);

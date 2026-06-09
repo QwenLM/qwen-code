@@ -93,6 +93,15 @@ export {
   type SearchOptions,
 } from './search/transcripts.js';
 export { createSearchRoute } from './routes/search.js';
+export { createForkRoute, type ForkRouteDeps } from './routes/fork.js';
+export {
+  // Aliased to avoid colliding with the (legacy, approximate) resolveChatsDir
+  // re-exported above from search/transcripts.js. This is the corrected,
+  // sanitizeCwd/runtime-base-exact resolver used by the fork route + e2e.
+  resolveChatsDir as resolveForkChatsDir,
+  isValidSessionId,
+  SESSION_FILE_RE,
+} from './sessions/chatsPath.js';
 export { parseFrontMatter, substitute } from './commands/parse.js';
 export {
   CommandLoader,

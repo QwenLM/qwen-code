@@ -20,6 +20,7 @@ import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute } from './routes/prompt.js';
+import { createForkRoute } from './routes/fork.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import {
   createListTokensRoute,
@@ -133,6 +134,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     recordActivity(workingDevice),
     enforceSessionLock(audit),
     createPromptRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/session/:id/fork',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    createForkRoute(
+      deps.daemon,
+      async () => {
+        try {
+          return (await deps.daemon.capabilities()).workspaceCwd;
+        } catch {
+          return undefined;
+        }
+      },
+      { audit },
+    ),
   );
   app.post(
     '/rc/session/:id/command/:name',
