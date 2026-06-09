@@ -1412,6 +1412,14 @@ function textBufferReducerLogic(
             }
             break;
           case 'right':
+            // No stall-fix needed here (unlike 'left' above): the cursor
+            // resolver (calculateVisualCursorFromLayout) selects segments with
+            // a strict `logicalCol < nextStartColInLogical`, so a cursor at a
+            // hard-wrap boundary always lands at the START of the next visual
+            // row, not the end of the current one — wrapping right never maps
+            // back to the same logical position. If that segment selection ever
+            // changes (e.g. `<` → `<=`), a symmetric decrement would be needed
+            // here to avoid a mirror-image right-movement stall.
             newPreferredCol = null;
             if (newVisualCol < currentVisLineLen) {
               newVisualCol++;
