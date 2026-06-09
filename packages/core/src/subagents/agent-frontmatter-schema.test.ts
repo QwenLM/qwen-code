@@ -61,6 +61,17 @@ describe('agent-frontmatter-schema', () => {
       expect(claudePermissionModeToApprovalMode(undefined)).toBeUndefined();
     });
 
+    it('does not walk the prototype chain for `__proto__` / `constructor`', () => {
+      // Implemented with `Map.get`, not a plain object lookup, so prototype
+      // keys cannot return Object.prototype / Function constructor.
+      expect(claudePermissionModeToApprovalMode('__proto__')).toBeUndefined();
+      expect(claudePermissionModeToApprovalMode('constructor')).toBeUndefined();
+      expect(
+        claudePermissionModeToApprovalMode('hasOwnProperty'),
+      ).toBeUndefined();
+      expect(claudePermissionModeToApprovalMode('toString')).toBeUndefined();
+    });
+
     it('preserves restrictive intent of dontAsk by mapping to default', () => {
       // dontAsk in CC denies any tool call that would prompt the user.
       // We map to `default` (which also requires approval) rather than

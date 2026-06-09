@@ -51,15 +51,19 @@ export type ColorValue = (typeof COLOR_VALUES)[number];
  * making it restrictive. We map it to `default` (which also requires approval)
  * rather than `auto-edit` (which auto-approves), preserving the restrictive
  * intent. `bypassPermissions` is the Claude mode that auto-approves everything.
+ *
+ * Use `Map` instead of a plain `Record` so a caller passing `'__proto__'` or
+ * `'constructor'` cannot walk the prototype chain and get back a non-string
+ * value (e.g. `Object.prototype`).
  */
-const PERMISSION_MODE_TO_APPROVAL_MODE: Readonly<Record<string, string>> = {
-  default: 'default',
-  plan: 'plan',
-  acceptEdits: 'auto-edit',
-  auto: 'auto-edit',
-  bypassPermissions: 'yolo',
-  dontAsk: 'default',
-};
+const PERMISSION_MODE_TO_APPROVAL_MODE = new Map<string, string>([
+  ['default', 'default'],
+  ['plan', 'plan'],
+  ['acceptEdits', 'auto-edit'],
+  ['auto', 'auto-edit'],
+  ['bypassPermissions', 'yolo'],
+  ['dontAsk', 'default'],
+]);
 
 /**
  * Map a Claude Code `permissionMode` frontmatter value to a qwen-code
@@ -75,7 +79,7 @@ export function claudePermissionModeToApprovalMode(
   permissionMode: string | undefined,
 ): string | undefined {
   if (!permissionMode) return undefined;
-  return PERMISSION_MODE_TO_APPROVAL_MODE[permissionMode];
+  return PERMISSION_MODE_TO_APPROVAL_MODE.get(permissionMode);
 }
 
 /**
