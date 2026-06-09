@@ -18,10 +18,7 @@ import process from 'node:process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
-import {
-  evaluateTimeBasedTrigger,
-  microcompactHistory,
-} from '../services/microcompaction/microcompact.js';
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -1336,7 +1333,7 @@ export class GeminiClient {
 
   private async microcompactIdleHistory(
     lastCompletionTimestamp: number | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
@@ -1344,7 +1341,7 @@ export class GeminiClient {
         this.config.getClearContextOnIdle(),
       );
       if (!mcResult.meta) {
-        return;
+        return false;
       }
 
       const m = mcResult.meta;
@@ -1397,10 +1394,12 @@ export class GeminiClient {
           `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
           `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
       );
+      return true;
     } catch (err) {
       debugLogger.error(
         `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
@@ -1617,13 +1616,7 @@ export class GeminiClient {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
-        if (
-          evaluateTimeBasedTrigger(
-            checkpoint,
-            this.config.getClearContextOnIdle(),
-          )
-        ) {
-          await this.microcompactIdleHistory(checkpoint);
+        if (await this.microcompactIdleHistory(checkpoint)) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
       }

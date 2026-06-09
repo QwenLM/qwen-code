@@ -1992,9 +1992,7 @@ describe('Gemini Client (client.ts)', () => {
         setHistory,
       } as unknown as GeminiChat;
       client['lastApiCompletionTimestamp'] = Date.now();
-      (
-        client as unknown as { lastHookMicrocompactionTimestamp: number }
-      ).lastHookMicrocompactionTimestamp = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
 
       const stream = client.sendMessageStream(
         [{ text: 'continue goal' }],
@@ -2027,7 +2025,8 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       } as unknown as GeminiChat;
       client['lastApiCompletionTimestamp'] = Date.now();
-      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
       mockClientDebugLogger.error.mockClear();
 
       const events: ServerGeminiStreamEvent[] = [];
@@ -2049,6 +2048,7 @@ describe('Gemini Client (client.ts)', () => {
           'microcompactHistory failed: hook cache disarm failed',
         ),
       );
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
     });
 
     it('skips the next Hook microcompaction after one just ran', async () => {
