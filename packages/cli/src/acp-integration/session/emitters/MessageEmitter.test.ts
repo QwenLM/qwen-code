@@ -65,6 +65,22 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: 'I can help you with that.' },
       });
     });
+
+    it('should include subagent parent metadata when provided', async () => {
+      await emitter.emitAgentMessage('Subagent progress', undefined, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Subagent progress' },
+        _meta: {
+          parentToolCallId: 'agent-parent-1',
+          subagentType: 'general-purpose',
+        },
+      });
+    });
   });
 
   describe('emitAgentThought', () => {
@@ -75,6 +91,22 @@ describe('MessageEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Let me think about this...' },
+      });
+    });
+
+    it('should include subagent parent metadata when provided', async () => {
+      await emitter.emitAgentThought('Subagent thought', undefined, {
+        parentToolCallId: 'agent-parent-1',
+        subagentType: 'general-purpose',
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'Subagent thought' },
+        _meta: {
+          parentToolCallId: 'agent-parent-1',
+          subagentType: 'general-purpose',
+        },
       });
     });
   });

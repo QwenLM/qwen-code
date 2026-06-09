@@ -690,8 +690,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
