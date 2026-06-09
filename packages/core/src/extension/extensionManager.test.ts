@@ -33,6 +33,8 @@ const mockGit = {
   revparse: vi.fn(),
   path: vi.fn(),
 };
+const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
+const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
   simpleGit: vi.fn((path: string) => {
@@ -45,9 +47,11 @@ vi.mock('./github.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./github.js')>();
   return {
     ...actual,
+    downloadFromArchiveUrl: mockDownloadFromArchiveUrl,
     downloadFromGitHubRelease: vi
       .fn()
       .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+    extractArchiveFile: mockExtractArchiveFile,
   };
 });
 
@@ -134,6 +138,8 @@ describe('extension tests', () => {
     mockHomedir.mockReturnValue(tempHomeDir);
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
     Object.values(mockGit).forEach((fn) => fn.mockReset());
+    mockDownloadFromArchiveUrl.mockReset();
+    mockExtractArchiveFile.mockReset();
   });
 
   afterEach(() => {
@@ -150,6 +156,133 @@ describe('extension tests', () => {
       ...options,
     });
   }
+
+  describe('installExtension', () => {
+    function writeExtractedExtension(destination: string, name: string) {
+      fs.mkdirSync(destination, { recursive: true });
+      fs.writeFileSync(
+        path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name, version: '1.0.0' }),
+      );
+    }
+
+    it('should install an extension from a local archive', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'local-archive-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: archivePath,
+          type: 'local',
+        },
+        async () => {},
+      );
+
+      expect(mockExtractArchiveFile).toHaveBeenCalledWith(
+        archivePath,
+        expect.any(String),
+      );
+      expect(extension.name).toBe('local-archive-extension');
+      expect(extension.installMetadata).toMatchObject({
+        source: archivePath,
+        type: 'local',
+      });
+    });
+
+    it('should install an extension from an archive URL', async () => {
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          writeExtractedExtension(destination, 'archive-url-extension');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          source: 'https://example.com/archive-extension.zip',
+          type: 'archive-url',
+        },
+        async () => {},
+      );
+
+      expect(mockDownloadFromArchiveUrl).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'https://example.com/archive-extension.zip',
+          type: 'archive-url',
+        }),
+        expect.any(String),
+      );
+      expect(extension.name).toBe('archive-url-extension');
+      expect(extension.installMetadata).toMatchObject({
+        source: 'https://example.com/archive-extension.zip',
+        type: 'archive-url',
+      });
+    });
+
+    it('should clean up the temp dir when archive URL download fails', async () => {
+      let tempDir: string | undefined;
+      mockDownloadFromArchiveUrl.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          tempDir = destination;
+          throw new Error('download failed');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          {
+            source: 'https://example.com/archive-extension.zip',
+            type: 'archive-url',
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow('download failed');
+
+      expect(tempDir).toBeDefined();
+      expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+
+    it('should clean up the temp dir when local archive extraction fails', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'local-extension.zip');
+      fs.writeFileSync(archivePath, 'not used by mocked extractor');
+      let tempDir: string | undefined;
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          tempDir = destination;
+          throw new Error('extract failed');
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      await expect(
+        manager.installExtension(
+          {
+            source: archivePath,
+            type: 'local',
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow('extract failed');
+
+      expect(tempDir).toBeDefined();
+      expect(fs.existsSync(tempDir!)).toBe(false);
+    });
+  });
 
   describe('loadExtension', () => {
     it('should include extension path in loaded extension', async () => {

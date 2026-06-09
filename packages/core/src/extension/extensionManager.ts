@@ -40,7 +40,10 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
+  downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  extractArchiveFile,
+  isSupportedArchivePath,
   parseGitHubRepoForReleases,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
@@ -62,14 +65,7 @@ import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
-import {
-  isGeminiExtensionConfig,
-  convertGeminiExtensionPackage,
-} from './gemini-converter.js';
-import {
-  convertClaudePluginPackage,
-  convertClaudePluginStandalone,
-} from './claude-converter.js';
+import { convertGeminiOrClaudeExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -297,36 +293,6 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     }
     return [];
   }
-}
-
-async function convertGeminiOrClaudeExtension(
-  extensionDir: string,
-  pluginName?: string,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
-  let newExtensionDir = extensionDir;
-  let originSource: ExtensionOriginSource = 'QwenCode';
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
-    ).convertedDir;
-    originSource = 'Claude';
-  } else if (
-    fs.existsSync(path.join(extensionDir, '.claude-plugin', 'plugin.json'))
-  ) {
-    // A standalone Claude plugin installed directly from a git URL: its root
-    // holds `.claude-plugin/plugin.json` with no marketplace.json.
-    newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
-      .convertedDir;
-    originSource = 'Claude';
-  }
-  return { extensionDir: newExtensionDir, originSource };
 }
 
 // ============================================================================
@@ -1064,6 +1030,7 @@ export class ExtensionManager {
     const isUpdate = !!previousExtensionConfig;
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
+    let tempDir: string | undefined;
 
     try {
       if (!this.isWorkspaceTrusted) {
@@ -1084,8 +1051,6 @@ export class ExtensionManager {
           installMetadata.source,
         );
       }
-
-      let tempDir: string | undefined;
 
       if (
         installMetadata.originSource === 'Claude' &&
@@ -1122,10 +1087,21 @@ export class ExtensionManager {
           }
         }
         localSourcePath = tempDir;
+      } else if (installMetadata.type === 'archive-url') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await downloadFromArchiveUrl(installMetadata, tempDir);
+        localSourcePath = tempDir;
       } else if (installMetadata.type === 'npm') {
         tempDir = await ExtensionStorage.createTmpDir();
         const result = await downloadFromNpmRegistry(installMetadata, tempDir);
         installMetadata.releaseTag = result.version;
+        localSourcePath = tempDir;
+      } else if (
+        installMetadata.type === 'local' &&
+        isSupportedArchivePath(installMetadata.source)
+      ) {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await extractArchiveFile(installMetadata.source, tempDir);
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -1348,6 +1324,9 @@ export class ExtensionManager {
         } catch {
           // Ignore error
         }
+      }
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
       }
       const config = newExtensionConfig ?? previousExtensionConfig;
       const extensionId = config

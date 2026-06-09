@@ -28,6 +28,18 @@ vi.mock('node:https', () => ({
 }));
 
 vi.mock('./github.js', () => ({
+  isSupportedArchiveUrl: vi.fn((url: string) => {
+    try {
+      const parsedUrl = new URL(url);
+      const pathname = parsedUrl.pathname.toLowerCase();
+      return (
+        parsedUrl.protocol === 'https:' &&
+        (pathname.endsWith('.zip') || pathname.endsWith('.tar.gz'))
+      );
+    } catch {
+      return false;
+    }
+  }),
   parseGitHubRepoForReleases: vi.fn((url: string) => {
     const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (match) {
@@ -138,6 +150,32 @@ describe('parseInstallSource', () => {
       // scheme is not mistaken for a pluginName separator.
       expect(result.source).toBe('HTTPS://github.com/owner/repo');
       expect(result.type).toBe('git');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+
+    it('should parse supported archive URLs as archive-url installs', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://example.com/releases/extension.tar.gz',
+      );
+
+      expect(result.source).toBe(
+        'https://example.com/releases/extension.tar.gz',
+      );
+      expect(result.type).toBe('archive-url');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse supported archive URLs with plugin name', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://example.com/releases/extension.zip:my-plugin',
+      );
+
+      expect(result.source).toBe('https://example.com/releases/extension.zip');
+      expect(result.type).toBe('archive-url');
       expect(result.pluginName).toBe('my-plugin');
     });
   });
