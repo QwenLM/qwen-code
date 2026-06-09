@@ -152,10 +152,14 @@ interface BridgeOptions {
 
 A session is eligible for reaping when **all** of the following hold:
 
-1. **No active prompt**: `entry.activePromptOriginatorClientId === undefined`
+1. **No active prompt**: `entry.promptActive === false`
 2. **No live SSE subscribers**: `entry.events.subscriberCount === 0`
-3. **No registered clients**: `entry.clientIds.size === 0`
-4. **Idle duration exceeded**: `now - lastActivity(entry) > sessionIdleTimeoutMs`
+3. **Idle duration exceeded**: `now - lastActivity(entry) > sessionIdleTimeoutMs`
+
+Note: the reaper intentionally does NOT check `clientIds.size`. It covers
+the crash path where detach was never sent — `clientIds` still shows
+registered clients but the session is effectively orphaned. The normal
+path (client sends detach) is handled by close-on-last-detach instead.
 
 Where `lastActivity(entry)` is defined as:
 

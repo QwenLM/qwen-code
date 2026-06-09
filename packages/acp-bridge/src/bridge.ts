@@ -2699,6 +2699,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
                 entry.promptActive = true;
+                entry.sessionLastSeenAt = Date.now();
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2734,7 +2735,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .prompt(normalized)
                   .finally(() => {
                     entry.promptActive = false;
+                    entry.sessionLastSeenAt = Date.now();
                     delete entry.activePromptOriginatorClientId;
+                    if (
+                      entry.clientIds.size === 0 &&
+                      entry.events.subscriberCount === 0 &&
+                      byId.has(sessionId)
+                    ) {
+                      void closeSessionImpl(sessionId, undefined, {
+                        reason: 'last_client_detached',
+                      }).catch(() => {});
+                    }
                   });
 
                 // Race against channel termination: if the underlying transport

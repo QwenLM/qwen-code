@@ -545,7 +545,7 @@ describe('createAcpSessionBridge', () => {
       // Attach two clients so detaching one doesn't trigger
       // close-on-last-detach (which would remove the session entirely).
       const s1 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const _s2 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       bridge.recordHeartbeat(s1.sessionId, { clientId: s1.clientId });
 
       const before = bridge.getHeartbeatState(s1.sessionId);
