@@ -392,9 +392,7 @@ describe('mergeCompactToolGroups', () => {
     // Single-batch turn: one tool_group, then its summary arrives. The group
     // is non-force-expanded (compact-mode candidate), so its callId is in
     // absorbedCallIds — the summary is consumed by the compact header and
-    // dropped from merged output. Without this drop, mergedHistory.length
-    // would grow lock-step with history.length and MainContent's
-    // refreshStatic heuristic would never fire.
+    // dropped from merged output to avoid double-displaying the label.
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
       {

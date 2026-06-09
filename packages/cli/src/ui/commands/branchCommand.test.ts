@@ -70,7 +70,7 @@ describe('branchCommand', () => {
     });
   });
 
-  it('exposes /fork as an alias', () => {
-    expect(branchCommand.altNames).toContain('fork');
+  it('no longer aliases /fork (now a separate background-fork command)', () => {
+    expect(branchCommand.altNames ?? []).not.toContain('fork');
   });
 });

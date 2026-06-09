@@ -30,7 +30,10 @@ We favor small, atomic PRs that address a single issue or add a single, self-con
 - **Do:** Create a PR that fixes one specific bug or adds one specific feature.
 - **Don't:** Bundle multiple unrelated changes (e.g., a bug fix, a new feature, and a refactor) into a single PR.
 
-Large changes should be broken down into a series of smaller, logical PRs that can be reviewed and merged independently.
+As a rule of thumb, start splitting a PR once it exceeds about 1,200 changed
+lines. PRs above about 2,000 changed lines should either be split into a series
+of smaller, logical PRs that can be reviewed and merged independently, or
+explain in the PR description why the change needs to land together.
 
 #### 3. Use Draft PRs for Work in Progress
 

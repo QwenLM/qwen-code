@@ -172,7 +172,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
 vi.mock('../utils/acpModelUtils.js', () => ({
   formatAcpModelId: vi.fn(),
@@ -351,6 +354,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
       };
       lastSessionMock = mock;

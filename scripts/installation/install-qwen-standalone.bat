@@ -296,20 +296,15 @@ echo.
 echo Usage: install-qwen-standalone.bat [OPTIONS]
 echo.
 echo Options:
-echo   -s, --source SOURCE      Record the installation source.
-echo                            Only letters, numbers, dot, underscore, and dash are allowed.
-echo   --method METHOD          Install method: detect, standalone, or npm.
-echo   --mirror MIRROR          Standalone archive mirror: auto, github, or aliyun.
-echo                            Defaults to QWEN_INSTALL_MIRROR or auto, which picks
-echo                            whichever responds first via a HEAD probe.
-echo   --base-url URL           Override standalone archive base URL.
-echo   --archive PATH           Install from a local standalone archive.
-echo   --version VERSION        Standalone release version. Defaults to latest.
-echo   --registry REGISTRY      npm registry to use.
-echo                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
-echo   --no-modify-path         Do not prepend INSTALL_BIN_DIR to user PATH even
-echo                            when a shadowing 'qwen' is detected.
-echo   -h, --help               Show this help message.
+echo   --method METHOD      Install method: detect, standalone, or npm (default: detect)
+echo   --mirror MIRROR      Mirror: auto, github, or aliyun (default: auto)
+echo   --base-url URL       Override standalone archive base URL
+echo   --archive PATH       Install from a local standalone archive
+echo   --version VERSION    Release version (default: latest)
+echo   --registry URL       npm registry (default: https://registry.npmmirror.com)
+echo   --no-modify-path     Do not modify user PATH
+echo   -s, --source SOURCE  Record installation source
+echo   -h, --help           Show this help message
 exit /b 0
 
 :PrintHeader
@@ -317,7 +312,20 @@ set "DISPLAY_VERSION=!VERSION!"
 if /i not "!DISPLAY_VERSION!"=="latest" (
     if /i "!DISPLAY_VERSION:~0,1!"=="v" set "DISPLAY_VERSION=!DISPLAY_VERSION:~1!"
 )
+echo.
 echo Installing Qwen Code version: !DISPLAY_VERSION!
+echo.
+exit /b 0
+
+:PrintLogo
+rem QWEN CODE logo with color (Windows Terminal VT100 support)
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$e=[char]27; Write-Host \"  $e[38;2;71;150;228mQ W E N  $e[38;2;132;122;206mC O D E$e[0m\""
+echo.
+exit /b 0
+
+:PrintProgressComplete
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$esc = [char]27; $bar = [string]::new([char]0x25A0, 50); Write-Host \"$esc[38;5;214m$bar 100%%$esc[0m\""
 exit /b 0
 
 :ValidateRawEnvironmentOptions
@@ -547,11 +555,11 @@ if /i "!MIRROR!"=="auto" (
     )
     call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_PROBE_URL!"
     if /i "!QWEN_RACE_RESULT!"=="timeout" (
-        echo INFO: Mirror auto-selection timed out; defaulting to github.
+        REM Mirror auto-selection timed out; defaulting to github.
         set "MIRROR=github"
     ) else (
         set "MIRROR=!QWEN_RACE_RESULT!"
-        echo INFO: Mirror auto-selected via HEAD probe: !QWEN_RACE_RESULT!
+        REM Mirror auto-selected: !QWEN_RACE_RESULT!
     )
     set "QWEN_GH_BASE_URL="
     set "QWEN_OSS_BASE_URL="
@@ -592,7 +600,7 @@ rem already on the user PATH. Uses PowerShell rather than `setx` because setx
 rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
 set "QWEN_NEW_BIN=%~1"
 if "!QWEN_NEW_BIN!"=="" exit /b 0
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = $userPath -split ';' | Where-Object { $_ -ne '' }; if ($entries -contains $bin) { Write-Output ('INFO: User PATH already contains ' + $bin + ' (skipping).'); exit 0 }; $newPath = (@($bin) + $entries) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Output ('SUCCESS: Prepended ' + $bin + ' to your user PATH.'); Write-Output 'INFO: Open a NEW command prompt for the change to take effect.'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = @($userPath -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { $_ -ne $bin }); if ($entries.Count -gt 0 -and $entries[0] -eq $bin -and $remaining.Count -eq ($entries.Count - 1)) { exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); exit 0"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_NEW_BIN="
 exit /b %PS_STATUS%
@@ -611,7 +619,8 @@ set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
 rem Prefer curl.exe -# for a hash-mark progress bar (Windows 10+ includes it);
 rem fall back to Invoke-WebRequest (which shows its own progress bar).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+rem Progress output is suppressed (-s overrides -#) because PrintProgressComplete provides the visual.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL -s --show-error; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { $ProgressPreference = 'SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -667,7 +676,7 @@ if "!RESOLVED_VERSION_PATH!"=="" (
     exit /b 1
 )
 
-echo INFO: Resolved Aliyun latest to !RESOLVED_VERSION_PATH!.
+REM Resolved Aliyun latest to !RESOLVED_VERSION_PATH!
 exit /b 0
 
 :VerifyChecksum
@@ -683,7 +692,7 @@ if "!CHECKSUM_FILE!"=="" (
         call :CreateTempFile "qwen-code-checksums"
         if !ERRORLEVEL! NEQ 0 exit /b 1
         set "TEMP_CHECKSUM=!TEMP_FILE!"
-        call :DownloadFile "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
+        call :DownloadFileQuiet "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
         if !ERRORLEVEL! NEQ 0 (
             if exist "!TEMP_CHECKSUM!" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
             echo ERROR: Could not download SHA256SUMS for checksum verification.
@@ -733,7 +742,7 @@ if /i not "!EXPECTED_HASH!"=="!ACTUAL_HASH!" (
     exit /b 1
 )
 
-echo SUCCESS: Checksum verified for !ARCHIVE_NAME!.
+REM Checksum verified for !ARCHIVE_NAME!
 exit /b 0
 
 :InstallStandalone
@@ -820,7 +829,6 @@ if not "!ARCHIVE_PATH!"=="" (
         if exist "!ARCHIVE_FILE!" del /F /Q "!ARCHIVE_FILE!" >nul 2>&1
         echo WARNING: Aliyun standalone archive download failed; retrying GitHub mirror.
         call :UseGithubFallbackBaseUrl
-        echo Downloading !ARCHIVE_NAME!
         call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
         set "DOWNLOAD_STATUS=!ERRORLEVEL!"
     )
@@ -830,6 +838,7 @@ if not "!ARCHIVE_PATH!"=="" (
         if /i "!METHOD!"=="detect" exit /b 2
         exit /b 1
     )
+    call :PrintProgressComplete
 )
 
 if "!TEMP_DIR!"=="" (
@@ -1002,8 +1011,7 @@ set "PATH=!INSTALL_BIN_DIR!;!PATH!"
 call :CreateSourceJson
 if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 
-echo SUCCESS: Qwen Code standalone archive installed successfully.
-echo INFO: Installed to !INSTALL_DIR!
+REM Standalone archive installed to !INSTALL_DIR!
 exit /b 0
 
 :CreateTempDir
@@ -1050,7 +1058,7 @@ REM with backslash separators even though the ZIP spec requires '/'. We
 REM accept either separator and reject only entries that, after
 REM normalization, are empty, absolute, drive-rooted, or contain a '..'
 REM segment.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); if ($archive.Entries.Count -eq 0) { [Console]::Error.WriteLine('Archive is empty: ' + $env:QWEN_ARCHIVE_FILE); exit 3 }; foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_ARCHIVE_FILE="
 if %PS_STATUS% EQU 0 exit /b 0
@@ -1060,6 +1068,10 @@ if %PS_STATUS% EQU 1 (
 )
 if %PS_STATUS% EQU 2 (
     echo ERROR: Archive could not be inspected before extraction.
+    exit /b 1
+)
+if %PS_STATUS% EQU 3 (
+    echo ERROR: Archive is empty: %~1
     exit /b 1
 )
 echo ERROR: Archive validation failed before extraction.
@@ -1113,8 +1125,7 @@ rem Back it up so the user doesn't lose data, then proceed.
 for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddTHHmmss"') do set "BACKUP_TIMESTAMP=%%t"
 set "BACKUP_DIR=!MANAGED_DIR!.backup.!BACKUP_TIMESTAMP!"
 if "!BACKUP_TIMESTAMP!"=="" set "BACKUP_DIR=!MANAGED_DIR!.backup"
-echo WARNING: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
-echo WARNING: Backing up to !BACKUP_DIR!
+rem Silently back up existing directory
 move /Y "!MANAGED_DIR!" "!BACKUP_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
     echo ERROR: Failed to back up !MANAGED_DIR!. Move or remove it manually, then rerun the installer.
@@ -1153,19 +1164,18 @@ if %NODE_MAJOR_NUM% LSS 22 (
     exit /b 1
 )
 
-echo SUCCESS: Node.js %NODE_VERSION% detected.
+REM Node.js %NODE_VERSION% detected.
 exit /b 0
 
 :RequireNpm
 where npm >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: npm was not found.
-    echo Please install Node.js with npm included, then rerun this installer.
+    echo ERROR: npm was not found. Install Node.js with npm from https://nodejs.org/
     exit /b 1
 )
 
 for /f "delims=" %%i in ('npm -v 2^>nul') do set "NPM_VERSION=%%i"
-echo SUCCESS: npm %NPM_VERSION% detected.
+REM npm %NPM_VERSION% detected.
 exit /b 0
 
 :NpmPackageSpec
@@ -1185,29 +1195,11 @@ if %ERRORLEVEL% NEQ 0 exit /b 1
 
 call :NpmPackageSpec
 
-where qwen >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for /f "delims=" %%i in ('qwen --version 2^>nul') do set "QWEN_VERSION=%%i"
-    echo INFO: Existing Qwen Code detected: !QWEN_VERSION!
-    if /i "!VERSION!"=="latest" (
-        echo INFO: Upgrading to the latest version.
-    ) else (
-        echo INFO: Installing requested version !VERSION!.
-    )
-)
-
-echo INFO: Running: npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
 call npm install -g !NPM_PACKAGE_SPEC! --registry "!NPM_REGISTRY!"
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: Failed to install Qwen Code.
-    echo.
-    echo This installer does not change your npm prefix or PATH.
-    echo If the failure is a permission error, fix your npm global package directory, then run:
-    echo   npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
+    echo ERROR: Failed to install. Try: npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
     exit /b 1
 )
-
-echo SUCCESS: Qwen Code installed successfully.
 call :CreateSourceJson
 exit /b 0
 
@@ -1224,7 +1216,6 @@ echo   "source": "!SOURCE!"
 echo }
 ) > "!QWEN_DIR!\source.json"
 
-echo SUCCESS: Installation source saved to !USERPROFILE!\.qwen\source.json
 exit /b 0
 
 :PrintFinalInstructions
@@ -1232,6 +1223,7 @@ set "EXTRA_BIN=%~1"
 set "SUMMARY_INSTALL_DIR=%~2"
 set "SUMMARY_INSTALL_METHOD=%~3"
 set "STANDALONE_UNINSTALL_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1"
+set "PATH_UPDATE_APPLIED=0"
 if "!SUMMARY_INSTALL_METHOD!"=="" set "SUMMARY_INSTALL_METHOD=standalone"
 
 set "INSTALLED_BIN="
@@ -1247,77 +1239,27 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-echo QWEN CODE
-echo.
-echo Qwen Code !INSTALLED_VERSION! installed successfully.
-echo.
-echo To start:
-echo   cd ^<project^>
-echo   qwen
-
-if not "!SUMMARY_INSTALL_DIR!"=="" (
-    echo.
-    echo Installed to:
-    echo   !SUMMARY_INSTALL_DIR!
-)
-
-echo.
-echo Uninstall:
-if /i "!SUMMARY_INSTALL_METHOD!"=="npm" (
-    echo   npm uninstall -g @qwen-code/qwen-code
-) else (
-    if not "!SUMMARY_INSTALL_DIR!"=="" (
-        if not "!EXTRA_BIN!"=="" (
-            echo   set "QWEN_INSTALL_LIB_DIR=!SUMMARY_INSTALL_DIR!" ^&^& set "QWEN_INSTALL_BIN_DIR=!EXTRA_BIN!" ^&^& powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-        ) else (
-            echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-        )
-    ) else (
-        echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-    )
-)
-
-rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.
-set "OTHER_QWENS="
-if defined PRE_INSTALL_QWENS_LIST (
-    for %%i in ("!PRE_INSTALL_QWENS_LIST:|=" "!") do (
-        set "ENTRY=%%~i"
-        if not "!ENTRY!"=="" if /i not "!ENTRY!"=="!INSTALLED_BIN!" (
-            if "!OTHER_QWENS!"=="" (
-                set "OTHER_QWENS=!ENTRY!"
-            ) else (
-                set "OTHER_QWENS=!OTHER_QWENS!|!ENTRY!"
-            )
-        )
-    )
-)
-
 rem Persist the install bin to user PATH unless --no-modify-path is set.
 if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
     call :MaybeUpdateUserPath "!EXTRA_BIN!"
     if !ERRORLEVEL! NEQ 0 (
         echo WARNING: Failed to update user PATH. Add the directory manually:
         echo   !EXTRA_BIN!
+    ) else (
+        set "PATH_UPDATE_APPLIED=1"
     )
 )
 
-if defined OTHER_QWENS (
-    echo.
-    echo WARNING: Other 'qwen' executables exist on this system. Depending on
-    echo WARNING: your PATH order, one of these may run instead of the install above:
-    for %%i in ("!OTHER_QWENS:|=" "!") do (
-        set "OQ=%%~i"
-        if not "!OQ!"=="" echo WARNING:   !OQ!
-    )
-    echo.
-    echo To make this install take priority, restart your command prompt.
-    echo Or invoke directly: "!INSTALLED_BIN!"
-    exit /b 0
-)
+echo.
+echo Qwen Code !INSTALLED_VERSION! installed successfully, to start:
+echo.
+echo   cd ^<project^>
+echo   qwen
+echo.
+echo For more information visit https://qwenlm.github.io/qwen-code
 
 if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
-    echo INFO: Final PATH refresh is handled by the PowerShell entrypoint.
+    REM Final PATH refresh is handled by the PowerShell entrypoint.
     exit /b 0
 )
-echo qwen is ready to use in this terminal.
 exit /b 0

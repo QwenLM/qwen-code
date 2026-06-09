@@ -268,17 +268,17 @@ In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-tex
 
 Commands for obtaining information and performing system settings.
 
-| Command         | Description                                     | Usage Examples                   |
-| --------------- | ----------------------------------------------- | -------------------------------- |
-| `/help`         | Display help information for available commands | `/help` or `/?`                  |
-| `/status`       | Display version information                     | `/status` or `/about`            |
-| `/status paths` | Display current session file and log paths      | `/status paths`                  |
-| `/stats`        | Display detailed statistics for current session | `/stats`                         |
-| `/settings`     | Open settings editor                            | `/settings`                      |
-| `/auth`         | Change authentication method                    | `/auth`                          |
-| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`         | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command         | Description                                                   | Usage Examples                   |
+| --------------- | ------------------------------------------------------------- | -------------------------------- |
+| `/help`         | Display help information for available commands               | `/help` or `/?`                  |
+| `/status`       | Display version information                                   | `/status` or `/about`            |
+| `/status paths` | Display current session file and log paths                    | `/status paths`                  |
+| `/stats`        | Display detailed statistics for current session               | `/stats`                         |
+| `/settings`     | Open settings editor                                          | `/settings`                      |
+| `/auth`         | Change authentication method                                  | `/auth`                          |
+| `/bug`          | Submit issue about Qwen Code                                  | `/bug Button click unresponsive` |
+| `/copy`         | Copy AI output to clipboard (`/copy N` = Nth-last AI message) | `/copy` or `/copy 2`             |
+| `/quit`         | Exit Qwen Code immediately                                    | `/quit` or `/exit`               |
 
 ### 1.10 Common Shortcuts
 

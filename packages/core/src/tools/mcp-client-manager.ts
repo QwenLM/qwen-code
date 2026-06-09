@@ -1822,6 +1822,17 @@ export class McpClientManager {
     return this.discoveryState;
   }
 
+  getServerInstructions(): Map<string, string> {
+    const instructions = new Map<string, string>();
+    for (const [serverName, client] of this.clients) {
+      const serverInstructions = client.getInstructions();
+      if (serverInstructions) {
+        instructions.set(serverName, serverInstructions);
+      }
+    }
+    return instructions;
+  }
+
   /**
    * Gets the health monitoring configuration
    */
