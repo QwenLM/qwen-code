@@ -203,6 +203,15 @@ jobs:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
 
+      - name: 'Prefer Git Bash'
+        shell: 'pwsh'
+        run: |-
+          $gitBash = 'C:\Program Files\Git\bin'
+          if (!(Test-Path "$gitBash\bash.exe")) {
+            throw "Git Bash was not found at $gitBash\bash.exe"
+          }
+          $gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: 'Resolve PR context'
         id: 'context'
         env:

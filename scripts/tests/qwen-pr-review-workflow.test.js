@@ -16,6 +16,9 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
     "runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']",
   );
   expect(workflow).toContain('shell: bash');
+  expect(workflow).toContain("shell: 'pwsh'");
+  expect(workflow).toContain("$gitBash = 'C:\\Program Files\\Git\\bin'");
+  expect(workflow).toContain('$gitBash | Out-File -FilePath $env:GITHUB_PATH');
   expect(workflow).toContain("MSYSTEM: 'MINGW64'");
   expect(workflow).toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))');
   expect(workflow).toContain('node scripts/run-qwen-pr-review.js');
