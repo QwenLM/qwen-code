@@ -15,6 +15,9 @@ test('PR review workflow runs on Windows with a bash-compatible command wrapper'
   expect(workflow).toContain(
     "runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']",
   );
+  expect(workflow).toContain(
+    "${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.repository.default_branch }}",
+  );
   expect(workflow).toContain('shell: bash');
   expect(workflow).toContain("shell: 'powershell'");
   expect(workflow).toContain("$gitBash = 'C:\\Program Files\\Git\\bin'");

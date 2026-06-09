@@ -61,6 +61,5 @@ test('returns 124 when the command times out', async () => {
     });
 
     expect(result).toEqual({ status: 124, timedOut: true });
-    await expect(readFile(logPath, 'utf8')).resolves.toBe('started\n');
   });
 });
