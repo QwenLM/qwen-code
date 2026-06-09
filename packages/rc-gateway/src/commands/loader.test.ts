@@ -165,4 +165,30 @@ describe('CommandLoader', () => {
     expect(cmds).toHaveLength(1);
     expect(cmds[0].source).toBe('user');
   });
+
+  // C1: an unreadable root (here a regular file at the user-commands path →
+  // ENOTDIR) must not reject out of load() — that would hang the route in
+  // express 4 (no error middleware). It contributes no commands instead.
+  it('returns [] for a root that is a regular file (ENOTDIR), not throwing', async () => {
+    const filePath = join(root, 'a-file');
+    await writeFile(filePath, 'not a directory');
+    await writeFile(join(workspaceDir, 'ws.md'), VALID('ws'));
+    const l = new CommandLoader(async () => workspaceCwd, filePath);
+    const cmds = await l.load();
+    // The bad user root yields nothing; the good workspace root still loads.
+    expect(cmds.map((c) => c.name)).toEqual(['ws']);
+  });
+
+  // M2: two workspace files with the same name is NOT a workspace-wins-over-user
+  // collision; no user command of that name exists.
+  it('does not audit a collision when one workspace file shadows another', async () => {
+    await writeFile(join(workspaceDir, 'a.md'), VALID('dup'));
+    await writeFile(join(workspaceDir, 'b.md'), VALID('dup'));
+    const audit = new FakeAudit();
+    await loader(audit).load();
+    const collisions = audit.entries.filter(
+      (e) => e.action === 'command_collision_workspace_wins',
+    );
+    expect(collisions).toHaveLength(0);
+  });
 });

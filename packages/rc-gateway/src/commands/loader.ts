@@ -58,14 +58,16 @@ export class CommandLoader {
     const map = new Map<string, LoadedCommand>();
     for (const cmd of userCmds) map.set(cmd.name, cmd);
     for (const cmd of workspaceCmds) {
-      if (map.has(cmd.name)) {
-        if (!this.warnedCollisions.has(cmd.name)) {
-          this.warnedCollisions.add(cmd.name);
-          void this.audit?.record({
-            action: 'command_collision_workspace_wins',
-            detail: { name: cmd.name },
-          });
-        }
+      // Only a *user* command being shadowed is the "workspace wins over user"
+      // collision the audit names. A workspace file shadowing an earlier
+      // workspace file (same name twice in one root) is not that event.
+      const shadowed = map.get(cmd.name);
+      if (shadowed?.source === 'user' && !this.warnedCollisions.has(cmd.name)) {
+        this.warnedCollisions.add(cmd.name);
+        void this.audit?.record({
+          action: 'command_collision_workspace_wins',
+          detail: { name: cmd.name },
+        });
       }
       map.set(cmd.name, cmd);
     }
@@ -80,9 +82,13 @@ export class CommandLoader {
     let names: string[];
     try {
       names = await readdir(dir);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
-      throw err;
+    } catch {
+      // Any unreadable root (ENOENT, ENOTDIR when the path is a regular file,
+      // EACCES on a 000 dir, …) → no commands from this root. The palette must
+      // never break on filesystem state; load() must not reject into a route
+      // handler (express 4 has no error middleware here → the request would
+      // hang). One bad root simply contributes nothing.
+      return [];
     }
     const out: LoadedCommand[] = [];
     for (const file of names) {

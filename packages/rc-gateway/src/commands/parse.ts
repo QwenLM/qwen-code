@@ -20,7 +20,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 export function parseFrontMatter(
   text: string,
 ): { frontMatter: Record<string, unknown>; body: string } | null {
-  const lines = text.split('\n');
+  // Normalize CRLF so a Windows-authored file's last front-matter field
+  // (e.g. `scope: write\r`) doesn't carry a trailing \r into its value and
+  // fail validation.
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
   if (lines[0]?.trim() !== '---') return null;
 
   let closeIdx = -1;

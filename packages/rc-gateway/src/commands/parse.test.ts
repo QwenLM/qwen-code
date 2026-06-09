@@ -24,6 +24,21 @@ describe('parseFrontMatter', () => {
     expect(parseFrontMatter('no front matter here')).toBeNull();
   });
 
+  // M1: a CRLF-authored file must not carry a trailing \r into the last
+  // front-matter field's value (e.g. `scope: write\r`).
+  it('normalizes CRLF so the last front-matter field has no trailing \\r', () => {
+    const text =
+      '---\r\nname: lint\r\ndescription: do it\r\nscope: write\r\n---\r\nnpm run lint\r\n';
+    const result = parseFrontMatter(text);
+    expect(result).not.toBeNull();
+    expect(result!.frontMatter).toEqual({
+      name: 'lint',
+      description: 'do it',
+      scope: 'write',
+    });
+    expect(result!.body).toBe('npm run lint\n');
+  });
+
   it('returns null when there is no closing delimiter', () => {
     expect(parseFrontMatter('---\nname: triage\nno closing')).toBeNull();
   });
