@@ -304,6 +304,32 @@ jobs:
         if: "steps.context.outputs.should_run == 'true'"
         run: 'npm ci'
 
+      - name: 'Prepare local Qwen CLI'
+        if: "steps.context.outputs.should_run == 'true'"
+        env:
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+        run: |-
+          set -euo pipefail
+
+          QWEN_BIN="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "$QWEN_BIN"
+          cat > "$QWEN_BIN/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "$GITHUB_WORKSPACE/dist/cli.js" "$@"
+          EOF
+          chmod +x "$QWEN_BIN/qwen"
+          cat > "$QWEN_BIN/qwen.cmd" <<'EOF'
+          @echo off
+          node "%GITHUB_WORKSPACE%\dist\cli.js" %*
+          EOF
+          echo "$QWEN_BIN" >> "$GITHUB_PATH"
+
+          review_path=".qwen/tmp/review-pr-${PR_NUMBER}"
+          git worktree remove --force "$review_path" 2>/dev/null || true
+          rm -rf "$review_path"
+          git worktree prune
+          git branch -D "qwen-review/pr-${PR_NUMBER}" 2>/dev/null || true
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
