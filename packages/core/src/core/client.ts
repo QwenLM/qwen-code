@@ -2364,53 +2364,42 @@ export class GeminiClient {
   /**
    * Fast, rule-based compression without any LLM side-query.
    * Delegates to {@link GeminiChat.compressFast} and handles post-compression
-   * session rebuild / FileReadCache disarming.
+   * FileReadCache disarming.
    */
-  async tryCompressChatFast(
-    mode: 'tool-calls' | 'keep-last',
-  ): Promise<ChatCompressionInfo> {
-    const { info, microcompactMeta } = this.getChat().compressFast(mode);
+  async tryCompressChatFast(): Promise<ChatCompressionInfo> {
+    const { info, microcompactMeta } = this.getChat().compressFast();
 
     if (info.compressionStatus !== CompressionStatus.COMPRESSED) {
       return info;
     }
 
-    if (mode === 'keep-last') {
-      // History drastically shrunk — rebuild session.
-      // Trade-off: previously revealed deferred tools are lost, but
-      // --keep-last is an aggressive trim by design.
-      const compressedHistory = this.getChat().getHistoryShallow();
-      await this.startChat(compressedHistory, SessionStartSource.Compact);
-      this.config.getFileReadCache().clear();
-    } else {
-      // --tool-calls: lightweight, setHistory() already called in compressFast().
-      // Reuse microcompaction's surgical FileReadCache disarm pattern.
-      const m = microcompactMeta;
-      const fileReadCache = this.config.getFileReadCache();
-      if (m && m.unresolvedEvictedReads > 0) {
-        debugLogger.debug(
-          `[FILE_READ_CACHE] clear after compress-fast ` +
-            `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-        );
-        fileReadCache.clear();
-      } else if (m && m.evictedReadPaths.length > 0) {
-        const statResults = await Promise.all(
-          m.evictedReadPaths.map((p) =>
-            fsPromises.stat(p).catch(() => undefined),
-          ),
-        );
-        let fullyDisarmed = true;
-        for (const stats of statResults) {
-          if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-            fullyDisarmed = false;
-          }
-        }
-        if (!fullyDisarmed) {
-          fileReadCache.clear();
+    // Lightweight: setHistory() already called in compressFast().
+    // Reuse microcompaction's surgical FileReadCache disarm pattern.
+    const m = microcompactMeta;
+    const fileReadCache = this.config.getFileReadCache();
+    if (m && m.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after compress-fast ` +
+          `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+    } else if (m && m.evictedReadPaths.length > 0) {
+      const statResults = await Promise.all(
+        m.evictedReadPaths.map((p) =>
+          fsPromises.stat(p).catch(() => undefined),
+        ),
+      );
+      let fullyDisarmed = true;
+      for (const stats of statResults) {
+        if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+          fullyDisarmed = false;
         }
       }
-      this.forceFullIdeContext = true;
+      if (!fullyDisarmed) {
+        fileReadCache.clear();
+      }
     }
+    this.forceFullIdeContext = true;
 
     this.getChat().setLastPromptTokenCount(info.newTokenCount);
     return info;

@@ -53,7 +53,7 @@ describe('compressFastCommand', () => {
     expect(mockTryCompressChatFast).not.toHaveBeenCalled();
   });
 
-  it('should default to tool-calls mode', async () => {
+  it('should call tryCompressChatFast without arguments', async () => {
     mockTryCompressChatFast.mockResolvedValue({
       originalTokenCount: 200,
       newTokenCount: 100,
@@ -62,25 +62,7 @@ describe('compressFastCommand', () => {
 
     await compressFastCommand.action!(context, '');
 
-    expect(mockTryCompressChatFast).toHaveBeenCalledWith('tool-calls');
-  });
-
-  it('should use keep-last mode when --keep-last flag is present', async () => {
-    mockTryCompressChatFast.mockResolvedValue({
-      originalTokenCount: 200,
-      newTokenCount: 50,
-      compressionStatus: CompressionStatus.COMPRESSED,
-    } satisfies ChatCompressionInfo);
-
-    context.invocation = {
-      raw: '/compress-fast --keep-last',
-      name: 'compress-fast',
-      args: '--keep-last',
-    };
-
-    await compressFastCommand.action!(context, '');
-
-    expect(mockTryCompressChatFast).toHaveBeenCalledWith('keep-last');
+    expect(mockTryCompressChatFast).toHaveBeenCalledWith();
   });
 
   it('should display compression result on success (interactive)', async () => {

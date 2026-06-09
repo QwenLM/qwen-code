@@ -14,19 +14,11 @@ export const compressFastCommand: SlashCommand = {
   name: 'compress-fast',
   get description() {
     return t(
-      'Fast context compression (no AI). ' +
-        '--tool-calls: strip tool outputs & thinking. ' +
-        '--keep-last: keep only last reply.',
+      'Fast context compression without AI. Strips old tool outputs and thinking parts.',
     );
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '[--tool-calls|--keep-last]',
-  examples: [
-    '/compress-fast',
-    '/compress-fast --tool-calls',
-    '/compress-fast --keep-last',
-  ],
   action: async (context) => {
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
@@ -62,19 +54,14 @@ export const compressFastCommand: SlashCommand = {
       };
     }
 
-    const rawArgs = context.invocation?.args?.trim() ?? '';
-    const mode: 'tool-calls' | 'keep-last' = rawArgs.includes('--keep-last')
-      ? 'keep-last'
-      : 'tool-calls';
-
-    const doCompress = async () => await geminiClient.tryCompressChatFast(mode);
+    const doCompress = async () => await geminiClient.tryCompressChatFast();
 
     if (executionMode === 'acp') {
       const messages = async function* () {
         try {
           yield {
             messageType: 'info' as const,
-            content: `Compressing context (fast, mode: ${mode})...`,
+            content: 'Compressing context (fast)...',
           };
           const compressed = await doCompress();
           if (

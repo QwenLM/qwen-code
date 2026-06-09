@@ -7517,7 +7517,7 @@ describe('GeminiChat', async () => {
       });
     });
 
-    it('tool-calls: strips thinking from model turns', () => {
+    it('strips thinking from model turns', () => {
       chat.setHistory([
         userMsg('hello'),
         modelMsgWithThinking('response text', 'internal reasoning'),
@@ -7526,7 +7526,7 @@ describe('GeminiChat', async () => {
       ]);
       chat.setLastPromptTokenCount(1000);
 
-      const result = chat.compressFast('tool-calls');
+      const result = chat.compressFast();
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       // Thinking parts should be stripped from the first model message
@@ -7535,7 +7535,7 @@ describe('GeminiChat', async () => {
       expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
     });
 
-    it('tool-calls: NOOP when no tool calls and no thinking', () => {
+    it('NOOP when no tool calls and no thinking', () => {
       chat.setHistory([
         userMsg('hello'),
         modelMsg('hi'),
@@ -7544,7 +7544,7 @@ describe('GeminiChat', async () => {
       ]);
       chat.setLastPromptTokenCount(10);
 
-      const result = chat.compressFast('tool-calls');
+      const result = chat.compressFast();
 
       // afterTokens >= beforeTokens (both very small) → NOOP
       // or compressionStatus is NOOP since estimated tokens may not shrink
@@ -7554,7 +7554,7 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
-    it('tool-calls: clears old tool results via microcompaction', () => {
+    it('clears old tool results via microcompaction', () => {
       const history: Content[] = [];
       // Create many tool calls so keepRecent=5 kicks in
       for (let i = 0; i < 8; i++) {
@@ -7568,71 +7568,26 @@ describe('GeminiChat', async () => {
       chat.setHistory(history);
       chat.setLastPromptTokenCount(5000);
 
-      const result = chat.compressFast('tool-calls');
+      const result = chat.compressFast();
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(result.microcompactMeta).toBeDefined();
       expect(result.microcompactMeta!.toolsCleared).toBeGreaterThan(0);
     });
 
-    it('keep-last: keeps only last user/model pair', () => {
-      chat.setHistory([
-        userMsg('first question'),
-        modelMsg('first answer'),
-        userMsg('second question'),
-        modelMsg('second answer'),
-        userMsg('third question'),
-        modelMsg('third answer'),
-      ]);
-      chat.setLastPromptTokenCount(5000);
-
-      const result = chat.compressFast('keep-last');
-
-      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-      const history = chat.getHistory();
-      expect(history).toHaveLength(2);
-      expect(history[0]).toEqual(userMsg('third question'));
-      expect(history[1]).toEqual(modelMsg('third answer'));
-    });
-
-    it('keep-last: NOOP when model has only thinking (no text)', () => {
-      chat.setHistory([
-        userMsg('question'),
-        modelMsgWithThinking(null, 'just thinking, no output'),
-      ]);
-      chat.setLastPromptTokenCount(1000);
-
-      const result = chat.compressFast('keep-last');
-
-      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
-    });
-
-    it('keep-last: NOOP on empty history', () => {
-      chat.setHistory([]);
-      chat.setLastPromptTokenCount(0);
-
-      const result = chat.compressFast('keep-last');
-
-      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
-    });
-
-    it('keep-last: NOOP when only model messages exist (no user)', () => {
-      chat.setHistory([modelMsg('orphan response')]);
-      chat.setLastPromptTokenCount(100);
-
-      const result = chat.compressFast('keep-last');
-
-      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
-    });
-
     it('updates lastPromptTokenCount on COMPRESSED', () => {
       chat.setHistory([
-        userMsg('question'),
-        modelMsgWithThinking('answer', 'long internal reasoning process'),
+        userMsg('hello'),
+        modelMsgWithThinking(
+          'response',
+          'very long internal reasoning process',
+        ),
+        userMsg('next'),
+        modelMsg('plain reply'),
       ]);
       chat.setLastPromptTokenCount(5000);
 
-      const result = chat.compressFast('keep-last');
+      const result = chat.compressFast();
 
       if (result.info.compressionStatus === CompressionStatus.COMPRESSED) {
         expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
