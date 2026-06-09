@@ -448,6 +448,7 @@ export const MarketplacesTab = ({
         config={config}
         extension={detailExtension}
         isActive={isActive}
+        showFavorite={false}
         onStatus={onStatus}
         onReload={() => {
           void load();

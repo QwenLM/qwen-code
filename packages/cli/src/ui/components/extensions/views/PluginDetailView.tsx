@@ -28,6 +28,8 @@ interface PluginDetailViewProps {
   isFavorite: boolean;
   hasUpdateAvailable: boolean;
   isFocused: boolean;
+  /** Whether to offer the favorite toggle (hidden in the Sources tab). */
+  showFavorite?: boolean;
   onAction: (action: PluginDetailAction) => void;
 }
 
@@ -69,6 +71,7 @@ export const PluginDetailView = ({
   isFavorite,
   hasUpdateAvailable,
   isFocused,
+  showFavorite = true,
   onAction,
 }: PluginDetailViewProps) => {
   const ext = extension;
@@ -85,11 +88,17 @@ export const PluginDetailView = ({
         label: isActive ? t('Disable') : t('Enable'),
         value: 'toggle',
       },
-      {
-        key: 'favorite',
-        label: isFavorite ? t('Remove from Favorites') : t('Add to Favorites'),
-        value: 'favorite',
-      },
+      ...(showFavorite
+        ? [
+            {
+              key: 'favorite',
+              label: isFavorite
+                ? t('Remove from Favorites')
+                : t('Add to Favorites'),
+              value: 'favorite' as const,
+            },
+          ]
+        : []),
       {
         key: 'change-scope',
         label: t('Change scope'),
@@ -110,7 +119,7 @@ export const PluginDetailView = ({
       },
     ];
     return items;
-  }, [isActive, isFavorite, hasUpdateAvailable]);
+  }, [isActive, isFavorite, hasUpdateAvailable, showFavorite]);
 
   return (
     <Box flexDirection="column" gap={1}>

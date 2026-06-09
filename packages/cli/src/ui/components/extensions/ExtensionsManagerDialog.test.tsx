@@ -15,6 +15,7 @@ import { SettingsContext } from '../../contexts/SettingsContext.js';
 import { ShellFocusContext } from '../../contexts/ShellFocusContext.js';
 import { LoadedSettings } from '../../../config/settings.js';
 import type { UIState } from '../../contexts/UIStateContext.js';
+import { SettingScope } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   Extension,
@@ -129,7 +130,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     const frame = lastFrame();
     expect(frame).toContain('Discover');
     expect(frame).toContain('Installed');
-    expect(frame).toContain('Marketplaces');
+    expect(frame).toContain('Sources');
   });
 
   it('shows discovered plugins on the Discover tab', async () => {
@@ -364,7 +365,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Skills');
   });
 
-  it('shows full extension actions (incl. Change scope) in the Marketplaces extension detail', async () => {
+  it('shows extension actions without Favorites in the Sources extension detail', async () => {
     const manager = createManager({
       extensions: [mockExtension('alpha', true)],
     });
@@ -386,9 +387,91 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     const frame = lastFrame();
     expect(frame).toContain('Disable'); // alpha is active
-    expect(frame).toContain('Add to Favorites');
     expect(frame).toContain('Mark for Update');
     expect(frame).toContain('Uninstall');
+    // Favorites is omitted in the Sources tab.
+    expect(frame).not.toContain('Favorites');
+  });
+
+  it('toggles enable/disable in the Sources extension detail and keeps the label in sync', async () => {
+    const manager = createManager({
+      extensions: [mockExtension('alpha', true)],
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha');
+    });
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● alpha');
+    });
+    stdin.write('\r'); // open detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Disable'); // active -> Disable
+    });
+    stdin.write('\r'); // Disable (toggle is the first action)
+    await waitFor(() => {
+      expect(manager.disableExtension).toHaveBeenCalled();
+      expect(lastFrame()).toContain('Enable'); // label flipped
+    });
+    stdin.write('\r'); // Enable (toggle still first)
+    await waitFor(() => {
+      expect(manager.enableExtension).toHaveBeenCalled();
+      expect(lastFrame()).toContain('Disable'); // flipped back, not stuck
+    });
+  });
+
+  it('change-scope re-scopes and re-enables a disabled extension in the Sources detail', async () => {
+    const manager = createManager({
+      extensions: [mockExtension('alpha', false)], // disabled
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.MARKETPLACES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha');
+    });
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● alpha');
+    });
+    stdin.write('\r'); // open detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Enable'); // disabled -> Enable label
+    });
+    // Actions (no favorite in Sources): toggle(0), change-scope(1), ...
+    stdin.write('\x1B[B'); // highlight Change scope
+    stdin.write('\r'); // enter scope-select
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Project (All Collaborators)');
+    });
+    stdin.write('\x1B[B'); // highlight Project (index 1)
+    stdin.write('\r'); // select Project
+    await waitFor(() => {
+      expect(manager.setExtensionScope).toHaveBeenCalledWith(
+        'alpha',
+        'project',
+      );
+    });
+    // Project/Local scope => disable at User, enable at Workspace.
+    expect(manager.disableExtension).toHaveBeenCalledWith(
+      'alpha',
+      SettingScope.User,
+    );
+    expect(manager.enableExtension).toHaveBeenCalledWith(
+      'alpha',
+      SettingScope.Workspace,
+    );
+    // Back on the detail: scope is Project and the extension is now enabled.
+    await waitFor(() => {
+      const frame = lastFrame();
+      expect(frame).toContain('Project');
+      expect(frame).toContain('Disable'); // enabled -> Disable label
+    });
   });
 
   it('shows a CC-style marketplace detail with installed plugins and actions', async () => {

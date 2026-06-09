@@ -28,7 +28,7 @@ function tabLabel(id: ExtensionsTab): string {
     case EXTENSIONS_TABS.INSTALLED:
       return t('Installed');
     case EXTENSIONS_TABS.MARKETPLACES:
-      return t('Marketplaces');
+      return t('Sources');
     default:
       return id;
   }

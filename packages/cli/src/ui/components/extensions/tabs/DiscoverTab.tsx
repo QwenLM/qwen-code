@@ -521,9 +521,7 @@ export const DiscoverTab = ({
           {t('No extensions discovered.')}
         </Text>
         <Text color={theme.text.secondary}>
-          {t(
-            'Add a marketplace in the Marketplaces tab to discover extensions.',
-          )}
+          {t('Add a marketplace in the Sources tab to discover extensions.')}
         </Text>
       </Box>
     );

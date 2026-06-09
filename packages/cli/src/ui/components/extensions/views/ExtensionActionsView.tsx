@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -29,11 +29,13 @@ type SubView = 'detail' | 'scope-select' | 'uninstall-confirm';
 
 interface ExtensionActionsViewProps {
   config: Config;
-  /** The extension to manage (identified by name; live state is re-read). */
+  /** The extension to manage. A fresh mount is expected per detail open. */
   extension: Extension;
   isActive: boolean;
   /** Current update state for this extension, if known. */
   updateState?: string;
+  /** Whether to offer the favorite toggle (hidden in the Sources tab). */
+  showFavorite?: boolean;
   onStatus: (status: StatusMessage | null) => void;
   /** Ask the parent list to reload (state changed). */
   onReload: () => void;
@@ -68,68 +70,61 @@ export const ExtensionActionsView = ({
   extension,
   isActive,
   updateState,
+  showFavorite = true,
   onStatus,
   onReload,
   onExit,
 }: ExtensionActionsViewProps) => {
   const manager = config.getExtensionManager();
   const [sub, setSub] = useState<SubView>('detail');
-  // Bumped after a mutation to re-read live favorite/scope/active state.
-  const [tick, setTick] = useState(0);
-
-  const live = useMemo(() => {
-    const current =
-      manager?.getLoadedExtensions().find((e) => e.name === extension.name) ??
-      extension;
-    return {
-      ext: current,
-      isFavorite: manager?.isFavorite(current.name) ?? false,
-      scope: (manager?.getExtensionScope(current.name) ??
-        'user') as ExtensionScope,
-    };
-    // tick forces a re-read after mutations.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manager, extension, tick]);
+  // Authoritative local state. Initialised once on mount and updated
+  // optimistically after each action — we do NOT read enablement back through
+  // the manager's cache, which is briefly empty during refreshCache().
+  const [enabled, setEnabled] = useState(extension.isActive);
+  const [isFavorite, setIsFavorite] = useState(
+    () => manager?.isFavorite(extension.name) ?? false,
+  );
+  const [scope, setScope] = useState<ExtensionScope>(
+    () => manager?.getExtensionScope(extension.name) ?? 'user',
+  );
 
   const hasUpdate = updateState === ExtensionUpdateState.UPDATE_AVAILABLE;
 
-  const refresh = useCallback(() => {
-    setTick((value) => value + 1);
-    onReload();
-  }, [onReload]);
+  const settingScopeFor = (s: ExtensionScope) =>
+    s === 'user' ? SettingScope.User : SettingScope.Workspace;
 
   const handleAction = useCallback(
     async (action: PluginDetailAction) => {
       if (!manager) return;
-      const name = live.ext.name;
-      const settingScope =
-        live.scope === 'user' ? SettingScope.User : SettingScope.Workspace;
+      const name = extension.name;
       try {
         switch (action) {
           case 'toggle':
-            if (live.ext.isActive) {
-              await manager.disableExtension(name, settingScope);
+            if (enabled) {
+              await manager.disableExtension(name, settingScopeFor(scope));
             } else {
-              await manager.enableExtension(name, settingScope);
+              await manager.enableExtension(name, settingScopeFor(scope));
             }
+            setEnabled(!enabled);
             onStatus({
               type: 'success',
               text: t('"{{name}}" {{state}}.', {
                 name,
-                state: live.ext.isActive ? t('disabled') : t('enabled'),
+                state: enabled ? t('disabled') : t('enabled'),
               }),
             });
-            refresh();
+            onReload();
             break;
           case 'favorite': {
             const now = manager.toggleFavorite(name);
+            setIsFavorite(now);
             onStatus({
               type: 'info',
               text: now
                 ? t('Added "{{name}}" to favorites.', { name })
                 : t('Removed "{{name}}" from favorites.', { name }),
             });
-            refresh();
+            onReload();
             break;
           }
           case 'change-scope':
@@ -144,7 +139,7 @@ export const ExtensionActionsView = ({
             break;
           case 'update':
             await manager.updateExtension(
-              live.ext,
+              extension,
               ExtensionUpdateState.UPDATE_AVAILABLE,
               () => {},
             );
@@ -152,7 +147,7 @@ export const ExtensionActionsView = ({
               type: 'success',
               text: t('Updated "{{name}}".', { name }),
             });
-            refresh();
+            onReload();
             break;
           case 'uninstall':
             setSub('uninstall-confirm');
@@ -164,36 +159,38 @@ export const ExtensionActionsView = ({
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
     },
-    [manager, live, onStatus, refresh],
+    [manager, extension, enabled, scope, onStatus, onReload],
   );
 
   const handleScope = useCallback(
-    async (scope: ExtensionScope) => {
+    async (newScope: ExtensionScope) => {
       if (!manager) return;
-      const name = live.ext.name;
+      const name = extension.name;
       try {
-        manager.setExtensionScope(name, scope);
+        manager.setExtensionScope(name, newScope);
         // Apply enablement: Global -> User; Project/Local -> workspace only.
-        if (scope === 'user') {
+        if (newScope === 'user') {
           await manager.enableExtension(name, SettingScope.User);
         } else {
           await manager.disableExtension(name, SettingScope.User);
           await manager.enableExtension(name, SettingScope.Workspace);
         }
+        setScope(newScope);
+        setEnabled(true);
         onStatus({
           type: 'success',
           text: t('Set "{{name}}" scope to {{scope}}.', {
             name,
-            scope: t(SCOPE_LABEL[scope]),
+            scope: t(SCOPE_LABEL[newScope]),
           }),
         });
-        refresh();
+        onReload();
       } catch (error) {
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
       setSub('detail');
     },
-    [manager, live, onStatus, refresh],
+    [manager, extension, onStatus, onReload],
   );
 
   const handleUninstall = useCallback(
@@ -229,13 +226,13 @@ export const ExtensionActionsView = ({
     return (
       <Box flexDirection="column" gap={1}>
         <Text color={theme.text.primary}>
-          {t('Change scope for "{{name}}":', { name: live.ext.name })}
+          {t('Change scope for "{{name}}":', { name: extension.name })}
         </Text>
         <RadioButtonSelect
           items={scopeItems()}
           isFocused={isActive}
           showNumbers={false}
-          onSelect={(scope) => void handleScope(scope)}
+          onSelect={(value) => void handleScope(value)}
         />
       </Box>
     );
@@ -244,7 +241,7 @@ export const ExtensionActionsView = ({
   if (sub === 'uninstall-confirm') {
     return (
       <UninstallConfirmStep
-        selectedExtension={live.ext}
+        selectedExtension={extension}
         onConfirm={handleUninstall}
         onNavigateBack={() => setSub('detail')}
       />
@@ -253,9 +250,10 @@ export const ExtensionActionsView = ({
 
   return (
     <PluginDetailView
-      extension={live.ext}
-      scope={t(SCOPE_LABEL[live.scope])}
-      isFavorite={live.isFavorite}
+      extension={{ ...extension, isActive: enabled }}
+      scope={t(SCOPE_LABEL[scope])}
+      isFavorite={isFavorite}
+      showFavorite={showFavorite}
       hasUpdateAvailable={hasUpdate}
       isFocused={isActive && sub === 'detail'}
       onAction={handleAction}

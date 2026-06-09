@@ -30,7 +30,7 @@ export interface StatusMessage {
 const TABS: ExtensionsTabDef[] = [
   { id: EXTENSIONS_TABS.INSTALLED, label: 'Installed' },
   { id: EXTENSIONS_TABS.DISCOVER, label: 'Discover' },
-  { id: EXTENSIONS_TABS.MARKETPLACES, label: 'Marketplaces' },
+  { id: EXTENSIONS_TABS.MARKETPLACES, label: 'Sources' },
 ];
 
 // Literal t() calls keep the footer hints extractable for translation.
