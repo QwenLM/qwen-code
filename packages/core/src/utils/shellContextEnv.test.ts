@@ -111,6 +111,7 @@ describe('getShellContextEnvVars', () => {
       expect(env['TRACEPARENT']).toBe(
         '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
       );
+      expect(env['TRACESTATE']).toBe('');
     });
 
     it('clears TRACEPARENT and TRACESTATE when propagation is enabled but no context', () => {
