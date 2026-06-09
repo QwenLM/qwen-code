@@ -1418,6 +1418,8 @@ export function App({
         .catch((error: unknown) => {
           if (cancelSucceeded) {
             dispatchGoalCleared(goalToClear);
+            reportError(error, 'Goal cleared but follow-up prompt failed');
+            return;
           }
           reportError(error, 'Failed to clear /goal');
         });

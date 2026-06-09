@@ -1734,6 +1734,50 @@ describe('Session', () => {
       expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
     });
 
+    it('aborts an in-flight background task notification prompt when cancelled', async () => {
+      let notificationCallback:
+        | ((displayText: string, modelText: string) => void)
+        | undefined;
+      let notificationSignal: AbortSignal | undefined;
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (callback?: (displayText: string, modelText: string) => void) => {
+          if (callback) notificationCallback = callback;
+        },
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockImplementationOnce(
+          async (
+            _model: string,
+            request: { config?: { abortSignal?: AbortSignal } },
+          ) => {
+            notificationSignal = request.config?.abortSignal;
+            return (async function* () {
+              if (!notificationSignal) return;
+              await new Promise<void>((resolve) => {
+                notificationSignal!.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+              yield { type: core.StreamEventType.CHUNK, value: {} };
+            })();
+          },
+        );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      } as PromptRequest);
+      expect(notificationCallback).toBeDefined();
+
+      notificationCallback?.('task finished', 'notification task output');
+      await vi.waitFor(() => expect(notificationSignal).toBeDefined());
+
+      await expect(session.cancelPendingPrompt()).resolves.toBeUndefined();
+      expect(notificationSignal!.aborted).toBe(true);
+    });
+
     it('continues ACP prompt ids after replaying resumed history', async () => {
       mockChat.sendMessageStream = vi
         .fn()

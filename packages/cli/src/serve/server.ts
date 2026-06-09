@@ -345,6 +345,20 @@ function parsePositiveBoundedInteger(
   return value;
 }
 
+function parseIPv4MappedHexSuffix(suffix: string): string | undefined {
+  const hexParts = suffix.split(':');
+  if (hexParts.length !== 2) return undefined;
+
+  const [hiRaw, loRaw] = hexParts;
+  if (!/^[0-9a-f]{1,4}$/i.test(hiRaw) || !/^[0-9a-f]{1,4}$/i.test(loRaw)) {
+    return undefined;
+  }
+
+  const hi = Number.parseInt(hiRaw, 16);
+  const lo = Number.parseInt(loRaw, 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 function isBlockedAuthProviderHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
@@ -369,7 +383,12 @@ function isBlockedAuthProviderHost(hostname: string): boolean {
     if (bareHost === '::1' || bareHost.startsWith('fe80:')) return true;
     if (bareHost.startsWith('fc') || bareHost.startsWith('fd')) return true;
     if (bareHost.startsWith('::ffff:')) {
-      return isBlockedAuthProviderHost(bareHost.slice('::ffff:'.length));
+      const suffix = bareHost.slice('::ffff:'.length);
+      if (net.isIP(suffix) === 4) {
+        return isBlockedAuthProviderHost(suffix);
+      }
+      const mappedIPv4 = parseIPv4MappedHexSuffix(suffix);
+      return mappedIPv4 ? isBlockedAuthProviderHost(mappedIPv4) : true;
     }
   }
 

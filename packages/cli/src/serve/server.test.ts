@@ -7802,6 +7802,29 @@ describe('auth device-flow routes', () => {
     expect(installAuthProvider).not.toHaveBeenCalled();
   });
 
+  it('POST /workspace/auth/provider rejects IPv4-mapped IPv6 baseUrl values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://[::ffff:127.0.0.1]:11434/v1',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_base_url');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('POST /workspace/auth/provider allows private baseUrl values when explicitly enabled', async () => {
     const installAuthProvider = vi.fn().mockResolvedValue({
       v: 1,
