@@ -9,8 +9,15 @@
  *
  * Each agent has an inbox file at
  * `~/.qwen/teams/{teamName}/inboxes/{agentName}.json`.
- * Concurrency is handled via `proper-lockfile` (10 retries,
- * 5–100ms exponential backoff).
+ *
+ * Concurrency is handled in two layers: a per-inbox in-process
+ * `Mutex` serializes writers within this process, and a
+ * `proper-lockfile` file lock (10 retries, randomized 5–100ms
+ * exponential backoff) guards against writers in other agent
+ * processes. The in-process mutex is what keeps same-process
+ * writers from stampeding the file lock — without it, slower
+ * Windows fs syscalls let concurrent writers exhaust the lock
+ * retry budget and throw `ELOCKED`.
  *
  * Phase 1 uses this for structured messages only (shutdown,
  * plan approval, task assignment). Plain text messages go through
@@ -20,6 +27,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -66,6 +74,10 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     minTimeout: 5,
     maxTimeout: 100,
     factor: 2,
+    // Jitter the backoff so cross-process contenders don't retry in
+    // lockstep (thundering herd) and starve each other out of the
+    // retry budget.
+    randomize: true,
   },
   stale: 5000,
   // Stale locks from crashed processes are expected in multi-agent
@@ -74,6 +86,48 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     debug.debug('mailbox lock compromised:', err?.message ?? err);
   },
 };
+
+// ─── In-process serialization ───────────────────────────────
+//
+// One `Mutex` per inbox path, keyed by absolute path. Distinct
+// inboxes never block each other; concurrent operations on the same
+// inbox queue in memory so only one of them ever reaches for the
+// `proper-lockfile` file lock at a time. Entries are never evicted,
+// but the key space is bounded by team size (one per agent inbox).
+
+const inboxLocks = new Map<string, Mutex>();
+
+function getInboxLock(inboxPath: string): Mutex {
+  let lock = inboxLocks.get(inboxPath);
+  if (!lock) {
+    lock = new Mutex();
+    inboxLocks.set(inboxPath, lock);
+  }
+  return lock;
+}
+
+/**
+ * Run `fn` while holding both the in-process inbox mutex and the
+ * cross-process file lock for `inboxPath`.
+ *
+ * The mutex serializes writers in this process so they don't stampede
+ * the file lock (the cause of the Windows `ELOCKED` flakiness); the
+ * file lock runs inside it to still guard against writers in other
+ * agent processes.
+ */
+async function withInboxLock<T>(
+  inboxPath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return getInboxLock(inboxPath).runExclusive(async () => {
+    const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  });
+}
 
 // ─── Path helpers ───────────────────────────────────────────
 
@@ -137,8 +191,7 @@ export async function writeMessage(
   const inboxPath = getInboxPath(teamName, toAgentName);
   await ensureInboxFile(inboxPath);
 
-  const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
-  try {
+  await withInboxLock(inboxPath, async () => {
     const messages = await readInboxRaw(inboxPath);
     const cutoff = Date.now() - READ_RETENTION_MS;
     const compacted = messages.filter((m) => {
@@ -148,9 +201,7 @@ export async function writeMessage(
     });
     compacted.push(message);
     await atomicWriteJSON(inboxPath, compacted);
-  } finally {
-    await release();
-  }
+  });
 }
 
 /**
@@ -165,8 +216,7 @@ export async function consumeUnread(
   const inboxPath = getInboxPath(teamName, agentName);
   await ensureInboxFile(inboxPath);
 
-  const release = await lockfile.lock(inboxPath, LOCK_OPTIONS);
-  try {
+  return withInboxLock(inboxPath, async () => {
     const messages = await readInboxRaw(inboxPath);
     const predicate = (m: MailboxMessage) =>
       !m.read && (type === undefined || m.type === type);
@@ -178,9 +228,7 @@ export async function consumeUnread(
     );
     await atomicWriteJSON(inboxPath, updated);
     return matching;
-  } finally {
-    await release();
-  }
+  });
 }
 
 /**
