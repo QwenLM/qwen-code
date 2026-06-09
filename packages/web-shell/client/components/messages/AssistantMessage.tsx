@@ -33,18 +33,27 @@ export const AssistantMessage = memo(function AssistantMessage({
   useEffect(() => {
     const el = previewRef.current;
     if (!el || !compactThinking) return;
+    let animationFrame = 0;
 
     const check = () => {
       if (thinkingExpandedRef.current) return;
       setOverflowing(el.scrollHeight > el.clientHeight);
     };
 
-    check();
+    const checkAfterLayout = () => {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(check);
+    };
 
-    const observer = new ResizeObserver(check);
+    checkAfterLayout();
+
+    const observer = new ResizeObserver(checkAfterLayout);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, [compactThinking, thinkingExpanded]);
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+    };
+  }, [compactThinking, thinking, thinkingExpanded]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
