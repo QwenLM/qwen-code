@@ -649,5 +649,183 @@ describe('useHistoryManager', () => {
       // Should not compact non-compactable types
       expect(result.current.history).toBe(before);
     });
+
+    it('should not re-compact already-compacted tool groups (idempotent)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // 15 already-compacted + 15 fresh tool_groups = 30 total
+      for (let i = 0; i < 15; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: '[Old tool result content cleared]',
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+      for (let i = 15; i < 30; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // totalToolGroupsWithOutput = 15 (only fresh ones), toolGroupsToCompact = 0
+      // → no additional compaction, all 30 items kept
+      expect(result.current.history).toHaveLength(30);
+
+      // Already-compacted items should still be the cleared message
+      for (let i = 0; i < 15; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      }
+
+      // Fresh items should remain untouched
+      for (let i = 15; i < 30; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).toBe(`content-${i}`);
+      }
+
+      // Second call should be a no-op (same reference)
+      const before = result.current.history;
+      act(() => {
+        result.current.compactOldItems();
+      });
+      expect(result.current.history).toBe(before);
+    });
+
+    it('should handle all tool groups already compacted', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      for (let i = 0; i < 30; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: '[Old tool result content cleared]',
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      const before = result.current.history;
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // totalToolGroupsWithOutput = 0, nothing to compact
+      expect(result.current.history).toBe(before);
+    });
+
+    it('should handle tool group with mixed output (some tools real, some cleared)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // 25 tool_groups, each with 2 tools: one with output, one cleared
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: `${i}-a`,
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+                {
+                  callId: `${i}-b`,
+                  name: 'edit',
+                  description: '',
+                  resultDisplay: '[Old tool result content cleared]',
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // totalToolGroupsWithOutput = 25 (hasOldOutput is true because tool[0] has real output)
+      // toolGroupsToCompact = max(0, 25 - 20) = 5
+      // First 5 should be compacted: both tools get resultDisplay replaced
+      for (let i = 0; i < 5; i++) {
+        const tools = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools;
+        expect(tools[0].resultDisplay).toBe(
+          '[Old tool result content cleared]',
+        );
+        expect(tools[1].resultDisplay).toBe(
+          '[Old tool result content cleared]',
+        );
+      }
+
+      // Last 20 should be untouched
+      for (let i = 5; i < 25; i++) {
+        const tools = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools;
+        expect(tools[0].resultDisplay).toBe(`content-${i}`);
+        expect(tools[1].resultDisplay).toBe(
+          '[Old tool result content cleared]',
+        );
+      }
+    });
   });
 });
