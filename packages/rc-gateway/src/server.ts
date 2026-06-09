@@ -30,6 +30,8 @@ import { createShareRouter } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
+import { createSearchRoute } from './routes/search.js';
+import { resolveChatsDir } from './search/transcripts.js';
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import type { SnoozeStore } from './routing/snooze.js';
@@ -130,6 +132,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/share',
     requireScope(OWNER, audit),
     createShareRouter(deps.store, registry, audit),
+  );
+  app.get(
+    '/rc/search',
+    requireScope(OWNER, audit),
+    createSearchRoute(async () => {
+      try {
+        const caps = await deps.daemon.capabilities();
+        return caps.workspaceCwd
+          ? resolveChatsDir(caps.workspaceCwd)
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    }, audit),
   );
 
   let notifier: PushNotifier | undefined;

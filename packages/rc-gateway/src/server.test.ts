@@ -233,6 +233,58 @@ describe('gateway app', () => {
     expect(rows.some((r) => r.action === 'pairing_redeemed')).toBe(true);
   });
 
+  it('owner GET /rc/search?q=x returns 200 with a hits array (no transcripts → [])', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([OWNER, SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/search?q=x`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hits: unknown[] };
+    expect(Array.isArray(body.hits)).toBe(true);
+    expect(body.hits).toHaveLength(0);
+  });
+
+  it('403s GET /rc/search for a non-owner token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]); // no owner
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/search?q=x`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('400s GET /rc/search with a missing q for an owner token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([OWNER, SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/search`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('invalid_query');
+  });
+
   it('createGatewayApp returns a notifier when push stores are supplied', async () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });

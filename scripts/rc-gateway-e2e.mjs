@@ -528,6 +528,36 @@ try {
       ? ok('share revoke -> 204')
       : bad(`share revoke ${dr.status}`);
   }
+
+  // Cross-session search core (cycle 19): owner-gated GET /rc/search. A pure
+  // gateway read over the daemon's on-disk JSONL transcripts. For the e2e
+  // workspace there are likely no matching transcripts, so hits is an array
+  // (typically empty); the contract under test is 200 + a hits array, owner-only.
+  {
+    const { code: sec } = pairing.mint([SESSION_READ, OWNER]);
+    const serr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: sec, label: 'search-owner' }),
+    });
+    const searchOwnerToken = (await serr.json()).token;
+
+    const sr = await fetch(`${gw}/rc/search?q=test`, {
+      headers: { Authorization: `Bearer ${searchOwnerToken}` },
+    });
+    const sb = await sr.json().catch(() => ({}));
+    sr.status === 200 && Array.isArray(sb.hits)
+      ? ok(`search GET -> 200 with hits array (len=${sb.hits.length})`)
+      : bad(`search GET ${sr.status} ${JSON.stringify(sb)}`);
+
+    // A non-owner (session:read-only) token is rejected at the owner gate.
+    const nsr = await fetch(`${gw}/rc/search?q=test`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    nsr.status === 403
+      ? ok('search GET as non-owner -> 403')
+      : bad(`search non-owner ${nsr.status}`);
+  }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
 } finally {
