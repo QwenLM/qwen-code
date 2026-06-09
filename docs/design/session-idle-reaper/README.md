@@ -271,9 +271,8 @@ function startSessionReaper(): void {
     if (shuttingDown) return;
     const now = Date.now();
     for (const [id, entry] of byId) {
-      if (entry.activePromptOriginatorClientId !== undefined) continue;
+      if (entry.promptActive) continue;
       if (entry.events.subscriberCount > 0) continue;
-      if (entry.clientIds.size > 0) continue;
       const lastActive = entry.sessionLastSeenAt ?? Date.parse(entry.createdAt);
       const idle = now - lastActive;
       if (idle < resolvedIdleTimeoutMs) continue;

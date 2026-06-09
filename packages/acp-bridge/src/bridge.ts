@@ -2744,7 +2744,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     ) {
                       void closeSessionImpl(sessionId, undefined, {
                         reason: 'last_client_detached',
-                      }).catch(() => {});
+                      }).catch((err) => {
+                        writeStderrLine(
+                          `qwen serve: deferred close-on-prompt-complete failed for ` +
+                            `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+                        );
+                      });
                     }
                   });
 
