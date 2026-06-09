@@ -17,7 +17,6 @@ import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { escapeXml } from '../utils/xml.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 const debugLogger = createDebugLogger('SKILL');
@@ -29,12 +28,53 @@ export interface SkillParams {
 
 // Re-export for backward compatibility
 export { buildSkillLlmContent } from './skill-utils.js';
-import { buildSkillLlmContent, applySkillAllowedTools } from './skill-utils.js';
+import {
+  buildSkillLlmContent,
+  applySkillAllowedTools,
+  collectAvailableSkillEntries,
+} from './skill-utils.js';
 
 /**
- * Skill tool that enables the model to access skill definitions.
- * The tool dynamically loads available skills and includes them in its description
- * for the model to choose from.
+ * Static description for the Skill tool. The live list of available skills is
+ * deliberately NOT embedded here — it is injected as an `<available_skills>`
+ * `<system-reminder>` in the startup prelude (see `environmentContext`) and
+ * refreshed via per-turn deltas. Keeping this description constant for the whole
+ * session means skill changes never mutate the tools block, which sits at the
+ * front of the tools → system → messages prompt-cache prefix. Mirrors Claude
+ * Code's static SkillTool prompt ("Available skills are listed in
+ * system-reminder messages in the conversation").
+ */
+const SKILL_TOOL_DESCRIPTION = `Execute a skill within the main conversation
+
+<skills_instructions>
+When users ask you to perform tasks, check if any of the available skills can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
+
+How to invoke:
+- Use this tool with the skill name only (no arguments)
+- Examples:
+  - \`skill: "pdf"\` - invoke the pdf skill
+  - \`skill: "xlsx"\` - invoke the xlsx skill
+  - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
+
+Important:
+- Available skills are listed in <system-reminder> messages in the conversation; only use skills listed there.
+- When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
+- NEVER just announce or mention a skill in your text response without actually calling this tool
+- This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
+- Do not invoke a skill that is already running
+- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
+- When executing scripts or loading referenced files, ALWAYS resolve absolute paths from skill's base directory. Examples:
+  - \`bash scripts/init.sh\` -> \`bash /path/to/skill/scripts/init.sh\`
+  - \`python scripts/helper.py\` -> \`python /path/to/skill/scripts/helper.py\`
+  - \`reference.md\` -> \`/path/to/skill/reference.md\`
+</skills_instructions>`;
+
+/**
+ * Skill tool that enables the model to access skill definitions. The tool keeps
+ * an in-memory set of the currently available skills (for validation) but exposes
+ * a static description to the model — the live listing reaches the model via the
+ * startup-prelude snapshot and per-turn `<system-reminder>` deltas.
  */
 export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   static readonly Name: string = ToolNames.SKILL;
@@ -56,8 +96,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
   // accumulates listeners across subagent lifetimes, and each path
-  // activation would serialize through every stale listener's
-  // refreshSkills / setTools round-trip.
+  // activation would serialize through every stale listener's refreshSkills run.
   private removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
@@ -82,7 +121,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     super(
       SkillTool.Name,
       ToolDisplayNames.SKILL,
-      'Execute a skill within the main conversation. Loading available skills...', // Initial description
+      SKILL_TOOL_DESCRIPTION, // Static; live skill list is injected via system-reminders.
       Kind.Read,
       initialSchema,
       false, // isOutputMarkdown
@@ -94,193 +133,53 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       throw new Error('SkillManager not available');
     }
     this.skillManager = skillManager;
-    // Return the refresh promise so SkillManager.notifyChangeListeners can
-    // await it. Without this, matchAndActivateByPath returns before the
-    // tool description picks up the newly activated skill, and the
-    // <system-reminder> announcing the activation can land in the same
-    // turn as a still-stale <available_skills> listing.
+    // Await-able so SkillManager.notifyChangeListeners can sequence on it:
+    // matchAndActivateByPaths must not resolve until the runtime sets reflect
+    // the newly activated skill, otherwise validateToolParams could reject a
+    // skill that the same-turn <system-reminder> just announced as available.
+    // (refreshSkills now only updates in-memory sets; it no longer mutates the
+    // tool declaration or calls setTools — see SKILL_TOOL_DESCRIPTION.)
     this.removeChangeListener = this.skillManager.addChangeListener(() =>
       this.refreshSkills(),
     );
 
-    // Initialize the tool asynchronously
+    // Populate the runtime sets asynchronously.
     this.refreshSkills();
   }
 
   /**
-   * Asynchronously initializes the tool by loading available skills
-   * and updating the description and schema.
+   * Refreshes the in-memory runtime sets — `availableSkills`,
+   * `pendingConditionalSkillNames`, `modelInvocableCommands` — that back
+   * `validateToolParams` / `execute`. Invoked on construction and whenever the
+   * SkillManager fires a change (skill-file edit, conditional activation, config
+   * toggle, or MCP-prompt provider change).
+   *
+   * It deliberately does NOT mutate the tool declaration or call
+   * `geminiClient.setTools()`. The Skill tool's description is static
+   * (`SKILL_TOOL_DESCRIPTION`), so the skill set no longer affects the tools
+   * block — and the tools block is the front of the tools → system → messages
+   * prompt-cache prefix, where any byte change invalidates the whole cached
+   * prefix. These runtime sets are in-memory only and never serialized into a
+   * request, so refreshing them is prompt-cache-neutral. The model's view of the
+   * available skills comes from the `<available_skills>` snapshot in the startup
+   * prelude plus per-turn `<system-reminder>` deltas.
    */
   async refreshSkills(): Promise<void> {
     try {
-      // Include a skill in the tool description only when (a) it is not
-      // hidden from the model (`disable-model-invocation`), (b) it is not
-      // user-disabled via `skills.disabled`, and (c) it is either
-      // unconditional or already activated by a matching file path in
-      // this session. This keeps the tool description small in large
-      // monorepos where most conditional skills are not yet relevant.
-      const allSkills = await this.skillManager.listSkills();
-      const disabledNames = this.config.getDisabledSkillNames();
-      const isDisabled = (name: string) =>
-        disabledNames.has(name.toLowerCase());
-
-      this.availableSkills = allSkills.filter(
-        (s) =>
-          !s.disableModelInvocation &&
-          this.skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
+      const collected = await collectAvailableSkillEntries(
+        this.skillManager,
+        this.config,
       );
-      // Track still-pending conditional skills so validateToolParams can
-      // distinguish "not found" from "registered but not yet activated".
-      // Disabled conditional skills are excluded too — there's no reason
-      // to surface a "gated by paths:" hint for a skill the user has
-      // explicitly hidden.
-      this.pendingConditionalSkillNames = new Set(
-        allSkills
-          .filter(
-            (s) =>
-              !s.disableModelInvocation &&
-              s.paths &&
-              s.paths.length > 0 &&
-              !this.skillManager.isSkillActive(s) &&
-              !isDisabled(s.name),
-          )
-          .map((s) => s.name),
-      );
-      // Merge in model-invocable commands from CommandService (injected via
-      // Config), but exclude any whose names appear as a model-invocable
-      // file-based skill — including pending conditional skills. Using
-      // `availableSkills` (active only) here would let a path-gated skill
-      // leak through the <available_commands> listing and bypass
-      // validateToolParams's pendingConditionalSkillNames check, breaking
-      // the activation contract. Conversely, a skill marked
-      // `disable-model-invocation: true` is intentionally hidden from the
-      // model and must not block an unrelated command/MCP prompt that
-      // happens to share its name; exclude those from the dedup set too.
-      // Same logic for user-disabled skills: removing them from
-      // `fileBasedSkillNames` lets a same-named MCP prompt or file
-      // command surface in `<available_skills>` instead of being shadowed
-      // by the disabled skill's name.
-      const provider = this.config.getModelInvocableCommandsProvider();
-      const allCommands = provider ? provider() : [];
-      const fileBasedSkillNames = new Set(
-        allSkills
-          .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
-          .map((s) => s.name),
-      );
-      // Do NOT additionally filter `allCommands` by name against
-      // `disabledNames` here. The skill loaders (`SkillCommandLoader`,
-      // `BundledSkillLoader`) have already stripped disabled skills from
-      // the command surface, so any skill-kind command flowing through
-      // this provider has survived the user filter. A non-skill command
-      // (file command, MCP prompt) that happens to share the disabled
-      // skill's name MUST keep its position here — that's the entire
-      // point of the `fileBasedSkillNames` exclusion above.
-      this.modelInvocableCommands = allCommands.filter(
-        (cmd) => !fileBasedSkillNames.has(cmd.name),
-      );
-      this.updateDescriptionAndSchema();
+      this.availableSkills = collected.availableSkills;
+      this.pendingConditionalSkillNames =
+        collected.pendingConditionalSkillNames;
+      this.modelInvocableCommands = collected.modelInvocableCommands;
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.pendingConditionalSkillNames = new Set();
       this.modelInvocableCommands = [];
-      this.updateDescriptionAndSchema();
-    } finally {
-      // Update the client with the new tools
-      const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
-        await geminiClient.setTools();
-      }
     }
-  }
-
-  /**
-   * Updates the tool's description and schema based on available skills and
-   * model-invocable commands (e.g. bundled skills, file commands, MCP prompts).
-   */
-  private updateDescriptionAndSchema(): void {
-    // Merge file-based skills and prompt commands into a single unified list,
-    // matching Claude Code's design where all invocable commands are listed together.
-    const allSkillEntries: string[] = [];
-
-    for (const skill of this.availableSkills) {
-      const descText = `${escapeXml(skill.description)}${skill.whenToUse ? ` — ${escapeXml(skill.whenToUse)}` : ''} (${skill.level})`;
-      // Escape `skill.name` defensively. File-based skills loaded
-      // through `parseSkillContent` go through `validateSkillName` (a
-      // charset whitelist that already excludes `<>&`), but extension
-      // skills come in via `extension.skills` (skill-manager.ts:827)
-      // and bypass that validator entirely. A crafted extension name
-      // would otherwise inject raw tags into <available_skills>.
-      allSkillEntries.push(`<skill>
-<name>
-${escapeXml(skill.name)}
-</name>
-<description>
-${descText}
-</description>
-<location>
-${skill.level}
-</location>
-</skill>`);
-    }
-
-    for (const cmd of this.modelInvocableCommands) {
-      // Escape `cmd.name` too — file-based skill names go through
-      // `validateSkillName` (charset whitelist), but command names come
-      // from externally-injected sources (MCP servers, extensions) and
-      // bypass that validator. A command shipped with an XML-special
-      // name (`<`, `>`, `&`) would otherwise inject raw tags into the
-      // model-facing `<available_skills>` block.
-      allSkillEntries.push(`<skill>
-<name>
-${escapeXml(cmd.name)}
-</name>
-<description>
-${escapeXml(cmd.description)}
-</description>
-</skill>`);
-    }
-
-    let skillDescriptions = '';
-    if (allSkillEntries.length === 0) {
-      skillDescriptions =
-        'No skills are currently configured. Skills can be created by adding directories with SKILL.md files to .qwen/skills/ or ~/.qwen/skills/.';
-    } else {
-      skillDescriptions = allSkillEntries.join('\n');
-    }
-
-    const baseDescription = `Execute a skill within the main conversation
-
-<skills_instructions>
-When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
-
-How to invoke:
-- Use this tool with the skill name only (no arguments)
-- Examples:
-  - \`skill: "pdf"\` - invoke the pdf skill
-  - \`skill: "xlsx"\` - invoke the xlsx skill
-  - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
-  - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
-
-Important:
-- When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
-- NEVER just announce or mention a skill in your text response without actually calling this tool
-- This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
-- Only use skills listed in <available_skills> below
-- Do not invoke a skill that is already running
-- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
-- When executing scripts or loading referenced files, ALWAYS resolve absolute paths from skill's base directory. Examples:
-  - \`bash scripts/init.sh\` -> \`bash /path/to/skill/scripts/init.sh\`
-  - \`python scripts/helper.py\` -> \`python /path/to/skill/scripts/helper.py\`
-  - \`reference.md\` -> \`/path/to/skill/reference.md\`
-</skills_instructions>
-
-<available_skills>
-${skillDescriptions}
-</available_skills>`;
-    // Update description using object property assignment
-    (this as { description: string }).description = baseDescription;
   }
 
   override validateToolParams(params: SkillParams): string | null {
@@ -381,7 +280,7 @@ ${skillDescriptions}
    * SkillManager would accumulate one stale listener per subagent
    * lifetime — and `notifyChangeListeners` is now `await`-ed
    * sequentially, so each path activation would serialize through every
-   * accumulated listener's refreshSkills + setTools round-trip.
+   * accumulated listener's refreshSkills run.
    */
   dispose(): void {
     this.removeChangeListener();

@@ -51,7 +51,12 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
+import {
+  collectAvailableSkillEntries,
+  renderAvailableSkillsBlock,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
@@ -3201,36 +3206,53 @@ export class CoreToolScheduler {
             if (rulesCtx) reminderBlocks.push(rulesCtx);
           }
 
-          // Skill activation runs in a single batch over all candidate
-          // paths so `notifyChangeListeners` (and therefore
-          // `SkillTool.refreshSkills` / `geminiClient.setTools()`) fires
-          // exactly once for this tool call, regardless of how many
-          // paths produced new activations. The await is load-bearing:
-          // matchAndActivateByPaths only resolves after the listener
-          // chain settles, so the activation reminder we append below
-          // never lands in a turn where <available_skills> is still
-          // stale.
+          // Skill activation runs in a single batch over all candidate paths so
+          // the SkillManager change listener (`SkillTool.refreshSkills`) fires
+          // once for this tool call. The await is load-bearing:
+          // matchAndActivateByPaths resolves only after the listener chain
+          // settles, so by the time we append the reminder below the runtime sets
+          // already accept the newly activated skill (validateToolParams).
+          // Visibility comes from THIS tail reminder (and the startup snapshot),
+          // NOT from the tool description — which is now static and never
+          // re-rendered. refreshSkills no longer calls setTools(), so activation
+          // does not mutate the prompt-cache prefix.
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
-          if (activatedSkills && activatedSkills.length > 0) {
-            // Subagents share the parent's SkillManager but may have a
-            // restricted toolsList that excludes SkillTool entirely.
-            // Telling such a context "skill X is now available via the
-            // Skill tool" is misleading — the subagent can't invoke it
-            // and would waste a turn trying. Gate the reminder on
-            // whether the active tool registry actually exposes
-            // SkillTool to the model.
+          if (activatedSkills && activatedSkills.length > 0 && skillManager) {
+            // Subagents share the parent's SkillManager but may run with a
+            // restricted toolsList that excludes SkillTool. Announcing a skill
+            // such a context can't invoke wastes a turn, so gate on whether the
+            // active registry actually exposes SkillTool to the model.
             const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
-              // Escape skill names defensively: validateSkillName already
-              // excludes `<>&` for parsed file-based skills, but
-              // extension skills (extension.skills array) bypass that
-              // validator. A crafted extension name would otherwise
-              // close the <system-reminder> envelope early.
-              const names = activatedSkills.map(escapeXml).join(', ');
-              reminderBlocks.push(
-                `The following skill(s) are now available via the Skill tool based on the file you just accessed: ${names}. Use them if relevant to the task.`,
-              );
+              // Render the just-activated skills with their description/whenToUse
+              // (the full listing is no longer in the tool description, so the
+              // model needs enough here to decide whether to invoke them). Source
+              // entries from the shared collector — which applies the same
+              // disabled / disable-model-invocation filtering — and keep only the
+              // file-based ones that were just activated.
+              // renderAvailableSkillsBlock XML-escapes every untrusted field, so
+              // a crafted extension name cannot break out of the reminder.
+              let activatedEntries: AvailableSkillEntry[] = [];
+              try {
+                const collected = await collectAvailableSkillEntries(
+                  skillManager,
+                  this.config,
+                );
+                const activatedSet = new Set(activatedSkills);
+                activatedEntries = collected.entries.filter(
+                  (e) => e.level !== undefined && activatedSet.has(e.name),
+                );
+              } catch {
+                activatedEntries = [];
+              }
+              if (activatedEntries.length > 0) {
+                reminderBlocks.push(
+                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                    activatedEntries,
+                  )}\n</available_skills>`,
+                );
+              }
             }
           }
 

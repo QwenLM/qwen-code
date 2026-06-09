@@ -9109,6 +9109,9 @@ describe('CoreToolScheduler activation wiring', () => {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
     toolResult?: ToolResult;
+    // Names the mock SkillManager.listSkills will report as available. When
+    // omitted, defaults to ["tsx-helper"] which satisfies the common case.
+    availableSkillNames?: string[];
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -9172,9 +9175,24 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({
-        matchAndActivateByPaths: opts.matchAndActivateByPaths,
-      }),
+      getSkillManager: () => {
+        const names = opts.availableSkillNames ?? ['tsx-helper'];
+        return {
+          matchAndActivateByPaths: opts.matchAndActivateByPaths,
+          listSkills: vi.fn().mockResolvedValue(
+            names.map((n) => ({
+              name: n,
+              description: `Description of ${n}`,
+              level: 'project' as const,
+              filePath: `/p/.qwen/skills/${n}/SKILL.md`,
+              body: '',
+            })),
+          ),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        };
+      },
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9220,7 +9238,7 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
-    expect(responseText).toContain('now available via the Skill tool');
+    expect(responseText).toContain('became available via the Skill tool');
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {
@@ -9484,7 +9502,21 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => rulesRegistry,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'tsx-helper',
+            description: 'Helper for TSX',
+            level: 'project' as const,
+            filePath: '/p/.qwen/skills/tsx-helper/SKILL.md',
+            body: '',
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9532,6 +9564,13 @@ describe('CoreToolScheduler activation wiring', () => {
     // but extension skills bypass it. A crafted extension name would
     // otherwise close the <system-reminder> envelope early when emitted
     // as part of "skill X is now available".
+    const evilSkill = {
+      name: 'evil<inject>',
+      description: 'Evil extension skill',
+      level: 'extension' as const,
+      filePath: '/ext/skills/evil/SKILL.md',
+      body: 'Body.',
+    };
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['evil<inject>']);
 
     const fsTool = new MockTool({
@@ -9582,7 +9621,13 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([evilSkill]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({

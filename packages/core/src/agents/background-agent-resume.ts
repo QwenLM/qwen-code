@@ -577,6 +577,7 @@ export class BackgroundAgentResumeService {
         : [
             ...(await getInitialChatHistory(bgConfig as Config, undefined, {
               includeDeferredToolsReminder: false,
+              includeAvailableSkillsReminder: false,
             })),
             ...recovery.history,
           ];

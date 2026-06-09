@@ -181,6 +181,7 @@ describe('getInitialChatHistory', () => {
       }),
       getFileService: vi.fn(),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getSkillManager: vi.fn().mockReturnValue(null),
     };
   });
 
@@ -368,6 +369,7 @@ describe('stripStartupContext', () => {
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getSkillManager: vi.fn().mockReturnValue(null),
     };
 
     const conversation: Content[] = [

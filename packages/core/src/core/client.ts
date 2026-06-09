@@ -81,10 +81,15 @@ import {
 import {
   formatDateForContext,
   buildAddedMcpToolsReminder,
+  buildAddedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
 } from '../utils/environmentContext.js';
+import {
+  collectAvailableSkillEntries,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
@@ -208,6 +213,15 @@ export class GeminiClient {
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
+  // Dedup state for the per-turn skill/command "now available" delta reminders
+  // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
+  // set is seeded on the first drain from the current skills (the startup
+  // snapshot already listed them) and reset whenever the startup prelude is
+  // rebuilt (startChat), so a resumed/compacted session re-seeds from its fresh
+  // snapshot instead of re-announcing — mirrors Claude Code's
+  // suppressNextSkillListing / "don't re-inject on compact".
+  private announcedSkillReminderKeys = new Set<string>();
+  private skillRemindersInitialized = false;
 
   /**
    * Tracks the most recently injected date string to prevent injecting
@@ -850,6 +864,92 @@ export class GeminiClient {
     });
   }
 
+  /**
+   * Per-turn delta for skills/commands that became invocable after session start
+   * — skills enabled mid-session (e.g. via `/skills`) and MCP prompts added after
+   * startup. Emitted as a tail `<system-reminder>` only, so it never mutates the
+   * cached tools/system/messages prefix. Deduped via `announcedSkillReminderKeys`.
+   *
+   * The first call after a (re)built startup prelude seeds the announced set from
+   * the current skills and emits nothing — the startup snapshot already listed
+   * them (mirrors Claude Code's `suppressNextSkillListing` and its decision not
+   * to re-inject the listing after compaction). Conditional path-activations are
+   * announced inline on the tool result by `coreToolScheduler`, so they are
+   * recorded here as announced (not re-queued) to avoid a double announcement.
+   */
+  private async drainSkillAndCommandReminders(): Promise<void> {
+    const toolRegistry = this.config.getToolRegistry();
+    // Only relevant when the model can actually invoke skills (subagents often
+    // run without the Skill tool).
+    if (!toolRegistry?.getTool(ToolNames.SKILL)) {
+      return;
+    }
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+
+    let entries: AvailableSkillEntry[];
+    try {
+      ({ entries } = await collectAvailableSkillEntries(
+        skillManager,
+        this.config,
+      ));
+    } catch {
+      return;
+    }
+
+    const keyOf = (e: AvailableSkillEntry) =>
+      e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+    const currentKeys = new Set(entries.map(keyOf));
+
+    // Prune announced keys no longer present so a later re-enable / reconnect
+    // re-announces (mirrors the MCP added-tools prune above).
+    for (const key of this.announcedSkillReminderKeys) {
+      if (!currentKeys.has(key)) {
+        this.announcedSkillReminderKeys.delete(key);
+      }
+    }
+
+    // First drain after a (re)built prelude: the snapshot already showed these.
+    if (!this.skillRemindersInitialized) {
+      this.skillRemindersInitialized = true;
+      for (const key of currentKeys) {
+        this.announcedSkillReminderKeys.add(key);
+      }
+      return;
+    }
+
+    // Conditional path-activations are announced inline on the tool result by
+    // coreToolScheduler; record them as announced here so we don't double-announce.
+    const activatedConditional = skillManager.getActivatedSkillNames();
+
+    const newEntries: AvailableSkillEntry[] = [];
+    for (const entry of entries) {
+      const key = keyOf(entry);
+      if (this.announcedSkillReminderKeys.has(key)) {
+        continue;
+      }
+      this.announcedSkillReminderKeys.add(key);
+      if (entry.level !== undefined && activatedConditional.has(entry.name)) {
+        continue;
+      }
+      newEntries.push(entry);
+    }
+
+    if (newEntries.length === 0) {
+      return;
+    }
+    const reminder = buildAddedSkillsReminder(newEntries);
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+  }
+
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
     switch (approvalMode) {
       case ApprovalMode.DEFAULT:
@@ -937,6 +1037,13 @@ export class GeminiClient {
       }
       const deferredTools = this.resolveDeferredToolsForReminder();
       this.rememberAnnouncedDeferredTools(deferredTools);
+      // The startup prelude rebuilt below carries a fresh <available_skills>
+      // snapshot, so reset the per-turn skill-reminder dedup: the first drain
+      // after this re-seeds from that snapshot and emits nothing, and only
+      // genuinely new skills/commands are announced thereafter (avoids
+      // re-injecting the full listing on resume / post-compaction).
+      this.announcedSkillReminderKeys = new Set();
+      this.skillRemindersInitialized = false;
       history = await getInitialChatHistory(this.config, extraHistory);
       const systemInstruction = this.getMainSessionSystemInstruction();
 
@@ -1769,6 +1876,7 @@ export class GeminiClient {
           messageType === SendMessageType.Cron)
       ) {
         this.drainPendingAddedMcpToolsReminder();
+        await this.drainSkillAndCommandReminders();
       }
 
       const turn = new Turn(this.getChat(), prompt_id);

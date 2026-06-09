@@ -374,6 +374,7 @@ export class AgentCore {
       ? []
       : await getInitialChatHistory(this.runtimeContext, undefined, {
           includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: false,
         });
 
     const startHistory = [
