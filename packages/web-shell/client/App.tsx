@@ -2166,7 +2166,13 @@ export function App({
               </div>
             )}
             {!shouldHideComposer &&
-              (showShortcuts ? <ShortcutsPanel /> : <StatusBar />)}
+              (showShortcuts ? (
+                <ShortcutsPanel />
+              ) : (
+                <StatusBar
+                  onSelectMode={() => setApprovalModeInlineOpen(true)}
+                />
+              ))}
 
             {floatingAgents.length > 0 && (
               <div className={styles.bottomPanels}>
