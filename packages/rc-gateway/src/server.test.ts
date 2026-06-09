@@ -569,6 +569,91 @@ describe('gateway app', () => {
     expect(res.status).toBe(403);
   });
 
+  it('mints a session-locked share; its token reaches the locked session but is 403d on others and on prompt', async () => {
+    const { url, pairing } = await boot();
+    // Owner mints the share for session s1.
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const mint = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    expect(mint.status).toBe(201);
+    const share = (await mint.json()) as {
+      id: string;
+      token: string;
+      url: string;
+    };
+    expect(share.url).toBe('/ui/share/' + share.token);
+
+    // The share token reaches its own locked session (passes the lock — not 403).
+    const ok = await fetch(`${url}/rc/session/s1/events`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(ok.status).not.toBe(403);
+
+    // The share token on a DIFFERENT session → 403 session_locked.
+    const wrong = await fetch(`${url}/rc/session/s2/events`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(wrong.status).toBe(403);
+    expect(((await wrong.json()) as { code: string }).code).toBe(
+      'session_locked',
+    );
+
+    // The share token on the prompt route (its own session) → 403: no write scope.
+    const prompt = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${share.token}`,
+      },
+      body: JSON.stringify({ prompt: 'x' }),
+    });
+    expect(prompt.status).toBe(403);
+
+    // GET /rc/share (owner) lists the minted share.
+    const list = await fetch(`${url}/rc/share`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as {
+      shares: Array<{ id: string; sessionLockId: string }>;
+    };
+    expect(listBody.shares.some((s) => s.id === share.id)).toBe(true);
+  });
+
+  it('403s POST /rc/share for a non-owner token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]); // no owner
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    expect(res.status).toBe(403);
+  });
+
   it('403s the push vapid route for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([OWNER]); // owner lacks session:read

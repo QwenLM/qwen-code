@@ -13,7 +13,7 @@ import type { TokenStore } from './tokenStore.js';
 import type { PairingService } from './pairing.js';
 import type { VapidStore } from './webpush/vapid.js';
 import type { PushStore } from './pushStore.js';
-import { bearerResolve, requireScope } from './auth.js';
+import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
@@ -26,6 +26,7 @@ import {
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './routes/tokens.js';
+import { createShareRouter } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
@@ -88,18 +89,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.get(
     '/rc/session/:id/events',
     requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
     createSessionEventsRoute(deps.daemon, registry, audit),
   );
   app.post(
     '/rc/session/:id/permission/:requestId',
     requireScope(APPROVE, audit),
     recordActivity(workingDevice),
+    enforceSessionLock(audit),
     createPermissionVoteRoute(deps.daemon, audit),
   );
   app.post(
     '/rc/session/:id/prompt',
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
+    enforceSessionLock(audit),
     createPromptRoute(deps.daemon, audit),
   );
   app.get(
@@ -121,6 +125,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/audit',
     requireScope(OWNER, audit),
     createAuditQueryRoute(audit),
+  );
+  app.use(
+    '/rc/share',
+    requireScope(OWNER, audit),
+    createShareRouter(deps.store, registry, audit),
   );
 
   let notifier: PushNotifier | undefined;
