@@ -187,7 +187,10 @@ jobs:
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR')))
     timeout-minutes: 60
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: ['self-hosted', 'windows', 'x64', 'ecs-qwen']
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -242,6 +245,17 @@ jobs:
             echo "timeout_minutes=$TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
 
+      - name: 'Set up Node.js 22.x'
+        if: "steps.context.outputs.should_run == 'true'"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: 'Install dependencies and build Qwen CLI'
+        if: "steps.context.outputs.should_run == 'true'"
+        run: 'npm ci'
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -250,6 +264,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MSYSTEM: 'MINGW64'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
@@ -266,7 +281,8 @@ jobs:
 
           REPO="${GITHUB_REPOSITORY}"
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
-          LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
+          LOG_PATH=".qwen/tmp/qwen-review-pr-${PR_NUMBER}.jsonl"
+          mkdir -p .qwen/tmp
           trap 'rm -f "$LOG_PATH"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
@@ -278,18 +294,15 @@ jobs:
           if [ -z "${OPENAI_BASE_URL:-}" ]; then
             fail "REVIEW_OPENAI_BASE_URL secret is required for Qwen PR review."
           fi
-          if ! command -v qwen >/dev/null 2>&1; then
-            fail "qwen CLI is required on the review runner."
-          fi
-          qwen --version
+          node dist/cli.js --version
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
               fail "Invalid timeout_minutes: ${TIMEOUT_MINUTES}"
               ;;
           esac
-          if [ "$TIMEOUT_MINUTES" -le 5 ]; then
-            fail "timeout_minutes must be greater than 5"
+          if [ "$TIMEOUT_MINUTES" -le 10 ]; then
+            fail "timeout_minutes must be greater than 10"
           fi
           if [ "$TIMEOUT_MINUTES" -gt 60 ]; then
             fail "timeout_minutes must not exceed the 60 minute job timeout"
@@ -313,24 +326,21 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
-          QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))
+          QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 10))
           set +e
-          # GNU timeout times out command children unless --foreground is used.
-          timeout --kill-after=10s "${QWEN_TIMEOUT}m" qwen \
+          node scripts/run-qwen-pr-review.js \
+            --timeout-minutes "$QWEN_TIMEOUT" \
+            --log-path "$LOG_PATH" \
+            -- node dist/cli.js \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
             --prompt "$PROMPT" \
-            --output-format stream-json \
-            | tee "$LOG_PATH"
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-          qwen_status="${pipeline_status[0]}"
-          tee_status="${pipeline_status[1]}"
+            --output-format stream-json
 
-          if [ "$tee_status" -ne 0 ]; then
-            fail "Failed to write qwen review log."
-          fi
+          qwen_status="$?"
+          set -e
+
           if [ "$qwen_status" -eq 124 ]; then
             fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes."
           fi
