@@ -62,6 +62,50 @@ describe('yaml-parser', () => {
       expect(result['name']).toBe('test-skill');
       expect(result['description']).toBe('Folded without trailing newline.');
     });
+
+    it('should not coerce date-like strings into Date objects', () => {
+      const input = 'name: test\ncreated: 2024-01-01';
+      const result = parse(input);
+      expect(typeof result['created']).toBe('string');
+      expect(result['created']).toBe('2024-01-01');
+    });
+
+    it('should return null for bare keys with no value', () => {
+      const input = 'name: test\nhooks:';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      expect(result['hooks']).toBeNull();
+    });
+
+    it('should return null for explicit null and tilde values', () => {
+      const input = 'a: null\nb: ~';
+      const result = parse(input);
+      expect(result['a']).toBeNull();
+      expect(result['b']).toBeNull();
+    });
+
+    it('should treat yes/no as strings in YAML 1.2 core schema', () => {
+      const input = 'answer: yes\nother: no';
+      const result = parse(input);
+      expect(result['answer']).toBe('yes');
+      expect(result['other']).toBe('no');
+    });
+
+    it('should fall back to simple parser on invalid YAML', () => {
+      const input = 'name: test\ndescription: value with unmatched "quote';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+    });
+
+    it('should handle empty input gracefully', () => {
+      const result = parse('');
+      expect(result).toEqual({});
+    });
+
+    it('should handle comment-only input gracefully', () => {
+      const result = parse('# just a comment');
+      expect(result).toEqual({});
+    });
   });
 
   describe('stringify', () => {

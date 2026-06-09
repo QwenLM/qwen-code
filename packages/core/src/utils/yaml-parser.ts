@@ -19,7 +19,7 @@ const debugLogger = createDebugLogger('YAML_PARSER');
  */
 export function parse(yamlString: string): Record<string, unknown> {
   try {
-    const result = yaml.parse(yamlString);
+    const result = yaml.parse(yamlString, { schema: 'core' });
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       return result as Record<string, unknown>;
     }
