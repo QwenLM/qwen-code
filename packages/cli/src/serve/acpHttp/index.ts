@@ -99,7 +99,7 @@ export function mountAcpHttp(
   app.post(path, async (req: Request, res: Response) => {
     // RFD: Content-Type MUST be application/json; otherwise 415.
     const ct = req.headers['content-type'];
-    if (!ct || !ct.includes('application/json')) {
+    if (!ct || !ct.startsWith('application/json')) {
       res.status(415).json({ error: 'Content-Type must be application/json' });
       return;
     }
@@ -362,10 +362,16 @@ export function mountAcpHttp(
     httpServer.on(
       'upgrade',
       (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-        const url = new URL(
-          req.url ?? '/',
-          `http://${req.headers.host ?? 'localhost'}`,
-        );
+        let url: URL;
+        try {
+          url = new URL(
+            req.url ?? '/',
+            `http://${req.headers.host ?? 'localhost'}`,
+          );
+        } catch {
+          socket.destroy();
+          return;
+        }
         if (url.pathname !== path) {
           socket.destroy();
           return;
@@ -380,7 +386,6 @@ export function mountAcpHttp(
             if (
               originHost !== '127.0.0.1' &&
               originHost !== 'localhost' &&
-              originHost !== '[::1]' &&
               originHost !== '::1'
             ) {
               socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -398,11 +403,16 @@ export function mountAcpHttp(
         // loopback without token = allow; non-loopback/token-mismatch = reject.
         if (opts.token) {
           const authHeader = req.headers['authorization'];
+          if (!authHeader || !authHeader.includes(' ')) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+          }
           const scheme = authHeader
-            ?.slice(0, authHeader.indexOf(' '))
+            .slice(0, authHeader.indexOf(' '))
             .toLowerCase();
           const credentials = authHeader
-            ?.slice(authHeader.indexOf(' ') + 1)
+            .slice(authHeader.indexOf(' ') + 1)
             .trim();
           if (scheme !== 'bearer' || credentials !== opts.token) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -562,12 +572,18 @@ export function mountAcpHttp(
                 if (binding && !binding.stream) {
                   const ac = new AbortController();
                   conn.attachSessionStream(sid, conn.connStream!, ac);
+                  const cleanupSession = () => {
+                    if (conn.sessions.get(sid)?.stream === conn.connStream) {
+                      conn.closeSessionStream(sid);
+                    }
+                  };
                   void dispatcher
                     .pumpSessionEvents(conn, sid, ac.signal)
-                    .catch((err: unknown) => {
+                    .then(cleanupSession, (err: unknown) => {
                       writeStderrLine(
                         `qwen serve: /acp WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
                       );
+                      cleanupSession();
                     });
                 }
               }

@@ -102,14 +102,14 @@ describe('WsStream', () => {
 
   it('ws "close" event triggers stream close', () => {
     const onClose = vi.fn();
-    const _stream = new WsStream(ws as never, onClose);
+    void new WsStream(ws as never, onClose);
     ws.emit('close');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('ws "error" event triggers stream close', () => {
     const onClose = vi.fn();
-    const _stream = new WsStream(ws as never, onClose);
+    void new WsStream(ws as never, onClose);
     ws.emit('error', new Error('test error'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -121,6 +121,8 @@ describe('WsStream', () => {
     vi.advanceTimersByTime(15_000);
     expect(ws.pinged).toBe(1);
     expect(onHeartbeat).toHaveBeenCalledTimes(1);
+    // Simulate pong to keep alive for next tick
+    ws.emit('pong');
     vi.advanceTimersByTime(15_000);
     expect(ws.pinged).toBe(2);
     _stream.close();
@@ -135,7 +137,7 @@ describe('WsStream', () => {
 
   it('dead connection detected via ping/pong (no pong → close)', () => {
     const onClose = vi.fn();
-    const _stream = new WsStream(ws as never, onClose);
+    void new WsStream(ws as never, onClose);
 
     // First tick: ping sent, alive flag set to false
     vi.advanceTimersByTime(15_000);

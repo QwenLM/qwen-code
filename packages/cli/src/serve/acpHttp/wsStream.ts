@@ -36,8 +36,16 @@ export class WsStream implements TransportStream {
         return;
       }
       alive = false;
-      this.onHeartbeat?.();
-      this.ws.ping();
+      try {
+        this.onHeartbeat?.();
+      } catch {
+        /* swallow — heartbeat callback must not crash the interval */
+      }
+      try {
+        this.ws.ping();
+      } catch {
+        /* socket may be gone */
+      }
     }, 15_000);
     this.heartbeat.unref();
   }
