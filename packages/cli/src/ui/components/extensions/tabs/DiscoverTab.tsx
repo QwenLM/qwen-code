@@ -241,9 +241,16 @@ export const DiscoverTab = ({
       }
       await load();
       onInstalled();
-      goToList();
+      if (errors.length === 0) {
+        goToList();
+      } else {
+        // On failure, stay on the extension detail so the error remains
+        // visible and the user can retry, instead of dropping to the list.
+        setView('detail');
+        onLockChange(true);
+      }
     },
-    [extensionManager, onStatus, load, onInstalled, goToList],
+    [extensionManager, onStatus, load, onInstalled, goToList, onLockChange],
   );
 
   const installWithScope = useCallback(
