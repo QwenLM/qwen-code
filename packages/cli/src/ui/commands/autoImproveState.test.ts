@@ -14,6 +14,8 @@ import {
   getAutoImproveStatePath,
   isRecord,
   isValidAutoImproveLoopId,
+  MAX_AUTO_IMPROVE_PROMPT_LENGTH,
+  MAX_TARGET_BRANCH_LENGTH,
   normalizeStringList,
   readActiveAutoImproveLoop,
   readAutoImproveConfig,
@@ -222,6 +224,42 @@ describe('autoImproveState', () => {
       expect(result).not.toBeNull();
       expect(result!.currentRun).toBeUndefined();
       expect(result!.lastRun).toBeUndefined();
+    });
+
+    it('bounds a tampered prompt and sanitizes targetBranch on read', async () => {
+      const loopId = 'test-loop-tamper';
+      const statePath = getAutoImproveStatePath(tempDir, loopId);
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      await fs.writeFile(
+        statePath,
+        JSON.stringify({
+          version: 1,
+          loopId,
+          status: 'running',
+          createdAt: '2026-05-25T00:00:00.000Z',
+          cadence: '30m',
+          cron: '*/30 * * * *',
+          // Embedded newlines/control chars + over-length; a branch name is a
+          // single token so these must be collapsed and capped.
+          targetBranch: '  ma\nin ' + 'x'.repeat(400) + '  ',
+          repoRoot: tempDir,
+          stopRequested: false,
+          // Multi-MB prompt that would overflow the model context each tick.
+          prompt: 'p'.repeat(MAX_AUTO_IMPROVE_PROMPT_LENGTH + 5000),
+        }),
+        'utf8',
+      );
+
+      const result = await readAutoImproveLoopState(tempDir, loopId);
+      expect(result).not.toBeNull();
+      // Prompt capped.
+      expect(result!.prompt).toHaveLength(MAX_AUTO_IMPROVE_PROMPT_LENGTH);
+      // targetBranch: control chars/newlines collapsed to spaces, trimmed, capped.
+      expect(result!.targetBranch).not.toContain('\n');
+      expect(result!.targetBranch.length).toBeLessThanOrEqual(
+        MAX_TARGET_BRANCH_LENGTH,
+      );
+      expect(result!.targetBranch.startsWith('ma in')).toBe(true);
     });
   });
 

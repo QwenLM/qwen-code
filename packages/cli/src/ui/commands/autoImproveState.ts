@@ -164,21 +164,27 @@ function readBoolean(value: unknown): boolean {
 
 export const MAX_CUSTOM_SOURCE_LENGTH = 200;
 export const MAX_CUSTOM_SOURCES = 10;
+// The start prompt is interpolated into the tick prompt on every cron tick; cap
+// it (defends a tampered state.json with a multi-MB prompt that would overflow
+// the model context / burn tokens every tick). A git branch name is a single
+// token, so it is both length-capped and control-char-stripped.
+export const MAX_AUTO_IMPROVE_PROMPT_LENGTH = 4096;
+export const MAX_TARGET_BRANCH_LENGTH = 255;
+
+// Control chars (incl. newlines) that could forge extra lines inside the
+// USER-PROVIDED DATA fence of the tick prompt. Collapsed to spaces in
+// single-line fields (custom sources, target branch).
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
 
 export function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const result: string[] = [];
-  // Collapse control characters (incl. newlines) to spaces so a custom
-  // source cannot forge extra lines inside the USER-PROVIDED DATA fence of
-  // the tick prompt (prompt-injection hardening); `trim()` alone only strips
-  // the ends and would leave embedded newlines intact.
-  // eslint-disable-next-line no-control-regex
-  const controlChars = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
   for (const item of value) {
     if (typeof item !== 'string') continue;
     const trimmed = item
-      .replace(controlChars, ' ')
+      .replace(CONTROL_CHARS_RE, ' ')
       .trim()
       .slice(0, MAX_CUSTOM_SOURCE_LENGTH);
     if (!trimmed || seen.has(trimmed)) continue;
@@ -474,14 +480,25 @@ function normalizeLoopState(value: unknown): AutoImproveLoopState | null {
     cadence: typeof value['cadence'] === 'string' ? value['cadence'] : '',
     cron: typeof value['cron'] === 'string' ? value['cron'] : '',
     targetBranch:
-      typeof value['targetBranch'] === 'string' ? value['targetBranch'] : '',
+      typeof value['targetBranch'] === 'string'
+        ? value['targetBranch']
+            .replace(CONTROL_CHARS_RE, ' ')
+            .trim()
+            .slice(0, MAX_TARGET_BRANCH_LENGTH)
+        : '',
     repoRoot: typeof value['repoRoot'] === 'string' ? value['repoRoot'] : '',
     deliveryPolicy: isKnownDeliveryPolicy
       ? (persistedDeliveryPolicy as AutoImproveLoopState['deliveryPolicy'])
       : DEFAULT_DELIVERY_POLICY,
     stopRequested: readBoolean(value['stopRequested']),
     sourceSnapshot: normalizeConfig(value['sourceSnapshot']),
-    prompt: typeof value['prompt'] === 'string' ? value['prompt'] : '',
+    // Cap (but keep newlines — a start prompt is legitimately multi-line; fence
+    // markers are neutralized in buildTickPrompt) so a tampered state can't
+    // overflow the model context on every tick.
+    prompt:
+      typeof value['prompt'] === 'string'
+        ? value['prompt'].slice(0, MAX_AUTO_IMPROVE_PROMPT_LENGTH)
+        : '',
   };
   const cronJobId = value['cronJobId'];
   if (typeof cronJobId === 'string' && cronJobId.trim()) {

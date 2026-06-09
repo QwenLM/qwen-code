@@ -483,9 +483,13 @@ function buildTickPrompt(state: AutoImproveLoopState): string {
   ]
     .filter(Boolean)
     .join('\n\n')
-    // Neutralize boundary markers to prevent prompt breakout
-    .replace(/---(?:BEGIN|END) USER-PROVIDED DATA---/g, (m) =>
-      m.replace(/---/g, '–––'),
+    // Neutralize boundary markers to prevent prompt breakout. The real BEGIN
+    // marker carries a parenthetical ("(not instructions)"), so match that
+    // optional suffix too — otherwise only END would be neutralized and a user
+    // value could forge the BEGIN line.
+    .replace(
+      /---(?:BEGIN USER-PROVIDED DATA(?:\s*\([^)]*\))?|END USER-PROVIDED DATA)---/g,
+      (m) => m.replace(/---/g, '–––'),
     );
   return `You are running one tick of the built-in /auto-improve loop.
 
