@@ -839,6 +839,29 @@ You are an agent.
       expect(serialized).toContain('maxTurns: 25');
     });
 
+    it('should NOT emit permissionMode when approvalMode is also being emitted (avoid round-trip drift)', () => {
+      // Regression for PR #4842 round-2 review: if both fields land on the
+      // serialised frontmatter, the next parse takes approvalMode (explicit
+      // wins over bridge) and silently ignores any user edits to
+      // permissionMode in the file.
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'yolo',
+      });
+      expect(serialized).toContain('approvalMode: yolo');
+      expect(serialized).not.toContain('permissionMode:');
+    });
+
+    it('should still emit permissionMode when approvalMode is unset (faithful round-trip of the user intent)', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'plan',
+      });
+      expect(serialized).toContain('permissionMode: plan');
+      expect(serialized).not.toContain('approvalMode:');
+    });
+
     it('should not include new fields when undefined', () => {
       const serialized = manager.serializeSubagent(validConfig);
       expect(serialized).not.toContain('permissionMode:');

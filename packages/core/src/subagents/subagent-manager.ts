@@ -620,7 +620,11 @@ export class SubagentManager {
     }
 
     // CC 2.1.168 declarative-agent fields (round-trip parity).
-    if (config.permissionMode) {
+    // Skip permissionMode when approvalMode is already being written: on the
+    // next load the parser takes approvalMode (explicit wins over bridge),
+    // making permissionMode dead frontmatter that silently ignores any
+    // later user edits.
+    if (config.permissionMode && frontmatter['approvalMode'] === undefined) {
       frontmatter['permissionMode'] = config.permissionMode;
     }
 
