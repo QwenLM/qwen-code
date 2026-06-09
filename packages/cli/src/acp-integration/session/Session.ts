@@ -1568,7 +1568,7 @@ export class Session implements SessionContext {
       }
 
       debugLogger.warn(
-        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable: ${errorMessage}`,
+        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
       return [];
     }

@@ -312,7 +312,10 @@ async function findLatestTrailer(
   const result = await git(cwd, ['log', '--format=%B%x00', ref], {
     capture: true,
   });
-  const pattern = new RegExp(`^${trailer}:\\s*([^\\s]+)\\s*$`, 'im');
+  const pattern = new RegExp(
+    `^${escapeRegExp(trailer)}:\\s*([^\\s]+)\\s*$`,
+    'im',
+  );
   return result.stdout.match(pattern)?.[1];
 }
 

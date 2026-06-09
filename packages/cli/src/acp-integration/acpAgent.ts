@@ -94,10 +94,10 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { gunzip } from 'node:zlib';
-import { promisify } from 'node:util';
+import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
@@ -734,15 +734,19 @@ function stripArchiveRoot(filePath: string): string {
 }
 
 // Bound the work done on untrusted skill archives so a malicious or oversized
-// download cannot exhaust memory. `gunzip` (async) keeps decompression off the
-// synchronous path so it never blocks the event loop.
+// download cannot exhaust memory. Decompression is streamed (createGunzip) and
+// aborted the moment the cumulative inflated size crosses the cap, so a
+// decompression bomb can never fully inflate into memory.
 const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
 const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
 // Bounds for the GitHub Contents-API directory walk (the archive path is
 // already bounded by the byte caps above).
 const MAX_SKILL_API_DIR_DEPTH = 16;
 const MAX_SKILL_API_FILE_COUNT = 2000;
-const gunzipAsync = promisify(gunzip);
+
+// Sentinel so the streaming decompression's size-limit abort can be told apart
+// from a genuine gunzip/format error in the catch below.
+class DecompressedSizeExceededError extends Error {}
 
 export async function extractFilesFromTarGz(
   archiveBytes: Uint8Array,
@@ -768,20 +772,42 @@ export async function extractFilesFromTarGz(
 
   let archive: Buffer;
   try {
-    archive = await gunzipAsync(archiveBytes);
+    // Stream the inflate so we can abort as soon as the cumulative output
+    // exceeds the cap, instead of materializing the entire decompressed buffer
+    // first (a ~1000:1 gzip ratio could otherwise inflate a small archive to
+    // many GB before any post-hoc length check fires).
+    const chunks: Buffer[] = [];
+    let total = 0;
+    await pipeline(
+      // Wrap in an array so the whole archive is emitted as a single chunk;
+      // `Readable.from(uint8array)` would otherwise iterate it byte-by-byte.
+      Readable.from([Buffer.from(archiveBytes)]),
+      createGunzip(),
+      new Writable({
+        write(chunk: Buffer, _enc, cb) {
+          total += chunk.length;
+          if (total > maxDecompressedBytes) {
+            cb(new DecompressedSizeExceededError());
+            return;
+          }
+          chunks.push(chunk);
+          cb();
+        },
+      }),
+    );
+    archive = Buffer.concat(chunks);
   } catch (error) {
+    if (error instanceof DecompressedSizeExceededError) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Decompressed skill archive exceeds the maximum allowed size',
+      );
+    }
     throw RequestError.invalidParams(
       undefined,
       `Failed to decompress skill archive: ${
         error instanceof Error ? error.message : String(error)
       }`,
-    );
-  }
-
-  if (archive.length > maxDecompressedBytes) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Decompressed skill archive exceeds the maximum allowed size',
     );
   }
 
@@ -885,6 +911,54 @@ export async function fetchAllowedGitHub(
   );
 }
 
+// Read a response body while enforcing a hard byte cap against the *actual*
+// streamed bytes. The Content-Length pre-checks at the call sites are advisory
+// only — a server that omits the header (chunked transfer, CDN redirect) could
+// otherwise stream an arbitrarily large body straight into memory via
+// `arrayBuffer()`.
+async function readBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const body = response.body;
+  if (!body) {
+    const buf = new Uint8Array(await response.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+    return buf;
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+    chunks.push(value);
+  }
+
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const response = await fetchAllowedGitHub(url);
   if (!response.ok) {
@@ -908,7 +982,7 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
     }
   }
 
-  return new Uint8Array(await response.arrayBuffer());
+  return readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES);
 }
 
 async function downloadSingleSkillFile(
@@ -959,7 +1033,7 @@ async function downloadGitHubSkillDirectoryFromArchive(
   }
 
   return extractFilesFromTarGz(
-    new Uint8Array(await response.arrayBuffer()),
+    await readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES),
     directoryPath,
   );
 }
@@ -1557,7 +1631,12 @@ export function normalizeCoreSettingValue(
       // instruction line (persistent prompt injection).
       // eslint-disable-next-line no-control-regex
       const controlChars = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
-      return value.replace(controlChars, ' ').trim();
+      const sanitized = value.replace(controlChars, ' ').trim();
+      // An input that is entirely control/whitespace chars (e.g. '\n') trims to
+      // ''. For settings like model.name an empty string has different
+      // semantics from undefined (a literal empty value vs. falling back to the
+      // default), so collapse the empty result to undefined.
+      return sanitized || undefined;
     }
     default:
       throw RequestError.invalidParams(
@@ -4354,15 +4433,18 @@ class QwenAgent implements Agent {
           settingKey,
           params['value'],
         );
-        settings.setValue(
-          toSettingsScope(params['scope']),
-          key,
-          normalizedValue,
-        );
+        const scope = toSettingsScope(params['scope']);
+        settings.setValue(scope, key, normalizedValue);
         if (
           settingKey === 'general.outputLanguage' &&
-          typeof normalizedValue === 'string'
+          typeof normalizedValue === 'string' &&
+          scope === SettingScope.User
         ) {
+          // output-language.md is a single global instruction file. Only a
+          // user-scoped change should rewrite it; a workspace-scoped change is
+          // persisted to the workspace settings file and must not clobber the
+          // global file (which would silently affect every other workspace and
+          // session).
           updateOutputLanguageFile(normalizedValue);
         }
         // `setValue` already persisted to disk and recomputed the in-memory
