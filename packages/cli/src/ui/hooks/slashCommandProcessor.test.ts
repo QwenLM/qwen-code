@@ -30,7 +30,7 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand, debugLoggerMock, gitServiceMock } = vi.hoisted(() => ({
+const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
   debugLoggerMock: {
     debug: vi.fn(),
@@ -38,11 +38,6 @@ const { logSlashCommand, debugLoggerMock, gitServiceMock } = vi.hoisted(() => ({
     warn: vi.fn(),
     error: vi.fn(),
   },
-  gitServiceMock: vi.fn().mockImplementation((projectRoot, storage) => ({
-    projectRoot,
-    storage,
-    restoreProjectFromSnapshot: vi.fn(),
-  })),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -51,7 +46,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     logSlashCommand,
-    GitService: gitServiceMock,
     createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
@@ -180,7 +174,6 @@ describe('useSlashCommandProcessor', () => {
     mockMcpLoadCommands.mockResolvedValue([]);
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
-    gitServiceMock.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
     mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
@@ -246,87 +239,6 @@ describe('useSlashCommandProcessor', () => {
       expect(mockBuiltinLoadCommands).toHaveBeenCalledTimes(1);
       expect(mockFileLoadCommands).toHaveBeenCalledTimes(1);
       expect(mockMcpLoadCommands).toHaveBeenCalledTimes(1);
-    });
-
-    it('should create command git service from the current project root and storage', async () => {
-      const action = vi.fn().mockResolvedValue({
-        type: 'message',
-        messageType: 'info',
-        content: 'ok',
-      });
-      const command = createTestCommand({ name: 'usesgit', action });
-      const projectRootSpy = vi.spyOn(mockConfig, 'getProjectRoot');
-      const oldStorage = { name: 'old-storage' };
-      const newStorage = { name: 'new-storage' };
-      projectRootSpy.mockReturnValue('/old/root');
-      Object.defineProperty(mockConfig, 'storage', {
-        value: oldStorage,
-        writable: true,
-        configurable: true,
-      });
-
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/usesgit');
-      });
-
-      projectRootSpy.mockReturnValue('/new/root');
-      Object.defineProperty(mockConfig, 'storage', {
-        value: newStorage,
-        writable: true,
-        configurable: true,
-      });
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/usesgit');
-      });
-
-      const firstContext = action.mock.calls[0][0] as CommandContext;
-      const secondContext = action.mock.calls[1][0] as CommandContext;
-      expect(firstContext.services.git).toMatchObject({
-        projectRoot: '/old/root',
-        storage: oldStorage,
-      });
-      expect(secondContext.services.git).toMatchObject({
-        projectRoot: '/new/root',
-        storage: newStorage,
-      });
-
-      projectRootSpy.mockRestore();
-    });
-
-    it('should use the initialized config GitService for command execution when available', async () => {
-      const initializedGitService = {
-        restoreProjectFromSnapshot: vi.fn().mockResolvedValue(undefined),
-      };
-      const getGitServiceSpy = vi
-        .spyOn(mockConfig, 'getGitService')
-        .mockResolvedValue(initializedGitService as never);
-      const action = vi.fn(async (context: CommandContext) => {
-        await context.services.git?.restoreProjectFromSnapshot('abc123');
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: 'ok',
-        };
-      });
-      const command = createTestCommand({ name: 'usesgit', action });
-
-      const result = setupProcessorHook([command]);
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      await act(async () => {
-        await result.current.handleSlashCommand('/usesgit');
-      });
-
-      expect(getGitServiceSpy).toHaveBeenCalled();
-      expect(
-        initializedGitService.restoreProjectFromSnapshot,
-      ).toHaveBeenCalledWith('abc123');
-
-      getGitServiceSpy.mockRestore();
     });
 
     it('should provide an immutable array of commands to consumers', async () => {

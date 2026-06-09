@@ -83,6 +83,12 @@ export class BundledSkillLoader implements ICommandLoader {
         modelInvocable: !skill.disableModelInvocation,
         argumentHint: skill.argumentHint,
         whenToUse: skill.whenToUse,
+        skillDetail: {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          level: skill.level,
+        },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
           // Auto-approve the skill's declared allowedTools before its body is submitted.
           applySkillAllowedTools(
