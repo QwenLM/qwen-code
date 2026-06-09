@@ -215,11 +215,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   prompt_absolute_deadline: { since: 'v1' },
   writer_idle_timeout: { since: 'v1' },
   non_blocking_prompt: { since: 'v1' },
+  session_language: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  rate_limit: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -236,6 +238,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  rateLimit?: boolean;
 }
 
 /**
@@ -291,6 +294,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['rate_limit', (toggles) => toggles.rateLimit === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

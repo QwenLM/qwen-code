@@ -33,6 +33,12 @@ interface MessageListProps {
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
+  /**
+   * When true, scroll the tail content into view the moment it first appears
+   * even if the user had scrolled up. Opt-in per caller so unrelated inline
+   * panels don't yank the reader to the bottom. Defaults to false.
+   */
+  autoScrollTailIntoView?: boolean;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -204,6 +210,7 @@ export function MessageList({
   workspaceCwd,
   tailContent,
   tailKey = 'tail',
+  autoScrollTailIntoView = false,
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
   const mergedMessages = useMemo(
@@ -272,6 +279,7 @@ export function MessageList({
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
   const catchingUpRef = useRef(catchingUp);
+  const prevHasTailContent = useRef(false);
   catchingUpRef.current = catchingUp;
 
   const hasTailApproval = useMemo(() => {
@@ -408,6 +416,27 @@ export function MessageList({
     }
     prevCatchingUp.current = catchingUp;
   }, [catchingUp, scrollToBottom]);
+
+  // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
+  // at the very bottom of the virtualized list, so if the user had scrolled
+  // up it would open below the fold and the action would look like a no-op.
+  // Only opt-in callers (autoScrollTailIntoView) force-follow it into view, so
+  // unrelated tail panels keep the reader's scroll position.
+  useEffect(() => {
+    if (
+      autoScrollTailIntoView &&
+      hasTailContent &&
+      !prevHasTailContent.current
+    ) {
+      shouldFollow.current = true;
+      // Re-check follow inside the frame: if the user scrolls up in the gap
+      // before it fires (Rule 2 clears the flag), don't fight them.
+      requestAnimationFrame(() => {
+        if (shouldFollow.current) scrollToBottom();
+      });
+    }
+    prevHasTailContent.current = hasTailContent;
+  }, [autoScrollTailIntoView, hasTailContent, scrollToBottom]);
 
   const renderVirtualItem = useCallback(
     (index: number) => {

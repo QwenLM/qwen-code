@@ -9,33 +9,19 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const timeoutMinutes = Number(process.env['TB_TIMEOUT_MINUTES'] || '5');
-const testTimeoutMs = timeoutMinutes * 60 * 1000;
 
 export default defineConfig({
   test: {
-    testTimeout: testTimeoutMs,
+    testTimeout: 10 * 60 * 1000,
+    root: __dirname,
     globalSetup: './globalSetup.ts',
     reporters: ['default'],
-    include: ['**/*.test.ts'],
-    exclude: [
-      '**/terminal-bench/*.test.ts',
-      '**/hook-integration/**',
-      '**/qwen-daemon-loadtest*',
-      '**/node_modules/**',
-    ],
-    retry: 2,
-    fileParallelism: true,
-    poolOptions: {
-      threads: {
-        minThreads: 2,
-        maxThreads: 4,
-      },
-    },
+    include: ['**/qwen-daemon-loadtest.test.ts'],
+    retry: 0,
+    fileParallelism: false,
   },
   resolve: {
     alias: {
-      // Use built SDK bundle for e2e tests
       '@qwen-code/sdk': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/index.mjs',

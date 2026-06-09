@@ -50,6 +50,10 @@ export interface BridgeEvent {
   /** Frame payload — opaque JSON. */
   data: unknown;
   /**
+   * Envelope metadata shared by SSE and load/replay responses.
+   */
+  _meta?: Record<string, unknown>;
+  /**
    * Identifier of the client that triggered the event, when known. Used by
    * fan-out consumers to suppress echoes of their own actions.
    */
@@ -107,6 +111,13 @@ const WARN_RESET_RATIO = 0.375;
  * configured at the listener level — see `runQwenServe.ts`.
  */
 const DEFAULT_MAX_SUBSCRIBERS = 64;
+
+function getServerTimestamp(meta: Record<string, unknown> | undefined): number {
+  const existing = meta?.['serverTimestamp'];
+  return typeof existing === 'number' && Number.isFinite(existing)
+    ? existing
+    : Date.now();
+}
 
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
@@ -222,10 +233,15 @@ export class EventBus {
     // straightforward; nobody can observe a frame nobody can subscribe
     // to anyway.
     if (this.closed) return undefined;
+    const existingMeta = input._meta;
     const event: BridgeEvent = {
       id: this.nextId++,
       v: EVENT_SCHEMA_VERSION,
       ...input,
+      _meta: {
+        ...(existingMeta ?? {}),
+        serverTimestamp: getServerTimestamp(existingMeta),
+      },
     };
     this.ring.push(event);
     try {

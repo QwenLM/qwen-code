@@ -34,6 +34,32 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('stamps published events with serverTimestamp metadata', () => {
+    const bus = new EventBus();
+    const before = Date.now();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { source: 'test' },
+    });
+    const after = Date.now();
+
+    expect(event?._meta?.['source']).toBe('test');
+    expect(event?._meta?.['serverTimestamp']).toBeGreaterThanOrEqual(before);
+    expect(event?._meta?.['serverTimestamp']).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves an existing serverTimestamp when publishing', () => {
+    const bus = new EventBus();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { serverTimestamp: 123 },
+    });
+
+    expect(event?._meta?.['serverTimestamp']).toBe(123);
+  });
+
   it('delivers live publishes to a subscriber', async () => {
     const bus = new EventBus();
     const abort = new AbortController();

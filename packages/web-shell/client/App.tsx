@@ -2148,6 +2148,10 @@ export function App({
                       ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
                       : undefined
                   }
+                  // Only the approval-mode picker (reachable by mouse from the
+                  // status bar) reveals itself; the model/agents/memory panels
+                  // keep the user's scroll position.
+                  autoScrollTailIntoView={approvalModeInlineOpen}
                 />
 
                 {btwMessage?.role === 'btw' && (
@@ -2213,7 +2217,10 @@ export function App({
               (showShortcuts ? (
                 <ShortcutsPanel />
               ) : (
-                <StatusBar escapeHint={escapeHintVisible} />
+                <StatusBar
+                  escapeHint={escapeHintVisible}
+                  onSelectMode={() => setApprovalModeInlineOpen((v) => !v)}
+                />
               ))}
 
             {floatingAgents.length > 0 && (

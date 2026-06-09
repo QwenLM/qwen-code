@@ -249,17 +249,22 @@ describe('TurnBoundaryCompactionEngine', () => {
     it('folds tool_call + tool_call_updates into single final-state event', () => {
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(makeTextChunk(1, 'Let me check'));
-      engine.ingest(makeToolCall(2, 'tc1', 'running', { title: 'Read file' }));
-      engine.ingest(
-        makeToolCallUpdate(3, 'tc1', 'running', {
+      engine.ingest({
+        ...makeToolCall(2, 'tc1', 'running', { title: 'Read file' }),
+        _meta: { serverTimestamp: 100, source: 'initial' },
+      });
+      engine.ingest({
+        ...makeToolCallUpdate(3, 'tc1', 'running', {
           content: 'reading...',
         }),
-      );
-      engine.ingest(
-        makeToolCallUpdate(4, 'tc1', 'done', {
+        _meta: { serverTimestamp: 150 },
+      });
+      engine.ingest({
+        ...makeToolCallUpdate(4, 'tc1', 'done', {
           rawOutput: 'file contents',
         }),
-      );
+        _meta: { serverTimestamp: 200 },
+      });
       engine.ingest(makeTextChunk(5, 'Done'));
       engine.ingest(makeTurnComplete(6));
 
@@ -281,6 +286,10 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(data.update.title).toBe('Read file');
       expect(data.update.rawOutput).toBe('file contents');
       expect(toolEvent.id).toBe(4); // last update's id
+      expect(toolEvent._meta).toEqual({
+        serverTimestamp: 200,
+        source: 'initial',
+      });
     });
 
     it('preserves tool call order when multiple tools run', () => {
@@ -686,6 +695,9 @@ describe('EventBus + CompactionEngine integration', () => {
       update: { content: { text: string } };
     };
     expect(mergedText.update.content.text).toBe('Hi there');
+    expect(snapshot!.compactedTurns[1]!._meta?.['serverTimestamp']).toEqual(
+      expect.any(Number),
+    );
   });
 
   it('snapshotReplay returns undefined when no engine is configured', () => {

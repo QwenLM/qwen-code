@@ -119,6 +119,19 @@ const MAX_EARLY_EVENTS_PER_SESSION = 32;
 const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
 
+// Known approval-mode ids accepted on the in-session `current_mode_update`
+// demux path. Mirrors the `modeMap` keys in `Session.setMode` (CLI); an id
+// outside this set is dropped before it fans out to SSE clients / the SDK
+// reducer. Keep the two in lockstep. Exported so the bridge's reconcile and
+// snapshot-seed paths apply the same enum backstop to agent-supplied mode ids.
+export const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set([
+  'plan',
+  'default',
+  'auto-edit',
+  'auto',
+  'yolo',
+]);
+
 /**
  * Human-readable label for a `fs.Stats` object's kind, used in the
  * `readTextFile` "not a regular file" rejection message (BX8YO).
@@ -195,6 +208,8 @@ export interface BridgeClientSessionEntry {
    * in `bridge.ts`; surfaced here for the demux.
    */
   modelRoundtripInFlight?: boolean;
+  /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
+  approvalModeRoundtripInFlight?: boolean;
 }
 
 /**
@@ -271,6 +286,28 @@ export class BridgeClient implements Client {
      * companion — preserves the inline proxy behavior.
      */
     private readonly fileSystem?: BridgeFileSystem,
+    /**
+     * §2.3 callback: centralised `model_switched` publish through the
+     * bridge factory's cache-updating helper. The BridgeClient calls
+     * this instead of inlining `entry.events.publish(...)` so the
+     * cache update + generation bump stays atomic in one place.
+     */
+    private readonly onModelPromoted?: (
+      entry: BridgeClientSessionEntry,
+      modelId: string,
+      originatorClientId: string | undefined,
+    ) => void,
+    /**
+     * §2.3 / A2 callback: centralised `approval_mode_changed` publish.
+     * Called by the A2 `current_mode_update` demux when the agent
+     * switches approval mode in-session (exit_plan_mode, ProceedAlways,
+     * /mode). `previous` is read from the bridge state cache.
+     */
+    private readonly onModePromoted?: (
+      entry: BridgeClientSessionEntry,
+      modeId: string,
+      originatorClientId: string | undefined,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -438,6 +475,10 @@ export class BridgeClient implements Client {
       this.handleInSessionModelUpdate(params);
       return;
     }
+    if (method === 'qwen/notify/session/mode-update') {
+      this.handleInSessionModeUpdate(params);
+      return;
+    }
     if (method === 'qwen/notify/session/prompt-suggestion') {
       const sessionId = params['sessionId'];
       const suggestion = params['suggestion'];
@@ -532,7 +573,15 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    try {
+    if (this.onModelPromoted) {
+      this.onModelPromoted(
+        entry,
+        currentModelId,
+        entry.activePromptOriginatorClientId,
+      );
+    } else {
+      // `EventBus.publish` never throws (closed bus → undefined no-op); per
+      // its documented contract we don't wrap it.
       entry.events.publish({
         type: 'model_switched',
         data: { sessionId, modelId: currentModelId },
@@ -540,12 +589,135 @@ export class BridgeClient implements Client {
           ? { originatorClientId: entry.activePromptOriginatorClientId }
           : {}),
       });
-      writeStderrLine(
-        `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
-      );
-    } catch {
-      /* bus closed */
     }
+    writeStderrLine(
+      `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
+    );
+  }
+
+  /**
+   * A2: promote an in-session `current_mode_update` extNotification to
+   * `approval_mode_changed`. Uses the same suppression pattern as
+   * `handleInSessionModelUpdate` — suppressed while the bridge is driving
+   * its own approval-mode roundtrip (`entry.approvalModeRoundtripInFlight`)
+   * — but diverges with two additions the model handler lacks: enum
+   * validation against `KNOWN_APPROVAL_MODES`, and a legacy
+   * `session_update{current_mode_update}` dual-emit for IDE companion
+   * compat (transition — see §6 of the design doc), itself deduped via the
+   * `legacyFrameSent` flag.
+   */
+  private handleInSessionModeUpdate(params: Record<string, unknown>): void {
+    const sessionId = params['sessionId'];
+    const currentModeId = params['currentModeId'];
+    if (typeof sessionId !== 'string' || typeof currentModeId !== 'string') {
+      return;
+    }
+    // Validate against the known approval-mode enum before it fans out.
+    // `Session.setMode` guards the symmetric send path with the same set
+    // ("an unknown id would call setApprovalMode(undefined), leaving the
+    // permission system undefined"); this is the receive path the agent
+    // can reach without that validation, so an unknown id here would
+    // propagate through `approval_mode_changed` to every SSE client and
+    // land in the SDK reducer's `state.approvalMode`. Keep in lockstep
+    // with `Session.setMode`'s `modeMap` keys (includes `auto`).
+    if (!KNOWN_APPROVAL_MODES.has(currentModeId)) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=dropped reason=unknown_mode mode=${currentModeId}`,
+      );
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=dropped reason=no_entry`,
+      );
+      return;
+    }
+    if (entry.approvalModeRoundtripInFlight) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=suppressed reason=bridge_roundtrip_in_flight`,
+      );
+      return;
+    }
+    if (this.onModePromoted) {
+      this.onModePromoted(
+        entry,
+        currentModeId,
+        entry.activePromptOriginatorClientId,
+      );
+    } else {
+      // Fallback path (no `onModePromoted` injected — tests / non-bridge
+      // consumers; production always wires the bridge callback). Mirror
+      // the main path's full payload: the SDK's
+      // `isApprovalModeChangedData` requires `previous` (non-empty
+      // string) and `persisted` (boolean), so a `{ sessionId, next }`
+      // shape fails validation and `asKnownDaemonEvent` drops the event.
+      // `previous` is unavailable on this path (the cache lives on the
+      // bridge's `SessionEntry`, not the demux interface), so seed it
+      // with the protocol default.
+      //
+      // `EventBus.publish` never throws (a closed bus is a return-undefined
+      // no-op and subscriber-enqueue failures are caught internally), so
+      // per its documented contract we don't wrap it in try/catch.
+      entry.events.publish({
+        type: 'approval_mode_changed',
+        data: {
+          sessionId,
+          previous: 'default',
+          next: currentModeId,
+          persisted: false,
+        },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
+    }
+    // TODO(dual-emit-removal): also emit the legacy generic
+    // `session_update{current_mode_update}` for one release cycle so the
+    // VS Code IDE companion's existing `case 'current_mode_update'`
+    // handler keeps working. Remove this block (and its tracking issue)
+    // once the companion ships an `approval_mode_changed` handler.
+    //
+    // Skip it when the producer already sent the legacy frame itself: the
+    // `exit_plan_mode` path (`Session.sendCurrentModeUpdateNotification`)
+    // calls `sendUpdate` before this extNotification, which
+    // `BridgeClient.sessionUpdate` already fanned onto the bus as the same
+    // `session_update{current_mode_update}` frame. Dual-emitting here would
+    // deliver it twice. The `setMode` path omits the flag (it has no
+    // `sendUpdate`), so its dual-emit still fires.
+    //
+    // Use the canonical ACP-nested shape (`data.update.sessionUpdate`),
+    // matching what `BridgeClient.sessionUpdate` publishes for a real
+    // `current_mode_update` notification. A flat
+    // `{ sessionId, sessionUpdate, currentModeId }` would (a) not be
+    // recognised by the companion's standard `data.update.sessionUpdate`
+    // switch, and (b) collide structurally with the real `session_update`
+    // the agent already emits on the `exit_plan_mode` path — leaving two
+    // incompatible shapes on the bus for one change.
+    if (params['legacyFrameSent'] === true) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId} legacy_frame=skipped`,
+      );
+      return;
+    }
+    // `EventBus.publish` never throws (closed bus → undefined no-op); per its
+    // documented contract we don't wrap it in try/catch.
+    entry.events.publish({
+      type: 'session_update',
+      data: {
+        sessionId,
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId,
+        },
+      },
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    });
+    writeStderrLine(
+      `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,
+    );
   }
 
   /**

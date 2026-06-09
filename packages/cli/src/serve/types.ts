@@ -156,6 +156,19 @@ export interface ServeOptions {
   writerIdleTimeoutMs?: number;
   /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
   channelIdleTimeoutMs?: number;
+  /**
+   * Enable per-tier HTTP rate limiting. Off by default. When enabled,
+   * requests exceeding per-tier limits receive 429 + Retry-After.
+   */
+  rateLimit?: boolean;
+  /** Max prompt requests per window per key (default 10). Requires --rate-limit. */
+  rateLimitPrompt?: number;
+  /** Max mutation requests per window per key (default 30). Requires --rate-limit. */
+  rateLimitMutation?: number;
+  /** Max read requests per window per key (default 120). Requires --rate-limit. */
+  rateLimitRead?: number;
+  /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
+  rateLimitWindowMs?: number;
 }
 
 /**

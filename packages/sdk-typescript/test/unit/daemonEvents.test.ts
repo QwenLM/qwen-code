@@ -2485,6 +2485,42 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.awaitingResync).toBe(false);
     });
+
+    it('still applies session_snapshot while awaitingResync (RESYNC_PASSTHROUGH_TYPES)', () => {
+      // session_snapshot is in RESYNC_PASSTHROUGH_TYPES — a reconnecting
+      // client that missed ring events still needs to seed its side-channel
+      // model/mode state. Without passthrough, the auto-skip gate would
+      // drop the snapshot and the client would remain on stale null/null.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      expect(afterResync.awaitingResync).toBe(true);
+
+      const afterSnapshot = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-max',
+          currentApprovalMode: 'auto-edit',
+        },
+      });
+      // The snapshot must have applied — model/mode state is populated.
+      expect(afterSnapshot.currentModelId).toBe('qwen-max');
+      expect(afterSnapshot.approvalMode).toBe('auto-edit');
+      // awaitingResync stays true (consumer hasn't explicitly recovered).
+      expect(afterSnapshot.awaitingResync).toBe(true);
+    });
   });
 
   describe('followup_suggestion (daemon assist push)', () => {
@@ -2599,6 +2635,96 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.lastFollowupSuggestion).toBeUndefined();
+    });
+  });
+
+  describe('session_snapshot (A5 #4511)', () => {
+    it('asKnownDaemonEvent narrows session_snapshot', () => {
+      const event: DaemonEvent = {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'auto',
+        },
+      };
+      const known = asKnownDaemonEvent(event);
+      expect(known).toBeDefined();
+      expect(known!.type).toBe('session_snapshot');
+    });
+
+    it('reducer seeds currentModelId and approvalMode from snapshot', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'yolo',
+        },
+      });
+      expect(state.sessionId).toBe('s-1');
+      expect(state.currentModelId).toBe('qwen-turbo');
+      expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('reducer does not overwrite model/mode with null snapshot values', () => {
+      const initial = {
+        ...createDaemonSessionViewState(),
+        currentModelId: 'existing-model',
+        approvalMode: 'default',
+      };
+      const state = reduceDaemonSessionEvent(initial, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.currentModelId).toBe('existing-model');
+      expect(state.approvalMode).toBe('default');
+    });
+
+    it('drops malformed session_snapshot (missing sessionId)', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: { currentModelId: 'qwen-turbo' },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+    });
+
+    it('drops session_snapshot with a non-string currentModelId', () => {
+      // Guards the reducer's `!= null` propagation: an unchecked non-string
+      // would land in `state.currentModelId` and crash downstream string ops.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: 42 as unknown as string,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.currentModelId).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-string currentApprovalMode', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: {} as unknown as string,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.approvalMode).toBeUndefined();
     });
   });
 });

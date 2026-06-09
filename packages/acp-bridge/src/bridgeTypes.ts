@@ -239,7 +239,10 @@ export interface AcpSessionBridge {
    */
   subscribeEvents(
     sessionId: string,
-    opts?: SubscribeOptions,
+    opts?: SubscribeOptions & {
+      /** Yield a synthetic `session_snapshot` frame after replay completes. */
+      snapshot?: boolean;
+    },
   ): AsyncIterable<BridgeEvent>;
 
   /**
@@ -395,6 +398,22 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /**
+   * Switch UI language and optionally LLM output language for a live
+   * session, then broadcast a `language_changed` event.  When
+   * `syncOutputLanguage` is true the handler also refreshes every
+   * session's system prompt so the next LLM call uses the new language.
+   */
+  setSessionLanguage(
+    sessionId: string,
+    params: { language: string; syncOutputLanguage: boolean },
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    language: string;
+    outputLanguage: string | null;
+    refreshed: boolean;
+  }>;
 
   /**
    * Change the approval mode of a live session and broadcast an

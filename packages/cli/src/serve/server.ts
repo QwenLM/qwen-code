@@ -48,6 +48,7 @@ import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
+import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { mountAcpHttp } from './acpHttp/index.js';
 import {
@@ -102,6 +103,11 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rateLimit.js';
 
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
@@ -289,7 +295,7 @@ function resolveDaemonTelemetryRoute(
     return { route: 'POST /sessions/delete' };
   }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -809,6 +815,7 @@ export function createServeApp(
         status: 'ok',
         sessions: bridge.sessionCount,
         pendingPermissions: bridge.pendingPermissionCount,
+        ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
       writeStderrLine(
@@ -882,6 +889,38 @@ export function createServeApp(
 
   app.use(bearerAuth(opts.token));
 
+  // Rate limiter: after auth (only count authenticated requests),
+  // before body parser (reject early without burning JSON.parse CPU).
+  let rateLimiter: RateLimiterInstance | undefined;
+  if (opts.rateLimit) {
+    const windowMs = opts.rateLimitWindowMs ?? 60_000;
+    rateLimiter = createRateLimiter({
+      tiers: {
+        prompt: { windowMs, max: opts.rateLimitPrompt ?? 10 },
+        mutation: { windowMs, max: opts.rateLimitMutation ?? 30 },
+        read: { windowMs, max: opts.rateLimitRead ?? 120 },
+      },
+      hostname: opts.hostname,
+      onLimitReached: daemonLog
+        ? (tier, key, suppressed) => {
+            daemonLog.warn(
+              `rate limit hit${suppressed > 0 ? ` (${suppressed} suppressed)` : ''}`,
+              { tier, key: key.slice(0, 64) },
+            );
+          }
+        : undefined,
+      onError: daemonLog
+        ? (err, path) => {
+            daemonLog.warn(
+              `rate limiter error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
+              { path },
+            );
+          }
+        : undefined,
+    });
+    app.use(rateLimiter.middleware);
+  }
+
   app.use(express.json({ limit: '10mb' }));
   app.use(
     (
@@ -946,6 +985,7 @@ export function createServeApp(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
+        rateLimit: opts.rateLimit === true,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -2216,6 +2256,57 @@ export function createServeApp(
     },
   );
 
+  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+
+  app.post('/session/:id/language', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const language = body['language'];
+    const syncOutputLanguage = body['syncOutputLanguage'];
+
+    if (typeof language !== 'string' || !LANGUAGE_CODES.includes(language)) {
+      res.status(400).json({
+        error:
+          '`language` is required and must be one of: ' +
+          LANGUAGE_CODES.join(', '),
+        code: 'invalid_language',
+        allowed: LANGUAGE_CODES,
+      });
+      return;
+    }
+
+    if (
+      syncOutputLanguage !== undefined &&
+      typeof syncOutputLanguage !== 'boolean'
+    ) {
+      res.status(400).json({
+        error: '`syncOutputLanguage` must be a boolean when provided',
+        code: 'invalid_sync_flag',
+      });
+      return;
+    }
+
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+
+    try {
+      const response = await bridge.setSessionLanguage(
+        sessionId,
+        {
+          language,
+          syncOutputLanguage: syncOutputLanguage === true,
+        },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/language',
+        sessionId,
+      });
+    }
+  });
+
   app.post(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
@@ -2584,10 +2675,12 @@ export function createServeApp(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
+      const snapshot = req.query['snapshot'] === '1';
       const iterable = bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
         ...(maxQueued !== undefined ? { maxQueued } : {}),
+        ...(snapshot ? { snapshot: true } : {}),
       });
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
@@ -2988,6 +3081,10 @@ export function createServeApp(
       }
     },
   );
+
+  if (rateLimiter) {
+    setRateLimiter(app, rateLimiter);
+  }
 
   return app;
 }
@@ -3536,16 +3633,19 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
   //
-  // `_meta.serverTimestamp`: stamp the daemon's wall-clock at SSE write
-  // time so multi-client transcript ordering uses the server's clock.
-  // Stamped at the wire boundary (NOT at EventBus.publish) so the
-  // in-memory `BridgeEvent` type stays unchanged. The top-level merge
-  // with `event._meta` is a forward-compat escape hatch for future
-  // envelope-level metadata; today `existingMeta` is always `undefined`.
+  // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
+  // are published so SSE and load/replay share the same event time. Keep this
+  // fallback for synthetic frames that do not pass through EventBus.
   const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const existingServerTimestamp = existingMeta?.['serverTimestamp'];
+  const serverTimestamp =
+    typeof existingServerTimestamp === 'number' &&
+    Number.isFinite(existingServerTimestamp)
+      ? existingServerTimestamp
+      : Date.now();
   const stamped = {
     ...event,
-    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+    _meta: { ...(existingMeta ?? {}), serverTimestamp },
   };
   const dataJson = JSON.stringify(stamped);
   const idLine =

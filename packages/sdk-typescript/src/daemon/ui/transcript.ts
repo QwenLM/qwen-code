@@ -96,13 +96,10 @@ export function appendLocalUserTranscriptMessage(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
   const next = cloneTranscriptState(state, opts);
+  finishAssistant(next);
   const block = createTextBlock(next, 'user', text);
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
-  next.activeAssistantBlockId = undefined;
-  next.activeThoughtBlockId = undefined;
-  next.activeAssistantBlockByParent = {};
-  next.activeThoughtBlockByParent = {};
   return trimTranscriptState(next);
 }
 
@@ -370,10 +367,52 @@ export function selectPendingPermissionBlocks(
   );
 }
 
-// Keyed (parentToolCallId) and scalar (activeAssistantBlockId) paths are
-// fully independent. Neither clears nor finalizes the other's blocks.
-// Only finishAssistant() or clearActiveText() with matching parentToolCallId
-// can finalize keyed-path blocks.
+function finalizeStreamingTextBlock(
+  state: DaemonTranscriptState,
+  blockId: string | undefined,
+): void {
+  const block = getWritableBlockById(state, blockId);
+  if (block?.kind === 'assistant' || block?.kind === 'thought') {
+    block.streaming = false;
+    block.updatedAt = state.now;
+  }
+}
+
+function clearActiveAssistant(state: DaemonTranscriptState): void {
+  finalizeStreamingTextBlock(state, state.activeAssistantBlockId);
+  state.activeAssistantBlockId = undefined;
+}
+
+function clearActiveThought(state: DaemonTranscriptState): void {
+  finalizeStreamingTextBlock(state, state.activeThoughtBlockId);
+  state.activeThoughtBlockId = undefined;
+}
+
+function clearActiveAssistantForParent(
+  state: DaemonTranscriptState,
+  parentToolCallId: string,
+): void {
+  finalizeStreamingTextBlock(
+    state,
+    state.activeAssistantBlockByParent[parentToolCallId],
+  );
+  delete state.activeAssistantBlockByParent[parentToolCallId];
+}
+
+function clearActiveThoughtForParent(
+  state: DaemonTranscriptState,
+  parentToolCallId: string,
+): void {
+  finalizeStreamingTextBlock(
+    state,
+    state.activeThoughtBlockByParent[parentToolCallId],
+  );
+  delete state.activeThoughtBlockByParent[parentToolCallId];
+}
+
+// Keyed (parentToolCallId) and scalar paths are independent, but replacing an
+// active assistant/thought with another text kind must finalize the old block
+// before clearing its active pointer.
 function appendTextDelta(
   state: DaemonTranscriptState,
   kind: 'user' | 'assistant' | 'thought',
@@ -406,7 +445,10 @@ function appendTextDelta(
     existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
-    if (kind === 'assistant') existing.streaming = true;
+    if (event.serverTimestamp !== undefined) {
+      existing.serverTimestamp = event.serverTimestamp;
+    }
+    if (kind === 'assistant' || kind === 'thought') existing.streaming = true;
     return;
   }
 
@@ -417,7 +459,7 @@ function appendTextDelta(
     event.eventId,
     event.serverTimestamp,
   );
-  if (kind === 'assistant') block.streaming = true;
+  if (kind === 'assistant' || kind === 'thought') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
@@ -432,56 +474,28 @@ function appendTextDelta(
 
   if (parentId != null) {
     if (kind === 'assistant') {
-      delete state.activeThoughtBlockByParent[parentId];
+      clearActiveThoughtForParent(state, parentId);
     }
     if (kind === 'thought') {
-      const evictedAssistId = state.activeAssistantBlockByParent[parentId];
-      if (evictedAssistId) {
-        const evicted = getWritableBlockById(state, evictedAssistId);
-        if (evicted?.kind === 'assistant') {
-          evicted.streaming = false;
-          evicted.updatedAt = state.now;
-        }
-      }
-      delete state.activeAssistantBlockByParent[parentId];
+      clearActiveAssistantForParent(state, parentId);
     }
   } else {
     if (kind !== 'user') state.activeUserBlockId = undefined;
-    if (kind !== 'assistant') state.activeAssistantBlockId = undefined;
-    if (kind !== 'thought') state.activeThoughtBlockId = undefined;
+    if (kind !== 'assistant') clearActiveAssistant(state);
+    if (kind !== 'thought') clearActiveThought(state);
   }
 }
 
 function finishAssistant(state: DaemonTranscriptState): void {
-  const existing = getWritableBlockById(state, state.activeAssistantBlockId);
-  if (existing?.kind === 'assistant') {
-    existing.streaming = false;
-    existing.updatedAt = state.now;
-  }
-  state.activeAssistantBlockId = undefined;
+  clearActiveAssistant(state);
 
-  for (const blockId of Object.values(state.activeAssistantBlockByParent)) {
-    const block = getWritableBlockById(state, blockId);
-    if (block?.kind === 'assistant') {
-      block.streaming = false;
-      block.updatedAt = state.now;
-    }
+  for (const parentId of Object.keys(state.activeAssistantBlockByParent)) {
+    clearActiveAssistantForParent(state, parentId);
   }
-  state.activeAssistantBlockByParent = {};
-  for (const blockId of Object.values(state.activeThoughtBlockByParent)) {
-    const block = getWritableBlockById(state, blockId);
-    if (block?.kind === 'thought') {
-      block.streaming = false;
-      block.updatedAt = state.now;
-    }
+  for (const parentId of Object.keys(state.activeThoughtBlockByParent)) {
+    clearActiveThoughtForParent(state, parentId);
   }
-  state.activeThoughtBlockByParent = {};
-  const scalarThought = getWritableBlockById(state, state.activeThoughtBlockId);
-  if (scalarThought?.kind === 'thought') {
-    scalarThought.streaming = false;
-    scalarThought.updatedAt = state.now;
-  }
-  state.activeThoughtBlockId = undefined;
+  clearActiveThought(state);
 }
 
 function upsertToolBlock(
@@ -1118,20 +1132,11 @@ function clearActiveText(
   parentToolCallId?: string,
 ): void {
   if (parentToolCallId) {
-    const assistId = state.activeAssistantBlockByParent[parentToolCallId];
-    if (assistId) {
-      const block = getWritableBlockById(state, assistId);
-      if (block?.kind === 'assistant') {
-        block.streaming = false;
-        block.updatedAt = state.now;
-      }
-      delete state.activeAssistantBlockByParent[parentToolCallId];
-    }
-    delete state.activeThoughtBlockByParent[parentToolCallId];
+    clearActiveAssistantForParent(state, parentToolCallId);
+    clearActiveThoughtForParent(state, parentToolCallId);
   } else {
     finishAssistant(state);
     state.activeUserBlockId = undefined;
-    state.activeThoughtBlockId = undefined;
   }
 }
 
