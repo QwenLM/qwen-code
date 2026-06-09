@@ -346,7 +346,9 @@ export class ExtensionManager {
       path.join(this.configDir, 'extension-preferences.json'),
     );
     this.sourceRegistryStore = new SourceRegistryStore(
-      path.join(this.configDir, 'sources.json'),
+      // Keep the on-disk filename as marketplaces.json for backward
+      // compatibility with sources added before the source/* rename.
+      path.join(this.configDir, 'marketplaces.json'),
     );
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =

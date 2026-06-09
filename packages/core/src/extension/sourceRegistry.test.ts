@@ -52,7 +52,7 @@ describe('SourceRegistryStore', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mkt-reg-'));
-    filePath = path.join(tmpDir, 'nested', 'sources.json');
+    filePath = path.join(tmpDir, 'nested', 'marketplaces.json');
     store = new SourceRegistryStore(filePath);
   });
 
