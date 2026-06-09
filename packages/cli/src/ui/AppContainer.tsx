@@ -2627,7 +2627,9 @@ export const AppContainer = (props: AppContainerProps) => {
             ?.rewindRecording(
               targetTurnIndex,
               { truncatedCount: originalLength - truncatedUi.length },
-              config.getFileHistoryService().getSnapshots(),
+              !hasRestoreFailure
+                ? config.getFileHistoryService().getSnapshots()
+                : undefined,
             );
         }
 

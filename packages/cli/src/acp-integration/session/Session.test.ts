@@ -449,9 +449,11 @@ describe('Session', () => {
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(1, {
-        truncatedCount: 2,
-      });
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        [],
+      );
     });
 
     it('preserves startup context when rewinding to the first user turn', () => {
