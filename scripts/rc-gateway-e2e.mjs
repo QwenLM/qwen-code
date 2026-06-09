@@ -6,7 +6,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,10 @@ const DAEMON_PORT = 4199;
 const GATEWAY_PORT = 4198;
 const token = randomBytes(32).toString('base64url');
 const workspace = mkdtempSync(join(tmpdir(), 'rc-e2e-ws-'));
+// Fixture command file lives inside the daemon's (tmpdir) workspace so the
+// gateway's on-demand loader picks it up from <workspaceCwd>/.qwen/commands.
+const cmdDir = join(workspace, '.qwen', 'commands');
+const cmdFile = join(cmdDir, 'echo.md');
 
 let pass = 0;
 let fail = 0;
@@ -91,6 +95,12 @@ const cleanup = async () => {
   }
   try {
     daemon.kill('SIGTERM');
+  } catch {
+    /* ignore */
+  }
+  // Remove the slash-command fixture so the (tmpdir) workspace is left clean.
+  try {
+    rmSync(cmdFile, { force: true });
   } catch {
     /* ignore */
   }
@@ -557,6 +567,59 @@ try {
     nsr.status === 403
       ? ok('search GET as non-owner -> 403')
       : bad(`search non-owner ${nsr.status}`);
+  }
+
+  // Custom slash commands (cycle 20): drop a valid workspace command into the
+  // real daemon's <workspaceCwd>/.qwen/commands, then GET /rc/commands picks it
+  // up on-demand. invoke of an unknown command 404s; no-token GET 401s.
+  {
+    mkdirSync(cmdDir, { recursive: true });
+    writeFileSync(
+      cmdFile,
+      '---\nname: echo\ndescription: echo the args\nscope: write\n---\nEcho: ${args}\n',
+    );
+
+    // GET with the owner token -> 200 {v:1, commands:[...]} containing echo
+    // with invocableByYou:true (owner mint below includes WRITE).
+    const { code: cc } = pairing.mint([SESSION_READ, WRITE]);
+    const crr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: cc, label: 'cmd-writer' }),
+    });
+    const cmdToken = (await crr.json()).token;
+
+    const lr = await fetch(`${gw}/rc/commands`, {
+      headers: { Authorization: `Bearer ${cmdToken}` },
+    });
+    const lb = await lr.json().catch(() => ({}));
+    const echo = Array.isArray(lb.commands)
+      ? lb.commands.find((c) => c.name === 'echo')
+      : undefined;
+    lr.status === 200 && lb.v === 1 && echo && echo.invocableByYou === true
+      ? ok('GET /rc/commands -> 200 {v:1} with fixture echo invocableByYou:true')
+      : bad(`commands list ${lr.status} ${JSON.stringify(lb)}`);
+
+    // Invoke an unknown command on a bogus session -> 404 unknown_command
+    // (the 404 short-circuits before the daemon is touched).
+    const ir = await fetch(`${gw}/rc/session/does-not-exist/command/nope`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${cmdToken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    const ib = await ir.json().catch(() => ({}));
+    ir.status === 404 && ib.code === 'unknown_command'
+      ? ok('invoke unknown command -> 404 unknown_command')
+      : bad(`invoke unknown ${ir.status} ${JSON.stringify(ib)}`);
+
+    // GET /rc/commands without a token -> 401.
+    const nr = await fetch(`${gw}/rc/commands`);
+    nr.status === 401
+      ? ok('GET /rc/commands without token -> 401')
+      : bad(`commands no-token ${nr.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
