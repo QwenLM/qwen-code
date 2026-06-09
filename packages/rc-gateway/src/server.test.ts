@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -49,6 +55,8 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   const vapid = await VapidStore.open(join(dir, 'vapid.json'));
   const pushStore = await PushStore.open(join(dir, 'push.json'));
   const snooze = await SnoozeStore.open(join(dir, 'snooze.state'));
+  // Isolate the loader's user-commands root from the real ~/.qwen/commands.
+  const commandsUserDir = join(dir, 'user-commands');
   const { app, notifier } = createGatewayApp({
     daemon,
     store,
@@ -57,6 +65,7 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
     vapid,
     pushStore,
     snooze,
+    commandsUserDir,
   }); // `audit` is also returned; boot() does not need it here.
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -702,6 +711,101 @@ describe('gateway app', () => {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ sessionId: 's1', ttlSec: 3600 }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('GET /rc/commands lists workspace commands with invocableByYou for a write caller', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-cmd-ws-'));
+    const cmdDir = join(dir, '.qwen', 'commands');
+    mkdirSync(cmdDir, { recursive: true });
+    writeFileSync(
+      join(cmdDir, 'triage.md'),
+      '---\nname: triage\ndescription: triage it\nscope: write\n---\nbody ${args}',
+    );
+    const { url, pairing } = await boot({ workspaceCwd: dir });
+    const { code } = pairing.mint([SESSION_READ, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/commands`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      v: number;
+      commands: Array<{ name: string; invocableByYou: boolean }>;
+    };
+    expect(body.v).toBe(1);
+    const triage = body.commands.find((c) => c.name === 'triage');
+    expect(triage).toBeDefined();
+    expect(triage!.invocableByYou).toBe(true);
+  });
+
+  it('401s GET /rc/commands without a token', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/rc/commands`);
+    expect(res.status).toBe(401);
+  });
+
+  it('403s GET /rc/commands for a token lacking session:read', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([WRITE]); // no session:read
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer-only' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+    const res = await fetch(`${url}/rc/commands`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('404s POST /rc/session/:id/command/:name for an unknown command (route wired)', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, WRITE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+    const res = await fetch(`${url}/rc/session/s1/command/nope`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'unknown_command',
+    );
+  });
+
+  it('403s POST /rc/session/:id/command/:name for a session:read-only token', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ]); // no write
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'reader' }),
+    });
+    const token = ((await redeem.json()) as { token: string }).token;
+    const res = await fetch(`${url}/rc/session/s1/command/whatever`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
     });
     expect(res.status).toBe(403);
   });

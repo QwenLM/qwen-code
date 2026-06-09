@@ -93,3 +93,14 @@ export {
   type SearchOptions,
 } from './search/transcripts.js';
 export { createSearchRoute } from './routes/search.js';
+export { parseFrontMatter, substitute } from './commands/parse.js';
+export {
+  CommandLoader,
+  type LoadedCommand,
+  type CommandScope,
+} from './commands/loader.js';
+export {
+  createListCommandsRoute,
+  createInvokeCommandRoute,
+  mapDeclaredScope,
+} from './routes/commands.js';

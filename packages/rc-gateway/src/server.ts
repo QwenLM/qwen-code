@@ -32,6 +32,11 @@ import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute } from './routes/search.js';
 import { resolveChatsDir } from './search/transcripts.js';
+import { CommandLoader } from './commands/loader.js';
+import {
+  createListCommandsRoute,
+  createInvokeCommandRoute,
+} from './routes/commands.js';
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import type { SnoozeStore } from './routing/snooze.js';
@@ -54,6 +59,10 @@ export interface GatewayDeps {
   pushStore?: PushStore;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
+  /** Pre-built command loader (test injection). Built from deps when omitted. */
+  commandLoader?: CommandLoader;
+  /** User-level slash-command root; defaults to ~/.qwen/commands. */
+  commandsUserDir?: string;
 }
 
 export interface GatewayApp {
@@ -75,6 +84,23 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Process-local activity tracker: feeds the notifier's working-device
   // suppression and is touched by recordActivity on the human-action POSTs.
   const workingDevice = new WorkingDeviceTracker();
+
+  // Single loader instance: holds the per-process collision-warned set so a
+  // workspace>user name collision is audited at most once for the lifetime.
+  // Workspace root is the raw capabilities().workspaceCwd (NOT resolveChatsDir).
+  const commandLoader =
+    deps.commandLoader ??
+    new CommandLoader(
+      async () => {
+        try {
+          return (await deps.daemon.capabilities()).workspaceCwd;
+        } catch {
+          return undefined;
+        }
+      },
+      deps.commandsUserDir ?? join(homedir(), '.qwen', 'commands'),
+      audit,
+    );
 
   app.get('/rc/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -107,6 +133,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     recordActivity(workingDevice),
     enforceSessionLock(audit),
     createPromptRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/rc/session/:id/command/:name',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    createInvokeCommandRoute(deps.daemon, commandLoader, audit),
+  );
+  app.get(
+    '/rc/commands',
+    requireScope(SESSION_READ, audit),
+    createListCommandsRoute(commandLoader),
   );
   app.get(
     '/rc/tokens',
