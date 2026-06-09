@@ -17,7 +17,10 @@ interface Rec {
   timestamp: string;
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   cwd?: string;
-  message?: { role?: string; parts?: Array<{ text?: string }> };
+  message?: {
+    role?: string;
+    parts?: Array<{ text?: string; functionResponse?: unknown }>;
+  };
 }
 
 function rec(
@@ -110,6 +113,34 @@ describe('searchTranscripts', () => {
     const hits = await searchTranscripts(dir, 'token', { kind: 'tool' });
     expect(hits.map((h) => h.eventId)).toEqual(['t']);
     expect(hits[0].kind).toBe('tool_result');
+  });
+
+  it('searches tool_result content carried under functionResponse (not parts[].text)', async () => {
+    // Real tool_result records store their output under functionResponse, not
+    // text — search must reach into it or tool output is invisible.
+    writeJsonl('s1.jsonl', [
+      rec({
+        uuid: 'tr',
+        sessionId: 's1',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'run_shell_command',
+                response: { output: 'Compiled FILTER_HIPASS successfully' },
+              },
+            },
+          ],
+        },
+      }),
+    ]);
+    const hits = await searchTranscripts(dir, 'filter_hipass', {
+      kind: 'tool',
+    });
+    expect(hits.map((h) => h.eventId)).toEqual(['tr']);
+    expect(hits[0].snippet.toLowerCase()).toContain('filter_hipass');
   });
 
   it('filters by sessionId', async () => {

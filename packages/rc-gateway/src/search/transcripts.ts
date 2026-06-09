@@ -43,7 +43,26 @@ interface TranscriptRecord {
   sessionId?: string;
   timestamp?: string;
   type?: string;
-  message?: { parts?: Array<{ text?: unknown } | null> };
+  message?: {
+    parts?: Array<{ text?: unknown; functionResponse?: unknown } | null>;
+  };
+}
+
+/**
+ * Recursively collect string leaves from an arbitrary JSON value, bounded so a
+ * giant tool payload can't blow up memory. Used to make `tool_result` content
+ * searchable — those records carry their output under `functionResponse`, NOT
+ * `parts[].text`, so a naive text-only read leaves tool output unsearchable.
+ */
+function collectStrings(value: unknown, out: string[], budget = 200): void {
+  if (out.length >= budget) return;
+  if (typeof value === 'string') {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) collectStrings(v, out, budget);
+  } else if (value && typeof value === 'object') {
+    for (const v of Object.values(value)) collectStrings(v, out, budget);
+  }
 }
 
 const SNIPPET_MAX = 200;
@@ -64,13 +83,18 @@ export function resolveChatsDir(workspaceCwd: string): string {
   );
 }
 
-/** Concatenated text of a record's message parts. */
+/** Concatenated searchable text of a record's message parts. */
 function recordText(rec: TranscriptRecord): string {
   const parts = rec.message?.parts ?? [];
-  return parts
-    .map((p) => (p && typeof p.text === 'string' ? p.text : undefined))
-    .filter((s): s is string => typeof s === 'string')
-    .join(' ');
+  const out: string[] = [];
+  for (const p of parts) {
+    if (!p) continue;
+    if (typeof p.text === 'string') out.push(p.text);
+    // tool_result parts carry their output under functionResponse, not text.
+    if (p.functionResponse !== undefined)
+      collectStrings(p.functionResponse, out);
+  }
+  return out.join(' ');
 }
 
 /**
