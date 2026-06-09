@@ -188,7 +188,10 @@ function normalizeConfig(value: unknown): AutoImproveConfig {
   const legacyUserContext =
     typeof value['userContext'] === 'string' ? value['userContext'].trim() : '';
   if (customSources.length === 0 && legacyUserContext) {
-    customSources.push(legacyUserContext);
+    // Apply the same length cap as normalizeStringList — this legacy value is
+    // pushed after normalization, so without the slice an unbounded userContext
+    // would reach the tick prompt inside the USER-PROVIDED DATA fence.
+    customSources.push(legacyUserContext.slice(0, MAX_CUSTOM_SOURCE_LENGTH));
   }
   return {
     version: 1,

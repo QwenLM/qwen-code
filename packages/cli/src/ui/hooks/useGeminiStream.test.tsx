@@ -2561,6 +2561,36 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('fires submit_prompt onComplete with { errored: true } when the stream throws', async () => {
+      // Without this, an auto-improve tick that hits an API error would leave
+      // currentRun = implementing and deadlock all future ticks.
+      const onComplete = vi.fn().mockResolvedValue(undefined);
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: 'expanded tick prompt',
+        onComplete,
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: '' };
+          throw new Error('API error');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          '/auto-improve tick loop-1',
+          SendMessageType.Cron,
+        );
+      });
+
+      await waitFor(() => {
+        expect(onComplete).toHaveBeenCalledWith({ errored: true });
+      });
+    });
+
     it('should call onCancelSubmit handler when cancelOngoingRequest is called', async () => {
       const cancelSubmitSpy = vi.fn();
       const mockStream = (async function* () {

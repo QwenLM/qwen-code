@@ -47,4 +47,41 @@ describe('dreamCommand', () => {
       `${path.sep}.qwen${path.sep}tmp${path.sep}`,
     );
   });
+
+  function setupOnComplete() {
+    const writeDreamManualRun = vi.fn();
+    const context = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: vi.fn().mockReturnValue(path.join('tmp', 'dream')),
+          getMemoryManager: vi.fn().mockReturnValue({
+            buildConsolidationPrompt: vi.fn().mockReturnValue('dream prompt'),
+            writeDreamManualRun,
+          }),
+          getSessionId: vi.fn().mockReturnValue('session-1'),
+        },
+      },
+    });
+    return { context, writeDreamManualRun };
+  }
+
+  it('records a manual dream run when the turn succeeds', async () => {
+    const { context, writeDreamManualRun } = setupOnComplete();
+    const result = await dreamCommand.action?.(context, '');
+    if (!result || result.type !== 'submit_prompt' || !result.onComplete) {
+      throw new Error('expected a submit_prompt result with onComplete');
+    }
+    await result.onComplete();
+    expect(writeDreamManualRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not record a dream run when the turn errored', async () => {
+    const { context, writeDreamManualRun } = setupOnComplete();
+    const result = await dreamCommand.action?.(context, '');
+    if (!result || result.type !== 'submit_prompt' || !result.onComplete) {
+      throw new Error('expected a submit_prompt result with onComplete');
+    }
+    await result.onComplete({ errored: true });
+    expect(writeDreamManualRun).not.toHaveBeenCalled();
+  });
 });
