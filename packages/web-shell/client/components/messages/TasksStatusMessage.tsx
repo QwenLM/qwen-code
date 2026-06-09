@@ -184,6 +184,8 @@ export function TasksStatusMessage({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [pendingCancelId, setPendingCancelId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
   const refreshInFlightRef = useRef(false);
   const initialDetailStatusRef = useRef<{
@@ -204,8 +206,12 @@ export function TasksStatusMessage({
         .getTasks()
         .then((snapshot) => {
           setTasks(sortTasks(snapshot.tasks));
+          setRefreshError(false);
         })
-        .catch(() => {})
+        .catch((error: unknown) => {
+          console.warn('[web-shell] failed to refresh tasks:', error);
+          setRefreshError(true);
+        })
         .finally(() => {
           refreshInFlightRef.current = false;
         });
@@ -291,13 +297,15 @@ export function TasksStatusMessage({
         await actions.cancelTask(task.id, task.kind);
         const snapshot = await actions.getTasks();
         setTasks(sortTasks(snapshot.tasks));
-      } catch {
-        // error handled by dispatchActionError
+        setActionError(null);
+      } catch (error: unknown) {
+        console.warn('[web-shell] failed to cancel task:', error);
+        setActionError(t('tasks.cancelFailed'));
       } finally {
         setBusy(false);
       }
     },
-    [actions, busy, pendingCancelId],
+    [actions, busy, pendingCancelId, t],
   );
 
   useDelayedGlobalKeyDown(
@@ -423,6 +431,10 @@ export function TasksStatusMessage({
       <div className={styles.panel} data-keyboard-scope>
         <div className={styles.header}>
           <div className={styles.title}>{t('tasks.title')}</div>
+          {refreshError && (
+            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+          )}
+          {actionError && <div className={styles.error}>{actionError}</div>}
         </div>
         <div>
           <div className={styles.sectionTitle}>
@@ -445,6 +457,10 @@ export function TasksStatusMessage({
       {step === 'list' && (
         <div className={styles.header}>
           <div className={styles.title}>{t('tasks.title')}</div>
+          {refreshError && (
+            <div className={styles.warning}>{t('tasks.refreshStale')}</div>
+          )}
+          {actionError && <div className={styles.error}>{actionError}</div>}
         </div>
       )}
 

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useI18n } from '../../i18n';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
 
@@ -47,11 +48,14 @@ function formatRuntime(ms: number): string {
   return `${hours}h ${totalMinutes % 60}m`;
 }
 
-function pluralTurns(n: number): string {
-  return `${n} ${n === 1 ? 'turn' : 'turns'}`;
+function pluralTurns(n: number, t: ReturnType<typeof useI18n>['t']): string {
+  return t(n === 1 ? 'goal.turn' : 'goal.turns', { count: n });
 }
 
-function getTitle(status: SerializedGoalStatusMessage): {
+function getTitle(
+  status: SerializedGoalStatusMessage,
+  t: ReturnType<typeof useI18n>['t'],
+): {
   prefix: string;
   title: string;
   colorClass: string;
@@ -60,41 +64,41 @@ function getTitle(status: SerializedGoalStatusMessage): {
     case 'checking':
       return {
         prefix: '○',
-        title: `Goal check${
+        title: `${t('goal.check')}${
           status.iterations && status.iterations > 0
-            ? ` · turn ${status.iterations}`
+            ? ` · ${t('goal.turnLabel', { count: status.iterations })}`
             : ''
-        } · not yet met`,
+        } · ${t('goal.notYetMet')}`,
         colorClass: styles.muted,
       };
     case 'set':
       return {
         prefix: '◎',
-        title: 'Goal set',
+        title: t('goal.set'),
         colorClass: styles.accent,
       };
     case 'achieved':
       return {
         prefix: '✓',
-        title: 'Goal achieved',
+        title: t('goal.achieved'),
         colorClass: styles.success,
       };
     case 'cleared':
       return {
         prefix: '○',
-        title: 'Goal cleared',
+        title: t('goal.cleared'),
         colorClass: styles.muted,
       };
     case 'failed':
       return {
         prefix: '✖',
-        title: 'Goal could not be achieved',
+        title: t('goal.failed'),
         colorClass: styles.error,
       };
     case 'aborted':
       return {
         prefix: '!',
-        title: 'Goal aborted',
+        title: t('goal.aborted'),
         colorClass: styles.warning,
       };
   }
@@ -107,6 +111,8 @@ export function GoalStatusMessage({
   status: SerializedGoalStatusMessage;
   activateFooter?: boolean;
 }) {
+  const { t } = useI18n();
+
   useEffect(() => {
     if (!activateFooter) return;
     const active = status.kind === 'set' || status.kind === 'checking';
@@ -121,11 +127,11 @@ export function GoalStatusMessage({
     );
   }, [activateFooter, status.condition, status.kind, status.setAt]);
 
-  const title = getTitle(status);
+  const title = getTitle(status, t);
   const stats: string[] = [];
   if (status.kind !== 'checking') {
     if (status.iterations && status.iterations > 0) {
-      stats.push(pluralTurns(status.iterations));
+      stats.push(pluralTurns(status.iterations, t));
     }
     if (typeof status.durationMs === 'number') {
       stats.push(formatRuntime(status.durationMs));
@@ -138,6 +144,8 @@ export function GoalStatusMessage({
       status.kind === 'failed' ||
       status.kind === 'aborted') &&
     status.lastReason?.trim();
+  const reasonLabel =
+    status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');
 
   return (
     <div className={styles.message}>
@@ -150,12 +158,12 @@ export function GoalStatusMessage({
           {subtitle && <span className={styles.muted}>{subtitle}</span>}
         </div>
         <div className={styles.row}>
-          <span className={styles.label}>Goal:</span>
+          <span className={styles.label}>{t('goal.label')}:</span>
           <span className={styles.value}>{status.condition}</span>
         </div>
         {showReason && (
           <div className={styles.muted}>
-            {status.kind === 'checking' ? 'Judge' : 'Last check'}: {showReason}
+            {reasonLabel}: {showReason}
           </div>
         )}
       </div>

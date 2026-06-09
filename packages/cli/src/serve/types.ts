@@ -147,6 +147,13 @@ export interface ServeOptions {
    */
   allowOrigins?: string[];
   /**
+   * Allow auth provider baseUrl values that point at localhost/private
+   * networks. Off by default because the daemon exposes this as an HTTP
+   * mutation; local development can opt in explicitly for local model
+   * endpoints.
+   */
+  allowPrivateAuthBaseUrl?: boolean;
+  /**
    * Server-side wallclock cap on a single
    * `POST /session/:id/prompt` from receipt to completion.
    */

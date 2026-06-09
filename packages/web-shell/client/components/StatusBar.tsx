@@ -232,7 +232,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
           })
           .catch((error: unknown) => {
             if (disposed) return;
-            console.warn('Failed to refresh tasks for status bar:', error);
+            console.warn('[web-shell] failed to refresh tasks:', error);
           })
           .finally(() => {
             tasksRefreshInFlightRef.current = false;
@@ -261,7 +261,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       ? formatGoalElapsed(Date.now() - activeGoal.setAt)
       : '';
     const goalLabel = activeGoal
-      ? `◎ /goal active${goalElapsed ? ` (${goalElapsed})` : ''}`
+      ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
       : '';
 
     useImperativeHandle(

@@ -2386,7 +2386,11 @@ export function App({
                         {authInlineOpen && (
                           <AuthMessage
                             onMessage={(text, type = 'status') => {
-                              store.dispatch([{ type, text }]);
+                              store.dispatch([
+                                type === 'error'
+                                  ? { type: 'error', text }
+                                  : { type: 'status', text },
+                              ]);
                             }}
                             onClose={() => setAuthInlineOpen(false)}
                           />

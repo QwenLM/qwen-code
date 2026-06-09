@@ -65,7 +65,8 @@ import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
-import type { ServeOptions ,
+import type {
+  ServeOptions,
   ServeAuthProviderInstallRequest,
   ServeAuthProviderInstallResult,
 } from './types.js';
@@ -524,6 +525,13 @@ export async function runQwenServe(
             'token gates API routes; /health and /demo remain pre-auth ' +
             'on loopback unless --require-auth is set)'
           : ''),
+    );
+  }
+  if (opts.allowPrivateAuthBaseUrl) {
+    writeStderrLine(
+      'qwen serve: --allow-private-auth-base-url enabled; ' +
+        '/workspace/auth/provider may install localhost/private-network ' +
+        'model endpoints. Use only for local development with trusted clients.',
     );
   }
 

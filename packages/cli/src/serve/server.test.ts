@@ -7756,6 +7756,112 @@ describe('auth device-flow routes', () => {
     expect(res.body.features).toContain('auth_device_flow');
   });
 
+  it('POST /workspace/auth/provider rejects private baseUrl values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://127.0.0.1:11434/v1',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_request');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider allows private baseUrl values when explicitly enabled', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        token: 'tkn',
+        allowPrivateAuthBaseUrl: true,
+      },
+      undefined,
+      {
+        bridge,
+        installAuthProvider,
+      },
+    );
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://127.0.0.1:11434/v1/',
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom-openai-compatible',
+      apiKey: 'sk-test',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+    });
+  });
+
+  it('POST /workspace/auth/provider filters invalid advanced numeric fields', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1/',
+        advancedConfig: {
+          enableThinking: true,
+          contextWindowSize: -1,
+          maxTokens: 8192,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom-openai-compatible',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/v1',
+      advancedConfig: {
+        enableThinking: true,
+        maxTokens: 8192,
+      },
+    });
+  });
+
   it('upstream provider.start failure → 502 upstream_error, not 500', async () => {
     // PR 21 fold-in 0 P1-14: provider throwing UpstreamDeviceFlowError
     // must surface as 502 with code:'upstream_error' instead of falling

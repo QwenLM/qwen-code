@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
@@ -328,8 +329,76 @@ function parseStringArray(value: unknown): string[] | undefined {
   return result.length > 0 ? [...new Set(result)] : undefined;
 }
 
+function parsePositiveBoundedInteger(
+  value: unknown,
+  max: number,
+): number | undefined {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    value > max
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function isBlockedAuthProviderHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) {
+    const parts = host.split('.').map((part) => Number(part));
+    const [a, b] = parts;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b !== undefined && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+
+  if (ipVersion === 6) {
+    if (host === '::1' || host.startsWith('fe80:')) return true;
+    if (host.startsWith('fc') || host.startsWith('fd')) return true;
+    if (host.startsWith('::ffff:')) {
+      return isBlockedAuthProviderHost(host.slice('::ffff:'.length));
+    }
+  }
+
+  return false;
+}
+
+function parseAuthProviderBaseUrl(
+  value: unknown,
+  allowPrivateBaseUrl: boolean,
+): string | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  if (!allowPrivateBaseUrl && isBlockedAuthProviderHost(parsed.hostname)) {
+    return null;
+  }
+  return parsed.toString().replace(/\/$/, '');
+}
+
 function parseAuthProviderInstallRequest(
   body: Record<string, unknown>,
+  options?: { allowPrivateBaseUrl?: boolean },
 ): ServeAuthProviderInstallRequest | undefined {
   const providerId = body['providerId'];
   const apiKey = body['apiKey'];
@@ -342,7 +411,11 @@ function parseAuthProviderInstallRequest(
     return undefined;
   }
   const protocol = body['protocol'];
-  const baseUrl = body['baseUrl'];
+  const baseUrl = parseAuthProviderBaseUrl(
+    body['baseUrl'],
+    options?.allowPrivateBaseUrl === true,
+  );
+  if (baseUrl === null) return undefined;
   const modelIds = parseStringArray(body['modelIds']);
   const rawAdvanced =
     body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
@@ -352,6 +425,14 @@ function parseAuthProviderInstallRequest(
     rawAdvanced?.['multimodal'] && typeof rawAdvanced['multimodal'] === 'object'
       ? (rawAdvanced['multimodal'] as Record<string, unknown>)
       : undefined;
+  const contextWindowSize = parsePositiveBoundedInteger(
+    rawAdvanced?.['contextWindowSize'],
+    10_000_000,
+  );
+  const maxTokens = parsePositiveBoundedInteger(
+    rawAdvanced?.['maxTokens'],
+    10_000_000,
+  );
   const advancedConfig = rawAdvanced
     ? {
         ...(typeof rawAdvanced['enableThinking'] === 'boolean'
@@ -375,12 +456,8 @@ function parseAuthProviderInstallRequest(
               },
             }
           : {}),
-        ...(typeof rawAdvanced['contextWindowSize'] === 'number'
-          ? { contextWindowSize: rawAdvanced['contextWindowSize'] }
-          : {}),
-        ...(typeof rawAdvanced['maxTokens'] === 'number'
-          ? { maxTokens: rawAdvanced['maxTokens'] }
-          : {}),
+        ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
       }
     : undefined;
   return {
@@ -391,9 +468,7 @@ function parseAuthProviderInstallRequest(
             protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
         }
       : {}),
-    ...(typeof baseUrl === 'string' && baseUrl.trim()
-      ? { baseUrl: baseUrl.trim() }
-      : {}),
+    ...(baseUrl ? { baseUrl } : {}),
     apiKey,
     ...(modelIds ? { modelIds } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
@@ -1504,7 +1579,9 @@ export function createServeApp(
         });
         return;
       }
-      const parsed = parseAuthProviderInstallRequest(safeBody(req));
+      const parsed = parseAuthProviderInstallRequest(safeBody(req), {
+        allowPrivateBaseUrl: opts.allowPrivateAuthBaseUrl === true,
+      });
       if (!parsed) {
         res.status(400).json({
           error: '`providerId` and `apiKey` are required',
@@ -1874,34 +1951,38 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/tasks/:taskId/cancel', mutate(), async (req, res) => {
-    const sessionId = req.params['id'];
-    const taskId = req.params['taskId'];
-    if (!sessionId || !taskId) {
-      res.status(400).json({
-        error: '`sessionId` and `taskId` route parameters are required',
-      });
-      return;
-    }
-    const body = safeBody(req);
-    const kind = body['kind'];
-    if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-      res
-        .status(400)
-        .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
-      return;
-    }
-    try {
-      res
-        .status(200)
-        .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/tasks/:taskId/cancel',
-        sessionId,
-      });
-    }
-  });
+  app.post(
+    '/session/:id/tasks/:taskId/cancel',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      const taskId = req.params['taskId'];
+      if (!sessionId || !taskId) {
+        res.status(400).json({
+          error: '`sessionId` and `taskId` route parameters are required',
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const kind = body['kind'];
+      if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
+        res
+          .status(400)
+          .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        return;
+      }
+      try {
+        res
+          .status(200)
+          .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/tasks/:taskId/cancel',
+          sessionId,
+        });
+      }
+    },
+  );
 
   app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];

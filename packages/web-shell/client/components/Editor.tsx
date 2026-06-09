@@ -376,7 +376,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return moveCompletionSelection(false)(view) || true;
+            return moveCompletionSelection(false)(view);
           }
           if (isBrowsingHistory) {
             closeCompletion(view);
@@ -424,7 +424,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return moveCompletionSelection(true)(view) || true;
+            return moveCompletionSelection(true)(view);
           }
           if (isBrowsingHistory) {
             closeCompletion(view);

@@ -401,6 +401,7 @@ export class Session implements SessionContext {
   private notificationResolve: (() => void) | null = null;
   private notificationProcessing: Promise<void> | null = null;
   private notificationDraining = false;
+  private notificationCounter = 0;
 
   // Cron scheduling state
   private cronQueue: string[] = [];
@@ -1803,6 +1804,14 @@ export class Session implements SessionContext {
 
     this.notificationDraining = true;
     try {
+      if (this.notificationProcessing) {
+        try {
+          await this.notificationProcessing;
+        } catch {
+          // The scheduled processor logs its own failures.
+        }
+      }
+
       while (true) {
         if (pendingSend.signal.aborted) {
           registry.abortAll();
@@ -1858,7 +1867,7 @@ export class Session implements SessionContext {
   }
 
   #scheduleBackgroundTaskNotificationProcessing(): void {
-    if (this.notificationProcessing) return;
+    if (this.notificationDraining || this.notificationProcessing) return;
     this.notificationProcessing = this.#processBackgroundTaskNotifications()
       .catch((error) => {
         debugLogger.warn(
@@ -1912,7 +1921,9 @@ export class Session implements SessionContext {
       this.config.getWorkingDir(),
       async () => {
         const promptId =
-          this.config.getSessionId() + '########notif' + Date.now();
+          this.config.getSessionId() +
+          '########notif' +
+          String(++this.notificationCounter);
 
         await withInteractionSpan(
           this.config,
