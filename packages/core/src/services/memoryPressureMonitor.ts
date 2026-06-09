@@ -276,7 +276,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   }
 
   private performCheckInternal(): void {
-    const { level: pressure, mem } = this.getPressureLevelWithMem();
+    const pressure = this.getPressureLevel();
     if (pressure !== 'critical') {
       this.consecutiveIneffectiveAggressiveCleanups = 0;
     }
@@ -284,21 +284,20 @@ export class MemoryPressureMonitor extends EventEmitter {
     // Always record a runtime sample so the ring buffer has history for
     // local diagnostics dumps, regardless of telemetry state.
     // Telemetry metric reporting is gated separately by isPerformanceMonitoringActive.
-    if (mem) {
-      try {
-        const sample = this.runtimeSamples.record(mem);
-        if (isPerformanceMonitoringActive()) {
-          recordMemoryUsage(this.coreConfig, sample.rss, {
-            memory_type: MemoryMetricType.RSS,
-          });
-          recordMemoryUsage(this.coreConfig, sample.heapUsed, {
-            memory_type: MemoryMetricType.HEAP_USED,
-          });
-          recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
-        }
-      } catch (err) {
-        debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
+    try {
+      const mem = process.memoryUsage();
+      const sample = this.runtimeSamples.record(mem);
+      if (isPerformanceMonitoringActive()) {
+        recordMemoryUsage(this.coreConfig, sample.rss, {
+          memory_type: MemoryMetricType.RSS,
+        });
+        recordMemoryUsage(this.coreConfig, sample.heapUsed, {
+          memory_type: MemoryMetricType.HEAP_USED,
+        });
+        recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
       }
+    } catch (err) {
+      debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
     }
 
     if (pressure === 'normal') return;
@@ -334,13 +333,6 @@ export class MemoryPressureMonitor extends EventEmitter {
    *  - V8 heap usage as a fraction of V8's heap size limit.
    */
   getPressureLevel(): 'normal' | 'soft' | 'hard' | 'critical' {
-    return this.getPressureLevelWithMem().level;
-  }
-
-  private getPressureLevelWithMem(): {
-    level: 'normal' | 'soft' | 'hard' | 'critical';
-    mem?: NodeJS.MemoryUsage;
-  } {
     let mem: ReturnType<typeof process.memoryUsage>;
     try {
       mem = process.memoryUsage();
@@ -348,7 +340,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       debugLogger.error(
         `Failed to read memory usage for pressure check: ${getErrorMessage(err)}`,
       );
-      return { level: 'normal' };
+      return 'normal';
     }
 
     const rssRatio =
@@ -357,13 +349,10 @@ export class MemoryPressureMonitor extends EventEmitter {
     const heapRatio = heapSizeLimit > 0 ? mem.heapUsed / heapSizeLimit : 0;
     const ratio = Math.max(rssRatio, heapRatio);
 
-    let level: 'normal' | 'soft' | 'hard' | 'critical';
-    if (ratio >= this.config.criticalRatio) level = 'critical';
-    else if (ratio >= this.config.hardPressureRatio) level = 'hard';
-    else if (ratio >= this.config.softPressureRatio) level = 'soft';
-    else level = 'normal';
-
-    return { level, mem };
+    if (ratio >= this.config.criticalRatio) return 'critical';
+    if (ratio >= this.config.hardPressureRatio) return 'hard';
+    if (ratio >= this.config.softPressureRatio) return 'soft';
+    return 'normal';
   }
 
   // Cleanup

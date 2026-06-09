@@ -78,6 +78,7 @@ const {
 
 vi.mock('node:os', () => ({
   totalmem: () => getMockOsTotalmem(),
+  cpus: () => [{ model: 'mock', speed: 0, times: {} }],
 }));
 
 vi.mock('node:fs', () => ({
