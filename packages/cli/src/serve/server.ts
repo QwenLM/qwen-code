@@ -3633,16 +3633,19 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
   // multi-line variant on the receive side — input/output asymmetry is
   // intentional.
   //
-  // `_meta.serverTimestamp`: stamp the daemon's wall-clock at SSE write
-  // time so multi-client transcript ordering uses the server's clock.
-  // Stamped at the wire boundary (NOT at EventBus.publish) so the
-  // in-memory `BridgeEvent` type stays unchanged. The top-level merge
-  // with `event._meta` is a forward-compat escape hatch for future
-  // envelope-level metadata; today `existingMeta` is always `undefined`.
+  // `_meta.serverTimestamp`: EventBus stamps normal session frames when they
+  // are published so SSE and load/replay share the same event time. Keep this
+  // fallback for synthetic frames that do not pass through EventBus.
   const existingMeta = (event as { _meta?: Record<string, unknown> })._meta;
+  const existingServerTimestamp = existingMeta?.['serverTimestamp'];
+  const serverTimestamp =
+    typeof existingServerTimestamp === 'number' &&
+    Number.isFinite(existingServerTimestamp)
+      ? existingServerTimestamp
+      : Date.now();
   const stamped = {
     ...event,
-    _meta: { ...(existingMeta ?? {}), serverTimestamp: Date.now() },
+    _meta: { ...(existingMeta ?? {}), serverTimestamp },
   };
   const dataJson = JSON.stringify(stamped);
   const idLine =

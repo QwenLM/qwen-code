@@ -41,9 +41,17 @@ export default defineConfig(({ command }) => ({
               '../webui/src/daemon-react-sdk.ts',
             ),
             '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
+            '@qwen-code/sdk/daemon': resolve(
+              __dirname,
+              '../sdk-typescript/src/daemon/index.ts',
+            ),
+            '@qwen-code/sdk': resolve(
+              __dirname,
+              '../sdk-typescript/src/index.ts',
+            ),
           }
         : {},
-    dedupe: ['react', 'react-dom', '@qwen-code/webui'],
+    dedupe: ['react', 'react-dom', '@qwen-code/webui', '@qwen-code/sdk'],
   },
   build: {
     outDir: '../dist',

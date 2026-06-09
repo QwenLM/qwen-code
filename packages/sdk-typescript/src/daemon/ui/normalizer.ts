@@ -351,12 +351,13 @@ function createBase(
 }
 
 /**
- * Extract daemon-authoritative timestamp from envelope. Looks at three
+ * Extract daemon-authoritative timestamp from envelope. Looks at known
  * candidate locations in order:
  *
  *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
  *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
  *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
+ *   4. `event.data.update._meta.serverTimestamp|timestamp` — ACP update meta
  *
  * Returns undefined when none of them are present or all are non-finite.
  * Forward-compat: SDK reads whichever location the daemon eventually emits
@@ -375,6 +376,18 @@ function extractServerTimestamp(event: DaemonEvent): number | undefined {
     if (isRecord(dataMeta)) {
       const ts = dataMeta['serverTimestamp'];
       if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    }
+    const update = (event.data as Record<string, unknown>)['update'];
+    if (isRecord(update)) {
+      const updateMeta = update['_meta'];
+      if (isRecord(updateMeta)) {
+        const serverTs = updateMeta['serverTimestamp'];
+        if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
+          return serverTs;
+        }
+        const ts = updateMeta['timestamp'];
+        if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+      }
     }
   }
   return undefined;

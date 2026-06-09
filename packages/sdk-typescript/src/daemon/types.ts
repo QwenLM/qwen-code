@@ -1325,6 +1325,8 @@ export interface DaemonEvent {
   type: string;
   /** Frame payload — opaque JSON. */
   data: unknown;
+  /** Envelope metadata, including daemon-emitted timestamps when available. */
+  _meta?: Record<string, unknown>;
   originatorClientId?: string;
 }
 
