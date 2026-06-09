@@ -431,6 +431,28 @@ jobs:
             --generate-notes \
             ${PRERELEASE_FLAG}
 
+      - name: 'Regenerate CHANGELOG.md'
+        # Stable releases only: nightly/preview ship daily and would drown out
+        # the changelog. The just-created GitHub Release is already queryable,
+        # so the generator picks it up. The release branch was already pushed
+        # above, so push this follow-up commit too — otherwise the PR opened
+        # below (whose head is the remote branch) would not include it.
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+        run: |-
+          node scripts/generate-changelog.js
+          git add CHANGELOG.md
+          if git diff --cached --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already up to date."
+          else
+            git commit -m "docs(changelog): sync for ${RELEASE_TAG}"
+            git push origin "${BRANCH_NAME}"
+          fi
+
       - name: 'Create PR to merge release branch into main'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
@@ -448,7 +470,7 @@ jobs:
               --base main \
               --head "${RELEASE_BRANCH}" \
               --title "chore(release): ${RELEASE_TAG}" \
-              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
+              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
 
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
