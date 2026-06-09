@@ -167,8 +167,14 @@ export interface AgentInteractiveConfig {
   maxTurnsPerMessage?: number;
   /**
    * When true, the agent transitions to COMPLETED (terminal) instead of
-   * IDLE when its message queue empties. Used for one-shot agents like
-   * team teammates that should not linger after finishing their task.
+   * IDLE when its message queue empties — for truly one-shot agents that
+   * should not linger after finishing.
+   *
+   * Note: team teammates deliberately use `false` (the default). They
+   * settle to IDLE rather than COMPLETED so they stay alive to receive
+   * follow-up messages and auto-claim further tasks; the leader's wait
+   * loop relies on that (see `hasActiveTeammates` /
+   * `allTeammatesTerminated` in TeamManager).
    */
   completeOnIdle?: boolean;
   /** Max wall-clock minutes per enqueued message (default: unlimited). */
