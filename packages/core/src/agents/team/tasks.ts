@@ -439,11 +439,21 @@ export async function deleteTask(
     await release();
   }
 
-  await Promise.all(
+  // Best-effort edge cleanup: a single dependent failing (corrupt JSON,
+  // EACCES, lock exhaustion) must not skip `notifyTasksUpdated` for the
+  // dependents that were cleaned — otherwise their `blockedBy` is cleared
+  // but `scanIdleAgentsForTasks` never re-runs and they hang idle, with no
+  // recovery (the task file is already unlinked, so a retry returns false).
+  const results = await Promise.allSettled(
     Array.from(dependentIds).map((depId) =>
       removeEdgesReferencing(teamName, depId, taskId),
     ),
   );
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      debug.warn(`deleteTask(${taskId}): edge cleanup failed: ${r.reason}`);
+    }
+  }
   notifyTasksUpdated(teamName);
   return true;
 }
