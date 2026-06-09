@@ -20,6 +20,7 @@ import {
   validateName,
   getExtensionId,
   hashValue,
+  resolveExtensionResourceDir,
   type ExtensionConfig,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
@@ -1112,6 +1113,26 @@ describe('extension tests', () => {
           }
         ).command,
       ).toBe(`${extensionDir}/scripts/setup.sh`);
+    });
+  });
+
+  describe('resolveExtensionResourceDir', () => {
+    it('should use manifest-declared directory when config value is a string', () => {
+      expect(
+        resolveExtensionResourceDir('/ext', 'custom-agents', 'agents'),
+      ).toBe('/ext/custom-agents');
+    });
+
+    it('should fall back to default directory when config value is undefined', () => {
+      expect(resolveExtensionResourceDir('/ext', undefined, 'agents')).toBe(
+        '/ext/agents',
+      );
+    });
+
+    it('should fall back to default directory when config value is an array', () => {
+      expect(
+        resolveExtensionResourceDir('/ext', ['a.md', 'b.md'], 'agents'),
+      ).toBe('/ext/agents');
     });
   });
 });

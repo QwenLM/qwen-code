@@ -231,6 +231,17 @@ function getContextFileNames(config: ExtensionConfig): string[] {
   return config.contextFileName;
 }
 
+export function resolveExtensionResourceDir(
+  extensionPath: string,
+  configValue: string | string[] | undefined,
+  defaultDir: string,
+): string {
+  if (typeof configValue === 'string') {
+    return path.join(extensionPath, configValue);
+  }
+  return path.join(extensionPath, defaultDir);
+}
+
 async function loadCommandsFromDir(dir: string): Promise<string[]> {
   const globOptions = {
     nodir: true,
@@ -692,7 +703,11 @@ export class ExtensionManager {
       }
 
       extension.commands = await loadCommandsFromDir(
-        `${effectiveExtensionPath}/commands`,
+        resolveExtensionResourceDir(
+          effectiveExtensionPath,
+          config.commands,
+          'commands',
+        ),
       );
 
       extension.contextFiles = getContextFileNames(config)
@@ -702,10 +717,18 @@ export class ExtensionManager {
         .filter((contextFilePath) => fs.existsSync(contextFilePath));
 
       extension.skills = await loadSkillsFromDir(
-        `${effectiveExtensionPath}/skills`,
+        resolveExtensionResourceDir(
+          effectiveExtensionPath,
+          config.skills,
+          'skills',
+        ),
       );
       extension.agents = await loadSubagentFromDir(
-        `${effectiveExtensionPath}/agents`,
+        resolveExtensionResourceDir(
+          effectiveExtensionPath,
+          config.agents,
+          'agents',
+        ),
       );
 
       if (config.hooks && typeof config.hooks !== 'string') {
@@ -978,15 +1001,29 @@ export class ExtensionManager {
         }
 
         const commands = await loadCommandsFromDir(
-          `${localSourcePath}/commands`,
+          resolveExtensionResourceDir(
+            localSourcePath,
+            newExtensionConfig.commands,
+            'commands',
+          ),
         );
         const previousCommands = previous?.commands ?? [];
 
-        const skills = await loadSkillsFromDir(`${localSourcePath}/skills`);
+        const skills = await loadSkillsFromDir(
+          resolveExtensionResourceDir(
+            localSourcePath,
+            newExtensionConfig.skills,
+            'skills',
+          ),
+        );
         const previousSkills = previous?.skills ?? [];
 
         const subagents = await loadSubagentFromDir(
-          `${localSourcePath}/agents`,
+          resolveExtensionResourceDir(
+            localSourcePath,
+            newExtensionConfig.agents,
+            'agents',
+          ),
         );
         const previousSubagents = previous?.agents ?? [];
 
