@@ -288,6 +288,36 @@ describe('autoImproveCommand', () => {
     expect(JSON.parse(runIndexRaw)).toEqual({ version: 1, runs: [] });
   });
 
+  it('tears down the half-initialized loop when scheduler.create throws', async () => {
+    await writeAutoImproveConfig(tempDir, {
+      version: 1,
+      sources: { githubIssues: false, githubPrs: false, localSignals: false },
+      customSources: [],
+    });
+    scheduler.create.mockImplementationOnce(() => {
+      throw new Error('quota exceeded');
+    });
+
+    const result = await autoImproveCommand.action?.(
+      context,
+      'start --every 2h prefer small fixes',
+    );
+
+    // (a) the failure surfaces as an error message
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+
+    // (b) the active pointer was not left behind
+    await expect(
+      fs.access(path.join(tempDir, '.qwen', 'auto-improve', 'active.json')),
+    ).rejects.toThrow();
+
+    // (c) the half-initialized loop directory tree was removed
+    const remaining = await fs
+      .readdir(path.join(tempDir, '.qwen', 'auto-improve', 'loops'))
+      .catch(() => [] as string[]);
+    expect(remaining).toEqual([]);
+  });
+
   it('accepts spaced intervals and rejects unsupported cadences', async () => {
     const seconds = await autoImproveCommand.action?.(
       context,

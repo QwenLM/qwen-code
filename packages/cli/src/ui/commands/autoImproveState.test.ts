@@ -261,6 +261,73 @@ describe('autoImproveState', () => {
       );
       expect(result!.targetBranch.startsWith('ma in')).toBe(true);
     });
+
+    it('round-trips a currentRun deliveryTarget and drops an unknown kind', async () => {
+      const loopId = 'test-loop-dt';
+      const statePath = getAutoImproveStatePath(tempDir, loopId);
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
+      const base = {
+        version: 1,
+        loopId,
+        status: 'running',
+        createdAt: '2026-05-25T00:00:00.000Z',
+        cadence: '30m',
+        cron: '*/30 * * * *',
+        targetBranch: 'main',
+        repoRoot: tempDir,
+        stopRequested: false,
+        prompt: '',
+      };
+
+      // A valid deliveryTarget preserves every field.
+      await fs.writeFile(
+        statePath,
+        JSON.stringify({
+          ...base,
+          currentRun: {
+            runId: 'r1',
+            status: 'implementing',
+            deliveryTarget: {
+              kind: 'pr-branch',
+              branch: 'feat/x',
+              pushRequested: true,
+              prNumber: 42,
+              issueNumber: 7,
+            },
+          },
+        }),
+        'utf8',
+      );
+      const ok = await readAutoImproveLoopState(tempDir, loopId);
+      expect(ok!.currentRun?.deliveryTarget).toEqual({
+        kind: 'pr-branch',
+        branch: 'feat/x',
+        pushRequested: true,
+        prNumber: 42,
+        issueNumber: 7,
+      });
+
+      // An unknown kind drops deliveryTarget but keeps the run ref.
+      await fs.writeFile(
+        statePath,
+        JSON.stringify({
+          ...base,
+          currentRun: {
+            runId: 'r2',
+            status: 'implementing',
+            deliveryTarget: {
+              kind: 'bogus',
+              branch: 'feat/x',
+              pushRequested: true,
+            },
+          },
+        }),
+        'utf8',
+      );
+      const bad = await readAutoImproveLoopState(tempDir, loopId);
+      expect(bad!.currentRun?.runId).toBe('r2');
+      expect(bad!.currentRun?.deliveryTarget).toBeUndefined();
+    });
   });
 
   describe('writeAutoImproveLoopState', () => {

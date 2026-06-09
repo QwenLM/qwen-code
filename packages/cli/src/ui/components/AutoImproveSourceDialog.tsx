@@ -49,7 +49,10 @@ async function resolveRepoRoot(
       execFile(
         'git',
         ['-C', cwd, 'rev-parse', '--show-toplevel'],
-        { signal },
+        // Bound the call so a blocked git credential helper (headless/SSH)
+        // can't wedge the dialog in its loading state forever; on timeout the
+        // catch below falls back to cwd (signal.aborted is false).
+        { signal, timeout: 10_000 },
         (error, stdout) => {
           if (error) {
             reject(error);
@@ -93,6 +96,7 @@ export function AutoImproveSourceDialog({
 }: AutoImproveSourceDialogProps): React.JSX.Element {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [repoRoot, setRepoRoot] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [sources, setSources] = useState<AutoImproveConfig['sources']>({
@@ -137,6 +141,9 @@ export function AutoImproveSourceDialog({
   }, [saveIndex]);
 
   const save = useCallback(() => {
+    // Re-entrancy guard: pressing Enter twice quickly would otherwise kick off
+    // two concurrent writes and emit duplicate "saved" messages.
+    if (isSaving) return;
     const nextConfig: AutoImproveConfig = {
       version: 1,
       sources,
@@ -146,6 +153,7 @@ export function AutoImproveSourceDialog({
       setError(t('Repository root is not ready yet.'));
       return;
     }
+    setIsSaving(true);
     writeAutoImproveConfig(repoRoot, nextConfig)
       .then(() => {
         addItem(
@@ -161,8 +169,9 @@ export function AutoImproveSourceDialog({
         setError(
           saveError instanceof Error ? saveError.message : String(saveError),
         );
+        setIsSaving(false);
       });
-  }, [addItem, customSources, onClose, repoRoot, sources]);
+  }, [addItem, customSources, isSaving, onClose, repoRoot, sources]);
 
   const toggleSource = useCallback((key: SourceKey) => {
     setSources((current) => ({
