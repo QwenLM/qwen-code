@@ -1,6 +1,6 @@
-name: Desktop Release
+name: 'Desktop Release'
 
-run-name: Desktop release ${{ inputs.version }}
+run-name: 'Desktop release ${{ inputs.version }}'
 
 on:
   workflow_dispatch:
@@ -8,98 +8,98 @@ on:
       version:
         description: 'Desktop app version to release, for example 0.0.2 or v0.0.2'
         required: true
-        type: string
+        type: 'string'
       release_name:
         description: 'Release title. Defaults to the tag.'
         required: false
-        type: string
+        type: 'string'
       qwen_code_source:
         description: 'Qwen Code runtime source to vendor into the desktop app.'
         required: true
-        default: source_branch
-        type: choice
+        default: 'source_branch'
+        type: 'choice'
         options:
-          - npm_latest
-          - source_branch
+          - 'npm_latest'
+          - 'source_branch'
       qwen_code_ref:
         description: 'Current repository branch, tag, or commit when qwen_code_source is source_branch.'
         required: false
-        default: main
-        type: string
+        default: 'main'
+        type: 'string'
       dry_run:
         description: 'Build installers only. Do not create or update a GitHub Release.'
         required: true
         default: true
-        type: boolean
+        type: 'boolean'
       draft:
         description: 'Create a draft release.'
         required: true
         default: true
-        type: boolean
+        type: 'boolean'
       prerelease:
         description: 'Mark the release as a prerelease.'
         required: true
         default: false
-        type: boolean
+        type: 'boolean'
       clobber:
         description: 'Replace same-named assets when uploading to an existing release.'
         required: true
         default: false
-        type: boolean
+        type: 'boolean'
 
 permissions:
-  contents: read
+  contents: 'read'
 
 concurrency:
-  group: desktop-release-${{ inputs.version }}
+  group: 'desktop-release-${{ inputs.version }}'
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: 1.3.9
-  CRAFT_BRAND: qwen-code
+  BUN_VERSION: '1.3.9'
+  CRAFT_BRAND: 'qwen-code'
 
 jobs:
   release_metadata:
-    name: Prepare Release Source
-    runs-on: ubuntu-latest
+    name: 'Prepare Release Source'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: 'write'
     outputs:
-      release_branch: ${{ steps.release-branch.outputs.branch }}
-      release_ref: ${{ steps.release-branch.outputs.ref }}
-      tag: ${{ steps.release-version.outputs.tag }}
-      version: ${{ steps.release-version.outputs.version }}
+      release_branch: '${{ steps.release-branch.outputs.branch }}'
+      release_ref: '${{ steps.release-branch.outputs.ref }}'
+      tag: '${{ steps.release-version.outputs.tag }}'
+      version: '${{ steps.release-version.outputs.version }}'
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - name: 'Check out source'
+        uses: 'actions/checkout@v4'
         with:
           fetch-depth: 0
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
+      - name: 'Set up Node'
+        uses: 'actions/setup-node@v6'
         with:
           node-version-file: '.nvmrc'
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - name: 'Set up Bun'
+        uses: 'oven-sh/setup-bun@v2'
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: '${{ env.BUN_VERSION }}'
 
-      - name: Install dependencies
-        working-directory: packages/desktop
-        run: bun install --frozen-lockfile
+      - name: 'Install dependencies'
+        working-directory: 'packages/desktop'
+        run: 'bun install --frozen-lockfile'
 
-      - name: Configure Git user
+      - name: 'Configure Git user'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Require main for publishing
-        if: ${{ inputs.dry_run == false }}
+      - name: 'Require main for publishing'
+        if: '${{ inputs.dry_run == false }}'
         env:
-          SOURCE_REF: ${{ github.ref_name }}
+          SOURCE_REF: '${{ github.ref_name }}'
         run: |
           set -euo pipefail
 
@@ -108,25 +108,25 @@ jobs:
             exit 1
           fi
 
-      - name: Bump desktop version
-        working-directory: packages/desktop
+      - name: 'Bump desktop version'
+        working-directory: 'packages/desktop'
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: bun run bump-desktop-version "$INPUT_VERSION"
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: 'bun run bump-desktop-version "$INPUT_VERSION"'
 
-      - name: Validate release version
-        working-directory: packages/desktop
-        id: release-version
+      - name: 'Validate release version'
+        working-directory: 'packages/desktop'
+        id: 'release-version'
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: bun run check-release-version --version "$INPUT_VERSION"
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: 'bun run check-release-version --version "$INPUT_VERSION"'
 
-      - name: Create release branch
-        working-directory: packages/desktop
-        id: release-branch
+      - name: 'Create release branch'
+        working-directory: 'packages/desktop'
+        id: 'release-branch'
         env:
-          IS_DRY_RUN: ${{ inputs.dry_run }}
-          RELEASE_TAG: ${{ steps.release-version.outputs.tag }}
+          IS_DRY_RUN: '${{ inputs.dry_run }}'
+          RELEASE_TAG: '${{ steps.release-version.outputs.tag }}'
         run: |
           set -euo pipefail
 
@@ -156,44 +156,44 @@ jobs:
           fi
 
   build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    name: 'Build ${{ matrix.name }}'
+    runs-on: '${{ matrix.os }}'
     timeout-minutes: 90
-    needs: release_metadata
+    needs: 'release_metadata'
     env:
-      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
+      RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
+      RELEASE_VERSION: '${{ needs.release_metadata.outputs.version }}'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: macOS
-            os: macos-latest
-            command: bun run dist:mac:no-publish
-          - name: Windows
-            os: windows-latest
-            command: bun run dist:win:no-publish
-          - name: Linux
-            os: ubuntu-22.04
-            command: bun run dist:linux:no-publish
+          - name: 'macOS'
+            os: 'macos-latest'
+            command: 'bun run dist:mac:no-publish'
+          - name: 'Windows'
+            os: 'windows-latest'
+            command: 'bun run dist:win:no-publish'
+          - name: 'Linux'
+            os: 'ubuntu-22.04'
+            command: 'bun run dist:linux:no-publish'
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - name: 'Check out source'
+        uses: 'actions/checkout@v4'
         with:
-          ref: ${{ needs.release_metadata.outputs.release_ref }}
+          ref: '${{ needs.release_metadata.outputs.release_ref }}'
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
+      - name: 'Set up Node'
+        uses: 'actions/setup-node@v6'
         with:
           node-version-file: '.nvmrc'
 
-      - name: Check out Qwen Code source
-        if: ${{ inputs.qwen_code_source == 'source_branch' }}
-        shell: bash
+      - name: 'Check out Qwen Code source'
+        if: "${{ inputs.qwen_code_source == 'source_branch' }}"
+        shell: 'bash'
         env:
-          QWEN_CODE_REF_INPUT: ${{ inputs.qwen_code_ref }}
-          QWEN_CODE_SOURCE_ROOT: ${{ runner.temp }}/qwen-code-source
+          QWEN_CODE_REF_INPUT: '${{ inputs.qwen_code_ref }}'
+          QWEN_CODE_SOURCE_ROOT: '${{ runner.temp }}/qwen-code-source'
         run: |
           set -euo pipefail
 
@@ -215,40 +215,40 @@ jobs:
           git -C "$QWEN_CODE_SOURCE_ROOT" checkout --detach FETCH_HEAD
           git config --global --add safe.directory "$QWEN_CODE_SOURCE_ROOT"
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - name: 'Set up Bun'
+        uses: 'oven-sh/setup-bun@v2'
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: '${{ env.BUN_VERSION }}'
 
-      - name: Install Linux packaging dependencies
-        if: runner.os == 'Linux'
+      - name: 'Install Linux packaging dependencies'
+        if: "runner.os == 'Linux'"
         run: |
           sudo apt-get update
           sudo apt-get install -y libfuse2
 
-      - name: Install dependencies
-        working-directory: packages/desktop
-        run: bun install --frozen-lockfile
+      - name: 'Install dependencies'
+        working-directory: 'packages/desktop'
+        run: 'bun install --frozen-lockfile'
 
-      - name: Install Qwen Code source dependencies
-        if: ${{ inputs.qwen_code_source == 'source_branch' }}
-        working-directory: ${{ runner.temp }}/qwen-code-source
-        run: npm ci
+      - name: 'Install Qwen Code source dependencies'
+        if: "${{ inputs.qwen_code_source == 'source_branch' }}"
+        working-directory: '${{ runner.temp }}/qwen-code-source'
+        run: 'npm ci'
 
-      - name: Bump desktop version
-        working-directory: packages/desktop
-        run: bun run bump-desktop-version "${{ needs.release_metadata.outputs.version }}"
+      - name: 'Bump desktop version'
+        working-directory: 'packages/desktop'
+        run: 'bun run bump-desktop-version "${{ needs.release_metadata.outputs.version }}"'
 
-      - name: Confirm release version
-        working-directory: packages/desktop
-        run: bun run check-release-version --version "${{ needs.release_metadata.outputs.version }}"
+      - name: 'Confirm release version'
+        working-directory: 'packages/desktop'
+        run: 'bun run check-release-version --version "${{ needs.release_metadata.outputs.version }}"'
 
-      - name: Configure Qwen Code runtime source
-        shell: bash
+      - name: 'Configure Qwen Code runtime source'
+        shell: 'bash'
         env:
-          QWEN_CODE_REF_INPUT: ${{ inputs.qwen_code_ref }}
-          QWEN_CODE_SOURCE_INPUT: ${{ inputs.qwen_code_source }}
-          QWEN_CODE_SOURCE_ROOT: ${{ runner.temp }}/qwen-code-source
+          QWEN_CODE_REF_INPUT: '${{ inputs.qwen_code_ref }}'
+          QWEN_CODE_SOURCE_INPUT: '${{ inputs.qwen_code_source }}'
+          QWEN_CODE_SOURCE_ROOT: '${{ runner.temp }}/qwen-code-source'
         run: |
           set -euo pipefail
 
@@ -271,11 +271,11 @@ jobs:
               ;;
           esac
 
-      - name: Verify desktop update feed target
-        working-directory: packages/desktop
-        shell: bash
+      - name: 'Verify desktop update feed target'
+        working-directory: 'packages/desktop'
+        shell: 'bash'
         env:
-          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REPOSITORY: '${{ github.repository }}'
         run: |
           set -euo pipefail
 
@@ -309,15 +309,15 @@ jobs:
 
           echo "Desktop update feed: https://github.com/${actual_repository}/releases"
 
-      - name: Configure optional signing secrets
-        shell: bash
+      - name: 'Configure optional signing secrets'
+        shell: 'bash'
         env:
-          APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_KEY_PASSWORD_SECRET: ${{ secrets.CSC_KEY_PASSWORD }}
-          CSC_LINK_SECRET: ${{ secrets.CSC_LINK }}
-          SENTRY_ELECTRON_INGEST_URL_SECRET: ${{ secrets.SENTRY_ELECTRON_INGEST_URL }}
+          APPLE_APP_SPECIFIC_PASSWORD_SECRET: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
+          APPLE_ID_SECRET: '${{ secrets.APPLE_ID }}'
+          APPLE_TEAM_ID_SECRET: '${{ secrets.APPLE_TEAM_ID }}'
+          CSC_KEY_PASSWORD_SECRET: '${{ secrets.CSC_KEY_PASSWORD }}'
+          CSC_LINK_SECRET: '${{ secrets.CSC_LINK }}'
+          SENTRY_ELECTRON_INGEST_URL_SECRET: '${{ secrets.SENTRY_ELECTRON_INGEST_URL }}'
         run: |
           set -euo pipefail
 
@@ -349,18 +349,18 @@ jobs:
 
           append_env "SENTRY_ELECTRON_INGEST_URL" "$SENTRY_ELECTRON_INGEST_URL_SECRET"
 
-      - name: Build desktop installer
-        working-directory: packages/desktop
+      - name: 'Build desktop installer'
+        working-directory: 'packages/desktop'
         # Build jobs only produce artifacts. The publish job below owns GitHub
         # Release creation/upload so dry-run, draft, prerelease, and replace
         # behavior stays centralized.
-        run: ${{ matrix.command }}
+        run: '${{ matrix.command }}'
 
-      - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
+      - name: 'Upload installer artifacts'
+        uses: 'actions/upload-artifact@v4'
         with:
-          name: desktop-${{ matrix.name }}
-          if-no-files-found: error
+          name: 'desktop-${{ matrix.name }}'
+          if-no-files-found: 'error'
           retention-days: 14
           path: |
             packages/desktop/apps/electron/release/*.AppImage
@@ -371,35 +371,35 @@ jobs:
             packages/desktop/apps/electron/release/*.zip
 
   publish:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
+    name: 'Publish GitHub Release'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 20
     needs:
-      - build
-      - release_metadata
-    if: ${{ inputs.dry_run == false }}
+      - 'build'
+      - 'release_metadata'
+    if: '${{ inputs.dry_run == false }}'
     permissions:
-      contents: write
+      contents: 'write'
     env:
-      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
+      RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
+      RELEASE_VERSION: '${{ needs.release_metadata.outputs.version }}'
 
     steps:
-      - name: Download installer artifacts
-        uses: actions/download-artifact@v4
+      - name: 'Download installer artifacts'
+        uses: 'actions/download-artifact@v4'
         with:
-          path: release-assets
+          path: 'release-assets'
           merge-multiple: true
 
-      - name: Publish release assets
+      - name: 'Publish release assets'
         env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_DRAFT: ${{ inputs.draft }}
-          RELEASE_NAME: ${{ inputs.release_name }}
-          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
-          RELEASE_TARGET: ${{ needs.release_metadata.outputs.release_ref }}
-          UPLOAD_CLOBBER: ${{ inputs.clobber }}
+          GH_REPO: '${{ github.repository }}'
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_DRAFT: '${{ inputs.draft }}'
+          RELEASE_NAME: '${{ inputs.release_name }}'
+          RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
+          RELEASE_TARGET: '${{ needs.release_metadata.outputs.release_ref }}'
+          UPLOAD_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
 
@@ -442,24 +442,24 @@ jobs:
           fi
 
   sync-version:
-    name: Sync Release Version to Main
-    runs-on: ubuntu-latest
+    name: 'Sync Release Version to Main'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     needs:
-      - publish
-      - release_metadata
-    if: ${{ inputs.dry_run == false && inputs.draft == false }}
+      - 'publish'
+      - 'release_metadata'
+    if: '${{ inputs.dry_run == false && inputs.draft == false }}'
     permissions:
-      contents: write
-      pull-requests: write
+      contents: 'write'
+      pull-requests: 'write'
 
     steps:
-      - name: Create version sync PR
-        id: version-pr
+      - name: 'Create version sync PR'
+        id: 'version-pr'
         env:
-          GH_TOKEN: ${{ secrets.CI_BOT_PAT || github.token }}
-          RELEASE_BRANCH: ${{ needs.release_metadata.outputs.release_branch }}
-          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          RELEASE_BRANCH: '${{ needs.release_metadata.outputs.release_branch }}'
+          RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
         run: |
           set -euo pipefail
 
@@ -481,11 +481,11 @@ jobs:
 
           echo "url=$pr_url" >> "$GITHUB_OUTPUT"
 
-      - name: Enable auto-merge
+      - name: 'Enable auto-merge'
         env:
-          GH_TOKEN: ${{ secrets.CI_BOT_PAT || github.token }}
-          PR_URL: ${{ steps.version-pr.outputs.url }}
-          RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_URL: '${{ steps.version-pr.outputs.url }}'
+          RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
         run: |
           set -euo pipefail
 
@@ -496,25 +496,25 @@ jobs:
             --subject "chore(release): desktop ${RELEASE_TAG} [skip ci]"
 
   dry-run-summary:
-    name: Dry Run Summary
-    runs-on: ubuntu-latest
+    name: 'Dry Run Summary'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     needs:
-      - build
-      - release_metadata
-    if: ${{ inputs.dry_run }}
+      - 'build'
+      - 'release_metadata'
+    if: '${{ inputs.dry_run }}'
     env:
-      RELEASE_TAG: ${{ needs.release_metadata.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.release_metadata.outputs.version }}
+      RELEASE_TAG: '${{ needs.release_metadata.outputs.tag }}'
+      RELEASE_VERSION: '${{ needs.release_metadata.outputs.version }}'
 
     steps:
-      - name: Download installer artifacts
-        uses: actions/download-artifact@v4
+      - name: 'Download installer artifacts'
+        uses: 'actions/download-artifact@v4'
         with:
-          path: release-assets
+          path: 'release-assets'
           merge-multiple: true
 
-      - name: List release assets
+      - name: 'List release assets'
         run: |
           set -euo pipefail
 
