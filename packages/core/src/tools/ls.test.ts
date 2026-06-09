@@ -202,6 +202,43 @@ describe('LSTool', () => {
       expect(result.returnDisplay).toBe('Listed 3 item(s) (2 qwen-ignored)');
     });
 
+    it('should respect configured custom qwen ignore files', async () => {
+      await fs.writeFile(path.join(tempRootDir, 'file1.txt'), 'content1');
+      await fs.writeFile(
+        path.join(tempRootDir, 'cursor-secret.log'),
+        'content',
+      );
+      await fs.writeFile(path.join(tempRootDir, 'agent-secret.log'), 'content');
+      await fs.writeFile(
+        path.join(tempRootDir, '.cursorignore'),
+        'cursor-secret.log',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.log',
+      );
+
+      const customConfig = {
+        ...mockConfig,
+        getFileService: () =>
+          new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        }),
+      } as unknown as Config;
+      const customLsTool = new LSTool(customConfig);
+
+      const invocation = customLsTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('file1.txt');
+      expect(result.llmContent).toContain('agent-secret.log');
+      expect(result.llmContent).not.toContain('cursor-secret.log');
+      expect(result.returnDisplay).toBe('Listed 4 item(s) (1 qwen-ignored)');
+    });
+
     it('should handle non-directory paths', async () => {
       const testPath = path.join(tempRootDir, 'file1.txt');
       await fs.writeFile(testPath, 'content1');

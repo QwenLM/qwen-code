@@ -96,6 +96,23 @@ describe('QwenIgnoreParser', () => {
     });
   });
 
+  describe('when compatibility ignore files contain negations', () => {
+    beforeEach(async () => {
+      await createTestFile('.qwenignore', 'secrets/**\n');
+      await createTestFile('.agentignore', '!secrets/**\n');
+      await createTestFile(path.join('secrets', 'token.txt'), 'secret');
+    });
+
+    it('should not let custom ignore negations unignore .qwenignore matches', () => {
+      const parser = new QwenIgnoreParser(projectRoot);
+
+      expect(parser.isIgnored(path.join('secrets', 'token.txt'))).toBe(true);
+      expect(
+        parser.getIgnoreFileNameForPath(path.join('secrets', 'token.txt')),
+      ).toBe('.qwenignore');
+    });
+  });
+
   describe('when custom ignore files are configured', () => {
     beforeEach(async () => {
       await createTestFile('.cursorignore', 'cursor-secret.txt\n');

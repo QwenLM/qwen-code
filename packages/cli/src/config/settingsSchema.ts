@@ -1451,7 +1451,7 @@ const SETTINGS_SCHEMA = {
             default: [...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES] as string[],
             description:
               'Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
-            showInDialog: true,
+            showInDialog: false,
             items: { type: 'string' },
           },
           enableRecursiveFileSearch: {

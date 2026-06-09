@@ -9,8 +9,10 @@ import path from 'node:path';
 import ignore from 'ignore';
 import picomatch from 'picomatch';
 import { getQwenIgnoreFileNames } from '../qwenIgnoreParser.js';
+import { createDebugLogger } from '../debugLogger.js';
 
 const hasFileExtension = picomatch('**/*[*.]*');
+const debugLogger = createDebugLogger('FILE_SEARCH_IGNORE');
 
 export interface LoadIgnoreRulesOptions {
   projectRoot: string;
@@ -37,7 +39,7 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
       const qwenignorePath = path.join(options.projectRoot, ignoreFileName);
       const qwenignoreContent = readIgnoreFile(qwenignorePath);
       if (qwenignoreContent !== undefined) {
-        ignorer.add(qwenignoreContent);
+        ignorer.addSource(qwenignoreContent);
       }
     }
   }
@@ -58,7 +60,11 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
 function readIgnoreFile(filePath: string): string | undefined {
   try {
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (_error) {
+    const error = _error as NodeJS.ErrnoException;
+    if (error.code !== 'ENOENT') {
+      debugLogger.debug(`Failed to read ${filePath}: ${error.message}`);
+    }
     return undefined;
   }
 }
@@ -67,6 +73,7 @@ export class Ignore {
   private readonly allPatterns: string[] = [];
   private dirIgnorer = ignore();
   private fileIgnorer = ignore();
+  private readonly sourceIgnorers: Ignore[] = [];
 
   /**
    * Adds one or more ignore patterns.
@@ -118,12 +125,20 @@ export class Ignore {
     return this;
   }
 
+  addSource(patterns: string | string[]): this {
+    const sourceIgnorer = new Ignore().add(patterns);
+    if (!sourceIgnorer.isEmpty()) {
+      this.sourceIgnorers.push(sourceIgnorer);
+    }
+    return this;
+  }
+
   /**
    * Returns a predicate that matches explicit directory ignore patterns (patterns ending with '/').
    * @returns {(dirPath: string) => boolean}
    */
   getDirectoryFilter(): (dirPath: string) => boolean {
-    return (dirPath: string) => this.dirIgnorer.ignores(dirPath);
+    return (dirPath: string) => this.isDirectoryIgnored(dirPath);
   }
 
   /**
@@ -132,7 +147,7 @@ export class Ignore {
    * @returns {(filePath: string) => boolean}
    */
   getFileFilter(): (filePath: string) => boolean {
-    return (filePath: string) => this.fileIgnorer.ignores(filePath);
+    return (filePath: string) => this.isFileIgnored(filePath);
   }
 
   /**
@@ -142,6 +157,33 @@ export class Ignore {
    * @returns A string fingerprint of the ignore patterns.
    */
   getFingerprint(): string {
-    return this.allPatterns.join('\n');
+    return JSON.stringify({
+      patterns: this.allPatterns,
+      sources: this.sourceIgnorers.map((sourceIgnorer) =>
+        sourceIgnorer.getFingerprint(),
+      ),
+    });
+  }
+
+  private isDirectoryIgnored(dirPath: string): boolean {
+    return (
+      this.dirIgnorer.ignores(dirPath) ||
+      this.sourceIgnorers.some((sourceIgnorer) =>
+        sourceIgnorer.isDirectoryIgnored(dirPath),
+      )
+    );
+  }
+
+  private isFileIgnored(filePath: string): boolean {
+    return (
+      this.fileIgnorer.ignores(filePath) ||
+      this.sourceIgnorers.some((sourceIgnorer) =>
+        sourceIgnorer.isFileIgnored(filePath),
+      )
+    );
+  }
+
+  private isEmpty(): boolean {
+    return this.allPatterns.length === 0 && this.sourceIgnorers.length === 0;
   }
 }

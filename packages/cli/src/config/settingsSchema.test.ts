@@ -119,6 +119,10 @@ describe('SettingsSchema', () => {
       ).toEqual([...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES]);
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.showInDialog,
+      ).toBe(false);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
     });

@@ -88,7 +88,6 @@ export interface QwenIgnoreFilter {
 export class QwenIgnoreParser implements QwenIgnoreFilter {
   private projectRoot: string;
   private patterns: string[] = [];
-  private ig = ignore();
   private readonly ignoreFileNames: string[];
   private readonly sourceIgnorers: Array<{
     ignoreFileName: string;
@@ -108,7 +107,12 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
       try {
         content = fs.readFileSync(patternsFilePath, 'utf-8');
       } catch (_error) {
-        // ignore file not found
+        const error = _error as NodeJS.ErrnoException;
+        if (error.code !== 'ENOENT') {
+          debugLogger.debug(
+            `Failed to read ${patternsFilePath}: ${error.message}`,
+          );
+        }
         continue;
       }
 
@@ -126,10 +130,6 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
       }
       this.patterns.push(...patterns);
     }
-
-    if (this.patterns.length > 0) {
-      this.ig.add(this.patterns);
-    }
   }
 
   isIgnored(filePath: string): boolean {
@@ -142,12 +142,14 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
       return false;
     }
 
-    return this.ig.ignores(normalizedPath);
+    return this.sourceIgnorers.some(({ ignorer }) =>
+      ignorer.ignores(normalizedPath),
+    );
   }
 
   getIgnoreFileNameForPath(filePath: string): string | undefined {
     const normalizedPath = this.normalizePathForIgnore(filePath);
-    if (!normalizedPath || !this.ig.ignores(normalizedPath)) {
+    if (!normalizedPath) {
       return undefined;
     }
 

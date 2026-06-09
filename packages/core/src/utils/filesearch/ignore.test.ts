@@ -126,6 +126,36 @@ describe('loadIgnoreRules', () => {
     expect(fileFilter('visible.txt')).toBe(false);
   });
 
+  it('should not let custom ignore negations unignore .qwenignore matches', async () => {
+    tmpDir = await createTmpDir({
+      '.qwenignore': 'secrets/**',
+      '.agentignore': '!secrets/**',
+    });
+    const ignore = loadIgnoreRules({
+      projectRoot: tmpDir,
+      useGitignore: false,
+      useQwenignore: true,
+      ignoreDirs: [],
+    });
+    const fileFilter = ignore.getFileFilter();
+    expect(fileFilter('secrets/token.txt')).toBe(true);
+  });
+
+  it('should keep negations scoped to the same ignore file', async () => {
+    tmpDir = await createTmpDir({
+      '.qwenignore': 'secrets/**\n!secrets/public.txt',
+    });
+    const ignore = loadIgnoreRules({
+      projectRoot: tmpDir,
+      useGitignore: false,
+      useQwenignore: true,
+      ignoreDirs: [],
+    });
+    const fileFilter = ignore.getFileFilter();
+    expect(fileFilter('secrets/token.txt')).toBe(true);
+    expect(fileFilter('secrets/public.txt')).toBe(false);
+  });
+
   it('should load rules from configured custom ignore files with qwenignore enabled', async () => {
     tmpDir = await createTmpDir({
       '.cursorignore': 'cursor-secret.txt',
