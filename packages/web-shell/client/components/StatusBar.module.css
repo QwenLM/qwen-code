@@ -99,6 +99,24 @@
   color: var(--error-color);
 }
 
+.contextButton {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.contextButton:hover .context,
+.contextButton:focus-visible .context {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
 .context {
   font-size: 11px;
   color: var(--text-dimmed);

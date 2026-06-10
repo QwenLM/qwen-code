@@ -28,6 +28,8 @@ interface MessageListProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  /** Run /context detail, exactly like typing it (context-usage panels). */
+  onShowContextDetail?: () => void;
   catchingUp?: boolean;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
@@ -205,6 +207,7 @@ export function MessageList({
   messages,
   pendingApproval,
   onConfirm,
+  onShowContextDetail,
   catchingUp,
   welcomeHeader,
   workspaceCwd,
@@ -481,6 +484,7 @@ export function MessageList({
           message={item.message}
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
+          onShowContextDetail={onShowContextDetail}
           workspaceCwd={workspaceCwd}
         />
       );
@@ -495,6 +499,7 @@ export function MessageList({
       tailApprovalIndex,
       pendingApproval,
       onConfirm,
+      onShowContextDetail,
       headerOffset,
       displayItems,
       workspaceCwd,

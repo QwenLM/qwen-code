@@ -29,12 +29,15 @@ interface StatusBarProps {
   onSelectMode: () => void;
   /** Open the model picker so the model can be chosen with the mouse. */
   onSelectModel: () => void;
+  /** Show the context-usage breakdown, exactly like typing /context. */
+  onShowContext: () => void;
 }
 
 export function StatusBar({
   escapeHint,
   onSelectMode,
   onSelectModel,
+  onShowContext,
 }: StatusBarProps) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
@@ -102,9 +105,21 @@ export function StatusBar({
           </button>
         )}
         {contextWindow > 0 && tokenCount > 0 && (
-          <span className={styles.context}>
-            {t('status.contextUsed', { pct: pctDisplay })}
-          </span>
+          // Clicking the percentage runs the same flow as typing /context:
+          // it echoes the command and appends the usage breakdown to the
+          // transcript. No stopPropagation here — unlike the mode/model
+          // buttons this opens no picker, and if one is open the press
+          // should dismiss it like any other outside press.
+          <button
+            type="button"
+            className={styles.contextButton}
+            onClick={onShowContext}
+            title={t('contextUsage.title')}
+          >
+            <span className={styles.context}>
+              {t('status.contextUsed', { pct: pctDisplay })}
+            </span>
+          </button>
         )}
       </div>
     </div>

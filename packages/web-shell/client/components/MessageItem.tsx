@@ -23,6 +23,8 @@ interface MessageItemProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  /** Run /context detail, exactly like typing it (context-usage panels). */
+  onShowContextDetail?: () => void;
   workspaceCwd?: string;
 }
 
@@ -30,6 +32,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onConfirm,
+  onShowContextDetail,
   workspaceCwd,
 }: MessageItemProps) {
   switch (message.role) {
@@ -55,7 +58,11 @@ export const MessageItem = memo(function MessageItem({
       return <PlanMessage todos={message.todos} />;
     case 'system':
       return (
-        <SystemMessage content={message.content} variant={message.variant} />
+        <SystemMessage
+          content={message.content}
+          variant={message.variant}
+          onShowContextDetail={onShowContextDetail}
+        />
       );
     case 'user_shell':
       return (
@@ -98,6 +105,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
+  if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   return areMessagesEqual(prev.message, next.message);
 }
