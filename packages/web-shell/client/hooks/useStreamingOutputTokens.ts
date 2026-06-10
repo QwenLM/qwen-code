@@ -34,6 +34,7 @@ export function useStreamingOutputTokens(): number {
           return;
         }
       }
+      charsRef.current = 0;
     };
     update();
     setDisplayTokens(Math.round(charsRef.current / 4));

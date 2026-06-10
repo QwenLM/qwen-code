@@ -2045,6 +2045,7 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
                     pushToast('error', t('delete.failed', { reason }));
@@ -2063,6 +2064,7 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
                     pushToast('error', t('release.failed', { reason }));

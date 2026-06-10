@@ -785,7 +785,7 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
-  const notice = addNotice({
+  addNotice({
     severity: 'error',
     category: 'user_action',
     operation,
@@ -796,7 +796,6 @@ function dispatchActionError(
   });
   return markNoticeDispatched(
     error instanceof Error ? error : new Error(message),
-    notice.id,
   );
 }
 
@@ -807,10 +806,9 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-function markNoticeDispatched(error: Error, noticeId: string): Error {
+function markNoticeDispatched(error: Error): Error {
   return Object.assign(error, {
     _alreadyDispatched: true as const,
-    _daemonNoticeId: noticeId,
   });
 }
 

@@ -3484,6 +3484,300 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('preserves session and uses delta resume after a retriable SSE error', async () => {
+    let callCount = 0;
+    const events = vi.fn(async function* retriableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      callCount += 1;
+      if (callCount === 1) {
+        yield {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'before error' },
+            },
+          },
+        };
+        throw new Error('network timeout');
+      }
+      // Second call: delta resume succeeds with new content
+      yield {
+        id: 6,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: ' after resume' },
+          },
+        },
+      };
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+    });
+    const session = createMockSession({ events });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    // Session was created only once (no load() on retry)
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    // events() was called twice: first threw, second succeeded
+    expect(events).toHaveBeenCalledTimes(2);
+    // Transcript preserved content from before the error and appended delta
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'before error after resume' },
+    ]);
+  });
+
+  it('routes session_died errors to notices, not transcript', async () => {
+    const session = createMockSession({
+      events: async function* sessionDiedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'session_died',
+          data: {
+            message: 'Session terminated unexpectedly',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // session_died should be a notice, not a transcript error block
+    expect(blocks.some((b) => b.kind === 'error')).toBe(false);
+    expect(notices).toMatchObject([
+      {
+        category: 'connection',
+        code: 'daemon.session_died',
+      },
+    ]);
+  });
+
+  it('routes stream_error to notices with connection category', async () => {
+    const session = createMockSession({
+      events: async function* streamErrorEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'stream_error',
+          data: {
+            message: 'Upstream provider disconnected',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks.some((b) => b.kind === 'error')).toBe(false);
+    expect(notices).toMatchObject([
+      {
+        category: 'connection',
+        code: 'daemon.stream_error',
+      },
+    ]);
+  });
+
+  it('routes model_switch_failed to notices with user_action category', async () => {
+    const session = createMockSession({
+      events: async function* modelSwitchFailedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'model_switch_failed',
+          data: {
+            message: 'Model not found',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks.some((b) => b.kind === 'error')).toBe(false);
+    expect(notices).toMatchObject([
+      {
+        category: 'user_action',
+        operation: 'switch_model',
+        code: 'daemon.switch_model.failed',
+      },
+    ]);
+  });
+
+  it('keeps turn_error in transcript instead of routing to notices', async () => {
+    const session = createMockSession({
+      events: async function* turnErrorEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_error',
+          data: {
+            promptId: 'prompt-1',
+            message: 'API rate limit exceeded',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // turn_error should stay in transcript as an error block
+    expect(blocks).toMatchObject([
+      {
+        kind: 'error',
+        text: 'API rate limit exceeded',
+        source: 'turn_error',
+      },
+    ]);
+    // Should not create a notice
+    expect(notices).toEqual([]);
+  });
+
+  it('routes client_evicted to notices with connection category', async () => {
+    const session = createMockSession({
+      events: async function* clientEvictedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'client_evicted',
+          data: {
+            reason: 'Another client connected',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks.some((b) => b.kind === 'error')).toBe(false);
+    expect(notices).toMatchObject([
+      {
+        category: 'connection',
+        code: 'daemon.client_evicted',
+      },
+    ]);
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
