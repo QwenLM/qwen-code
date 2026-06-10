@@ -199,7 +199,11 @@ export async function listWorkspaceSessionsForResponse(
     Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
     MAX_SESSION_PAGE_SIZE,
   );
-  const numericCursor = options?.cursor ? Number(options.cursor) : undefined;
+  const rawCursor = options?.cursor ? Number(options.cursor) : undefined;
+  const numericCursor =
+    rawCursor !== undefined && Number.isFinite(rawCursor)
+      ? rawCursor
+      : undefined;
 
   const persisted = await new SessionService(workspaceCwd).listSessions({
     cursor: numericCursor,
@@ -242,7 +246,8 @@ export async function listWorkspaceSessionsForResponse(
 
   return {
     sessions,
-    nextCursor: persisted.nextCursor ? String(persisted.nextCursor) : undefined,
+    nextCursor:
+      persisted.nextCursor != null ? String(persisted.nextCursor) : undefined,
   };
 }
 

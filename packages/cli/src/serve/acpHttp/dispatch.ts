@@ -688,7 +688,9 @@ export class AcpDispatcher {
               title: s.title,
               updatedAt: s.updatedAt,
             })),
-            ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+            ...(result.nextCursor != null
+              ? { nextCursor: result.nextCursor }
+              : {}),
           });
           return;
         }
