@@ -769,6 +769,7 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
+      this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -2720,9 +2721,7 @@ export class Session implements SessionContext {
         const pm = this.config.getPermissionManager?.();
         if (pm && !(await pm.isToolEnabled(toolName))) {
           return earlyErrorResponse(
-            new Error(
-              `Tool "${toolName}" is disabled.`,
-            ),
+            new Error(`Tool "${toolName}" is disabled.`),
             toolName,
           );
         }

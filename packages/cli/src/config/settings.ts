@@ -962,6 +962,7 @@ export function reloadEnvironment(
   }
 
   // Build the set of new keys from .env (higher priority) + settings.env
+  let dotEnvReadFailed = false;
   const newDotEnvKeys = new Map<string, string>();
   const newSettingsEnvKeys = new Map<string, string>();
 
