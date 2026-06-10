@@ -1307,8 +1307,13 @@ export function buildApiHistoryFromConversation(
  */
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
+  sessionId?: string,
 ): void {
-  uiTelemetryService.reset();
+  if (sessionId) {
+    uiTelemetryService.resetSession(sessionId);
+  } else {
+    uiTelemetryService.reset();
+  }
 
   for (const record of conversation.messages) {
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
@@ -1319,7 +1324,7 @@ export function replayUiTelemetryFromConversation(
       | undefined;
     const uiEvent = payload?.uiEvent;
     if (uiEvent) {
-      uiTelemetryService.addEvent(uiEvent);
+      uiTelemetryService.addEvent(uiEvent, sessionId);
     }
   }
 

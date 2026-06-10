@@ -223,7 +223,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -393,7 +393,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -436,7 +436,7 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
     'event.name': EVENT_API_CANCEL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   QwenLogger.getInstance(config)?.logApiCancelEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -462,7 +462,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   if (!isInternalPromptId(event.prompt_id)) {
     config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   }
@@ -983,7 +983,7 @@ export function logUserFeedback(
     'event.name': EVENT_USER_FEEDBACK,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
-  uiTelemetryService.addEvent(uiEvent);
+  uiTelemetryService.addEvent(uiEvent, config.getSessionId());
   config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
