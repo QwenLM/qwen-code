@@ -46,6 +46,11 @@ on:
         required: true
         default: false
         type: boolean
+      allow_unsigned_test_release:
+        description: "Allow unsigned macOS/Windows artifacts only for prerelease testing."
+        required: true
+        default: false
+        type: boolean
       clobber:
         description: "Replace same-named assets when uploading to an existing release."
         required: true
@@ -281,11 +286,18 @@ jobs:
       - name: Configure optional signing secrets
         shell: bash
         env:
+          IS_DRY_RUN: ${{ inputs.dry_run }}
           APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+          ALLOW_UNSIGNED_TEST_RELEASE: ${{ inputs.allow_unsigned_test_release }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+          MAC_CSC_KEY_PASSWORD_SECRET: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_LINK_SECRET: ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD_SECRET: ${{ secrets.CSC_KEY_PASSWORD }}
           CSC_LINK_SECRET: ${{ secrets.CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD_SECRET: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK_SECRET: ${{ secrets.WIN_CSC_LINK }}
           SENTRY_ELECTRON_INGEST_URL_SECRET: ${{ secrets.SENTRY_ELECTRON_INGEST_URL }}
         run: |
           set -euo pipefail
@@ -305,15 +317,71 @@ jobs:
             } >> "$GITHUB_ENV"
           }
 
-          if [ -n "$CSC_LINK_SECRET" ]; then
-            append_env "CSC_LINK" "$CSC_LINK_SECRET"
-            append_env "CSC_KEY_PASSWORD" "$CSC_KEY_PASSWORD_SECRET"
-            append_env "APPLE_ID" "$APPLE_ID_SECRET"
-            append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
-            append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+          mac_csc_link="${MAC_CSC_LINK_SECRET:-$CSC_LINK_SECRET}"
+          mac_csc_key_password="${MAC_CSC_KEY_PASSWORD_SECRET:-$CSC_KEY_PASSWORD_SECRET}"
+
+          allow_unsigned_artifacts() {
+            if [ "$IS_DRY_RUN" = "true" ]; then
+              return 0
+            fi
+
+            if [ "$ALLOW_UNSIGNED_TEST_RELEASE" = "true" ] && [ "$IS_PRERELEASE" = "true" ]; then
+              return 0
+            fi
+
+            return 1
+          }
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -n "$mac_csc_link" ]; then
+              if [ -z "$mac_csc_key_password" ]; then
+                echo "::error::MAC_CSC_LINK/CSC_LINK is configured, but MAC_CSC_KEY_PASSWORD/CSC_KEY_PASSWORD is missing."
+                exit 1
+              fi
+
+              append_env "CSC_LINK" "$mac_csc_link"
+              append_env "CSC_KEY_PASSWORD" "$mac_csc_key_password"
+              append_env "APPLE_ID" "$APPLE_ID_SECRET"
+              append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
+              append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+            else
+              if ! allow_unsigned_artifacts; then
+                echo "::error::Published macOS desktop releases require MAC_CSC_LINK/CSC_LINK and MAC_CSC_KEY_PASSWORD/CSC_KEY_PASSWORD so auto-update signature validation can pass."
+                exit 1
+              fi
+
+              if [ "$IS_DRY_RUN" = "false" ]; then
+                echo "::warning::Publishing an unsigned macOS prerelease for manual testing. Auto-update validation is not supported for this artifact."
+              fi
+
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            fi
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            if [ -n "$WIN_CSC_LINK_SECRET" ]; then
+              if [ -z "$WIN_CSC_KEY_PASSWORD_SECRET" ]; then
+                echo "::error::WIN_CSC_LINK is configured, but WIN_CSC_KEY_PASSWORD is missing."
+                exit 1
+              fi
+
+              append_env "WIN_CSC_LINK" "$WIN_CSC_LINK_SECRET"
+              append_env "WIN_CSC_KEY_PASSWORD" "$WIN_CSC_KEY_PASSWORD_SECRET"
+            else
+              if ! allow_unsigned_artifacts; then
+                echo "::error::Published Windows desktop releases require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD."
+                exit 1
+              fi
+
+              if [ "$IS_DRY_RUN" = "false" ]; then
+                echo "::warning::Publishing an unsigned Windows prerelease for manual testing. Windows may show Unknown Publisher / SmartScreen warnings."
+              else
+                echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
+              fi
+            fi
           else
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            if [ "$RUNNER_OS" != "Linux" ] && [ -n "$CSC_LINK_SECRET" ]; then
+              echo "::warning::CSC_LINK is configured but not used on $RUNNER_OS."
+            fi
           fi
 
           append_env "SENTRY_ELECTRON_INGEST_URL" "$SENTRY_ELECTRON_INGEST_URL_SECRET"

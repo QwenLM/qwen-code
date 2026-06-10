@@ -20,6 +20,7 @@ import { platform } from 'os'
 import * as path from 'path'
 import * as fs from 'fs'
 import { mainLog } from './logger'
+import { getCurrentMacCodeSignatureStatus } from './auto-update-signature'
 import { getAppVersion } from '@craft-agent/shared/version'
 import { BRAND } from '@craft-agent/shared/branding'
 import {
@@ -35,7 +36,74 @@ const PLATFORM = platform()
 const IS_MAC = PLATFORM === 'darwin'
 const IS_WINDOWS = PLATFORM === 'win32'
 const UPDATE_SOURCE = BRAND.updates
-const AUTO_UPDATE_ENABLED = app.isPackaged && !!UPDATE_SOURCE
+
+interface AutoUpdateCapability {
+  enabled: boolean
+  reason?: 'development' | 'unconfigured' | 'mac-code-signature'
+  message?: string
+  details?: Record<string, unknown>
+}
+
+let autoUpdateCapability: AutoUpdateCapability | null = null
+let updaterCacheDirName: string | null = null
+
+function getAutoUpdateCapability(): AutoUpdateCapability {
+  if (autoUpdateCapability) return autoUpdateCapability
+
+  if (!app.isPackaged) {
+    autoUpdateCapability = { enabled: false, reason: 'development' }
+    return autoUpdateCapability
+  }
+
+  if (!UPDATE_SOURCE) {
+    autoUpdateCapability = { enabled: false, reason: 'unconfigured' }
+    return autoUpdateCapability
+  }
+
+  if (IS_MAC) {
+    const signature = getCurrentMacCodeSignatureStatus(app.getPath('exe'))
+    if (!signature.trustedForAutoUpdate) {
+      autoUpdateCapability = {
+        enabled: false,
+        reason: 'mac-code-signature',
+        message: 'macOS auto-update requires a non-ad-hoc Developer ID signature. Install a signed release build to use automatic updates.',
+        details: {
+          appBundlePath: signature.appBundlePath,
+          signature: signature.signature,
+          teamIdentifier: signature.teamIdentifier,
+          signatureReason: signature.reason,
+        },
+      }
+      return autoUpdateCapability
+    }
+
+    mainLog.info('[auto-update] macOS code signature accepted for updates', {
+      appBundlePath: signature.appBundlePath,
+      teamIdentifier: signature.teamIdentifier,
+    })
+  }
+
+  autoUpdateCapability = { enabled: true }
+  return autoUpdateCapability
+}
+
+function getUpdaterCacheDirName(): string {
+  if (updaterCacheDirName) return updaterCacheDirName
+
+  const fallback = `${app.getName()}-updater`
+  try {
+    const updateConfigPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'app-update.yml')
+      : path.join(app.getAppPath(), 'dev-app-update.yml')
+    const updateConfig = fs.readFileSync(updateConfigPath, 'utf8')
+    const match = updateConfig.match(/^updaterCacheDirName:\s*['"]?([^'"\n]+)['"]?\s*$/m)
+    updaterCacheDirName = match?.[1]?.trim() || fallback
+  } catch {
+    updaterCacheDirName = fallback
+  }
+
+  return updaterCacheDirName
+}
 
 // Get the update cache directory path (for file watcher fallback on macOS)
 // electron-updater uses these paths:
@@ -43,16 +111,16 @@ const AUTO_UPDATE_ENABLED = app.isPackaged && !!UPDATE_SOURCE
 // - macOS: ~/Library/Caches/{appName}-updater/pending
 // - Linux: ~/.cache/{appName}-updater/pending
 function getUpdateCacheDir(): string {
-  const appName = app.getName()
+  const cacheDirName = getUpdaterCacheDirName()
   if (IS_MAC) {
-    return path.join(app.getPath('home'), 'Library', 'Caches', `${appName}-updater`, 'pending')
+    return path.join(app.getPath('home'), 'Library', 'Caches', cacheDirName, 'pending')
   } else if (IS_WINDOWS) {
     // Windows uses LOCALAPPDATA, not APPDATA (roaming)
     const localAppData = process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local')
-    return path.join(localAppData, `${appName}-updater`, 'pending')
+    return path.join(localAppData, cacheDirName, 'pending')
   } else {
     // Linux
-    return path.join(app.getPath('home'), '.cache', `${appName}-updater`, 'pending')
+    return path.join(app.getPath('home'), '.cache', cacheDirName, 'pending')
   }
 }
 
@@ -114,8 +182,9 @@ function broadcastDownloadProgress(progress: number): void {
 
 // ─── Configure electron-updater ───────────────────────────────────────────────
 
-// Download updates only for packaged builds with a brand-owned update source.
-autoUpdater.autoDownload = AUTO_UPDATE_ENABLED
+// Download updates only after checkForUpdates verifies this build can safely
+// pass the platform updater validation.
+autoUpdater.autoDownload = false
 
 autoUpdater.allowPrerelease = false
 autoUpdater.allowDowngrade = false
@@ -317,28 +386,39 @@ function checkForExistingDownload(): { exists: boolean; version?: string } {
  * @param options.autoDownload - If false, only checks without downloading (for manual "Check Now")
  */
 export async function checkForUpdates(options: CheckOptions = {}): Promise<UpdateInfo> {
-  if (!AUTO_UPDATE_ENABLED) {
+  const capability = getAutoUpdateCapability()
+  if (!capability.enabled) {
     mainLog.info('[auto-update] Skipping update check', {
       packaged: app.isPackaged,
       brand: BRAND.id,
       hasUpdateSource: !!UPDATE_SOURCE,
+      reason: capability.reason,
+      details: capability.details,
     })
+
+    const isUnsupportedPackagedBuild = capability.reason === 'mac-code-signature'
     updateInfo = {
       available: false,
       currentVersion: getAppVersion(),
       latestVersion: null,
-      downloadState: 'idle',
+      downloadState: isUnsupportedPackagedBuild ? 'error' : 'idle',
       downloadProgress: 0,
+      error: isUnsupportedPackagedBuild ? capability.message : undefined,
     }
     return getUpdateInfo()
+  }
+
+  const updateSource = UPDATE_SOURCE
+  if (!updateSource) {
+    throw new Error('Auto-update source is not configured')
   }
 
   const { autoDownload = true } = options
   mainLog.info('[auto-update] Checking stable release feed', {
     brand: BRAND.id,
-    provider: UPDATE_SOURCE.provider,
-    owner: UPDATE_SOURCE.owner,
-    repo: UPDATE_SOURCE.repo,
+    provider: updateSource.provider,
+    owner: updateSource.owner,
+    repo: updateSource.repo,
     autoDownload,
   })
 
@@ -395,8 +475,9 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
  * Then relaunches the app automatically.
  */
 export async function installUpdate(): Promise<void> {
-  if (!AUTO_UPDATE_ENABLED) {
-    throw new Error('Auto-update is not available for this build')
+  const capability = getAutoUpdateCapability()
+  if (!capability.enabled) {
+    throw new Error(capability.message ?? 'Auto-update is not available for this build')
   }
 
   if (updateInfo.downloadState !== 'ready') {
@@ -443,20 +524,33 @@ export interface UpdateOnLaunchResult {
  * - Auto-downloads if update available
  */
 export async function checkForUpdatesOnLaunch(): Promise<UpdateOnLaunchResult> {
-  if (!AUTO_UPDATE_ENABLED) {
+  const capability = getAutoUpdateCapability()
+  if (!capability.enabled) {
     mainLog.info('[auto-update] Skipping launch update check', {
       packaged: app.isPackaged,
       brand: BRAND.id,
       hasUpdateSource: !!UPDATE_SOURCE,
+      reason: capability.reason,
+      details: capability.details,
     })
-    return { action: 'skipped', reason: app.isPackaged ? 'unconfigured' : 'development' }
+    return {
+      action: 'skipped',
+      reason: capability.reason === 'mac-code-signature'
+        ? 'mac-code-signature'
+        : app.isPackaged ? 'unconfigured' : 'development',
+    }
+  }
+
+  const updateSource = UPDATE_SOURCE
+  if (!updateSource) {
+    throw new Error('Auto-update source is not configured')
   }
 
   mainLog.info('[auto-update] Checking for updates on launch...', {
     brand: BRAND.id,
-    provider: UPDATE_SOURCE.provider,
-    owner: UPDATE_SOURCE.owner,
-    repo: UPDATE_SOURCE.repo,
+    provider: updateSource.provider,
+    owner: updateSource.owner,
+    repo: updateSource.repo,
   })
 
   const info = await checkForUpdates({ autoDownload: true })

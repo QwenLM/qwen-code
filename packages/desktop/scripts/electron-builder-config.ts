@@ -31,6 +31,10 @@ config.appId = BRAND.appId;
 config.productName = BRAND.productName;
 config.copyright = BRAND.copyright;
 
+const extraMetadata = section(config, 'extraMetadata');
+extraMetadata.main = 'dist/main.cjs';
+extraMetadata.name = BRAND.artifactPrefix.toLowerCase();
+
 const mac = section(config, 'mac');
 mac.icon = BRAND.assets.macIcon;
 mac.artifactName = artifactName;
