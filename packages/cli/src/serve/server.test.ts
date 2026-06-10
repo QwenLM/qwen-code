@@ -876,6 +876,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get sessionCount() {
       return calls.length;
     },
+    get activePromptCount() {
+      return 0;
+    },
+    get lastActivityAt() {
+      return null;
+    },
     get pendingPermissionCount() {
       return 0;
     },
