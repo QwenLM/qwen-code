@@ -958,11 +958,11 @@ export class Session implements SessionContext {
                 .getChatRecordingService()
                 ?.recordFileHistorySnapshot(latestSnapshot);
             }
-          } catch {
-            // Recording is best-effort
+          } catch (e) {
+            debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
           }
-        } catch {
-          // Snapshot is best-effort
+        } catch (e) {
+          debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
         }
 
         const parentContext = extractDaemonTraceContext(params);
