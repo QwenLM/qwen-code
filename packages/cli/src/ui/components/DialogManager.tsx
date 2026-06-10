@@ -47,6 +47,7 @@ import { SkillsManagerDialog } from './skills/SkillsManagerDialog.js';
 import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
+import { StatsDialog } from './StatsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
@@ -55,6 +56,7 @@ import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -74,6 +76,11 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+  const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
+  const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
+  // Long list-style dialogs use this finite budget for their own internal
+  // virtualization even when the outer app layout is not height-constrained.
+  const listDialogHeight = dialogMaxHeight;
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -126,7 +133,11 @@ export const DialogManager = ({
   }
   if (uiState.shellConfirmationRequest) {
     return (
-      <ShellConfirmationDialog request={uiState.shellConfirmationRequest} />
+      <ShellConfirmationDialog
+        request={uiState.shellConfirmationRequest}
+        availableTerminalHeight={constrainedDialogHeight}
+        contentWidth={mainAreaWidth}
+      />
     );
   }
   if (uiState.loopDetectionConfirmationRequest) {
@@ -142,6 +153,7 @@ export const DialogManager = ({
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -152,6 +164,7 @@ export const DialogManager = ({
         prompt={request.prompt}
         onConfirm={request.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -203,9 +216,7 @@ export const DialogManager = ({
           onSelect={uiActions.handleThemeSelect}
           onHighlight={uiActions.handleThemeHighlight}
           settings={settings}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
           terminalWidth={mainAreaWidth}
         />
       </Box>
@@ -256,7 +267,7 @@ export const DialogManager = ({
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
-          availableTerminalHeight={terminalHeight - staticExtraHeight}
+          availableTerminalHeight={listDialogHeight}
           config={config}
         />
       </Box>
@@ -271,7 +282,7 @@ export const DialogManager = ({
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -298,9 +309,7 @@ export const DialogManager = ({
           settings={settings}
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
         />
       </Box>
     );
@@ -432,9 +441,7 @@ export const DialogManager = ({
         onClose={uiActions.closeSkillsManagerDialog}
         reloadCommands={uiActions.reloadCommands}
         setInputBuffer={uiActions.setInputBuffer}
-        availableTerminalHeight={
-          constrainHeight ? terminalHeight - staticExtraHeight : undefined
-        }
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -449,6 +456,11 @@ export const DialogManager = ({
   }
   if (uiState.isHooksDialogOpen) {
     return <HooksManagementDialog onClose={uiActions.closeHooksDialog} />;
+  }
+  if (uiState.isStatsDialogOpen) {
+    return (
+      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+    );
   }
   if (uiState.isMcpDialogOpen) {
     return <MCPManagementDialog onClose={uiActions.closeMcpDialog} />;
@@ -515,7 +527,7 @@ export const DialogManager = ({
   if (bgTasksDialogOpen) {
     return (
       <BackgroundTasksDialog
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={listDialogHeight}
         terminalWidth={mainAreaWidth}
       />
     );

@@ -205,8 +205,8 @@ export default {
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'Connect an LLM provider': 'LLM-Anbieter verbinden',
-  'Copy the last result or code snippet to clipboard':
-    'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für die N-letzte)',
 
   // ============================================================================
   // Commands - Agents
@@ -796,6 +796,24 @@ export default {
   'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
   'Fork the current conversation into a new session':
     'Die aktuelle Unterhaltung in eine neue Sitzung verzweigen',
+  'Spawn a background agent that inherits the full conversation':
+    'Einen Hintergrund-Agenten starten, der die gesamte Unterhaltung übernimmt',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Bitte geben Sie eine Anweisung an. Verwendung: /fork <Anweisung>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Während eine Antwort oder ein Tool-Aufruf läuft, kann kein Hintergrund-Fork erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
+  'Cannot fork before the first conversation turn.':
+    'Vor der ersten Gesprächsrunde kann kein Fork erstellt werden.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'Der Befehl /fork erfordert das Fork-Feature-Gate. Setzen Sie QWEN_CODE_ENABLE_FORK_SUBAGENT=1, um es zu aktivieren.',
+  'The agent tool is unavailable; cannot fork.':
+    'Das Agent-Tool ist nicht verfügbar; Fork kann nicht gestartet werden.',
+  'Failed to launch fork: {{error}}':
+    'Fork konnte nicht gestartet werden: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'Benutzer hat über /fork einen Hintergrund-Fork gestartet: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'In einen Hintergrund-Agenten verzweigt. Er übernimmt diese Unterhaltung und läuft ohne zu blockieren — verfolgen Sie ihn im Hintergrundaufgaben-Panel; er meldet sich nach Abschluss zurück.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Während eine Antwort oder ein Tool-Aufruf läuft, kann keine Verzweigung erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'No conversation to branch.': 'Keine Unterhaltung zum Verzweigen vorhanden.',
@@ -1387,6 +1405,21 @@ export default {
     'In dieser Sitzung wurden keine Werkzeugaufrufe gemacht.',
   'Session start time is unavailable, cannot calculate stats.':
     'Sitzungsstartzeit nicht verfügbar, Statistiken können nicht berechnet werden.',
+  Activity: 'Aktivität',
+  Efficiency: 'Effizienz',
+  Today: 'Heute',
+  'Token Trend': 'Token-Trend',
+  'Cache Hit Rate': 'Cache-Trefferquote',
+  'Tool Success': 'Tool-Erfolgsrate',
+  'Tool Leaderboard': 'Tool-Rangliste',
+  Time: 'Zeit',
+  Success: 'Erfolg',
+  Cache: 'Cache',
+  Latency: 'Latenz',
+  'Code Impact': 'Code-Änderungen',
+  net: 'netto',
+  streak: 'Serie',
+  best: 'Rekord',
 
   // ============================================================================
   // Command Format Migration
@@ -1946,4 +1979,40 @@ export default {
   remote: 'entfernt',
   '中国 (China)': 'China',
   '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Aktivitäts-Heatmap',
+  Less: 'Weniger',
+  More: 'Mehr',
+  Sessions: 'Sitzungen',
+  Duration: 'Dauer',
+  Projects: 'Projekte',
+  'Loading stats...': 'Statistiken werden geladen...',
+  '(no data)': '(keine Daten)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Eingabe',
+  Models: 'Modelle',
+  'All time': 'Gesamtzeitraum',
+  'Last 7 days': 'Letzte 7 Tage',
+  'Last 30 days': 'Letzte 30 Tage',
+  'Show usage statistics dashboard.': 'Nutzungsstatistik-Dashboard anzeigen.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-Anfragen',
+  'Tool Calls': 'Tool-Aufrufe',
+  'Success rate': 'Erfolgsrate',
+  'Code Changes': 'Code-Änderungen',
+  Tool: 'Tool',
+  reqs: 'Anfr.',
+  in: 'ein',
+  out: 'aus',
+  'In/Out': 'Ein/Aus',
 };

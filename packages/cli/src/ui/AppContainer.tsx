@@ -43,6 +43,7 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  createInstructionsLoadedCallback,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -120,7 +121,10 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -191,6 +195,7 @@ import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
@@ -208,6 +213,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './utils/historyUtils.js';
+import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -1062,7 +1068,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { toggleVimEnabled } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
 
   const {
     isSubagentCreateDialogOpen,
@@ -1087,6 +1094,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
+  const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
+    useStatsDialog();
 
   // Ref bridge: the guarded openRewindSelector callback is defined later
   // (after useDoublePress), but slashCommandActions needs it now. The ref
@@ -1134,6 +1143,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       openDiffDialog,
@@ -1163,6 +1173,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       handleResume,
       handleBranch,
@@ -1333,6 +1344,12 @@ export const AppContainer = (props: AppContainerProps) => {
           config.isTrustedFolder(),
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
+          {
+            loadReason: 'refresh',
+            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+              config.getHookSystem(),
+            ),
+          },
         );
 
       config.setUserMemory(memoryContent);
@@ -2236,6 +2253,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const [compactInline] = useState<boolean>(
+    settings.merged.ui?.compactInline ?? false,
+  );
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -2322,6 +2342,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
+    isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
@@ -2378,7 +2399,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
+    terminalHeight -
+      controlsHeight -
+      staticExtraHeight -
+      MAIN_CONTENT_HEIGHT_RESERVATION -
+      tabBarHeight,
   );
 
   config.setShellExecutionConfig({
@@ -2801,6 +2826,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
     closeDiffDialog,
+    isStatsDialogOpen,
+    closeStatsDialog,
     showWorktreeExitDialog,
     closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
@@ -2923,6 +2950,14 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
+        // the Esc to switch to NORMAL mode. Without this guard, both handlers
+        // fire on the same keypress — vim switches mode AND AppContainer
+        // shows "Press Esc again to clear" or cancels the stream.
+        if (vimEnabled && vimMode === 'INSERT') {
+          return;
+        }
+
         // Dismiss or cancel btw side-question on Escape,
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
@@ -3144,6 +3179,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
+      vimEnabled,
+      vimMode,
     ],
   );
 
@@ -3331,6 +3368,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3459,6 +3497,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3537,6 +3576,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3618,6 +3658,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3649,8 +3690,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, setCompactMode }),
-    [compactMode, setCompactMode],
+    () => ({ compactMode, compactInline, setCompactMode }),
+    [compactMode, compactInline, setCompactMode],
   );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),

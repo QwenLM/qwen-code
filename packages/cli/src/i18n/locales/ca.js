@@ -227,8 +227,8 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last result or code snippet to clipboard':
-    "Copiar l'últim resultat o fragment de codi al porta-retalls",
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
 
   // ============================================================================
   // Ordres - Agents
@@ -839,6 +839,24 @@ export default {
   'Resume a previous session': 'Reprendre una sessió anterior',
   'Fork the current conversation into a new session':
     'Bifurca la conversa actual en una sessió nova',
+  'Spawn a background agent that inherits the full conversation':
+    'Inicia un agent en segon pla que hereta tota la conversa',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Proporcioneu una directiva. Ús: /fork <directiva>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "No es pot crear una bifurcació mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
+  'Cannot fork before the first conversation turn.':
+    'No es pot crear una bifurcació abans del primer torn de conversa.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'L’ordre /fork requereix el feature gate de fork. Definiu QWEN_CODE_ENABLE_FORK_SUBAGENT=1 per activar-lo.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'eina d'agent no està disponible; no es pot crear una bifurcació.",
+  'Failed to launch fork: {{error}}':
+    'No s’ha pogut iniciar la bifurcació: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'usuari ha iniciat una bifurcació en segon pla amb /fork: {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "S'ha bifurcat a un agent en segon pla. Hereta aquesta conversa i s'executa sense bloquejar — feu-ne el seguiment al tauler de tasques en segon pla; informarà quan acabi.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "No es pot bifurcar mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'No conversation to branch.': 'No hi ha cap conversa per bifurcar.',
@@ -1453,6 +1471,21 @@ export default {
     "No s'ha realitzat cap crida a eines en aquesta sessió.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'hora d'inici de la sessió no està disponible, no es poden calcular les estadístiques.",
+  Activity: 'Activitat',
+  Efficiency: 'Eficiència',
+  Today: 'Avui',
+  'Token Trend': 'Tendència de Tokens',
+  'Cache Hit Rate': "Taxa d'encert de cache",
+  'Tool Success': "Èxit d'eines",
+  'Tool Leaderboard': "Classificació d'eines",
+  Time: 'Temps',
+  Success: 'Èxit',
+  Cache: 'Cache',
+  Latency: 'Latència',
+  'Code Impact': 'Impacte al codi',
+  net: 'net',
+  streak: 'ratxa',
+  best: 'rècord',
 
   // ============================================================================
   // Migració del format d'ordres
@@ -1903,4 +1936,40 @@ export default {
   'Ref:': 'Referència:',
   '中国 (China)': 'Xina',
   '中国 (China) - 阿里云百炼': 'Xina - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Mapa d'activitat",
+  Less: 'Menys',
+  More: 'Més',
+  Sessions: 'Sessions',
+  Duration: 'Durada',
+  Projects: 'Projectes',
+  'Loading stats...': 'Carregant estadístiques...',
+  '(no data)': '(sense dades)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrada',
+  Models: 'Models',
+  'All time': 'Tot el temps',
+  'Last 7 days': 'Últims 7 dies',
+  'Last 30 days': 'Últims 30 dies',
+  'Show usage statistics dashboard.': "Mostra el tauler d'estadístiques d'ús.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': "Sol·licituds d'API",
+  'Tool Calls': "Crides d'eines",
+  'Success rate': "Taxa d'èxit",
+  'Code Changes': 'Canvis de codi',
+  Tool: 'Eina',
+  reqs: 'sol.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
 };

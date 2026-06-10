@@ -45,6 +45,8 @@ export const alibabaStandardProvider: ProviderConfig = {
   envKey: 'DASHSCOPE_API_KEY',
   models: [
     { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
+    { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
+    { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
     { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
     {
       id: 'deepseek-v4-pro',

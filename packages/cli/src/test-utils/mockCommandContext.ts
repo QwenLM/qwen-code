@@ -7,7 +7,6 @@
 import { vi } from 'vitest';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { LoadedSettings } from '../config/settings.js';
-import type { GitService } from '@qwen-code/qwen-code-core';
 import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
 import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 
@@ -41,7 +40,6 @@ export const createMockCommandContext = (
         merged: {},
         setValue: vi.fn(),
       } as unknown as LoadedSettings,
-      git: undefined as GitService | undefined,
       logger: {
         log: vi.fn(),
         logMessage: vi.fn(),

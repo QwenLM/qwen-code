@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CronScheduler, type CronJob } from './cronScheduler.js';
 
 describe('CronScheduler', () => {
@@ -97,6 +97,28 @@ describe('CronScheduler', () => {
 
       expect(fired).toHaveLength(1);
       expect(fired[0]!.prompt).toBe('match');
+    });
+
+    it('does not fire on the same minute the job was created', () => {
+      vi.useFakeTimers();
+      const localScheduler = new CronScheduler();
+      try {
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 30, 15));
+        const fired: CronJob[] = [];
+        localScheduler.start((job) => fired.push(job));
+
+        localScheduler.create('*/1 * * * *', 'should not fire yet', true);
+
+        localScheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+        expect(fired).toHaveLength(0);
+
+        localScheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
+        expect(fired).toHaveLength(1);
+        expect(fired[0]!.prompt).toBe('should not fire yet');
+      } finally {
+        localScheduler.destroy();
+        vi.useRealTimers();
+      }
     });
 
     it('does not fire when no match', () => {

@@ -795,6 +795,22 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('should return terminal sequence when available', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: { terminalSequence: '\x07' },
+      });
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result).toEqual({ terminalSequence: '\x07' });
+    });
+
     it('should send correct parameters to MessageBus for permission_prompt', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({

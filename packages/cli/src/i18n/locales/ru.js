@@ -227,8 +227,8 @@ export default {
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
   'Connect an LLM provider': 'Подключить провайдера LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Копирование последнего результата или фрагмента кода в буфер обмена',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Копировать последний ответ ИИ в буфер обмена (/copy N для N-го с конца)',
 
   // ============================================================================
   // Команды - Агенты
@@ -808,6 +808,23 @@ export default {
   'Resume a previous session': 'Продолжить предыдущую сессию',
   'Fork the current conversation into a new session':
     'Создать ветку текущего разговора в новой сессии',
+  'Spawn a background agent that inherits the full conversation':
+    'Запустить фонового агента, который наследует весь разговор',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Укажите инструкцию. Использование: /fork <инструкция>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Нельзя создать fork, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
+  'Cannot fork before the first conversation turn.':
+    'Нельзя создать fork до первого сообщения в разговоре.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'Команде /fork требуется feature gate fork. Установите QWEN_CODE_ENABLE_FORK_SUBAGENT=1, чтобы включить его.',
+  'The agent tool is unavailable; cannot fork.':
+    'Инструмент агента недоступен; fork создать нельзя.',
+  'Failed to launch fork: {{error}}': 'Не удалось запустить fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'Пользователь запустил фоновый fork через /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Создан fork в фоновом агенте. Он наследует этот разговор и работает без блокировки — отслеживайте его на панели фоновых задач; он сообщит результат после завершения.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Нельзя создать ветку, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   'No conversation to branch.': 'Нет разговора для создания ветки.',
@@ -1335,6 +1352,21 @@ export default {
     'В этой сессии не было вызовов инструментов.',
   'Session start time is unavailable, cannot calculate stats.':
     'Время начала сессии недоступно, невозможно рассчитать статистику.',
+  Activity: 'Активность',
+  Efficiency: 'Эффективность',
+  Today: 'Сегодня',
+  'Token Trend': 'Тренд токенов',
+  'Cache Hit Rate': 'Попадание в кэш',
+  'Tool Success': 'Успех инструментов',
+  'Tool Leaderboard': 'Рейтинг инструментов',
+  Time: 'Время',
+  Success: 'Успех',
+  Cache: 'Кэш',
+  Latency: 'Задержка',
+  'Code Impact': 'Изменения кода',
+  net: 'нетто',
+  streak: 'серия',
+  best: 'рекорд',
 
   // ============================================================================
   // Command Format Migration
@@ -1921,4 +1953,41 @@ export default {
   'start server': 'запустить сервер',
   '中国 (China)': 'Китай',
   '中国 (China) - 阿里云百炼': 'Китай - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Карта активности',
+  Less: 'Меньше',
+  More: 'Больше',
+  Sessions: 'Сессии',
+  Duration: 'Длительность',
+  Projects: 'Проекты',
+  'Loading stats...': 'Загрузка статистики...',
+  '(no data)': '(нет данных)',
+  d: 'д',
+  h: 'ч',
+  m: 'м',
+  Input: 'Ввод',
+  Models: 'Модели',
+  'All time': 'За всё время',
+  'Last 7 days': 'Последние 7 дней',
+  'Last 30 days': 'Последние 30 дней',
+  'Show usage statistics dashboard.':
+    'Показать панель статистики использования.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-запросы',
+  'Tool Calls': 'Вызовы инструментов',
+  'Success rate': 'Успешность',
+  'Code Changes': 'Изменения кода',
+  Tool: 'Инструмент',
+  reqs: 'запр.',
+  in: 'вх.',
+  out: 'вых.',
+  'In/Out': 'Вх/Вых',
 };

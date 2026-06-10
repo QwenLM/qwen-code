@@ -181,8 +181,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'Connect an LLM provider': 'LLM プロバイダーに接続',
-  'Copy the last result or code snippet to clipboard':
-    '最後の結果またはコードスニペットをクリップボードにコピー',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '最新のAI応答をクリップボードにコピー（/copy N で新しい方からN番目）',
 
   // ============================================================================
   // Commands - Agents
@@ -583,6 +583,23 @@ export default {
   'Resume a previous session': '前のセッションを再開する',
   'Fork the current conversation into a new session':
     '現在の会話を新しいセッションに分岐する',
+  'Spawn a background agent that inherits the full conversation':
+    '会話全体を引き継ぐバックグラウンドエージェントを起動する',
+  'Please provide a directive. Usage: /fork <directive>':
+    '指示を入力してください。使用法: /fork <指示>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
+  'Cannot fork before the first conversation turn.':
+    '最初の会話ターンの前にはフォークできません。',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    '/fork コマンドには fork フィーチャーゲートが必要です。有効にするには QWEN_CODE_ENABLE_FORK_SUBAGENT=1 を設定してください。',
+  'The agent tool is unavailable; cannot fork.':
+    'エージェントツールを利用できないため、フォークできません。',
+  'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'バックグラウンドエージェントにフォークしました。この会話を引き継ぎ、ブロックせずに実行されます — バックグラウンドタスクパネルで追跡でき、完了時に報告します。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '応答またはツール呼び出しの処理中は分岐できません。完了するか、保留中のツール呼び出しを解決してください。',
   'No conversation to branch.': '分岐できる会話がありません。',
@@ -1124,6 +1141,21 @@ export default {
     'このセッションではツール呼び出しが行われていません',
   'Session start time is unavailable, cannot calculate stats.':
     'セッション開始時刻が利用できないため、統計を計算できません',
+  Activity: 'アクティビティ',
+  Efficiency: '効率',
+  Today: '今日',
+  'Token Trend': 'Token トレンド',
+  'Cache Hit Rate': 'キャッシュヒット率',
+  'Tool Success': 'ツール成功率',
+  'Tool Leaderboard': 'ツールランキング',
+  Time: '時間',
+  Success: '成功率',
+  Cache: 'キャッシュ',
+  Latency: 'レイテンシ',
+  'Code Impact': 'コード変更',
+  net: '純増',
+  streak: '連続',
+  best: '最長',
   // Loading
   'Waiting for user confirmation...': 'ユーザーの確認を待っています...',
   // Witty Loading Phrases
@@ -1709,4 +1741,40 @@ export default {
   'Attribution: commit': 'コミットの帰属表示',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
+
+  // Stats Dashboard — Category 2 (missing from ja)
+  'Activity Heatmap': 'アクティビティヒートマップ',
+  Less: '少',
+  More: '多',
+  Sessions: 'セッション数',
+  Duration: '所要時間',
+  Projects: 'プロジェクト',
+  'Loading stats...': '統計を読み込み中...',
+  '(no data)': '(データなし)',
+  d: '日',
+  h: '時',
+  m: '分',
+  Input: '入力',
+  Models: 'モデル',
+  'All time': '全期間',
+  'Last 7 days': '過去 7 日間',
+  'Last 30 days': '過去 30 日間',
+  'Show usage statistics dashboard.': '使用統計ダッシュボードを表示する。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'APIリクエスト',
+  'Tool Calls': 'ツール呼び出し',
+  'Success rate': '成功率',
+  'Code Changes': 'コード変更',
+  Tool: 'ツール',
+  reqs: 'リクエスト',
+  in: '入力',
+  out: '出力',
+  'In/Out': '入力/出力',
 };
