@@ -16,23 +16,68 @@ import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKFLOW');
 
 /**
- * Hard ceiling on total `agent()` calls per workflow run (matches upstream
+ * Default ceiling on total `agent()` calls per workflow run (matches upstream
  * `hOK = 1000`). Counts EVERY dispatch — sequential, `parallel()`, and
  * `pipeline()` all funnel through the one wrapped dispatch — so a fan-out
- * cannot bypass it. The 1001st call throws.
+ * cannot bypass it. The 1001st call throws. Override via env (see below).
  */
-export const MAX_AGENTS_PER_RUN = 1000;
-const MAX_AGENTS_MESSAGE = `Workflow exceeded the maximum of ${MAX_AGENTS_PER_RUN} agent() calls per run.`;
+export const DEFAULT_MAX_AGENTS_PER_RUN = 1000;
+export const MAX_WORKFLOW_AGENTS_ENV = 'QWEN_CODE_MAX_WORKFLOW_AGENTS';
+
+/**
+ * Resolve the per-run agent cap, honoring `QWEN_CODE_MAX_WORKFLOW_AGENTS`.
+ * Mirrors `resolveMaxConcurrentBackgroundAgents` (background-tasks.ts): a
+ * non-integer / <1 override is rejected with a debug warning and the default
+ * is used.
+ */
+export function resolveMaxAgentsPerRun(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env[MAX_WORKFLOW_AGENTS_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_MAX_AGENTS_PER_RUN;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${MAX_WORKFLOW_AGENTS_ENV}=${JSON.stringify(raw)}, ` +
+        `using default (${DEFAULT_MAX_AGENTS_PER_RUN})`,
+    );
+    return DEFAULT_MAX_AGENTS_PER_RUN;
+  }
+  return parsed;
+}
+
+export const MAX_WORKFLOW_CONCURRENCY_ENV =
+  'QWEN_CODE_MAX_WORKFLOW_CONCURRENCY';
 
 /**
  * Maximum agents in flight at once within a single run, shared across all
  * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
  * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
- * produce a deadlocking limit.
+ * produce a deadlocking limit. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides
+ * the computed value with an explicit integer (>=1); an invalid override
+ * falls back to the cpu-derived default with a debug warning.
  */
-function resolveConcurrencyLimit(): number {
+export function resolveConcurrencyLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env[MAX_WORKFLOW_CONCURRENCY_ENV];
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      return parsed;
+    }
+    debugLogger.warn(
+      `Invalid ${MAX_WORKFLOW_CONCURRENCY_ENV}=${JSON.stringify(raw)}, ` +
+        `using cpu-derived default`,
+    );
+  }
   return Math.max(1, Math.min(16, os.cpus().length - 2));
 }
 
@@ -190,13 +235,18 @@ export class WorkflowOrchestrator {
 
     // P2: every agent() call — sequential, parallel(), or pipeline() — funnels
     // through this one wrapped dispatch, so a single per-run counter enforces
-    // the 1000-agent cap regardless of launch path. Increment-then-check means
-    // calls 1..1000 pass and the 1001st throws.
+    // the agent cap regardless of launch path. Increment-then-check means
+    // calls 1..max pass and the (max+1)th throws.
+    const maxAgents = resolveMaxAgentsPerRun();
     let agentCount = 0;
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
       agentCount += 1;
-      if (agentCount > MAX_AGENTS_PER_RUN) {
-        return Promise.reject(new Error(MAX_AGENTS_MESSAGE));
+      if (agentCount > maxAgents) {
+        return Promise.reject(
+          new Error(
+            `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
+          ),
+        );
       }
       return this.dispatch(prompt, opts);
     };

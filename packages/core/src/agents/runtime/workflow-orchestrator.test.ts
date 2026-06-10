@@ -12,7 +12,9 @@ import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
   createProductionDispatch,
-  MAX_AGENTS_PER_RUN,
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  resolveMaxAgentsPerRun,
+  resolveConcurrencyLimit,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 
@@ -485,14 +487,14 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       const orchestrator = new WorkflowOrchestrator(async () => 'ok');
       await expect(
         orchestrator.run({
-          script: `for (let i = 0; i < ${MAX_AGENTS_PER_RUN + 1}; i++) {
+          script: `for (let i = 0; i < ${DEFAULT_MAX_AGENTS_PER_RUN + 1}; i++) {
             await agent("x");
           }
           return "done";`,
           args: undefined,
         }),
       ).rejects.toThrow(
-        new RegExp(`${MAX_AGENTS_PER_RUN} agent\\(\\) calls per run`),
+        new RegExp(`${DEFAULT_MAX_AGENTS_PER_RUN} agent\\(\\) calls per run`),
       );
     });
 
@@ -500,13 +502,15 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       const orchestrator = new WorkflowOrchestrator(async () => 'ok');
       const outcome = await orchestrator.run({
         script: `return await parallel(
-          Array.from({ length: ${MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
+          Array.from({ length: ${DEFAULT_MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
         );`,
         args: undefined,
       });
       const arr = outcome.result as Array<string | null>;
       // Exactly 1000 dispatches succeed; the one over the cap becomes null.
-      expect(arr.filter((v) => v === 'ok')).toHaveLength(MAX_AGENTS_PER_RUN);
+      expect(arr.filter((v) => v === 'ok')).toHaveLength(
+        DEFAULT_MAX_AGENTS_PER_RUN,
+      );
       expect(arr.filter((v) => v === null)).toHaveLength(1);
     });
   });
@@ -549,5 +553,59 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       await expect(p).rejects.toThrow(/abort/i);
       expect(dispatched).toBeGreaterThan(0);
     }, 10_000);
+  });
+
+  describe('env-overridable caps', () => {
+    it('resolveMaxAgentsPerRun defaults to 1000 and honors a valid override', () => {
+      expect(resolveMaxAgentsPerRun({})).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '50' }),
+      ).toBe(50);
+    });
+
+    it('resolveMaxAgentsPerRun rejects a non-integer / <1 override and falls back', () => {
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '0' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: 'abc' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '2.5' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+    });
+
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+      expect(
+        resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
+      ).toBe(4);
+      // invalid → cpu-derived default, always within [1, 16]
+      const fallback = resolveConcurrencyLimit({
+        QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
+      });
+      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    it('QWEN_CODE_MAX_WORKFLOW_AGENTS actually lowers the cap at run time', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '3';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+        const outcome = await orchestrator.run({
+          script: `return await parallel(
+            Array.from({ length: 4 }, () => () => agent("x"))
+          );`,
+          args: undefined,
+        });
+        const arr = outcome.result as Array<string | null>;
+        expect(arr.filter((v) => v === 'ok')).toHaveLength(3);
+        expect(arr.filter((v) => v === null)).toHaveLength(1);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+      }
+    });
   });
 });
