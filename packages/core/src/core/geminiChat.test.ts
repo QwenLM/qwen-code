@@ -7535,23 +7535,19 @@ describe('GeminiChat', async () => {
       expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
     });
 
-    it('NOOP when no tool calls and no thinking', () => {
+    it('NOOP when after estimate is not lower than before', () => {
       chat.setHistory([
         userMsg('hello'),
         modelMsg('hi'),
         userMsg('how are you'),
         modelMsg('good'),
       ]);
-      chat.setLastPromptTokenCount(10);
+      // Set beforeTokens very low so afterTokens >= beforeTokens is guaranteed
+      chat.setLastPromptTokenCount(1);
 
       const result = chat.compressFast();
 
-      // afterTokens >= beforeTokens (both very small) → NOOP
-      // or compressionStatus is NOOP since estimated tokens may not shrink
-      expect(
-        result.info.compressionStatus === CompressionStatus.NOOP ||
-          result.info.compressionStatus === CompressionStatus.COMPRESSED,
-      ).toBe(true);
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
     });
 
     it('clears old tool results via microcompaction', () => {
@@ -7576,22 +7572,24 @@ describe('GeminiChat', async () => {
     });
 
     it('updates lastPromptTokenCount on COMPRESSED', () => {
-      chat.setHistory([
-        userMsg('hello'),
-        modelMsgWithThinking(
-          'response',
-          'very long internal reasoning process',
-        ),
-        userMsg('next'),
-        modelMsg('plain reply'),
-      ]);
+      // Build a history with substantial thinking parts to guarantee COMPRESSED
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
       chat.setLastPromptTokenCount(5000);
 
       const result = chat.compressFast();
 
-      if (result.info.compressionStatus === CompressionStatus.COMPRESSED) {
-        expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
-      }
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
     });
   });
 });
