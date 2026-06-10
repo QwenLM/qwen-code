@@ -221,8 +221,10 @@ const workerTransport: Transport = {
 
     const failAll = (err: Error) => {
       if (readyState === 'pending') {
-        readyState = 'failed';
         readyReject(err);
+      }
+      if (readyState !== 'disposed') {
+        readyState = 'failed';
       }
       for (const slot of pending.values()) {
         slot.reject(err);
@@ -247,14 +249,14 @@ const workerTransport: Transport = {
         return readyPromise;
       },
       async find(pattern, limit?) {
-        if (readyState === 'disposed') {
-          throw new Error('fzf worker disposed');
+        if (readyState === 'disposed' || readyState === 'failed') {
+          throw new Error(`fzf worker not available (${readyState})`);
         }
         await readyPromise;
         const reqId = nextReqId++;
         return new Promise<Array<FzfResultItem<string>>>((resolve, reject) => {
-          if (readyState === ('disposed' as typeof readyState)) {
-            reject(new Error('fzf worker disposed'));
+          if (readyState === 'disposed' || readyState === 'failed') {
+            reject(new Error(`fzf worker not available (${readyState})`));
             return;
           }
           pending.set(reqId, { resolve, reject });

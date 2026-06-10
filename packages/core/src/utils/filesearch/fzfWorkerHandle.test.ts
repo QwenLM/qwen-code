@@ -226,6 +226,33 @@ describe('FzfWorkerHandle', () => {
       }
     });
 
+    it('rejects subsequent find() calls after worker crash', async () => {
+      if (!workerExists) return;
+
+      const goodWorker = fs.readFileSync(outfile, 'utf8');
+      fs.writeFileSync(
+        outfile,
+        `import { parentPort } from 'node:worker_threads';
+         parentPort.on('message', (msg) => {
+           if (msg.type === 'init') { parentPort.postMessage({ type: 'ready' }); return; }
+           if (msg.type === 'find') { process.exit(1); }
+         });`,
+      );
+      __resetWorkerScriptResolutionForTests();
+      restorers.push(__setWorkerThresholdForTests(1));
+
+      try {
+        const handle = await FzfWorkerHandle.create(['a.ts'], { fuzzy: 'v2' });
+        // First find triggers the crash
+        await expect(handle.find('a')).rejects.toThrow(/exited unexpectedly/);
+        // Subsequent find should reject immediately with 'failed' state
+        await expect(handle.find('b')).rejects.toThrow(/not available.*failed/);
+      } finally {
+        fs.writeFileSync(outfile, goodWorker);
+        __resetWorkerScriptResolutionForTests();
+      }
+    });
+
     it('handles concurrent find() calls', async () => {
       if (!workerExists) return;
       __resetWorkerScriptResolutionForTests();
