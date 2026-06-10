@@ -100,6 +100,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   }),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  ApprovalMode: {
+    DEFAULT: 'default',
+    AUTO_EDIT: 'auto-edit',
+    YOLO: 'yolo',
+    PLAN: 'plan',
+  },
   AuthType: {},
   clearCachedCredentialFile: vi.fn(),
   QwenOAuth2Event: {},
@@ -113,6 +122,27 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionStartSource: { Startup: 'startup', Resume: 'resume' },
   SessionEndReason: { PromptInputExit: 'prompt_input_exit', Other: 'other' },
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  HookEventName: {
+    PreToolUse: 'PreToolUse',
+    PostToolUse: 'PostToolUse',
+    PostToolUseFailure: 'PostToolUseFailure',
+    PostToolBatch: 'PostToolBatch',
+    Notification: 'Notification',
+    UserPromptSubmit: 'UserPromptSubmit',
+    UserPromptExpansion: 'UserPromptExpansion',
+    SessionStart: 'SessionStart',
+    Stop: 'Stop',
+    SubagentStart: 'SubagentStart',
+    SubagentStop: 'SubagentStop',
+    PreCompact: 'PreCompact',
+    PostCompact: 'PostCompact',
+    SessionEnd: 'SessionEnd',
+    PermissionRequest: 'PermissionRequest',
+    PermissionDenied: 'PermissionDenied',
+    StopFailure: 'StopFailure',
+    TodoCreated: 'TodoCreated',
+    TodoCompleted: 'TodoCompleted',
+  },
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -146,7 +176,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
 vi.mock('../utils/acpModelUtils.js', () => ({
   formatAcpModelId: vi.fn(),
@@ -311,6 +344,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
       };
       lastSessionMock = mock;

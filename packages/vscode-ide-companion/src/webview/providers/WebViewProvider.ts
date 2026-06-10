@@ -254,6 +254,28 @@ export class WebViewProvider {
       // legitimate history replay messages (e.g., session/load) or
       // assistant replies when a new prompt starts while an async save is
       // still finishing.
+      if (message.source?.startsWith('background_notification')) {
+        // Prefer the originating ACP session id (forwarded on the message)
+        // over the currently active conversation. The notification was
+        // generated using the originating conversation's full chat history
+        // as context; persisting it under whichever conversation is active
+        // *now* would leak that context into an unrelated conversation if
+        // the user switched panels between triggering the background task
+        // and the notification being delivered.
+        const conversationId =
+          message.sessionId ??
+          this.conversationStore.getCurrentConversationId();
+        if (conversationId) {
+          void this.conversationStore
+            .addMessage(conversationId, message)
+            .catch((error) => {
+              console.warn(
+                '[WebViewProvider] Failed to persist background notification:',
+                error,
+              );
+            });
+        }
+      }
       this.sendMessageToWebView({
         type: 'message',
         data: message,
@@ -414,19 +436,29 @@ export class WebViewProvider {
     });
 
     // Setup end-turn handler from ACP stopReason notifications
-    this.agentManager.onEndTurn((reason) => {
+    this.agentManager.onEndTurn((reason, source) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere
+      const data: {
+        timestamp: number;
+        reason: string;
+        source?: string;
+      } = {
+        timestamp: Date.now(),
+        reason: reason || 'end_turn',
+      };
+      if (source) {
+        data.source = source;
+      }
       this.sendMessageToWebView({
         type: 'streamEnd',
-        data: {
-          timestamp: Date.now(),
-          reason: reason || 'end_turn',
-        },
+        data,
       });
       // Fire the idle notification from here (authoritative "task done" event) rather
       // than relying on the webview's isStreaming transition, which fires on every
       // intermediate streamEnd in multi-tool-call sequences and on cancellation.
-      this.handleAgentIdle();
+      if (source !== 'background_notification') {
+        this.handleAgentIdle();
+      }
     });
 
     // Note: Tool call updates are handled in handleSessionUpdate within QwenAgentManager

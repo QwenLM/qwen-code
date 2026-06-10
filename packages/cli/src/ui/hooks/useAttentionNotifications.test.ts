@@ -28,6 +28,7 @@ const mockTerminal: TerminalNotification = {
   notifyKitty: vi.fn(),
   notifyGhostty: vi.fn(),
   notifyBell: vi.fn(),
+  writeTerminalSequence: vi.fn(() => true),
 };
 
 const mockSettings: LoadedSettings = {

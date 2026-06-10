@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import {
   loadServerHierarchicalMemory,
   ConditionalRulesRegistry,
+  createInstructionsLoadedCallback,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
@@ -241,6 +242,12 @@ export const directoryCommand: SlashCommand = {
                 context.services.settings.merged.context?.importFormat ||
                   'tree', // Use setting or default to 'tree'
                 config.getContextRuleExcludes(),
+                {
+                  loadReason: 'refresh',
+                  onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+                    config.getHookSystem(),
+                  ),
+                },
               );
               config.setUserMemory(memoryContent);
               config.setGeminiMdFileCount(fileCount);

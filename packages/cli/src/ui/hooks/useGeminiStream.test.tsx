@@ -97,7 +97,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
   return {
     ...actualCoreModule,
-    GitService: vi.fn(),
     GeminiClient: MockedGeminiClientClass,
     UserPromptEvent: MockedUserPromptEvent,
     ApiCancelEvent: MockedApiCancelEvent,
@@ -221,7 +220,7 @@ describe('useGeminiStream', () => {
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
-      getCheckpointingEnabled: vi.fn(() => false),
+      getFileCheckpointingEnabled: vi.fn(() => false),
       getGeminiClient: mockGetGeminiClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getUsageStatisticsEnabled: () => true,
@@ -3959,6 +3958,22 @@ describe('useGeminiStream', () => {
         {
           reason: 'IMAGE_SAFETY',
           message: '⚠️  Response stopped due to image safety violations.',
+        },
+        {
+          reason: 'IMAGE_PROHIBITED_CONTENT',
+          message: '⚠️  Response stopped due to image prohibited content.',
+        },
+        {
+          reason: 'NO_IMAGE',
+          message: '⚠️  Response stopped due to no image.',
+        },
+        {
+          reason: 'IMAGE_RECITATION',
+          message: '⚠️  Response stopped due to image recitation policy.',
+        },
+        {
+          reason: 'IMAGE_OTHER',
+          message: '⚠️  Response stopped due to other image-related reasons.',
         },
         {
           reason: 'UNEXPECTED_TOOL_CALL',

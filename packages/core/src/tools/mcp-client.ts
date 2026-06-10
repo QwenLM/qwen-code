@@ -223,6 +223,7 @@ export class McpClient {
   private transport: Transport | undefined;
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
+  private instructions: string | undefined;
 
   constructor(
     private readonly serverName: string,
@@ -276,9 +277,11 @@ export class McpClient {
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
       });
+      this.instructions = this.client.getInstructions();
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
+      this.instructions = undefined;
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       throw error;
     }
@@ -342,6 +345,7 @@ export class McpClient {
       await this.transport.close();
     }
     this.client.close();
+    this.instructions = undefined;
   }
 
   /**
@@ -349,6 +353,10 @@ export class McpClient {
    */
   getStatus(): MCPServerStatus {
     return this.status;
+  }
+
+  getInstructions(): string | undefined {
+    return this.instructions;
   }
 
   async readResource(

@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import process from 'node:process';
 import { useCallback, useContext, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
@@ -105,6 +106,24 @@ function persistAuthTypeSelection(
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'security.auth.selectedType', authType);
+}
+
+function hydrateApiKeyEnvFromSettings(
+  settings: ReturnType<typeof useSettings>,
+  envKey: string | undefined,
+): void {
+  if (!envKey || process.env[envKey]) {
+    return;
+  }
+  const settingsEnvValue = (
+    settings?.merged?.env as Record<string, unknown> | undefined
+  )?.[envKey];
+  if (
+    typeof settingsEnvValue === 'string' &&
+    settingsEnvValue.trim().length > 0
+  ) {
+    process.env[envKey] = settingsEnvValue;
+  }
 }
 
 interface HandleModelSwitchSuccessParams {
@@ -271,6 +290,12 @@ export function ModelDialog({
                 [{t2}]
               </Text>
               <Text>{` ${model.label}`}</Text>
+              {model.id !== model.label && (
+                <Text color={theme.text.secondary} italic>
+                  {' '}
+                  ({model.id})
+                </Text>
+              )}
               {isRuntime && (
                 <Text color={theme.status.warning}> (Runtime)</Text>
               )}
@@ -390,6 +415,16 @@ export function ModelDialog({
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
+      const selectedEntry = availableModelEntries.find(
+        ({ authType: t2, model, isRuntime, snapshotId }) => {
+          const value =
+            isRuntime && snapshotId
+              ? snapshotId
+              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+          return value === selected;
+        },
+      );
+      hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
@@ -495,9 +530,14 @@ export function ModelDialog({
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        // Use parsed modelId for display to avoid showing raw selection key
+        // (which contains invisible \0 separator between modelId and baseUrl)
+        const displayModelId = isRuntime
+          ? effectiveModelId
+          : parseModelSelectionKey(selected).modelId;
         const errorPrefix = isRuntime
           ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+          : `Failed to switch model to '${displayModelId}'.`;
         setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
         return;
       }
@@ -520,6 +560,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      availableModelEntries,
     ],
   );
 

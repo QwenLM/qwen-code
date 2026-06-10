@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -464,6 +465,10 @@ export class LoadedSettings {
   }
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
+    // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+    if (key === 'model.name' && typeof value === 'string') {
+      value = stripRuntimeSnapshotPrefix(value);
+    }
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
@@ -473,6 +478,36 @@ export class LoadedSettings {
   }
 
   recomputeMerged(): void {
+    this._merged = this.computeMergedSettings();
+  }
+
+  reloadScopeFromDisk(scope: SettingScope): void {
+    const file = this.forScope(scope);
+    try {
+      if (!fs.existsSync(file.path)) {
+        file.settings = {};
+        file.originalSettings = {};
+        file.rawJson = undefined;
+        this._merged = this.computeMergedSettings();
+        return;
+      }
+
+      const content = fs.readFileSync(file.path, 'utf-8');
+      const parsed = JSON.parse(stripJsonComments(content));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const resolved = resolveEnvVarsInObject(
+          parsed as Settings,
+          getHomeEnvFallbackVars(),
+        );
+        file.settings = resolved;
+        file.originalSettings = structuredClone(parsed) as Settings;
+        file.rawJson = content;
+      }
+    } catch (err) {
+      debugLogger.warn(
+        `reloadScopeFromDisk(${scope}): ${getErrorMessage(err)}`,
+      );
+    }
     this._merged = this.computeMergedSettings();
   }
 

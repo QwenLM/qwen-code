@@ -35,11 +35,10 @@ import {
   resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
+  HookEventName,
   updateSetting,
   SessionEndReason,
   restoreWorktreeContext,
-  parse as parseYaml,
-  stringify as stringifyYaml,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -95,16 +94,20 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { gunzipSync } from 'node:zlib';
+import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
-import { loadCliConfig } from '../config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+} from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
@@ -225,13 +228,20 @@ function readPermissionRuleSet(settings: unknown): PermissionRuleSet {
 }
 
 function normalizePermissionRules(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value)) {
+    throw RequestError.invalidParams(undefined, 'rules must be an array');
+  }
   return Array.from(
     new Set(
-      value
-        .filter((item): item is string => typeof item === 'string')
-        .map((item) => item.trim())
-        .filter(Boolean),
+      value.map((item) => {
+        if (typeof item !== 'string' || !item.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'rules must contain only non-empty strings',
+          );
+        }
+        return item.trim();
+      }),
     ),
   );
 }
@@ -297,19 +307,7 @@ type GitHubBlobSkillUrl = {
 type QwenSettingsScope = 'user' | 'workspace';
 type QwenSettingValue = string | number | boolean | string[] | undefined;
 type QwenMcpTransport = 'stdio' | 'http' | 'sse';
-type QwenHookEvent =
-  | 'UserPromptSubmit'
-  | 'Stop'
-  | 'Notification'
-  | 'PreToolUse'
-  | 'PostToolUse'
-  | 'PostToolUseFailure'
-  | 'SessionStart'
-  | 'SessionEnd'
-  | 'PreCompact'
-  | 'SubagentStart'
-  | 'SubagentStop'
-  | 'PermissionRequest';
+type QwenHookEvent = HookEventName;
 
 type QwenCoreSettingKey =
   | 'model.name'
@@ -379,7 +377,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.language': { type: 'string' },
   'tools.approvalMode': {
     type: 'enum',
-    values: ['plan', 'default', 'auto-edit', 'yolo'],
+    values: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
@@ -412,25 +410,12 @@ const QWEN_CORE_SETTING_KEYS = Object.keys(
   QWEN_CORE_SETTING_DEFINITIONS,
 ) as QwenCoreSettingKey[];
 
-const QWEN_HOOK_EVENTS: QwenHookEvent[] = [
-  'UserPromptSubmit',
-  'Stop',
-  'Notification',
-  'PreToolUse',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'SessionStart',
-  'SessionEnd',
-  'PreCompact',
-  'SubagentStart',
-  'SubagentStop',
-  'PermissionRequest',
-];
+const QWEN_HOOK_EVENTS = Object.values(HookEventName) as QwenHookEvent[];
 
 const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
-  enableManagedAutoDream: false,
-  enableAutoSkill: false,
+  enableManagedAutoDream: true,
+  enableAutoSkill: true,
 };
 
 const QWEN_MEMORY_SETTING_KEYS = [
@@ -493,15 +478,30 @@ function readRequiredString(value: unknown, fieldName: string): string {
   return stringValue;
 }
 
+// Skill slugs are used to build filesystem paths under `<globalQwenDir>/skills`.
+// The character allowlist below already excludes `/` and `\`, but `.` and `..`
+// would still slip through and let `path.join` traverse out of the skills dir
+// (e.g. slug `..` resolves to the global config dir). Reject them explicitly.
+function validateSkillSlug(slug: string): void {
+  if (
+    !slug ||
+    slug === '.' ||
+    slug === '..' ||
+    slug.includes('/') ||
+    slug.includes(path.sep) ||
+    !/^[a-zA-Z0-9._-]+$/.test(slug)
+  ) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+}
+
 function readSkillInstallRequest(
   params: Record<string, unknown>,
 ): QwenSkillInstallRequest {
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global') {
@@ -531,9 +531,7 @@ function readSkillSlugRequest(
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global') {
@@ -552,9 +550,7 @@ function readSkillSetEnabledRequest(
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global' && scope !== 'project') {
@@ -597,23 +593,82 @@ function splitSkillMarkdown(content: string): {
 
 function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   const { frontmatter, body } = splitSkillMarkdown(content);
-  const parsed = parseYaml(frontmatter);
+
+  // Surgically add/remove only the top-level `disable-model-invocation:` line
+  // instead of round-tripping the whole frontmatter through a YAML
+  // parse/stringify. The minimal core YAML serializer drops comments and
+  // flattens nested structures (e.g. `hooks:`), so reserializing here would
+  // corrupt hooks-bearing skills and strip user comments. Working on the raw
+  // text leaves every other byte untouched.
+  const lines = frontmatter.split('\n');
+  const disabledLineIndex = lines.findIndex((line) =>
+    /^disable-model-invocation\s*:/.test(line),
+  );
+
   if (enabled) {
-    delete parsed['disable-model-invocation'];
+    if (disabledLineIndex !== -1) {
+      lines.splice(disabledLineIndex, 1);
+    }
+  } else if (disabledLineIndex !== -1) {
+    lines[disabledLineIndex] = 'disable-model-invocation: true';
   } else {
-    parsed['disable-model-invocation'] = true;
+    let insertIndex = lines.length;
+    while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
+      insertIndex -= 1;
+    }
+    lines.splice(insertIndex, 0, 'disable-model-invocation: true');
   }
 
-  const nextFrontmatter = stringifyYaml(parsed);
+  const nextFrontmatter = lines.join('\n');
   return `---\n${nextFrontmatter}\n---\n${body}`;
+}
+
+// Skill downloads must come from the GitHub host set. Restricting the host
+// here prevents the client-supplied `sourceUrl` from driving server-side
+// fetches at internal/loopback/link-local endpoints (SSRF), e.g.
+// `http://169.254.169.254/` cloud-metadata or `http://localhost:<port>/`.
+const ALLOWED_SKILL_SOURCE_HOSTS = new Set([
+  'github.com',
+  'raw.githubusercontent.com',
+  'codeload.github.com',
+  'api.github.com',
+]);
+
+function assertAllowedSkillSourceUrl(sourceUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl must be a valid URL',
+    );
+  }
+  // Require HTTPS: a plaintext http: fetch of skill content (which can include
+  // executable hooks) is MITM-able by a network-position attacker, so the host
+  // allowlist alone is not sufficient. All supported GitHub hosts serve HTTPS.
+  if (parsed.protocol !== 'https:') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl must be an HTTPS URL',
+    );
+  }
+  if (!ALLOWED_SKILL_SOURCE_HOSTS.has(parsed.hostname)) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl host is not allowed (only github.com sources are supported)',
+    );
+  }
 }
 
 function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
   const parsed = new URL(sourceUrl);
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+  // HTTPS-only, consistent with assertAllowedSkillSourceUrl (skill content can
+  // include executable hooks, so plaintext http: is MITM-able).
+  if (parsed.protocol !== 'https:') {
     throw RequestError.invalidParams(
       undefined,
-      'Skill sourceUrl must be an HTTP(S) URL',
+      'Skill sourceUrl must be an HTTPS URL',
     );
   }
 
@@ -678,13 +733,92 @@ function stripArchiveRoot(filePath: string): string {
   return parts.length > 1 ? parts.slice(1).join('/') : '';
 }
 
-function extractFilesFromTarGz(
+// Bound the work done on untrusted skill archives so a malicious or oversized
+// download cannot exhaust memory. Decompression is streamed (createGunzip) and
+// aborted the moment the cumulative inflated size crosses the cap, so a
+// decompression bomb can never fully inflate into memory.
+const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
+const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
+// Bounds for the GitHub Contents-API directory walk (the archive path is
+// already bounded by the byte caps above).
+const MAX_SKILL_API_DIR_DEPTH = 16;
+const MAX_SKILL_API_FILE_COUNT = 2000;
+
+// Sentinel so the streaming decompression's size-limit abort can be told apart
+// from a genuine gunzip/format error in the catch below.
+class DecompressedSizeExceededError extends Error {}
+
+export async function extractFilesFromTarGz(
   archiveBytes: Uint8Array,
   directoryPath: string,
-): DownloadedSkillFile[] {
-  const archive = gunzipSync(archiveBytes);
+  // Limits are injectable so the size-guard branches can be exercised in tests
+  // without allocating the 100MB/500MB production thresholds.
+  limits: {
+    maxCompressedBytes?: number;
+    maxDecompressedBytes?: number;
+  } = {},
+): Promise<DownloadedSkillFile[]> {
+  const maxCompressedBytes =
+    limits.maxCompressedBytes ?? MAX_SKILL_DOWNLOAD_BYTES;
+  const maxDecompressedBytes =
+    limits.maxDecompressedBytes ?? MAX_SKILL_DECOMPRESSED_BYTES;
+
+  if (archiveBytes.length > maxCompressedBytes) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill archive exceeds the maximum allowed size',
+    );
+  }
+
+  let archive: Buffer;
+  try {
+    // Stream the inflate so we can abort as soon as the cumulative output
+    // exceeds the cap, instead of materializing the entire decompressed buffer
+    // first (a ~1000:1 gzip ratio could otherwise inflate a small archive to
+    // many GB before any post-hoc length check fires).
+    const chunks: Buffer[] = [];
+    let total = 0;
+    await pipeline(
+      // Wrap in an array so the whole archive is emitted as a single chunk;
+      // `Readable.from(uint8array)` would otherwise iterate it byte-by-byte.
+      Readable.from([Buffer.from(archiveBytes)]),
+      createGunzip(),
+      new Writable({
+        write(chunk: Buffer, _enc, cb) {
+          total += chunk.length;
+          if (total > maxDecompressedBytes) {
+            cb(new DecompressedSizeExceededError());
+            return;
+          }
+          chunks.push(chunk);
+          cb();
+        },
+      }),
+    );
+    archive = Buffer.concat(chunks);
+  } catch (error) {
+    if (error instanceof DecompressedSizeExceededError) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Decompressed skill archive exceeds the maximum allowed size',
+      );
+    }
+    throw RequestError.invalidParams(
+      undefined,
+      `Failed to decompress skill archive: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
   const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
-  const directoryPrefix = normalizedDirectory ? `${normalizedDirectory}/` : '';
+  // Treat '.' (SKILL.md at the repository root) as the empty prefix; otherwise
+  // the prefix becomes './' and never matches the root-stripped archive paths
+  // (e.g. 'SKILL.md'), yielding zero extracted files.
+  const directoryPrefix =
+    normalizedDirectory && normalizedDirectory !== '.'
+      ? `${normalizedDirectory}/`
+      : '';
   const files: DownloadedSkillFile[] = [];
 
   for (let offset = 0; offset + 512 <= archive.length; ) {
@@ -715,15 +849,140 @@ function extractFilesFromTarGz(
   return files;
 }
 
+// GitHub host suffixes a download may legitimately redirect to (raw/codeload
+// commonly 302 to their object CDN for geo/CDN routing). Redirects to anything
+// outside these are rejected, preserving the SSRF guard while not breaking
+// real downloads.
+const ALLOWED_REDIRECT_HOST_SUFFIXES = [
+  '.githubusercontent.com',
+  '.github.com',
+  // Note: '.github.io' is intentionally excluded — *.github.io are
+  // user-controlled GitHub Pages sites, so allowing redirects there would
+  // reopen the SSRF/exfiltration surface this allowlist exists to close.
+];
+
+function isAllowedSkillFetchHost(hostname: string): boolean {
+  if (ALLOWED_SKILL_SOURCE_HOSTS.has(hostname)) return true;
+  return ALLOWED_REDIRECT_HOST_SUFFIXES.some((suffix) =>
+    hostname.endsWith(suffix),
+  );
+}
+
+/**
+ * Fetch that follows redirects manually, validating every hop stays on an
+ * allowed GitHub host over HTTPS. This keeps the SSRF protection of
+ * `redirect: 'manual'` (a malicious repo cannot bounce the fetch to an internal
+ * endpoint) while still following GitHub's legitimate CDN redirects, which
+ * plain `redirect: 'manual'` would surface as a download failure.
+ */
+export async function fetchAllowedGitHub(
+  url: string,
+  init: RequestInit = {},
+  maxRedirects = 5,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+    const location = response.headers?.get('location');
+    if (!location) return response;
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download redirected to an invalid URL',
+      );
+    }
+    if (next.protocol !== 'https:' || !isAllowedSkillFetchHost(next.hostname)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download redirected to a disallowed host',
+      );
+    }
+    current = next.toString();
+  }
+  throw RequestError.invalidParams(
+    undefined,
+    'Skill download exceeded the maximum number of redirects',
+  );
+}
+
+// Read a response body while enforcing a hard byte cap against the *actual*
+// streamed bytes. The Content-Length pre-checks at the call sites are advisory
+// only — a server that omits the header (chunked transfer, CDN redirect) could
+// otherwise stream an arbitrarily large body straight into memory via
+// `arrayBuffer()`.
+async function readBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const body = response.body;
+  if (!body) {
+    const buf = new Uint8Array(await response.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+    return buf;
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+    chunks.push(value);
+  }
+
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url);
+  const response = await fetchAllowedGitHub(url);
   if (!response.ok) {
     throw RequestError.invalidParams(
       undefined,
       `Failed to download skill (${response.status})`,
     );
   }
-  return new Uint8Array(await response.arrayBuffer());
+
+  const contentLength = response.headers?.get('content-length');
+  if (contentLength) {
+    const declaredSize = Number.parseInt(contentLength, 10);
+    if (
+      Number.isFinite(declaredSize) &&
+      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+  }
+
+  return readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES);
 }
 
 async function downloadSingleSkillFile(
@@ -742,8 +1001,10 @@ async function downloadGitHubSkillDirectoryFromArchive(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
 ): Promise<DownloadedSkillFile[]> {
-  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${githubUrl.ref}`;
-  const response = await fetch(archiveUrl, {
+  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${encodeURIComponent(
+    githubUrl.ref,
+  )}`;
+  const response = await fetchAllowedGitHub(archiveUrl, {
     headers: {
       'User-Agent': 'qwen-code',
     },
@@ -755,8 +1016,24 @@ async function downloadGitHubSkillDirectoryFromArchive(
     );
   }
 
+  // Reject oversized archives by declared Content-Length before buffering the
+  // whole body into memory, mirroring the guard in fetchBytes.
+  const contentLength = response.headers?.get('content-length');
+  if (contentLength) {
+    const declaredSize = Number.parseInt(contentLength, 10);
+    if (
+      Number.isFinite(declaredSize) &&
+      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill archive exceeds the maximum allowed size',
+      );
+    }
+  }
+
   return extractFilesFromTarGz(
-    new Uint8Array(await response.arrayBuffer()),
+    await readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES),
     directoryPath,
   );
 }
@@ -767,7 +1044,7 @@ async function fetchGitHubDirectoryItems(
 ): Promise<unknown[]> {
   const encodedPath = encodeGitHubPath(directoryPath);
   const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
-  const response = await fetch(apiUrl, {
+  const response = await fetchAllowedGitHub(apiUrl, {
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': 'qwen-code',
@@ -794,7 +1071,19 @@ async function downloadGitHubSkillDirectoryFromApi(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
   relativeRoot = '',
+  // Bound the recursive API walk so a crafted repo (deeply nested dirs, huge
+  // file counts, or large cumulative size) can't exhaust memory/time. The
+  // archive fallback already enforces size caps; this gives the API path
+  // equivalent guards.
+  depth = 0,
+  budget: { files: number; bytes: number } = { files: 0, bytes: 0 },
 ): Promise<DownloadedSkillFile[]> {
+  if (depth > MAX_SKILL_API_DIR_DEPTH) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill directory nesting exceeds the maximum allowed depth',
+    );
+  }
   const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
   const files: DownloadedSkillFile[] = [];
 
@@ -813,19 +1102,39 @@ async function downloadGitHubSkillDirectoryFromApi(
           githubUrl,
           itemPath,
           relativePath,
+          depth + 1,
+          budget,
         )),
       );
       continue;
     }
 
     if (type !== 'file') continue;
+    budget.files += 1;
+    if (budget.files > MAX_SKILL_API_FILE_COUNT) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill directory contains too many files',
+      );
+    }
     const downloadUrl = readRequiredString(
       record['download_url'],
       'github.download_url',
     );
+    // SSRF defense: the API-provided download_url is attacker-influenced, so
+    // run it through the same host allowlist + HTTPS check as the initial URL.
+    assertAllowedSkillSourceUrl(downloadUrl);
+    const content = await fetchBytes(downloadUrl);
+    budget.bytes += content.length;
+    if (budget.bytes > MAX_SKILL_DECOMPRESSED_BYTES) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill directory exceeds the maximum allowed size',
+      );
+    }
     files.push({
       relativePath,
-      content: await fetchBytes(downloadUrl),
+      content,
     });
   }
 
@@ -839,13 +1148,20 @@ async function downloadGitHubSkillDirectory(
   const apiFiles = await downloadGitHubSkillDirectoryFromApi(
     githubUrl,
     directoryPath,
-  ).catch(() => null);
+  ).catch((error) => {
+    debugLogger.warn(
+      'GitHub API directory listing failed, falling back to archive download:',
+      error,
+    );
+    return null;
+  });
   if (apiFiles) return apiFiles;
 
   return downloadGitHubSkillDirectoryFromArchive(githubUrl, directoryPath);
 }
 
 async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {
+  assertAllowedSkillSourceUrl(sourceUrl);
   const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
   if (!githubUrl || path.posix.basename(githubUrl.filePath) !== 'SKILL.md') {
     return downloadSingleSkillFile(sourceUrl);
@@ -880,6 +1196,18 @@ function resolveSkillInstallPath(
     );
   }
   return target;
+}
+
+// Builds the per-skill directory and asserts (defense-in-depth, on top of
+// validateSkillSlug) that it stays strictly under the managed skills root, so a
+// crafted slug can never make install/delete operate on `<globalQwenDir>` itself.
+function resolveManagedSkillDir(skillsBaseDir: string, slug: string): string {
+  const root = path.resolve(skillsBaseDir);
+  const skillDir = path.resolve(skillsBaseDir, slug);
+  if (!skillDir.startsWith(root + path.sep)) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+  return skillDir;
 }
 
 function readStringArray(value: unknown, fieldName: string): string[] {
@@ -1087,10 +1415,33 @@ function readExistingProviderConfig(
   return {
     protocol,
     baseUrl,
-    ...(apiKey ? { apiKey } : {}),
+    // Never serialize the raw secret over the ACP wire. Expose only whether a
+    // key is stored; the client can omit `apiKey` on connect to keep it.
+    ...(apiKey ? { hasApiKey: true } : {}),
     ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
+}
+
+// Resolves the raw, stored API key for a provider for server-side use only
+// (never serialized to the client). Used so `qwen/providers/connect` can keep
+// the existing key when the client updates other fields without resubmitting it.
+function resolveExistingProviderApiKey(
+  config: ProviderConfig,
+  settings: LoadedSettings,
+): string | undefined {
+  const existing = findExistingProviderModels(config, settings);
+  const firstModel = existing?.models[0];
+  const protocol = existing?.protocol ?? config.protocol;
+  const baseUrl =
+    typeof firstModel?.baseUrl === 'string'
+      ? firstModel.baseUrl
+      : resolveBaseUrl(config);
+  const envKey =
+    typeof firstModel?.envKey === 'string'
+      ? firstModel.envKey
+      : resolveProviderEnvKey(config, protocol, baseUrl);
+  return readSettingsEnv(settings, envKey);
 }
 
 function serializeProviderConfig(
@@ -1128,6 +1479,7 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
+  existingApiKey?: string,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1157,7 +1509,13 @@ function readProviderSetupInputs(
     );
   }
 
-  const apiKey = readRequiredString(params['apiKey'], 'apiKey');
+  // `apiKey` is optional on update: when the client omits it (e.g. it only
+  // received `hasApiKey` from the list response), fall back to the stored key.
+  const apiKey =
+    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+  if (!apiKey) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
+  }
   const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
   if (apiKeyError) {
     throw RequestError.invalidParams(undefined, apiKeyError);
@@ -1229,7 +1587,7 @@ function readCoreSettingValues(
   return values;
 }
 
-function normalizeCoreSettingValue(
+export function normalizeCoreSettingValue(
   key: QwenCoreSettingKey,
   value: unknown,
 ): QwenSettingValue {
@@ -1261,12 +1619,25 @@ function normalizeCoreSettingValue(
       }
       return value;
     }
-    case 'string':
+    case 'string': {
       if (value === undefined) return undefined;
       if (typeof value !== 'string') {
         throw RequestError.invalidParams(undefined, `${key} must be a string`);
       }
-      return value.trim();
+      // Strip control characters (incl. newlines) from string settings. Some
+      // are embedded verbatim into instruction files / prompts — e.g.
+      // general.outputLanguage is written into output-language.md, loaded as a
+      // system instruction — where an embedded newline could forge a new
+      // instruction line (persistent prompt injection).
+      // eslint-disable-next-line no-control-regex
+      const controlChars = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+      const sanitized = value.replace(controlChars, ' ').trim();
+      // An input that is entirely control/whitespace chars (e.g. '\n') trims to
+      // ''. For settings like model.name an empty string has different
+      // semantics from undefined (a literal empty value vs. falling back to the
+      // default), so collapse the empty result to undefined.
+      return sanitized || undefined;
+    }
     default:
       throw RequestError.invalidParams(
         undefined,
@@ -1303,7 +1674,7 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const numberValue =
     typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue < 0) {
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
     throw RequestError.invalidParams(undefined, 'Expected a positive number');
   }
   return numberValue;
@@ -1452,6 +1823,138 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
   return undefined;
 }
 
+// Placeholder substituted for MCP secret values in settings responses. Keys
+// are preserved so the client can show which env vars / headers are configured
+// without ever receiving the plaintext value. Clients must treat this sentinel
+// as "unchanged" and not echo it back through setMcpServer.
+const REDACTED_MCP_SECRET = '__redacted__';
+
+function redactMcpServerSecrets(
+  server: QwenMcpServerConfig,
+): QwenMcpServerConfig {
+  const redactValues = (record?: Record<string, string>) =>
+    record
+      ? Object.fromEntries(
+          Object.keys(record).map((key) => [key, REDACTED_MCP_SECRET]),
+        )
+      : record;
+  return {
+    ...server,
+    env: redactValues(server.env),
+    headers: redactValues(server.headers),
+  };
+}
+
+/**
+ * Reverse of redaction on write: when a client echoes back the
+ * `__redacted__` sentinel (because it read the masked value via getCore and
+ * re-submitted the whole config), restore the previously stored real value
+ * instead of persisting the literal sentinel. Keys with no prior value are
+ * dropped, since there is no secret to restore.
+ */
+function restoreRedactedMcpSecrets(
+  server: QwenMcpServerConfig,
+  existing: Record<string, unknown>,
+): QwenMcpServerConfig {
+  const restore = (
+    incoming: Record<string, string> | undefined,
+    prior: unknown,
+  ): Record<string, string> | undefined => {
+    if (!incoming) return incoming;
+    const priorRecord = toRecord(prior);
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(incoming)) {
+      if (value !== REDACTED_MCP_SECRET) {
+        result[key] = value;
+        continue;
+      }
+      const priorValue = priorRecord[key];
+      if (typeof priorValue === 'string') {
+        result[key] = priorValue;
+      }
+    }
+    return result;
+  };
+  return {
+    ...server,
+    env: restore(server.env, existing['env']),
+    headers: restore(server.headers, existing['headers']),
+  };
+}
+
+function redactSecretRecord(
+  record: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  return record
+    ? Object.fromEntries(
+        Object.keys(record).map((key) => [key, REDACTED_MCP_SECRET]),
+      )
+    : record;
+}
+
+function restoreSecretRecord(
+  incoming: Record<string, string> | undefined,
+  prior: unknown,
+): Record<string, string> | undefined {
+  if (!incoming) return incoming;
+  const priorRecord = toRecord(prior);
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== REDACTED_MCP_SECRET) {
+      result[key] = value;
+      continue;
+    }
+    const priorValue = priorRecord[key];
+    if (typeof priorValue === 'string') result[key] = priorValue;
+  }
+  return result;
+}
+
+// Hooks carry the same secret classes as MCP servers — command-hook `env`
+// (tokens passed to scripts) and http-hook `headers` (auth). Mask them in the
+// settings response and restore them on write, mirroring the MCP scheme.
+function redactHookSecrets(hook: QwenHookDefinition): QwenHookDefinition {
+  return {
+    ...hook,
+    hooks: hook.hooks.map((config) => ({
+      ...config,
+      ...(config.env ? { env: redactSecretRecord(config.env) } : {}),
+      ...(config.headers
+        ? { headers: redactSecretRecord(config.headers) }
+        : {}),
+    })),
+  };
+}
+
+function restoreRedactedHookSecrets(
+  hook: QwenHookDefinition,
+  prior: Record<string, unknown>,
+): QwenHookDefinition {
+  const priorHooks = Array.isArray(prior['hooks'])
+    ? (prior['hooks'] as unknown[])
+    : [];
+  return {
+    ...hook,
+    hooks: hook.hooks.map((config, i) => {
+      const priorConfig = toRecord(priorHooks[i]);
+      return {
+        ...config,
+        ...(config.env
+          ? { env: restoreSecretRecord(config.env, priorConfig['env']) }
+          : {}),
+        ...(config.headers
+          ? {
+              headers: restoreSecretRecord(
+                config.headers,
+                priorConfig['headers'],
+              ),
+            }
+          : {}),
+      };
+    }),
+  };
+}
+
 function readMcpServers(
   source: Record<string, unknown>,
   scope: QwenSettingsScope | 'extension',
@@ -1465,7 +1968,11 @@ function readMcpServers(
     .map(([name, value]) => {
       try {
         const server = toMcpServerConfig(value);
-        return server ? { name, scope, server } : undefined;
+        // Never expose stdio env or http/sse auth headers in plaintext in the
+        // settings response — they routinely hold API keys / tokens.
+        return server
+          ? { name, scope, server: redactMcpServerSecrets(server) }
+          : undefined;
       } catch (error) {
         debugLogger.warn(
           `Skipping malformed MCP server config [${scope}:${name}]:`,
@@ -1585,7 +2092,7 @@ function readHooks(
           event,
           scope,
           index,
-          hook: normalizeHookDefinition(hookValue),
+          hook: redactHookSecrets(normalizeHookDefinition(hookValue)),
           extensionName,
         });
       } catch (error) {
@@ -1635,15 +2142,6 @@ async function resolvePreferredMemoryFile(
   return path.join(dir, fallbackFilename);
 }
 
-async function ensureMemoryFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.access(filePath);
-  } catch {
-    await fs.writeFile(filePath, '', 'utf-8');
-  }
-}
-
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
@@ -1659,12 +2157,11 @@ async function resolveQwenMemoryPaths(params: {
   );
   const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
 
-  await Promise.all([
-    ensureMemoryFile(userMemoryFile),
-    ensureMemoryFile(projectMemoryFile),
-    fs.mkdir(autoMemoryDir, { recursive: true }),
-  ]);
-
+  // Resolve-only: `getMemoryPaths` is a read query, so it must not create
+  // files or directories as a side effect (the old code ran ensureMemoryFile
+  // + fs.mkdir on every call, including against a client-controlled
+  // projectRoot). Callers that write memory are responsible for ensuring the
+  // target exists.
   return {
     userMemoryFile,
     projectMemoryFile,
@@ -1770,6 +2267,7 @@ export async function runAcpAgent(
 
     // Fire SessionEnd hook for all active sessions (aligned with core path)
     await fireSessionEndOnce(SessionEndReason.Other);
+    agentInstance?.disposeSessions();
 
     try {
       process.stdin.destroy();
@@ -1798,6 +2296,7 @@ export async function runAcpAgent(
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
   await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+  agentInstance?.disposeSessions();
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -1834,6 +2333,13 @@ class QwenAgent implements Agent {
 
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  disposeSessions(): void {
+    for (const session of this.sessions.values()) {
+      session.dispose();
+    }
+    this.sessions.clear();
   }
 
   constructor(
@@ -2205,7 +2711,7 @@ class QwenAgent implements Agent {
     try {
       const extensionManager = new ExtensionManager({
         workspaceDir: cwd,
-        isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+        isWorkspaceTrusted: settings.isTrusted,
       });
       await extensionManager.refreshCache();
       extensions = extensionManager.getLoadedExtensions();
@@ -2268,7 +2774,10 @@ class QwenAgent implements Agent {
       }),
     );
 
-    const extensionMcpServers = extensions.flatMap((extension) =>
+    const activeExtensions = extensions.filter(
+      (extension) => extension.isActive,
+    );
+    const extensionMcpServers = activeExtensions.flatMap((extension) =>
       readMcpServers(
         { mcpServers: extension.config.mcpServers ?? {} },
         'extension',
@@ -2277,9 +2786,32 @@ class QwenAgent implements Agent {
         server: { ...entry.server, extensionName: extension.name },
       })),
     );
-    const extensionHooks = extensions.flatMap((extension) =>
+    const extensionHooks = activeExtensions.flatMap((extension) =>
       readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
     );
+
+    // Build the merged MCP/hook lists from the user and workspace settings
+    // separately so each entry keeps its real scope label. Reading
+    // mergedSettings with a single 'workspace' label mislabeled user-scope
+    // servers/hooks. MCP servers are keyed by name, so dedupe with workspace
+    // overriding user (matching the merged/effective semantics); hooks stack
+    // across scopes, so they are concatenated.
+    const mergedMcpByName = new Map<
+      string,
+      ReturnType<typeof readMcpServers>[number]
+    >();
+    for (const entry of readMcpServers(userSettings, 'user')) {
+      mergedMcpByName.set(entry.name, entry);
+    }
+    if (settings.isTrusted) {
+      for (const entry of readMcpServers(workspaceSettings, 'workspace')) {
+        mergedMcpByName.set(entry.name, entry);
+      }
+    }
+    const mergedHooks = [
+      ...readHooks(userSettings, 'user'),
+      ...(settings.isTrusted ? readHooks(workspaceSettings, 'workspace') : []),
+    ];
 
     return {
       user: {
@@ -2296,11 +2828,8 @@ class QwenAgent implements Agent {
       },
       merged: {
         values: readCoreSettingValues(mergedSettings),
-        mcpServers: [
-          ...readMcpServers(mergedSettings, 'workspace'),
-          ...extensionMcpServers,
-        ],
-        hooks: [...readHooks(mergedSettings, 'workspace'), ...extensionHooks],
+        mcpServers: [...mergedMcpByName.values(), ...extensionMcpServers],
+        hooks: [...mergedHooks, ...extensionHooks],
       },
       extensions: extensionEntries,
       isTrusted: settings.isTrusted,
@@ -2322,11 +2851,22 @@ class QwenAgent implements Agent {
       for (const session of this.sessions.values()) {
         const pm = session.getConfig().getPermissionManager?.();
         if (!pm) continue;
-        for (const rule of removed) {
-          pm.removePersistentRule(rule, ruleType);
-        }
-        for (const rule of added) {
-          pm.addPersistentRule(rule, ruleType);
+        // Isolate per-session failures: a stale/broken permission manager for
+        // one session must not abort syncing the rest (settings are already
+        // persisted, so the in-memory sync is best-effort).
+        try {
+          for (const rule of removed) {
+            pm.removePersistentRule(rule, ruleType);
+          }
+          for (const rule of added) {
+            pm.addPersistentRule(rule, ruleType);
+          }
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to sync permission rules to a live session: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         }
       }
     }
@@ -3130,11 +3670,8 @@ class QwenAgent implements Agent {
     }
 
     const download = await downloadSkill(request.sourceUrl);
-    const skillDir = path.join(
-      Storage.getGlobalQwenDir(),
-      'skills',
-      request.slug,
-    );
+    const skillsBaseDir = path.join(Storage.getGlobalQwenDir(), 'skills');
+    const skillDir = resolveManagedSkillDir(skillsBaseDir, request.slug);
     const skillFile = path.join(skillDir, 'SKILL.md');
     const parsed = skillManager.parseSkillContent(
       download.skillContent,
@@ -3148,10 +3685,31 @@ class QwenAgent implements Agent {
       );
     }
 
-    for (const file of download.files) {
-      const targetPath = resolveSkillInstallPath(skillDir, file.relativePath);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, file.content);
+    // Install atomically: stage all files in a sibling temp directory, then
+    // swap it in with a single rename. A mid-write failure (disk full,
+    // permission error) therefore leaves the previously installed skill
+    // intact instead of deleting it up front and ending up with a partial
+    // install. Removing the old dir before writing also dropped orphaned
+    // files from older versions; the rename preserves that property.
+    const stagingDir = `${skillDir}.installing-${process.pid}-${Date.now()}`;
+    try {
+      await fs.rm(stagingDir, { recursive: true, force: true });
+      for (const file of download.files) {
+        const targetPath = resolveSkillInstallPath(
+          stagingDir,
+          file.relativePath,
+        );
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, file.content);
+      }
+      // stagingDir is a sibling of skillDir (same filesystem), so the rename
+      // is atomic; the only gap is between the rm and rename, during which
+      // the fully-staged copy still exists for recovery.
+      await fs.rm(skillDir, { recursive: true, force: true });
+      await fs.rename(stagingDir, skillDir);
+    } catch (error) {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
     }
     await skillManager.refreshCache();
 
@@ -3188,6 +3746,27 @@ class QwenAgent implements Agent {
       );
     }
 
+    // Guard the recursive delete: readManagedSkillFile's generic fallback can
+    // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
+    // the directory that directly contains the SKILL.md we just validated, and
+    // never a filesystem root or the global Qwen dir itself, so a malformed
+    // skill entry can't trigger a destructive rm of a shared/parent directory.
+    const resolvedSkillDir = path.resolve(skillDir);
+    const resolvedSkillFile = path.resolve(skillFile);
+    const globalDir = path.resolve(Storage.getGlobalQwenDir());
+    const isDedicatedSkillDir =
+      resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
+    if (
+      !isDedicatedSkillDir ||
+      resolvedSkillDir === path.parse(resolvedSkillDir).root ||
+      resolvedSkillDir === globalDir
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Refusing to delete unexpected skill directory: ${skillDir}`,
+      );
+    }
+
     await fs.rm(skillDir, { recursive: true, force: true });
     await skillManager.refreshCache();
     return {
@@ -3203,9 +3782,8 @@ class QwenAgent implements Agent {
     cwd?: string,
   ): Promise<QwenManagedSkillFile> {
     if (scope === 'global') {
-      const qwenSkillDir = path.join(
-        Storage.getGlobalQwenDir(),
-        'skills',
+      const qwenSkillDir = resolveManagedSkillDir(
+        path.join(Storage.getGlobalQwenDir(), 'skills'),
         slug,
       );
       const qwenSkillFile = path.join(qwenSkillDir, 'SKILL.md');
@@ -3312,6 +3890,16 @@ class QwenAgent implements Agent {
 
     const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
     skillManager.parseSkillContent(nextContent, skillFile, level);
+    // Defense-in-depth (consistent with deleteGlobalSkill): readManagedSkillFile's
+    // generic fallback can resolve skillFile from listSkills() to an arbitrary
+    // path. We only ever write back to the SKILL.md manifest we just read and
+    // whose parsed name matched the slug, so refuse to write anything else.
+    if (path.basename(skillFile) !== 'SKILL.md') {
+      throw RequestError.invalidParams(
+        undefined,
+        `Refusing to write to unexpected skill file: ${skillFile}`,
+      );
+    }
     await fs.writeFile(skillFile, nextContent, 'utf8');
     await skillManager.refreshCache();
     return {
@@ -3351,7 +3939,11 @@ class QwenAgent implements Agent {
           );
         }
 
-        const inputs = readProviderSetupInputs(providerConfig, params);
+        const inputs = readProviderSetupInputs(
+          providerConfig,
+          params,
+          resolveExistingProviderApiKey(providerConfig, this.settings),
+        );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
         await applyProviderInstallPlan(plan, {
@@ -3386,14 +3978,18 @@ class QwenAgent implements Agent {
         );
       }
       case 'qwen/settings/getMemory': {
+        const settings = loadSettings(cwd);
+        this.settings = settings;
         return {
-          settings: normalizeQwenMemorySettings(
-            this.settings.user.settings.memory,
-          ),
+          settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
       }
       case 'qwen/settings/setMemory': {
         const updates = toRecord(params['updates']);
+        // Mutate a freshly loaded settings object and adopt it, mirroring the
+        // other settings mutation handlers, instead of writing through the
+        // possibly-stale cached `this.settings` and reading it back.
+        const settings = loadSettings(cwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -3402,16 +3998,11 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
-          this.settings.setValue(
-            SettingScope.User,
-            `memory.${key}`,
-            updates[key],
-          );
+          settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
+        this.settings = settings;
         return {
-          settings: normalizeQwenMemorySettings(
-            this.settings.user.settings.memory,
-          ),
+          settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
       }
       case 'qwen/settings/getPath': {
@@ -3747,11 +4338,13 @@ class QwenAgent implements Agent {
             updates.push(update);
           },
         };
+        let replayError: string | undefined;
         try {
           await new HistoryReplayer(replayContext).replay(
             sessionData.conversation.messages,
           );
         } catch (error) {
+          replayError = error instanceof Error ? error.message : String(error);
           debugLogger.warn(
             '[loadUpdates] History replay failed for session %s (partial updates: %d):',
             sessionId,
@@ -3775,6 +4368,9 @@ class QwenAgent implements Agent {
           updates: updatesWithTopLevelTimestamps,
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
+          // Signal to the client that replay aborted partway so it doesn't
+          // render a truncated replay as the full conversation.
+          ...(replayError !== undefined ? { partial: true, replayError } : {}),
         };
       }
       case 'restoreSessionHistory': {
@@ -3837,20 +4433,24 @@ class QwenAgent implements Agent {
           settingKey,
           params['value'],
         );
-        settings.setValue(
-          toSettingsScope(params['scope']),
-          key,
-          normalizedValue,
-        );
+        const scope = toSettingsScope(params['scope']);
+        settings.setValue(scope, key, normalizedValue);
         if (
           settingKey === 'general.outputLanguage' &&
-          typeof normalizedValue === 'string'
+          typeof normalizedValue === 'string' &&
+          scope === SettingScope.User
         ) {
+          // output-language.md is a single global instruction file. Only a
+          // user-scoped change should rewrite it; a workspace-scoped change is
+          // persisted to the workspace settings file and must not clobber the
+          // global file (which would silently affect every other workspace and
+          // session).
           updateOutputLanguageFile(normalizedValue);
         }
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setMcpServer': {
         const name = params['name'];
@@ -3865,16 +4465,21 @@ class QwenAgent implements Agent {
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
+        const existingServers = toRecord(existing['mcpServers']);
         const mcpServers = {
-          ...toRecord(existing['mcpServers']),
+          ...existingServers,
           [name.trim()]: toStoredMcpServerConfig(
-            normalizeMcpServerConfig(params['server']),
+            restoreRedactedMcpSecrets(
+              normalizeMcpServerConfig(params['server']),
+              toRecord(existingServers[name.trim()]),
+            ),
           ),
         };
         settings.setValue(settingScope, 'mcpServers', mcpServers);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/removeMcpServer': {
         const name = params['name'];
@@ -3892,9 +4497,10 @@ class QwenAgent implements Agent {
         const mcpServers = { ...toRecord(existing['mcpServers']) };
         delete mcpServers[name.trim()];
         settings.setValue(settingScope, 'mcpServers', mcpServers);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setHook': {
         const event = params['event'];
@@ -3910,18 +4516,38 @@ class QwenAgent implements Agent {
         const eventHooks = Array.isArray(hooksRoot[event])
           ? [...(hooksRoot[event] as unknown[])]
           : [];
-        const hook = normalizeHookDefinition(params['hook']);
+        const incomingHook = normalizeHookDefinition(params['hook']);
         const index = params['index'];
-        if (typeof index === 'number' && index >= 0) {
-          eventHooks[index] = hook;
+        // Only replace when the index points at an existing entry. An
+        // out-of-range index would create sparse-array holes that serialize to
+        // `null` in settings.json and corrupt hook loading, so treat it (and a
+        // missing/negative index) as an append.
+        const isReplace =
+          typeof index === 'number' &&
+          Number.isInteger(index) &&
+          index >= 0 &&
+          index < eventHooks.length;
+        // Restore any `__redacted__` env/header values the client echoed back
+        // from getCore against the hook being replaced, so masking on read
+        // never persists the sentinel over a real secret.
+        const hook = restoreRedactedHookSecrets(
+          incomingHook,
+          isReplace ? toRecord(eventHooks[index as number]) : {},
+        );
+        if (isReplace) {
+          eventHooks[index as number] = hook;
         } else {
+          // Missing/negative/non-integer index → append. (A non-integer like
+          // 1.5 would otherwise create a sparse, non-integer array property
+          // that JSON.stringify silently drops, corrupting the hook list.)
           eventHooks.push(hook);
         }
         hooksRoot[event] = eventHooks;
         settings.setValue(settingScope, 'hooks', hooksRoot);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/removeHook': {
         const event = params['event'];
@@ -3929,7 +4555,11 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
         const index = params['index'];
-        if (typeof index !== 'number' || index < 0) {
+        if (
+          typeof index !== 'number' ||
+          !Number.isInteger(index) ||
+          index < 0
+        ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         const settings = loadSettings(cwd);
@@ -3941,12 +4571,19 @@ class QwenAgent implements Agent {
         const eventHooks = Array.isArray(hooksRoot[event])
           ? [...(hooksRoot[event] as unknown[])]
           : [];
+        if (index >= eventHooks.length) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Hook index ${index} out of range (event has ${eventHooks.length} hooks)`,
+          );
+        }
         eventHooks.splice(index, 1);
         hooksRoot[event] = eventHooks;
         settings.setValue(settingScope, 'hooks', hooksRoot);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setExtensionSetting': {
         const extensionId = params['extensionId'];
@@ -3987,9 +4624,12 @@ class QwenAgent implements Agent {
           async () => value,
           extScope,
         );
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // Unlike the sibling core-setting handlers, this persists through
+        // `updateSetting` (extension settings store), not `settings.setValue`,
+        // so `settings` here is just the snapshot loaded above and is reused to
+        // build the response.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);
@@ -4014,17 +4654,20 @@ class QwenAgent implements Agent {
           );
         }
 
-        const beforeSettings = this.loadPermissionSettings(cwd);
-        const before = readPermissionRuleSet(beforeSettings.merged);
+        const settings = this.loadPermissionSettings(cwd);
+        const before = readPermissionRuleSet(settings.merged);
         const rules = normalizePermissionRules(params['rules']);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
 
-        beforeSettings.setValue(settingScope, `permissions.${ruleType}`, rules);
-        const afterSettings = this.loadPermissionSettings(cwd);
-        const after = readPermissionRuleSet(afterSettings.merged);
+        settings.setValue(settingScope, `permissions.${ruleType}`, rules);
+        // `setValue` already recomputed the in-memory merged view, so read the
+        // "after" state from the same instance instead of reloading from disk
+        // (avoids redundant I/O and a concurrency window where another handler
+        // could mutate settings between the two loads).
+        const after = readPermissionRuleSet(settings.merged);
         this.syncLivePermissionManagers(before, after);
-        return this.buildPermissionSettings(afterSettings) as unknown as Record<
+        return this.buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;
@@ -4115,6 +4758,13 @@ class QwenAgent implements Agent {
         userHooks: this.settings.getUserHooks(),
         projectHooks: this.settings.getProjectHooks(),
       },
+      // CRITICAL: close over `this.settings` (LoadedSettings instance), NOT
+      // over the local `settings` snapshot built above. `LoadedSettings.
+      // setValue` replaces `_merged`, so a closure over the snapshot would
+      // never see workspace toggles applied during the session. ACP/Zed
+      // sessions otherwise leak persisted disabled skills into the first
+      // <available_skills> at cold start.
+      buildDisabledSkillNamesProvider(this.settings),
     );
     // PR 14b fix #2 (codex review round 1): register the MCP guardrail
     // budget-event callback BEFORE `config.initialize()`. Pre-fix the
@@ -4245,6 +4895,8 @@ class QwenAgent implements Agent {
     if (needsInitialize) {
       await geminiClient.initialize();
     }
+
+    this.sessions.get(sessionId)?.dispose();
 
     const session = new Session(
       sessionId,

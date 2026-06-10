@@ -123,12 +123,13 @@ const tsxArgs = [
   cliEntry,
   ...process.argv.slice(2),
 ];
+const useShell = isWin && !hasLocalTsxCli;
 
 const child = spawn(tsxCmd, tsxArgs, {
   stdio: 'inherit',
   env,
   cwd: process.cwd(),
-  shell: isWin, // Use shell on Windows to resolve .cmd files
+  shell: useShell, // Needed only when falling back to tsx.cmd on Windows.
 });
 
 child.on('error', (err) => {

@@ -40,7 +40,10 @@ import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
   logContentRetryFailure,
+  logApiRetry,
 } from '../telemetry/loggers.js';
+import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
@@ -48,15 +51,18 @@ import {
   MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
+import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
 import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ApiRetryEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import { isSystemReminderContent } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
@@ -227,6 +233,13 @@ interface TryCompressOptions {
    * post-compression guards that may roll the in-memory chat state back.
    */
   deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -857,7 +870,7 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
   let i = 0;
   while (i < length) {
     if (comprehensiveHistory[i].role === 'user') {
-      curatedHistory.push(comprehensiveHistory[i]);
+      appendCuratedContent(curatedHistory, comprehensiveHistory[i]);
       i++;
     } else {
       const modelOutput: Content[] = [];
@@ -875,6 +888,24 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
     }
   }
   return curatedHistory;
+}
+
+function appendCuratedContent(
+  curatedHistory: Content[],
+  content: Content,
+): void {
+  const lastIndex = curatedHistory.length - 1;
+  const lastContent = lastIndex >= 0 ? curatedHistory[lastIndex] : undefined;
+
+  if (content.role === 'user' && lastContent?.role === 'user') {
+    curatedHistory[lastIndex] = {
+      ...lastContent,
+      parts: [...(lastContent.parts ?? []), ...(content.parts ?? [])],
+    };
+    return;
+  }
+
+  curatedHistory.push(content);
 }
 
 function copyContentContainer(content: Content): Content {
@@ -1420,6 +1451,7 @@ export class GeminiChat {
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 
@@ -1433,6 +1465,7 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
@@ -1734,6 +1767,10 @@ export class GeminiChat {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return (async function* () {
+      const sleepInhibitorHandle = acquireSleepInhibitor(
+        self.config,
+        'Qwen Code is streaming a model response',
+      );
       try {
         // Surface a successful auto-compression to the caller as the first
         // event in the stream. Failed/skipped compaction attempts are silent.
@@ -2272,6 +2309,7 @@ export class GeminiChat {
           throw lastError;
         }
       } finally {
+        sleepInhibitorHandle.release();
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
         // post-retry-loop unretryable break AND the max-tokens
@@ -2334,6 +2372,20 @@ export class GeminiChat {
       heartbeatFn: (info) => {
         process.stderr.write(
           `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+        );
+      },
+      onRetry: (info) => {
+        logApiRetry(
+          this.config,
+          new ApiRetryEvent({
+            model,
+            promptId: prompt_id,
+            attemptNumber: info.attempt,
+            error: info.error,
+            statusCode: info.errorStatus,
+            retryDelayMs: info.delayMs,
+            subagentName: subagentNameContext.getStore(),
+          }),
         );
       },
     });
@@ -2556,6 +2608,23 @@ export class GeminiChat {
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
+      // Never pop a *pure* system-reminder user entry. These are structural,
+      // not orphaned turns: the startup-context prelude (history[0]) and
+      // mid-history MCP added-tool reminders injected by
+      // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
+      // announcement permanently — pendingAddedMcpTools is already cleared and
+      // the tool name is already in announcedDeferredToolNames, so
+      // queueAddedMcpToolsReminder won't re-queue it.
+      //
+      // Must check EVERY part, not just parts[0]: a failed user turn in plan
+      // mode (or with subagent/memory reminders) is recorded as one Content
+      // whose parts are [<system-reminder>…, actual prompt]. Matching parts[0]
+      // alone would treat that as structural and preserve the user's prompt
+      // text, which then leaks into the next turn via appendCuratedContent.
+      const lastEntry = this.history[this.history.length - 1];
+      if (lastEntry && isSystemReminderContent(lastEntry)) {
+        break;
+      }
       this.history.pop();
     }
     // Today this is safe even without the reset — only trailing user

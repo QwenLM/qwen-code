@@ -804,6 +804,15 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('ACP');
   });
 
+  it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    // The `!result['channel']` guard must not override an explicitly provided
+    // channel with the ACP default.
+    expect(argv.channel).toBe('desktop');
+    expect(argv.acp).toBe(true);
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -937,6 +946,29 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should enable runtime sleep prevention by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('should propagate runtime sleep prevention setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        general: {
+          preventSystemSleep: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
@@ -2082,7 +2114,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers();
+    const mcpServers = config.getMcpServers()!;
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2101,7 +2133,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()['direct-server']).toEqual({
+    expect(config.getMcpServers()!['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2115,7 +2147,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()['settings-server']).toEqual({
+    expect(config.getMcpServers()!['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });

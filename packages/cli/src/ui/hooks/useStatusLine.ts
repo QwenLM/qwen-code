@@ -7,10 +7,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -197,7 +198,7 @@ export function useStatusLine(): {
   const settings = useSettings();
   const uiState = useUIState();
   const config = useConfig();
-  const { vimEnabled, vimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -392,7 +393,7 @@ export function useStatusLine(): {
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: ui.currentModel || cfg.getModel(),
+        modelDisplayName: cfg.getModelDisplayName(),
         reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
@@ -443,7 +444,7 @@ export function useStatusLine(): {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: cfg.getModelDisplayName(),
       },
       context_window: {
         context_window_size: contextWindowSize,
@@ -614,6 +615,23 @@ export function useStatusLine(): {
     updatePullRequestNumber,
   ]);
 
+  // File edits made during a turn bypass in-memory settings; reload the user
+  // scope on idle, then re-render only if ui.statusLine changed.
+  const [settingsReloadKey, setSettingsReloadKey] = useState(0);
+  const prevStreamingForReloadRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevStreamingForReloadRef.current;
+    prevStreamingForReloadRef.current = streamingState;
+    if (prev !== streamingState && streamingState === 'idle') {
+      const before = JSON.stringify(settings.merged.ui?.statusLine);
+      settings.reloadScopeFromDisk(SettingScope.User);
+      const after = JSON.stringify(settings.merged.ui?.statusLine);
+      if (before !== after) {
+        setSettingsReloadKey((k) => k + 1);
+      }
+    }
+  }, [streamingState, settings]);
+
   // Re-execute immediately when the command itself changes (hot reload).
   // Skip the first run — the mount effect below already handles it.
   useEffect(() => {
@@ -634,6 +652,7 @@ export function useStatusLine(): {
     statusLinePresetUseThemeColors,
     statusLinePresetItemsKey,
     statusLineSettingsVersion,
+    settingsReloadKey,
   ]);
 
   // Re-render preset output once the async GitHub PR lookup returns.

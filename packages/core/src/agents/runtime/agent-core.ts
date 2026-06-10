@@ -100,6 +100,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
 ]);
 
 /**
@@ -327,7 +331,9 @@ export class AgentCore {
       this.promptConfig.initialMessages.length > 0;
     const envHistory = hasInitialMessages
       ? []
-      : await getInitialChatHistory(this.runtimeContext);
+      : await getInitialChatHistory(this.runtimeContext, undefined, {
+          includeDeferredToolsReminder: false,
+        });
 
     const startHistory = [
       ...envHistory,
@@ -409,9 +415,8 @@ export class AgentCore {
       ) {
         // Subagents inherit the full tool surface — including deferred tools
         // (MCP, low-frequency built-ins). Subagents are one-shot and don't
-        // have the same "save tokens" lifecycle as the main chat, and they
-        // don't see the "Deferred Tools" section of the system prompt, so
-        // hiding schemas would silently break existing `tools: ['*']` configs.
+        // have the same "save tokens" lifecycle as the main chat, so hiding
+        // schemas would silently break existing `tools: ['*']` configs.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })

@@ -91,17 +91,6 @@
             }
           ]
         },
-        "checkpointing": {
-          "description": "Session checkpointing settings.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "description": "Enable session checkpointing for recovery",
-              "type": "boolean",
-              "default": false
-            }
-          }
-        },
         "debugKeystrokeLogging": {
           "description": "Enable debug logging of keystrokes to the console.",
           "type": "boolean",
@@ -135,6 +124,11 @@
         },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
+          "type": "boolean",
+          "default": true
+        },
+        "preventSystemSleep": {
+          "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
           "type": "boolean",
           "default": true
         },
@@ -300,6 +294,11 @@
           "type": "boolean",
           "default": false
         },
+        "compactInline": {
+          "description": "Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.",
+          "type": "boolean",
+          "default": false
+        },
         "useTerminalBuffer": {
           "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
@@ -454,7 +453,7 @@
       "type": "object",
       "properties": {
         "propagateTraceContext": {
-          "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+          "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
           "type": "boolean",
           "default": false
         }
@@ -669,6 +668,19 @@
         }
       }
     },
+    "skills": {
+      "description": "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "permissions": {
       "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
       "type": "object",
@@ -698,6 +710,37 @@
           "description": "Settings consumed by the AUTO approval mode classifier.",
           "type": "object",
           "properties": {
+            "classifier": {
+              "description": "Runtime controls for the AUTO approval mode classifier.",
+              "type": "object",
+              "properties": {
+                "timeouts": {
+                  "description": "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                  "type": "object",
+                  "properties": {
+                    "stage1Ms": {
+                      "description": "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                      "type": "number"
+                    },
+                    "stage2Ms": {
+                      "description": "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                      "type": "number"
+                    }
+                  }
+                },
+                "thinking": {
+                  "description": "Provider/API-level thinking controls for the AUTO classifier.",
+                  "type": "object",
+                  "properties": {
+                    "stage2Enabled": {
+                      "description": "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  }
+                }
+              }
+            },
             "hints": {
               "description": "Natural-language hints injected into the classifier system prompt.",
               "type": "object",
@@ -709,8 +752,22 @@
                     "type": "string"
                   }
                 },
+                "softDeny": {
+                  "description": "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hardDeny": {
+                  "description": "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "deny": {
-                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "description": "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
                   "type": "array",
                   "items": {
                     "type": "string"
@@ -1030,6 +1087,109 @@
       "properties": {
         "UserPromptSubmit": {
           "description": "Hooks that execute before agent processing. Can modify prompts or inject context.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "UserPromptExpansion": {
+          "description": "Hooks that execute when a slash command expands into a prompt.",
           "type": "array",
           "items": {
             "description": "A hook definition with an optional matcher and a list of hook configurations.",
@@ -1545,6 +1705,109 @@
         },
         "PostToolUseFailure": {
           "description": "Hooks that execute when tool execution fails. ",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostToolBatch": {
+          "description": "Hooks that execute once after all tool calls in a batch resolve.",
           "type": "array",
           "items": {
             "description": "A hook definition with an optional matcher and a list of hook configurations.",

@@ -3032,6 +3032,167 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('reloadScopeFromDisk', () => {
+    it('reloads a scope from disk and resolves home env vars', () => {
+      const homeQwenEnvPath = path.join(
+        path.dirname(USER_SETTINGS_PATH),
+        '.env',
+      );
+      const initialUserSettingsContent = {
+        ui: {
+          theme: 'dark',
+          statusLine: {
+            type: 'preset',
+            items: ['model'],
+          },
+        },
+      };
+      const reloadedUserSettingsContent = {
+        ui: {
+          theme: '${RELOADED_THEME}',
+          statusLine: {
+            type: 'command',
+            command: 'echo reloaded',
+          },
+        },
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH || p === homeQwenEnvPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          if (p === homeQwenEnvPath) {
+            return 'RELOADED_THEME=light';
+          }
+          return '{}';
+        },
+      );
+      delete process.env['RELOADED_THEME'];
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(reloadedUserSettingsContent);
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(settings.user.originalSettings.ui?.theme).toBe(
+        '${RELOADED_THEME}',
+      );
+      expect(settings.user.rawJson).toBe(currentUserSettingsContent);
+      expect(settings.merged.ui?.statusLine).toEqual({
+        type: 'command',
+        command: 'echo reloaded',
+      });
+
+      delete process.env['RELOADED_THEME'];
+    });
+
+    it('clears a scope when its settings file is removed', () => {
+      const userSettingsContent = {
+        ui: {
+          theme: 'dark',
+        },
+      };
+      let userSettingsExists = true;
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH && userSettingsExists,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify(userSettingsContent);
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      userSettingsExists = false;
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings).toEqual({});
+      expect(settings.user.originalSettings).toEqual({});
+      expect(settings.user.rawJson).toBeUndefined();
+      expect(settings.merged.ui).toBeUndefined();
+    });
+
+    it('ignores top-level array settings during reload', () => {
+      const initialUserSettingsContent = {
+        ui: {
+          theme: 'dark',
+        },
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = '[]';
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.user.settings).toEqual({
+        ...initialUserSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.merged.ui?.theme).toBe('dark');
+    });
+
+    it('keeps existing settings and logs when reload JSON parsing fails', () => {
+      const initialUserSettingsContent = {
+        ui: {
+          theme: 'dark',
+        },
+      };
+      let currentUserSettingsContent = JSON.stringify(
+        initialUserSettingsContent,
+      );
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = '{bad json';
+
+      settings.reloadScopeFromDisk(SettingScope.User);
+
+      expect(settings.merged.ui?.theme).toBe('dark');
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('reloadScopeFromDisk(User):'),
+      );
+    });
+  });
+
   describe('setValue persistence', () => {
     it('preserves models added to settings.json after startup when updating model.name', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
@@ -3108,6 +3269,38 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.modelProviders.openai).toEqual(
         externallyModifiedUserSettingsContent.modelProviders.openai,
       );
+    });
+
+    it('strips a runtime snapshot prefix before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
+    it('collapses stacked runtime snapshot prefixes before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
     });
 
     it('persists removed MCP servers when replacing the top-level mcpServers object', () => {
