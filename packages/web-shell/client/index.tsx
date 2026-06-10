@@ -11,6 +11,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   token?: string;
   /** Initial daemon session id to load. Omit to create/attach automatically. */
   initialSessionId?: string;
+  /** Client identity to reuse when attaching to an externally created session. */
+  clientId?: string;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -34,6 +36,7 @@ export function WebShellWithProviders({
   baseUrl,
   token,
   initialSessionId,
+  clientId,
   ...webShellProps
 }: WebShellWithProvidersProps) {
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -42,6 +45,7 @@ export function WebShellWithProviders({
     <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
       <DaemonSessionProvider
         initialSessionId={initialSessionId}
+        clientId={clientId}
         suppressOwnUserEcho
       >
         <App {...webShellProps} />
