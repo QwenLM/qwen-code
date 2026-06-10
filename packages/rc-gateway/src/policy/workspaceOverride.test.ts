@@ -124,6 +124,44 @@ describe('loadLayeredPolicy', () => {
     expect(d.ruleId).toBe('ws-allow');
   });
 
+  it('priority dominates specificity: a higher-priority workspace allow beats a MORE-specific user deny (documented worst case)', async () => {
+    // The user deny is more specific (tool + argsGlob = 130) but priority 0; the
+    // workspace allow is broad (tool = 100) but priority 5. The evaluator sorts
+    // priority FIRST, so the workspace allow wins → the documented widening where
+    // a workspace rule overrides even a more-specific user deny via priority.
+    await writeFile(
+      userPath,
+      `rules:\n  - id: user-deny\n    match: { tool: bash, argsGlob: 'git push*' }\n    action: deny\n`,
+    );
+    await writeFile(
+      workspaceFile,
+      `rules:\n  - id: ws-allow\n    match: { tool: bash }\n    action: allow\n    priority: 5\n`,
+    );
+    const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
+    const d = evaluate(p, {
+      tool: 'bash',
+      args: 'git push --force origin main',
+    });
+    expect(d.action).toBe('allow');
+    expect(d.ruleId).toBe('ws-allow');
+  });
+
+  it('a higher-priority USER deny still beats a lower-priority workspace allow', async () => {
+    // The inverse: priority lets the user protect a call the workspace would allow.
+    await writeFile(
+      userPath,
+      `rules:\n  - id: user-deny\n    match: { tool: bash }\n    action: deny\n    priority: 10\n`,
+    );
+    await writeFile(
+      workspaceFile,
+      `rules:\n  - id: ws-allow\n    match: { tool: bash }\n    action: allow\n    priority: 5\n`,
+    );
+    const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
+    const d = evaluate(p, { tool: 'bash' });
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('user-deny');
+  });
+
   it('fail-closed: a malformed workspace file is logged + ignored; the user policy stays intact', async () => {
     await writeFile(
       userPath,
