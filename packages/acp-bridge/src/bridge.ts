@@ -813,6 +813,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
 
+  // Tracks the most recent "activity" event for idle-detection by
+  // external schedulers. Updated on prompt start/end and session
+  // spawn/restore. `null` until the first activity after boot.
+  let lastActivityTimestamp: number | null = null;
+  function touchActivity(): void {
+    lastActivityTimestamp = Date.now();
+  }
+
   function resolvePositiveFiniteMs(
     raw: number | undefined,
     fallback: number,
@@ -1986,6 +1994,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     // Drain any guardrail events that fired during this session's
     // `newSession` handler (before this entry registered) onto the
@@ -2452,6 +2461,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return byId.size;
     },
 
+    get activePromptCount() {
+      let count = 0;
+      for (const entry of byId.values()) {
+        if (entry.promptActive) count++;
+      }
+      return count;
+    },
+
+    get lastActivityAt() {
+      return lastActivityTimestamp;
+    },
+
     isChannelLive() {
       return !!liveChannelInfo();
     },
@@ -2703,6 +2724,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 }
                 entry.promptActive = true;
                 entry.sessionLastSeenAt = Date.now();
+                touchActivity();
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -2739,6 +2761,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .finally(() => {
                     entry.promptActive = false;
                     entry.sessionLastSeenAt = Date.now();
+                    touchActivity();
                     delete entry.activePromptOriginatorClientId;
                     if (
                       entry.clientIds.size === 0 &&

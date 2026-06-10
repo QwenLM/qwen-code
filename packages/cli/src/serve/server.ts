@@ -276,9 +276,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -1191,10 +1189,18 @@ export function createServeApp(
       return;
     }
     try {
+      const lastActivity = bridge.lastActivityAt;
+      const now = Date.now();
       res.status(200).json({
         status: 'ok',
         sessions: bridge.sessionCount,
         pendingPermissions: bridge.pendingPermissionCount,
+        activePrompts: bridge.activePromptCount,
+        connectedClients: getActiveSseCount(),
+        channelAlive: bridge.isChannelLive(),
+        lastActivityAt:
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? now - lastActivity : null,
         ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
