@@ -14,6 +14,7 @@ import {
   mergeClaudeConfigs,
   isClaudePluginConfig,
   convertClaudePluginPackage,
+  convertClaudePluginStandalone,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
@@ -666,6 +667,85 @@ describe('convertClaudePluginPackage', () => {
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+});
+
+describe('convertClaudePluginStandalone', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-standalone-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('converts a repo with root .claude-plugin/plugin.json, .mcp.json and skills', async () => {
+    // Mirror the ClickHouse plugin layout: plugin.json metadata only, MCP in
+    // a root .mcp.json, and a skills/ folder with no commands/agents.
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({
+        name: 'clickhouse',
+        version: '1.0.0',
+        description: 'ClickHouse plugin',
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          clickhouse: { type: 'http', url: 'https://mcp.clickhouse.cloud/mcp' },
+        },
+      }),
+      'utf-8',
+    );
+    const skillDir = path.join(testDir, 'skills', 'best-practices');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '# best practices',
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginStandalone(testDir);
+
+    // A qwen-extension.json must exist so the installer can load it.
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'qwen-extension.json')),
+    ).toBe(true);
+    expect(result.config.name).toBe('clickhouse');
+    expect(result.config.version).toBe('1.0.0');
+    // MCP server folded in from .mcp.json and remapped to Qwen's transport
+    // shape: Claude `type: 'http'` + `url` becomes `httpUrl` (streamable HTTP).
+    const mcp = result.config.mcpServers?.['clickhouse'] as
+      | { httpUrl?: string; url?: string; type?: string }
+      | undefined;
+    expect(mcp?.httpUrl).toBe('https://mcp.clickhouse.cloud/mcp');
+    expect(mcp?.url).toBeUndefined();
+    expect(mcp?.type).toBeUndefined();
+    // Skills folder preserved.
+    expect(
+      fs.existsSync(
+        path.join(result.convertedDir, 'skills', 'best-practices', 'SKILL.md'),
+      ),
+    ).toBe(true);
+    // VCS metadata is not shipped into the installed extension.
+    expect(fs.existsSync(path.join(result.convertedDir, '.git'))).toBe(false);
+
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('throws when there is no .claude-plugin/plugin.json', async () => {
+    await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
+      /Plugin configuration not found/,
+    );
   });
 });
 

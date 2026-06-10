@@ -66,7 +66,10 @@ import {
   isGeminiExtensionConfig,
   convertGeminiExtensionPackage,
 } from './gemini-converter.js';
-import { convertClaudePluginPackage } from './claude-converter.js';
+import {
+  convertClaudePluginPackage,
+  convertClaudePluginStandalone,
+} from './claude-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -302,8 +305,15 @@ async function convertGeminiOrClaudeExtension(
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
     originSource = 'Claude';
+  } else if (
+    fs.existsSync(path.join(extensionDir, '.claude-plugin', 'plugin.json'))
+  ) {
+    // A standalone Claude plugin installed directly from a git URL: its root
+    // holds `.claude-plugin/plugin.json` with no marketplace.json.
+    newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
+      .convertedDir;
+    originSource = 'Claude';
   }
-  // Claude plugin conversion not yet implemented
   return { extensionDir: newExtensionDir, originSource };
 }
 
