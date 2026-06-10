@@ -11,6 +11,16 @@ import { parseFrontMatter } from './parse.js';
 
 export type CommandScope = 'read' | 'write' | 'approve';
 
+/** A declared positional-argument constraint (front-matter `args:` element). */
+export interface ArgDecl {
+  /** Label used in errors/audit; constrains the positional arg at its index. */
+  name: string;
+  /** Whether an absent (and default-less) value fails the invoke. */
+  required: boolean;
+  /** Auto-filled into the positional array when the value is absent. */
+  default?: string;
+}
+
 export interface LoadedCommand {
   name: string;
   /** Clamped to ≤140 chars. */
@@ -20,15 +30,50 @@ export interface LoadedCommand {
   tool?: string;
   /** Default 'required'. Captured for listing; not enforced this slice. */
   sessionScope: string;
+  /** Declared positional-argument constraints, or undefined (pass-through). */
+  args?: ArgDecl[];
   body: string;
   source: 'workspace' | 'user';
 }
 
 const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+const ARG_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/;
 const SCOPES: readonly CommandScope[] = ['read', 'write', 'approve'];
 
 function isScope(v: unknown): v is CommandScope {
   return typeof v === 'string' && (SCOPES as readonly string[]).includes(v);
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Validate a front-matter `args:` value into `ArgDecl[]`. Returns `undefined`
+ * when the field is absent (pass-through) and `null` when present-but-malformed
+ * (→ the whole command file is rejected). Each element must be a mapping with a
+ * regex-valid string `name`, an optional boolean `required` (default false), and
+ * an optional string `default`. Unknown element keys are ignored.
+ */
+export function parseArgDecls(raw: unknown): ArgDecl[] | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return null;
+  const out: ArgDecl[] = [];
+  for (const el of raw) {
+    if (!isPlainObject(el)) return null;
+    const name = el['name'];
+    if (typeof name !== 'string' || !ARG_NAME_RE.test(name)) return null;
+    const requiredRaw = el['required'];
+    if (requiredRaw !== undefined && typeof requiredRaw !== 'boolean') {
+      return null;
+    }
+    const defaultRaw = el['default'];
+    if (defaultRaw !== undefined && typeof defaultRaw !== 'string') return null;
+    const decl: ArgDecl = { name, required: requiredRaw === true };
+    if (defaultRaw !== undefined) decl.default = defaultRaw;
+    out.push(decl);
+  }
+  return out;
 }
 
 /**
@@ -99,7 +144,7 @@ export class CommandLoader {
       } catch {
         continue;
       }
-      const cmd = this.parseCommandFile(text, source);
+      const cmd = this.parseCommandFile(text, source, file);
       if (cmd) out.push(cmd);
     }
     return out;
@@ -108,21 +153,37 @@ export class CommandLoader {
   private parseCommandFile(
     text: string,
     source: 'workspace' | 'user',
+    file: string,
   ): LoadedCommand | null {
     const parsed = parseFrontMatter(text);
+    // No front-matter → not a command file at all (e.g. a README.md). Skip it
+    // silently; only a front-mattered-but-INVALID file is a "parse failure".
     if (!parsed) return null;
     const fm = parsed.frontMatter;
 
+    // Emit slash_command_parse_failed once and return null. `reason` is a short
+    // field token, never file content.
+    const reject = (reason: string): null => {
+      void this.audit?.record({
+        action: 'slash_command_parse_failed',
+        detail: { file, source, reason },
+      });
+      return null;
+    };
+
     const name = fm['name'];
-    if (typeof name !== 'string' || !NAME_RE.test(name)) return null;
+    if (typeof name !== 'string' || !NAME_RE.test(name)) return reject('name');
 
     const description = fm['description'];
     if (typeof description !== 'string' || description.length === 0) {
-      return null;
+      return reject('description');
     }
 
     const scope = fm['scope'];
-    if (!isScope(scope)) return null;
+    if (!isScope(scope)) return reject('scope');
+
+    const args = parseArgDecls(fm['args']);
+    if (args === null) return reject('args');
 
     const command: LoadedCommand = {
       name,
@@ -136,6 +197,7 @@ export class CommandLoader {
       source,
     };
     if (typeof fm['tool'] === 'string') command.tool = fm['tool'];
+    if (args !== undefined) command.args = args;
     return command;
   }
 }

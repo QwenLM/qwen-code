@@ -41,6 +41,8 @@ export type AuditAction =
   | 'search_performed'
   | 'command_collision_workspace_wins'
   | 'slash_command_invoked'
+  | 'slash_command_parse_failed'
+  | 'slash_command_arg_missing'
   | 'session_forked';
 
 /** Runtime list of valid actions (for validating query params). */
@@ -71,6 +73,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'search_performed',
   'command_collision_workspace_wins',
   'slash_command_invoked',
+  'slash_command_parse_failed',
+  'slash_command_arg_missing',
   'session_forked',
 ];
 

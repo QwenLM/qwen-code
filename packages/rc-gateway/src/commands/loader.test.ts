@@ -191,4 +191,81 @@ describe('CommandLoader', () => {
     );
     expect(collisions).toHaveLength(0);
   });
+
+  it('parses a valid args declaration (required + default)', async () => {
+    await writeFile(
+      join(workspaceDir, 'fix.md'),
+      `---\nname: fix\ndescription: fix an issue\nscope: write\nargs:\n  - name: issue\n    required: true\n  - name: branch\n    default: main\n---\nfix #${'${arg}'} on ${'${arg.1}'}`,
+    );
+    const cmds = await loader().load();
+    expect(cmds[0].args).toEqual([
+      { name: 'issue', required: true },
+      { name: 'branch', required: false, default: 'main' },
+    ]);
+  });
+
+  it('a command with no args declaration has args undefined (pass-through)', async () => {
+    await writeFile(join(workspaceDir, 'triage.md'), VALID('triage'));
+    const cmds = await loader().load();
+    expect(cmds[0].args).toBeUndefined();
+  });
+
+  it('rejects a malformed args declaration + audits slash_command_parse_failed', async () => {
+    const audit = new FakeAudit();
+    // args is a scalar, not a sequence.
+    await writeFile(
+      join(workspaceDir, 'bad.md'),
+      `---\nname: bad\ndescription: bad\nscope: write\nargs: 7\n---\nbody`,
+    );
+    const cmds = await loader(audit).load();
+    expect(cmds).toHaveLength(0);
+    const pf = audit.entries.find(
+      (e) => e.action === 'slash_command_parse_failed',
+    );
+    expect(pf?.detail).toMatchObject({
+      file: 'bad.md',
+      source: 'workspace',
+      reason: 'args',
+    });
+  });
+
+  it.each([
+    ['element not a mapping', `args:\n  - just-a-string`],
+    ['bad arg name', `args:\n  - name: "1bad"`],
+    ['non-boolean required', `args:\n  - name: x\n    required: yes-ish\n`],
+    ['non-string default', `args:\n  - name: x\n    default: 5`],
+  ])('rejects args (%s)', async (_label, argsBlock) => {
+    await writeFile(
+      join(workspaceDir, 'bad.md'),
+      `---\nname: bad\ndescription: bad\nscope: write\n${argsBlock}\n---\nbody`,
+    );
+    const cmds = await loader().load();
+    expect(cmds).toHaveLength(0);
+  });
+
+  it('a bad scope also emits slash_command_parse_failed (reason: scope)', async () => {
+    const audit = new FakeAudit();
+    await writeFile(
+      join(workspaceDir, 'bad.md'),
+      `---\nname: bad\ndescription: bad\nscope: owner\n---\nbody`,
+    );
+    await loader(audit).load();
+    expect(
+      audit.entries.find((e) => e.action === 'slash_command_parse_failed')
+        ?.detail,
+    ).toMatchObject({ reason: 'scope' });
+  });
+
+  it('a .md file with NO front-matter is skipped silently (no parse_failed)', async () => {
+    const audit = new FakeAudit();
+    await writeFile(
+      join(workspaceDir, 'README.md'),
+      `# Just a readme\n\nNo front matter here.`,
+    );
+    const cmds = await loader(audit).load();
+    expect(cmds).toHaveLength(0);
+    expect(
+      audit.entries.some((e) => e.action === 'slash_command_parse_failed'),
+    ).toBe(false);
+  });
 });
