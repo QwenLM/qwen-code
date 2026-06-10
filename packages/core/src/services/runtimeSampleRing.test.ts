@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as os from 'node:os';
 import { RuntimeSampleRing } from './memoryPressureMonitor.js';
 
 describe('RuntimeSampleRing', () => {
@@ -78,6 +79,45 @@ describe('RuntimeSampleRing', () => {
 
     // Verify it's a copy, not the same reference
     expect(second).not.toBe(first);
+  });
+
+  it('accumulates the CPU delta from a same-tick sample into the next sample', () => {
+    const mem = {
+      rss: 100,
+      heapUsed: 50,
+      heapTotal: 80,
+      external: 10,
+      arrayBuffers: 0,
+    };
+
+    let mockCpu = { user: 0, system: 0 };
+    vi.spyOn(process, 'cpuUsage').mockImplementation(() => ({ ...mockCpu }));
+    let mockTime = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => mockTime);
+
+    // Construct under mocked time so the baseline is deterministic:
+    // prevCpuUsage = {0, 0}, prevSampleTime = 1000.
+    const localRing = new RuntimeSampleRing();
+
+    mockTime = 1100;
+    mockCpu = { user: 4000, system: 4000 }; // 8ms CPU over 100ms
+    const first = localRing.record(mem);
+
+    // Same ms tick (elapsed = 0): the 8ms of CPU accrued since `first`
+    // must NOT be consumed — prevCpuUsage/prevSampleTime stay untouched.
+    mockCpu = { user: 8000, system: 8000 };
+    const second = localRing.record(mem);
+    expect(second).toEqual(first);
+
+    mockTime = 1200;
+    mockCpu = { user: 12000, system: 12000 };
+    const third = localRing.record(mem);
+
+    // 16ms of CPU (8ms from the skipped tick + 8ms after) over 100ms = 16%,
+    // normalized by core count. A regression that updates prevCpuUsage in the
+    // elapsed <= 0 branch would yield only 8% / cores here.
+    const coreCount = os.cpus().length || 1;
+    expect(third.cpuPercent).toBeCloseTo(16 / coreCount, 2);
   });
 
   it('evicts oldest sample when exceeding buffer size', () => {
