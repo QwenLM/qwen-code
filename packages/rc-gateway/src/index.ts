@@ -100,8 +100,10 @@ export {
 } from './routing/rules.js';
 export {
   searchTranscripts,
+  searchTranscriptsDetailed,
   SearchTimeoutError,
   type SearchHit,
+  type SearchResult,
   type SearchOptions,
 } from './search/transcripts.js';
 export { createSearchRoute } from './routes/search.js';

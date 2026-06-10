@@ -8,6 +8,16 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseQuery, matchesQuery } from './query.js';
 
+/**
+ * A search result set plus whether more matches existed than were returned.
+ * `truncated` is true when the full match count exceeded the (clamped) limit, so
+ * `hits` is a recency-sorted prefix.
+ */
+export interface SearchResult {
+  hits: SearchHit[];
+  truncated: boolean;
+}
+
 /** One search result: a matched transcript record. */
 export interface SearchHit {
   sessionId: string;
@@ -138,14 +148,18 @@ function snippet(text: string, term: string): string {
  * empty/skipped. The ONLY throw is {@link SearchTimeoutError}, and only when an
  * opted-in `opts.timeoutMs` budget is exceeded (the deadline bounds scan/match
  * work, not a single file's `readFile`).
+ *
+ * Returns the recency-sorted hit prefix together with `truncated` (true when the
+ * full match count exceeded the clamped limit). {@link searchTranscripts} is the
+ * thin `SearchHit[]`-returning delegate kept for every pre-cycle-37 caller.
  */
-export async function searchTranscripts(
+export async function searchTranscriptsDetailed(
   chatsDir: string,
   query: string,
   opts: SearchOptions = {},
-): Promise<SearchHit[]> {
+): Promise<SearchResult> {
   const plan = parseQuery(query);
-  if (plan.node === null) return [];
+  if (plan.node === null) return { hits: [], truncated: false };
 
   const wantType =
     opts.kind && opts.kind !== 'all' ? KIND_MAP[opts.kind] : undefined;
@@ -166,7 +180,8 @@ export async function searchTranscripts(
   try {
     files = await readdir(chatsDir);
   } catch {
-    return []; // missing dir (ENOENT) or unreadable → no results.
+    // missing dir (ENOENT) or unreadable → no results.
+    return { hits: [], truncated: false };
   }
 
   const hits: SearchHit[] = [];
@@ -209,5 +224,22 @@ export async function searchTranscripts(
 
   hits.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
   const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
-  return hits.slice(0, limit);
+  // `truncated` compares the FULL match count against the clamped limit, so the
+  // caller learns the result set was capped (not whether the scan timed out —
+  // that is the separate SearchTimeoutError → 503 path).
+  return { hits: hits.slice(0, limit), truncated: hits.length > limit };
+}
+
+/**
+ * Recency-sorted hits for a query — the thin, back-compat delegate over
+ * {@link searchTranscriptsDetailed}. Returns only `SearchHit[]` and preserves
+ * the exact signature, return shape, and `SearchTimeoutError` propagation every
+ * pre-cycle-37 caller relies on.
+ */
+export async function searchTranscripts(
+  chatsDir: string,
+  query: string,
+  opts: SearchOptions = {},
+): Promise<SearchHit[]> {
+  return (await searchTranscriptsDetailed(chatsDir, query, opts)).hits;
 }

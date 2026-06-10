@@ -8,7 +8,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { searchTranscripts, SearchTimeoutError } from './transcripts.js';
+import {
+  searchTranscripts,
+  searchTranscriptsDetailed,
+  SearchTimeoutError,
+} from './transcripts.js';
 
 interface Rec {
   uuid: string;
@@ -358,5 +362,52 @@ describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
     await expect(
       searchTranscripts(bigDir, 'oauth', { timeoutMs: 2000, now }),
     ).rejects.toBeInstanceOf(SearchTimeoutError);
+  });
+});
+
+describe('searchTranscriptsDetailed — truncated (cycle 37)', () => {
+  /** Write `n` distinct assistant records all matching `oauth`. */
+  function writeMatches(n: number): void {
+    const recs = Array.from({ length: n }, (_, i) =>
+      textRec(
+        {
+          uuid: `u${i}`,
+          sessionId: 's1',
+          type: 'assistant',
+          timestamp: `2026-06-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+        },
+        `oauth token ${i}`,
+      ),
+    );
+    writeJsonl('s1.jsonl', recs);
+  }
+
+  it('truncated:false when the match count equals the clamped limit', async () => {
+    writeMatches(2);
+    const r = await searchTranscriptsDetailed(dir, 'oauth', { limit: 2 });
+    expect(r.hits).toHaveLength(2);
+    expect(r.truncated).toBe(false);
+  });
+
+  it('truncated:true when one more match exists than the clamped limit', async () => {
+    writeMatches(3);
+    const r = await searchTranscriptsDetailed(dir, 'oauth', { limit: 2 });
+    expect(r.hits).toHaveLength(2);
+    expect(r.truncated).toBe(true);
+  });
+
+  it('a no-match query yields {hits:[], truncated:false}', async () => {
+    writeMatches(2);
+    const r = await searchTranscriptsDetailed(dir, 'nonesuch', { limit: 2 });
+    expect(r).toEqual({ hits: [], truncated: false });
+  });
+
+  it('searchTranscripts returns exactly the detailed hits (delegation)', async () => {
+    writeMatches(3);
+    const detailed = await searchTranscriptsDetailed(dir, 'oauth', {
+      limit: 2,
+    });
+    const delegated = await searchTranscripts(dir, 'oauth', { limit: 2 });
+    expect(delegated).toEqual(detailed.hits);
   });
 });
