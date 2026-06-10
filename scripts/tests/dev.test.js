@@ -40,6 +40,7 @@ describe('scripts/dev.js launcher', () => {
     process,
     'execPath',
   );
+  const normalizePath = (filePath) => String(filePath).replaceAll('\\', '/');
 
   beforeEach(() => {
     vi.resetModules();
@@ -57,7 +58,7 @@ describe('scripts/dev.js launcher', () => {
   it('spawns Node without a shell on Windows when local tsx cli.mjs exists', async () => {
     platformMock.mockReturnValue('win32');
     existsSyncMock.mockImplementation((filePath) =>
-      String(filePath).endsWith('node_modules/tsx/dist/cli.mjs'),
+      normalizePath(filePath).endsWith('node_modules/tsx/dist/cli.mjs'),
     );
     Object.defineProperty(process, 'execPath', {
       configurable: true,
@@ -81,7 +82,7 @@ describe('scripts/dev.js launcher', () => {
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {
     platformMock.mockReturnValue('win32');
     existsSyncMock.mockImplementation((filePath) =>
-      String(filePath).endsWith('node_modules/.bin/tsx.cmd'),
+      normalizePath(filePath).endsWith('node_modules/.bin/tsx.cmd'),
     );
 
     await import('../dev.js?cmd-fallback');

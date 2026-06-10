@@ -420,7 +420,14 @@ export class SessionService {
     try {
       const firstRecords = await jsonl.readLines<ChatRecord>(filePath, 1);
       if (firstRecords.length === 0) return 0;
-      if (getProjectHash(firstRecords[0].cwd) !== this.projectHash) return 0;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          sessionId,
+          firstRecords[0].cwd,
+        ))
+      ) {
+        return 0;
+      }
     } catch {
       return 0;
     }
@@ -768,8 +775,9 @@ export class SessionService {
         return false;
       }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
+      ) {
         return false;
       }
 
@@ -853,8 +861,9 @@ export class SessionService {
         return false;
       }
 
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      if (recordProjectHash !== this.projectHash) {
+      if (
+        !(await this.sessionBelongsToCurrentProject(sessionId, records[0].cwd))
+      ) {
         return false;
       }
 
@@ -927,8 +936,12 @@ export class SessionService {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
 
-    // Verify project ownership via the first record's cwd.
-    if (getProjectHash(records[0].cwd) !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        sourceSessionId,
+        records[0].cwd,
+      ))
+    ) {
       throw new Error(
         `Source session does not belong to current project: ${sourceSessionId}`,
       );
@@ -1057,8 +1070,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -1130,7 +1149,14 @@ export class SessionService {
       try {
         const records = await jsonl.readLines<ChatRecord>(filePath, 1);
         if (records.length === 0) continue;
-        if (getProjectHash(records[0].cwd) !== this.projectHash) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
       } catch {
         continue;
       }
@@ -1173,8 +1199,7 @@ export class SessionService {
       if (records.length === 0) {
         return false;
       }
-      const recordProjectHash = getProjectHash(records[0].cwd);
-      return recordProjectHash === this.projectHash;
+      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
     } catch {
       return false;
     }

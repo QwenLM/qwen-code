@@ -638,6 +638,33 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
 
+    it('should remove a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalled();
+    });
+
     it('should handle file not found error', async () => {
       const error = new Error('ENOENT') as NodeJS.ErrnoException;
       error.code = 'ENOENT';
@@ -827,6 +854,38 @@ describe('SessionService', () => {
       expect(createReadStreamSpy).not.toHaveBeenCalled();
     });
 
+    it('should count a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd) =>
+        cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
+      );
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => [
+        JSON.parse(line),
+      ]);
+      const createReadStreamSpy = stubCreateReadStream([
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'a1', type: 'assistant' }),
+      ]);
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(2);
+      expect(createReadStreamSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('should return 0 when the session file has no records (empty file)', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
       const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
@@ -914,6 +973,32 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(false);
+    });
+
+    it('should return true for a migrated session when runtime status matches this project', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const exists = await sessionService.sessionExists(sessionIdA);
+
+      expect(exists).toBe(true);
     });
   });
 
@@ -1508,7 +1593,7 @@ describe('SessionService', () => {
       }
     });
 
-    const seedSession = (sessionId: string) => {
+    const seedSession = (sessionId: string, sessionCwd = cwd) => {
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
@@ -1522,7 +1607,7 @@ describe('SessionService', () => {
           sessionId,
           type: 'user',
           timestamp: '2026-04-22T00:00:00.000Z',
-          cwd,
+          cwd: sessionCwd,
           version: 'test',
           message: { role: 'user', parts: [{ text: 'hello' }] },
         },
@@ -1532,7 +1617,7 @@ describe('SessionService', () => {
           sessionId,
           type: 'assistant',
           timestamp: '2026-04-22T00:00:01.000Z',
-          cwd,
+          cwd: sessionCwd,
           version: 'test',
           message: { role: 'model', parts: [{ text: 'hi' }] },
         },
@@ -1633,6 +1718,26 @@ describe('SessionService', () => {
       await expect(service.forkSession(oldId, newId)).rejects.toThrow(
         /does not belong to current project/,
       );
+    });
+
+    it('forks a migrated session when runtime status matches this project', async () => {
+      const oldId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const newId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      seedSession(oldId, realPath.join(realTmpDir, 'old-project'));
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: oldId,
+        workDir: cwd,
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+
+      const result = await service.forkSession(oldId, newId);
+
+      expect(result.copiedCount).toBe(2);
+      expect(fs.existsSync(result.filePath)).toBe(true);
     });
 
     it('rejects invalid sessionId patterns before touching disk', async () => {
