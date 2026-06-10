@@ -6,6 +6,7 @@
 
 import { Router } from 'express';
 import { OWNER } from '../scopes.js';
+import { parseTimeOfDay } from '../policy/conditions.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { VapidStore } from '../webpush/vapid.js';
 import type { PushStore } from '../pushStore.js';
@@ -85,6 +86,7 @@ export function createPushRouter(
           createdAt: r.createdAt,
           tokenId: r.tokenId,
           prefs: r.prefs,
+          quietHours: r.quietHours,
         })),
       });
       return;
@@ -95,6 +97,7 @@ export function createPushRouter(
         endpoint: r.endpoint,
         createdAt: r.createdAt,
         prefs: r.prefs,
+        quietHours: r.quietHours,
       })),
     });
   });
@@ -116,12 +119,17 @@ export function createPushRouter(
     res.status(204).end();
   });
 
-  // Set per-subscription notification prefs (kind allowlist). Authorization
-  // mirrors DELETE: existence + ownership are checked first (hide existence of
-  // another token's subscription from non-owners with a 404, NOT a 403/400),
-  // and only then is the body validated. `prefs` must be null/absent (clears to
-  // "receive all") OR an array of strings; otherwise 400 invalid_prefs. An
-  // empty array is valid and means "receive nothing".
+  // Set per-subscription delivery preferences: `prefs` (kind allowlist) and/or
+  // `quietHours` (a `{from, to, timezone}` window). Authorization mirrors
+  // DELETE: existence + ownership are checked first (hide existence of another
+  // token's subscription from non-owners with a 404, NOT a 403/400), and only
+  // then is the body validated. Fields update INDEPENDENTLY — each is applied
+  // only when its key is present in the body: a `null` value clears it, a
+  // value sets it, an absent key leaves it unchanged (so a PATCH that sets
+  // only `quietHours` does not wipe `prefs`). `prefs`: array of strings (empty
+  // = "receive nothing") or null (clear → receive all), else 400 invalid_prefs.
+  // `quietHours`: a parseable `{from, to, timezone}` (validated by the shared
+  // policy `parseTimeOfDay`) or null (clear), else 400 invalid_quiet_hours.
   router.patch('/subscriptions/:id', async (req, res) => {
     const rec = store.get(req.params.id);
     const isOwnerScope = req.rcClient!.scopes.includes(OWNER);
@@ -129,24 +137,81 @@ export function createPushRouter(
       res.status(404).json({ error: 'Not found', code: 'not_found' });
       return;
     }
-    const body = (req.body ?? {}) as { prefs?: unknown };
-    const { prefs } = body;
-    const isValid =
-      prefs === undefined ||
-      prefs === null ||
-      (Array.isArray(prefs) && prefs.every((p) => typeof p === 'string'));
-    if (!isValid) {
-      res.status(400).json({ error: 'Invalid prefs', code: 'invalid_prefs' });
-      return;
+    // persist() (writeFile) can reject on EACCES/ENOSPC; server.ts has no
+    // global error middleware, so an uncaught rejection would hang the request
+    // (the recurring async-route-error bug class). Catch → 500.
+    try {
+      const body = (req.body ?? {}) as {
+        prefs?: unknown;
+        quietHours?: unknown;
+      };
+
+      let touched = false;
+
+      if ('prefs' in body) {
+        const { prefs } = body;
+        const isValid =
+          prefs === null ||
+          (Array.isArray(prefs) && prefs.every((p) => typeof p === 'string'));
+        if (!isValid) {
+          res
+            .status(400)
+            .json({ error: 'Invalid prefs', code: 'invalid_prefs' });
+          return;
+        }
+        await store.setPrefs(
+          rec.id,
+          Array.isArray(prefs) ? (prefs as string[]) : undefined,
+        );
+        touched = true;
+      }
+
+      if ('quietHours' in body) {
+        const { quietHours } = body;
+        if (quietHours === null) {
+          await store.setQuietHours(rec.id, undefined);
+        } else {
+          const parsed = parseTimeOfDay(quietHours);
+          if (!parsed) {
+            res.status(400).json({
+              error: 'Invalid quiet hours',
+              code: 'invalid_quiet_hours',
+            });
+            return;
+          }
+          const qh = quietHours as {
+            from: string;
+            to: string;
+            timezone: string;
+          };
+          await store.setQuietHours(rec.id, {
+            from: qh.from,
+            to: qh.to,
+            timezone: qh.timezone,
+          });
+        }
+        touched = true;
+      }
+
+      if (touched) {
+        void audit?.record({
+          action: 'push_prefs_updated',
+          actorTokenId: req.rcClient!.id,
+          detail: { subscriptionId: rec.id },
+        });
+      }
+      // Reflect the current record state (post-update).
+      const fresh = store.get(rec.id)!;
+      res.status(200).json({
+        id: rec.id,
+        prefs: fresh.prefs,
+        quietHours: fresh.quietHours,
+      });
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal error', code: 'internal' });
+      }
     }
-    const next = Array.isArray(prefs) ? (prefs as string[]) : undefined;
-    await store.setPrefs(rec.id, next);
-    void audit?.record({
-      action: 'push_prefs_updated',
-      actorTokenId: req.rcClient!.id,
-      detail: { subscriptionId: rec.id },
-    });
-    res.status(200).json({ id: rec.id, prefs: next });
   });
 
   // Owner-gated self-test: fan a synthetic task.completed out to the caller's

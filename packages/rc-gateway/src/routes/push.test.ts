@@ -282,6 +282,104 @@ describe('push routes', () => {
     expect(store.get(rec.id)!.prefs).toBeUndefined();
   });
 
+  it('PATCH sets quietHours -> 200 and GET shows it', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const qh = { from: '23:00', to: '07:00', timezone: 'UTC' };
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quietHours: qh }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { quietHours?: unknown };
+    expect(body.quietHours).toEqual(qh);
+    expect(store.get(rec.id)!.quietHours).toEqual(qh);
+
+    const list = await fetch(`${url}/rc/push/subscriptions`);
+    const lb = (await list.json()) as {
+      subscriptions: Array<{ quietHours?: unknown }>;
+    };
+    expect(lb.subscriptions[0].quietHours).toEqual(qh);
+  });
+
+  it('PATCH quietHours:null clears the window', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setQuietHours(rec.id, {
+      from: '23:00',
+      to: '07:00',
+      timezone: 'UTC',
+    });
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quietHours: null }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.get(rec.id)!.quietHours).toBeUndefined();
+  });
+
+  it('PATCH {quietHours} leaves existing prefs intact (field independence)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setPrefs(rec.id, ['task.completed']);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quietHours: { from: '00:00', to: '06:00', timezone: 'UTC' },
+      }),
+    });
+    expect(res.status).toBe(200);
+    // prefs untouched (a quietHours-only PATCH must not wipe prefs).
+    expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
+  });
+
+  it('PATCH {prefs} leaves existing quietHours intact (field independence)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const qh = { from: '00:00', to: '06:00', timezone: 'UTC' };
+    await store.setQuietHours(rec.id, qh);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: ['permission.required'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.get(rec.id)!.quietHours).toEqual(qh);
+    expect(store.get(rec.id)!.prefs).toEqual(['permission.required']);
+  });
+
+  it('PATCH malformed quietHours -> 400 invalid_quiet_hours', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quietHours: { from: '9am', to: '5pm', timezone: 'UTC' },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('invalid_quiet_hours');
+    expect(store.get(rec.id)!.quietHours).toBeUndefined();
+  });
+
+  it('PATCH another tokens id as non-owner with a quietHours body -> 404 (existence hidden before validation)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokB', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quietHours: { from: '1', to: '2', timezone: 'x' },
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
   it('PATCH another tokens id as non-owner -> 404 (hide existence)', async () => {
     const url = await mount();
     const rec = await store.add('tokB', VALID_SUB);

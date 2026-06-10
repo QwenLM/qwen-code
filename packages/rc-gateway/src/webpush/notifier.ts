@@ -12,6 +12,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import type { SnoozeStore } from '../routing/snooze.js';
 import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
 import type { RoutingMatcher } from '../routing/rules.js';
+import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 
@@ -41,10 +42,15 @@ export class PushNotifier {
     private readonly routing?: RoutingMatcher,
   ) {}
 
-  /** Fan a daemon event out to all scope-eligible subscriptions. */
+  /**
+   * Fan a daemon event out to all scope-eligible subscriptions. `now` is
+   * injected (default the wall clock) so quiet-hours can be tested against a
+   * fixed instant, mirroring the policy evaluator's `evaluate(…, now)`.
+   */
   async notify(
     event: { type: string; data: unknown },
     ctx: { sessionId: string; sessionName?: string },
+    now: Date = new Date(),
   ): Promise<void> {
     const payload = buildPayload(event, ctx);
     if (!payload) return;
@@ -95,6 +101,28 @@ export class PushNotifier {
         // a list → only those kinds; [] → nothing. Skip is silent (no audit),
         // matching the cycle-9 scope-skip posture. Runs after scope + snooze.
         if (r.prefs !== undefined && !r.prefs.includes(payload.kind)) return;
+        // Quiet-hours skip (cycle 29): if `now` falls inside this
+        // subscription's own quiet window, suppress (any kind — quiet hours
+        // silences the device entirely). Runs after prefs, before
+        // working-device. Fail-OPEN: an unparseable stored window (shouldn't
+        // occur post-validation) is treated as "no quiet hours" → send.
+        // parseTimeOfDay / isWithinTimeOfDay are internally try/caught and
+        // never throw into the fan-out.
+        if (r.quietHours) {
+          const window = parseTimeOfDay(r.quietHours);
+          if (window && isWithinTimeOfDay(window, now)) {
+            void this.audit?.record({
+              action: 'push_suppressed',
+              target: ctx.sessionId,
+              detail: {
+                kind: payload.kind,
+                reason: 'quiet_hours',
+                subscriptionId: r.id,
+              },
+            });
+            return;
+          }
+        }
         // Working-device skip (this cycle): a permission.required push to a
         // subscription whose own token posted recently is redundant — you're
         // already on that device. permission.required-ONLY (completions et al.

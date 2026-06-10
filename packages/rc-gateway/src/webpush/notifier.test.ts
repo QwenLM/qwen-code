@@ -552,4 +552,107 @@ describe('PushNotifier', () => {
     expect(sent).toHaveLength(0);
     expect(audit.calls.length).toBe(0);
   });
+
+  // --- Quiet hours (cycle 29) ---------------------------------------------
+
+  async function approverWithSub(): Promise<string> {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/q',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    return sub.id;
+  }
+
+  const PERM_EVENT = {
+    type: 'permission_request',
+    data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+  };
+
+  it('suppresses a subscription whose quiet window covers now (+ audits reason)', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '09:00',
+      to: '17:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      PERM_EVENT,
+      { sessionId: 's1' },
+      new Date('2026-06-10T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(0);
+    const supp = audit.calls.find((c) => c.action === 'push_suppressed');
+    expect(supp?.detail).toMatchObject({
+      kind: 'permission.required',
+      reason: 'quiet_hours',
+      subscriptionId: subId,
+    });
+  });
+
+  it('sends when now is OUTSIDE the quiet window', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '09:00',
+      to: '17:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      PERM_EVENT,
+      { sessionId: 's1' },
+      new Date('2026-06-10T20:00:00Z'),
+    );
+    expect(sent).toHaveLength(1);
+    expect(audit.calls.some((c) => c.action === 'push_suppressed')).toBe(false);
+  });
+
+  it('handles a midnight-wrapping quiet window (23:00–07:00) at 02:00', async () => {
+    const subId = await approverWithSub();
+    await store.setQuietHours(subId, {
+      from: '23:00',
+      to: '07:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      PERM_EVENT,
+      { sessionId: 's1' },
+      new Date('2026-06-10T02:00:00Z'),
+    );
+    expect(sent).toHaveLength(0);
+    expect(
+      audit.calls.find((c) => c.action === 'push_suppressed')?.detail,
+    ).toMatchObject({ reason: 'quiet_hours' });
+  });
+
+  it('FAIL-OPEN: an unparseable stored quiet window sends (no suppression)', async () => {
+    const subId = await approverWithSub();
+    // Bypasses PATCH validation by writing directly through the store.
+    await store.setQuietHours(subId, {
+      from: '99:99',
+      to: '07:00',
+      timezone: 'UTC',
+    });
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      PERM_EVENT,
+      { sessionId: 's1' },
+      new Date('2026-06-10T02:00:00Z'),
+    );
+    expect(sent).toHaveLength(1);
+    expect(audit.calls.some((c) => c.action === 'push_suppressed')).toBe(false);
+  });
+
+  it('a subscription with no quiet window is unaffected (back-compat)', async () => {
+    await approverWithSub();
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(
+      PERM_EVENT,
+      { sessionId: 's1' },
+      new Date('2026-06-10T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(1);
+  });
 });
