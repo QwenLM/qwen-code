@@ -1495,6 +1495,70 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('seeds tokenCount from the latest replay usage on attach', async () => {
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'old answer' },
+                _meta: { usage: { inputTokens: 11_000, totalTokens: 12_000 } },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_complete',
+            data: { stopReason: 'end_turn' },
+          },
+          {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'latest answer' },
+                _meta: { usage: { inputTokens: 23_000, totalTokens: 25_000 } },
+              },
+            },
+          },
+          {
+            id: 4,
+            v: 1,
+            type: 'turn_complete',
+            data: { stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.tokenCount).toBe(23_000);
+  });
+
   it('bumps workspace event signals from replay snapshot events', async () => {
     const session = createMockSession({
       replaySnapshot: {

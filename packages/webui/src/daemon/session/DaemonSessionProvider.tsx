@@ -35,6 +35,7 @@ import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
+  getReplayTokenCount,
   mapProviderStatus,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
@@ -228,6 +229,10 @@ export function DaemonSessionProvider({
         try {
           let isSameSessionReconnect = false;
           let shouldInjectReplaySnapshot = false;
+          // Only populated when this attempt (re)loads the session: a reused
+          // session object carries the snapshot from its original load, whose
+          // usage may be older than the in-memory count.
+          let replayTokenCount: number | undefined;
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -318,6 +323,10 @@ export function DaemonSessionProvider({
             shouldInjectReplaySnapshot =
               nextSession.replaySnapshot.compactedReplay.length > 0 ||
               nextSession.replaySnapshot.liveJournal.length > 0;
+            replayTokenCount = getReplayTokenCount([
+              ...nextSession.replaySnapshot.compactedReplay,
+              ...nextSession.replaySnapshot.liveJournal,
+            ]);
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -370,9 +379,15 @@ export function DaemonSessionProvider({
             currentModel,
             currentMode,
             tokenCount:
-              current.sessionId === activeSession.sessionId
-                ? (current.tokenCount ?? 0)
-                : 0,
+              // A freshly loaded snapshot covers everything up to the SSE
+              // resume point, so its usage supersedes the in-memory count;
+              // without one (or with a usage-less replay) keep the
+              // same-session value and start anything else at 0.
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
             contextWindow,
             providers,
             supportedCommands,
