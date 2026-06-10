@@ -85,6 +85,9 @@ export const ExtensionActionsView = ({
   const [scope, setScope] = useState<ExtensionScope>(
     () => manager?.getExtensionScope(extension.name) ?? 'user',
   );
+  // Changing scope re-writes enablement settings and can take a moment;
+  // surfaced as a loading line so the selection doesn't look ignored.
+  const [scopeBusy, setScopeBusy] = useState(false);
 
   const hasUpdate = updateState === ExtensionUpdateState.UPDATE_AVAILABLE;
 
@@ -164,6 +167,7 @@ export const ExtensionActionsView = ({
     async (newScope: ExtensionScope) => {
       if (!manager) return;
       const name = extension.name;
+      setScopeBusy(true);
       try {
         manager.setExtensionScope(name, newScope);
         // Apply enablement: Global -> User; Project/Local -> workspace only.
@@ -186,6 +190,7 @@ export const ExtensionActionsView = ({
       } catch (error) {
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
+      setScopeBusy(false);
       setSub('detail');
     },
     [manager, extension, onStatus, onReload],
@@ -210,9 +215,10 @@ export const ExtensionActionsView = ({
   );
 
   // Escape: from the detail leaves; from a sub-view returns to the detail.
+  // Ignored while a scope change is in flight so it can't be abandoned midway.
   useKeypress(
     (key) => {
-      if (key.name === 'escape') {
+      if (key.name === 'escape' && !scopeBusy) {
         if (sub === 'detail') onExit();
         else setSub('detail');
       }
@@ -238,13 +244,17 @@ export const ExtensionActionsView = ({
             {t('Current: {{scope}}', { scope: items[currentIndex].label })}
           </Text>
         </Box>
-        <RadioButtonSelect
-          items={items}
-          initialIndex={currentIndex}
-          isFocused={isActive}
-          showNumbers={false}
-          onSelect={(value) => void handleScope(value)}
-        />
+        {scopeBusy ? (
+          <Text color={theme.text.secondary}>{t('Changing scope...')}</Text>
+        ) : (
+          <RadioButtonSelect
+            items={items}
+            initialIndex={currentIndex}
+            isFocused={isActive}
+            showNumbers={false}
+            onSelect={(value) => void handleScope(value)}
+          />
+        )}
       </Box>
     );
   }

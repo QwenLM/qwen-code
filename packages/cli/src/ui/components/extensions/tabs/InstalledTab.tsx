@@ -96,6 +96,9 @@ export const InstalledTab = ({
   // group) the cursor — and any open detail view — stays on the SAME item
   // rather than whatever now sits at the old index.
   const selectedKeyRef = useRef<string | null>(null);
+  // Guards against overlapping mutations (e.g. mashing Space) while an
+  // enable/disable is still being applied.
+  const mutatingRef = useRef(false);
 
   const extensionManager = config.getExtensionManager();
 
@@ -231,9 +234,16 @@ export const InstalledTab = ({
 
   const togglePlugin = useCallback(
     async (item: Extract<InstalledItem, { kind: 'plugin' }>) => {
-      if (!extensionManager) return;
+      if (!extensionManager || mutatingRef.current) return;
       const scope =
         item.scope === 'user' ? SettingScope.User : SettingScope.Workspace;
+      mutatingRef.current = true;
+      onStatus({
+        type: 'info',
+        text: item.isActive
+          ? t('Disabling "{{name}}"...', { name: item.name })
+          : t('Enabling "{{name}}"...', { name: item.name }),
+      });
       try {
         if (item.isActive) {
           await extensionManager.disableExtension(item.name, scope);
@@ -250,6 +260,8 @@ export const InstalledTab = ({
         await load();
       } catch (error) {
         onStatus({ type: 'error', text: getErrorMessage(error) });
+      } finally {
+        mutatingRef.current = false;
       }
     },
     [extensionManager, load, onStatus],
@@ -257,7 +269,16 @@ export const InstalledTab = ({
 
   const toggleMcp = useCallback(
     async (item: Extract<InstalledItem, { kind: 'mcp' }>) => {
+      if (mutatingRef.current) return;
       const toolRegistry = config.getToolRegistry();
+      mutatingRef.current = true;
+      // Enabling rediscovers the server's tools, which can take a while.
+      onStatus({
+        type: 'info',
+        text: item.isActive
+          ? t('Disabling MCP "{{name}}"...', { name: item.name })
+          : t('Enabling MCP "{{name}}"...', { name: item.name }),
+      });
       try {
         const settings = loadSettings();
         const targetScope =
@@ -307,6 +328,8 @@ export const InstalledTab = ({
         await load();
       } catch (error) {
         onStatus({ type: 'error', text: getErrorMessage(error) });
+      } finally {
+        mutatingRef.current = false;
       }
     },
     [config, load, onStatus],
@@ -345,7 +368,8 @@ export const InstalledTab = ({
           void toggleMcp(selectedItem);
         }
       } else if (key.sequence === 'f' && !key.ctrl && !key.meta) {
-        if (selectedItem) void toggleFavorite(selectedItem);
+        if (selectedItem && !mutatingRef.current)
+          void toggleFavorite(selectedItem);
       }
     },
     { isActive: isActive && view === 'list' },
