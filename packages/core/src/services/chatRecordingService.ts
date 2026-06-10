@@ -1373,17 +1373,7 @@ export class ChatRecordingService {
   }
 
   recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
-    try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'file_history_snapshot',
-        systemPayload: { snapshots: [serializeSnapshot(snapshot)] },
-      };
-      this.appendRecord(record);
-    } catch (error) {
-      debugLogger.error('Error saving file history snapshot:', error);
-    }
+    this.recordFileHistorySnapshotBatch([snapshot]);
   }
 
   recordFileHistorySnapshotBatch(snapshots: FileHistorySnapshot[]): void {
