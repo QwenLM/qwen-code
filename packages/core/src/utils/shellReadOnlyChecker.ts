@@ -28,7 +28,6 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
   'dirname',
   'du',
   'echo',
-  'env',
   'find',
   'git',
   'grep',
