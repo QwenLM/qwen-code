@@ -103,6 +103,8 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'LD_LIBRARY_PATH',
   'DYLD_INSERT_LIBRARIES',
   'DYLD_LIBRARY_PATH',
+  'BASH_ENV',
+  'ENV',
   'PATH',
   'HOME',
   'TMPDIR',
@@ -1001,10 +1003,12 @@ export function reloadEnvironment(
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (typeof value !== 'string') continue;
-      // .env has higher priority — don't overwrite keys already in newDotEnvKeys
-      if (!newDotEnvKeys.has(key)) {
-        newSettingsEnvKeys.set(key, value);
-      }
+      if (newDotEnvKeys.has(key)) continue;
+      // When .env read failed, use the snapshot as the shadow set so
+      // settings.env keys that were previously shadowed by .env don't
+      // accidentally overwrite the still-live .env values in process.env.
+      if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
+      newSettingsEnvKeys.set(key, value);
     }
   }
 
