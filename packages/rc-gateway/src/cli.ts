@@ -12,6 +12,11 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
+import {
+  loadRoutingConfigFile,
+  compileRouting,
+  type RoutingMatcher,
+} from './routing/rules.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import { loadPolicyFile } from './policy/loader.js';
@@ -39,6 +44,24 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const snooze = await SnoozeStore.open(
     join(homedir(), '.qwen', 'rc', 'snooze.state'),
   );
+  // Load routing rules FAIL-OPEN: absent file → no matcher (full fan-out); a
+  // malformed file is logged and ignored (not fatal) — routing rules only
+  // suppress, so the safe default on misconfig is more notifications, never
+  // fewer. Workspace override + hot-reload are deferred.
+  let routing: RoutingMatcher | undefined;
+  let routingRuleCount = 0;
+  try {
+    const routingCfg = await loadRoutingConfigFile(
+      join(homedir(), '.qwen', 'rc', 'routing.yaml'),
+    );
+    if (routingCfg) {
+      routing = compileRouting(routingCfg);
+      routingRuleCount = routingCfg.rules.length;
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[routing] ignoring routing.yaml: ${(err as Error).message}`);
+  }
   const { app, notifier, audit } = createGatewayApp({
     daemon: handle.daemon,
     store,
@@ -46,6 +69,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     vapid,
     pushStore,
     snooze,
+    routing,
   });
 
   // Load the policy fail-closed: absent file → default-prompt (auto-votes
@@ -73,6 +97,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         `web viewer: http://127.0.0.1:${port}/ui/`,
         `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
         `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
+        `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
         `owner pairing code: ${code}`,
         `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
         `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,

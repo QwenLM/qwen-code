@@ -41,6 +41,7 @@ import {
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import type { SnoozeStore } from './routing/snooze.js';
+import type { RoutingMatcher } from './routing/rules.js';
 import {
   WorkingDeviceTracker,
   recordActivity,
@@ -60,6 +61,8 @@ export interface GatewayDeps {
   pushStore?: PushStore;
   /** Persisted snooze store. Routing routes + notifier snooze-gating wire only when set. */
   snooze?: SnoozeStore;
+  /** Compiled routing matcher; notifier drop-gating wires only when set. */
+  routing?: RoutingMatcher;
   /** Pre-built command loader (test injection). Built from deps when omitted. */
   commandLoader?: CommandLoader;
   /** User-level slash-command root; defaults to ~/.qwen/commands. */
@@ -214,6 +217,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       deps.snooze,
       audit,
       workingDevice,
+      deps.routing,
     );
     app.use(
       '/rc/push',

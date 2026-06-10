@@ -11,6 +11,7 @@ import type { PushStore } from '../pushStore.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { SnoozeStore } from '../routing/snooze.js';
 import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
+import type { RoutingMatcher } from '../routing/rules.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 
@@ -37,6 +38,7 @@ export class PushNotifier {
     private readonly snooze?: SnoozeStore,
     private readonly audit?: AuditRecorder,
     private readonly workingDevice?: WorkingDeviceTracker,
+    private readonly routing?: RoutingMatcher,
   ) {}
 
   /** Fan a daemon event out to all scope-eligible subscriptions. */
@@ -54,6 +56,27 @@ export class PushNotifier {
         action: 'push_suppressed',
         target: ctx.sessionId,
         detail: { kind: payload.kind, reason: 'snoozed' },
+      });
+      return;
+    }
+    // Routing drop gate (cycle 25): an operator routing.yaml `drop` rule
+    // matching this event's kind/sessionTag suppresses the WHOLE fan-out, like
+    // snooze — event-global, before any per-subscription work. Suppress-only:
+    // a rule can never cause a push the gates below would have blocked. The
+    // /test path (notifyToken) is NOT gated.
+    const dropRuleId = this.routing?.firstDrop({
+      kind: payload.kind,
+      sessionName: ctx.sessionName,
+    });
+    if (dropRuleId) {
+      void this.audit?.record({
+        action: 'push_suppressed',
+        target: ctx.sessionId,
+        detail: {
+          kind: payload.kind,
+          reason: 'routing_rule',
+          ruleId: dropRuleId,
+        },
       });
       return;
     }

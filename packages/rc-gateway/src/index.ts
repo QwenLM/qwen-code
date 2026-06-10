@@ -87,6 +87,16 @@ export {
 } from './routing/workingDevice.js';
 export { createRoutingRouter } from './routes/routing.js';
 export {
+  loadRoutingConfig,
+  loadRoutingConfigFile,
+  compileRouting,
+  RoutingError,
+  type RoutingRule,
+  type RoutingRuleMatch,
+  type RoutingConfig,
+  type RoutingMatcher,
+} from './routing/rules.js';
+export {
   searchTranscripts,
   type SearchHit,
   type SearchOptions,

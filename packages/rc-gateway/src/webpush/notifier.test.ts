@@ -406,6 +406,134 @@ describe('PushNotifier', () => {
     expect(sent[0].payload.kind).toBe('task.completed');
   });
 
+  it('a routing drop rule suppresses the whole fan-out, auditing routing_rule', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifierAudit = fakeAudit();
+    const routing = { firstDrop: () => 'silence-prompts' };
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+
+    expect(sent).toHaveLength(0);
+    expect(notifierAudit.calls).toHaveLength(1);
+    expect(notifierAudit.calls[0].action).toBe('push_suppressed');
+    expect(notifierAudit.calls[0].target).toBe('s1');
+    expect(notifierAudit.calls[0].detail).toMatchObject({
+      kind: 'permission.required',
+      reason: 'routing_rule',
+      ruleId: 'silence-prompts',
+    });
+  });
+
+  it('a routing matcher returning null leaves delivery unchanged', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const routing = { firstDrop: () => null };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('permission.required');
+  });
+
+  it('snooze takes precedence over a routing drop rule (gate order)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const snoozeDir = mkdtempSync(join(tmpdir(), 'rc-notifier-snooze-'));
+    const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
+    await snooze.snooze(60, 'all');
+    const notifierAudit = fakeAudit();
+    // A matcher that WOULD drop — but snooze fires first, so the recorded
+    // reason must be 'snoozed', proving the routing gate sits after snooze.
+    const routing = { firstDrop: () => 'would-drop' };
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      snooze,
+      notifierAudit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+
+    expect(sent).toHaveLength(0);
+    expect(notifierAudit.calls).toHaveLength(1);
+    expect(notifierAudit.calls[0].detail).toMatchObject({ reason: 'snoozed' });
+  });
+
+  it('notifyToken (/test) is NOT gated by a routing drop rule', async () => {
+    const owner = await tokens.issue([SESSION_READ], 'owner');
+    await store.add(owner.id, {
+      endpoint: 'https://push.example.com/owner',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const payload: PushPayload = {
+      v: 1,
+      kind: 'task.completed',
+      sessionId: 'test',
+      summary: 'Task finished',
+      url: '/ui/?session=test',
+    };
+    const routing = { firstDrop: () => 'drop-everything' };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+    );
+    await notifier.notifyToken(owner.id, payload);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('task.completed');
+  });
+
   it('notifyToken skips a token lacking the required scope (no audit noise)', async () => {
     const t = await tokens.issue([APPROVE], 'no-session-read');
     await store.add(t.id, {
