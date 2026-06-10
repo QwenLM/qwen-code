@@ -9,7 +9,6 @@ import { Box, Text } from 'ink';
 import open from 'open';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
@@ -346,14 +345,17 @@ export const DiscoverTab = ({
 
   // List keyboard: navigate, type-to-search, Space to toggle, Enter to view
   // (or install the selected set), matching Claude Code's Discover list.
+  // Note: navigation here intentionally bypasses the global SELECTION_UP/DOWN
+  // matchers (which include bare j/k) so that j and k stay available as
+  // printable characters for the type-to-search query.
   useKeypress(
     (key) => {
-      if (keyMatchers[Command.SELECTION_UP](key)) {
+      if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
         if (filtered.length > 0)
           setCursor((prev) => (prev > 0 ? prev - 1 : filtered.length - 1));
         return;
       }
-      if (keyMatchers[Command.SELECTION_DOWN](key)) {
+      if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
         if (filtered.length > 0)
           setCursor((prev) => (prev < filtered.length - 1 ? prev + 1 : 0));
         return;
