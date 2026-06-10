@@ -746,6 +746,20 @@ export const useGeminiStream = (
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
 
+        // Teammate envelopes are model-authored text already rendered
+        // as a `● …` notification by the teammate drain. They must NOT
+        // enter the slash/shell/@ preprocessing below: with `!` shell
+        // mode active a teammate report would be EXECUTED as a shell
+        // command, and a leading `/` or an `@path` would be
+        // reinterpreted against the leader's session. Pass the
+        // envelope straight through to the model, like Notification.
+        if (submitType === SendMessageType.Teammate) {
+          onDebugMessage(
+            `Received teammate message (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
@@ -796,15 +810,12 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        // Cron prompts and teammate reports are already rendered as a
-        // `● …` notification by their queue drains, so skip the
-        // user-message history item to avoid a duplicate `> …` line (and,
-        // for teammates, dumping the whole nonce-tagged envelope on screen).
-        // Preprocessing (@/slash/shell) still runs.
-        if (
-          submitType !== SendMessageType.Cron &&
-          submitType !== SendMessageType.Teammate
-        ) {
+        // Cron prompts are already rendered as a `● …` notification by
+        // their queue drain, so skip the user-message history item to
+        // avoid a duplicate `> …` line. Preprocessing (@/slash/shell)
+        // still runs for Cron. (Teammate envelopes returned earlier
+        // and never reach this point.)
+        if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
             {
               type: MessageType.USER,
