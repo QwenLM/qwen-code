@@ -66,6 +66,25 @@
   font-size: 12px;
 }
 
+.modelButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.modelButton:hover .model,
+.modelButton:focus-visible .model {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
 .escapeHint {
   color: var(--text-secondary);
   font-size: 13px;

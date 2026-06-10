@@ -332,13 +332,6 @@ export class Storage {
     return this.targetDir;
   }
 
-  getHistoryDir(): string {
-    const hash = getProjectHash(this.getProjectRoot());
-    const historyDir = path.join(Storage.getRuntimeBaseDir(), 'history');
-    const targetDir = path.join(historyDir, hash);
-    return targetDir;
-  }
-
   getWorkspaceSettingsPath(): string {
     return path.join(this.getQwenDir(), 'settings.json');
   }

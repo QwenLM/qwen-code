@@ -11,9 +11,10 @@ import {
   resolveToolName,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
+  toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
-import { extractShellOperations } from './shell-semantics.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
@@ -188,30 +189,69 @@ export class PermissionManager {
     ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
-    // For shell commands, split compound commands and evaluate each
-    // sub-command independently, then return the most restrictive result.
-    // Priority order (most to least restrictive): deny > ask > allow
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run the compound-aware extractor on the FULL original command before
+    // splitting. This is the single source of truth for cd tracking and
+    // recursive shell-wrapper unwrapping — without it, splitting first
+    // would discard the cd context, so a rule like
+    // `deny: ["Write(.qwen/settings.json)"]` would miss
+    // `cd .qwen && bash -lc 'echo > settings.json'`.
+    //
+    // Virtual-op verdicts can only ESCALATE the overall decision; a
+    // 'default' here means "shell semantics have no opinion" and we still
+    // need to consult Bash rules below.
+    let virtualDecision: PermissionDecision = 'default';
+    if (command !== undefined && SHELL_TOOL_NAMES.has(toolName)) {
+      const pathCtx: PathMatchContext | undefined =
+        this.config.getProjectRoot && this.config.getCwd
+          ? {
+              projectRoot: this.config.getProjectRoot(),
+              cwd: ctx.cwd ?? this.config.getCwd(),
+            }
+          : undefined;
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwd);
+      virtualDecision = this.evaluateShellVirtualOps(ops, pathCtx);
+      // deny short-circuits — most restrictive verdict possible.
+      if (virtualDecision === 'deny') return 'deny';
+    }
+
+    // ── Bash-rule pass: split compound commands and evaluate each
+    // sub-command independently against Bash(...) patterns, returning the
+    // most restrictive result. Priority: deny > ask > allow.
+    let bashDecision: PermissionDecision;
     if (command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
-        return this.evaluateCompoundCommand(ctx, subCommands);
+        bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
+      } else {
+        bashDecision = this.evaluateSingle(ctx);
+        // For shell commands, resolve 'default' to actual permission via AST
+        // analysis so the caller always sees a concrete verdict.
+        if (
+          bashDecision === 'default' &&
+          SHELL_TOOL_NAMES.has(toolName) &&
+          command !== undefined
+        ) {
+          bashDecision = await this.resolveDefaultPermission(command);
+        }
       }
+    } else {
+      bashDecision = this.evaluateSingle(ctx);
     }
 
-    const decision = this.evaluateSingle(ctx);
-
-    // For shell commands, resolve 'default' to actual permission using AST analysis
-    // This ensures 'default' is never returned for shell commands - they always get
-    // a concrete permission (deny/ask/allow) based on the command's readonly status.
+    // ── Merge: virtual-op verdict can ESCALATE the bash verdict (to ask /
+    // deny) but a 'default' virtual result means "shell semantics have no
+    // opinion" and must never override an explicit allow from a Bash
+    // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
+    // guard is load-bearing.)
     if (
-      decision === 'default' &&
-      SHELL_TOOL_NAMES.has(toolName) &&
-      command !== undefined
+      virtualDecision !== 'default' &&
+      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
     ) {
-      return this.resolveDefaultPermission(command);
+      return virtualDecision;
     }
-
-    return decision;
+    return bashDecision;
   }
 
   /**
@@ -221,7 +261,7 @@ export class PermissionManager {
    * of:
    *   1. The base decision from Bash / command-pattern rules.
    *   2. The decision derived from virtual file / network operations extracted
-   *      via `extractShellOperations` — allows Read/Edit/Write/WebFetch rules
+   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
@@ -285,8 +325,14 @@ export class PermissionManager {
     // should return 'allow', not be downgraded to 'default'.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
+      // Use the compound-aware extractor here too so a single
+      // `evaluateSingle` call on a segment like
+      // `bash -lc 'echo > .qwen/settings.json'` still surfaces the inner
+      // write to virtual-op rules. The cross-command cd-tracking pass at
+      // the top of `evaluate()` handles `cd && wrapper` patterns —
+      // per-segment unwrapping handles wrappers in isolation.
       const virtualDecision = this.evaluateShellVirtualOps(
-        extractShellOperations(command, cwd),
+        extractShellOperationsAcrossCommand(command, cwd),
         pathCtx,
       );
       if (
@@ -321,12 +367,24 @@ export class PermissionManager {
       // Evaluate the virtual operation using the standard rule-matching path.
       // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
       // into the shell-semantics branch.
-      const opDecision = this.evaluateSingle({
+      let opDecision = this.evaluateSingle({
         toolName: op.virtualTool,
         cwd: pathCtx?.cwd,
         filePath: op.filePath,
         domain: op.domain,
       });
+
+      if (
+        op.cwdUnknown &&
+        op.pathMayDependOnCwd &&
+        DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask &&
+        this.hasDenyOrAskRuleForTool(op.virtualTool)
+      ) {
+        debugLogger.info(
+          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
+        );
+        opDecision = 'ask';
+      }
 
       if (DECISION_PRIORITY[opDecision] > DECISION_PRIORITY[worst]) {
         worst = opDecision;
@@ -335,6 +393,18 @@ export class PermissionManager {
     }
 
     return worst;
+  }
+
+  private hasDenyOrAskRuleForTool(toolName: string): boolean {
+    return [
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   /**
@@ -626,15 +696,6 @@ export class PermissionManager {
     ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
-    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
-      if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasRelevantRules({ ...ctx, command: subCmd }),
-        );
-      }
-    }
-
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
@@ -642,15 +703,6 @@ export class PermissionManager {
             cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
-
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-    ] as const;
 
     const allRules = [
       ...this.sessionRules.allow,
@@ -661,17 +713,24 @@ export class PermissionManager {
       ...this.persistentRules.deny,
     ];
 
-    if (allRules.some((rule) => matchesRule(rule, ...matchArgs))) return true;
-
-    // For shell commands: also check whether any virtual file/network operation
-    // extracted from the command has a relevant rule. This ensures the PM is
-    // consulted (and the confirmation dialog shown) when Read/Edit/etc. rules
-    // would match equivalent shell commands.
-    if (SHELL_TOOL_NAMES.has(ctx.toolName) && ctx.command !== undefined) {
-      const cwd = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperations(ctx.command, cwd);
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run before the splitCompound recursion so cd tracking and recursive
+    // wrapper unwrapping see the FULL original command. Required so
+    // rules like `Write(.qwen/settings.json)` are recognised as relevant
+    // for `cd .qwen && bash -lc 'echo > settings.json'`.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
           const opMatchArgs = [
             op.virtualTool,
             undefined,
@@ -687,7 +746,25 @@ export class PermissionManager {
       }
     }
 
-    return false;
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        );
+      }
+    }
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
   }
 
   /**
@@ -703,6 +780,47 @@ export class PermissionManager {
     ctx = this.normalizePermissionContext(ctx);
     const { toolName, command, cwd, filePath, domain, specifier } = ctx;
 
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // See `hasRelevantRules` for the rationale; same cd-tracking and
+    // wrapper-unwrapping requirement applies to ask rules.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      if (
+        ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
+          const opMatchArgs = [
+            op.virtualTool,
+            undefined,
+            op.filePath,
+            op.domain,
+            pathCtx,
+            undefined,
+          ] as const;
+          return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+        })
+      ) {
+        return true;
+      }
+    }
+
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
@@ -711,14 +829,6 @@ export class PermissionManager {
         );
       }
     }
-
-    const pathCtx: PathMatchContext | undefined =
-      this.config.getProjectRoot && this.config.getCwd
-        ? {
-            projectRoot: this.config.getProjectRoot(),
-            cwd: cwd ?? this.config.getCwd(),
-          }
-        : undefined;
 
     const matchArgs = [
       toolName,
@@ -729,29 +839,14 @@ export class PermissionManager {
       specifier,
     ] as const;
 
-    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+    return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+  }
 
-    if (askRules.some((rule) => matchesRule(rule, ...matchArgs))) {
-      return true;
-    }
-
-    if (SHELL_TOOL_NAMES.has(ctx.toolName) && ctx.command !== undefined) {
-      const cwd = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperations(ctx.command, cwd);
-      return ops.some((op) => {
-        const opMatchArgs = [
-          op.virtualTool,
-          undefined,
-          op.filePath,
-          op.domain,
-          pathCtx,
-          undefined,
-        ] as const;
-        return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
-      });
-    }
-
-    return false;
+  private hasAskRuleForTool(toolName: string): boolean {
+    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   // ---------------------------------------------------------------------------

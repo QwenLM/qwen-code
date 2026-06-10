@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import { QWEN_DIR, resolvePath, sanitizeCwd } from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
@@ -15,6 +15,13 @@ export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
 export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
+
+/**
+ * Top-level directory name (under getMemoryBaseDir()) for the user-level
+ * auto-memory layer — cross-project facts about the user (preferences,
+ * working style, background). Mirror layout of the per-project memory dir.
+ */
+export const USER_AUTO_MEMORY_DIRNAME = 'memories';
 
 function findGitRoot(startPath: string): string | null {
   let current = path.resolve(startPath);
@@ -81,38 +88,42 @@ function findCanonicalGitRoot(startPath: string): string | null {
 
 /**
  * Returns the base directory for all auto-memory storage.
- * Defaults to the global qwen dir (`~/.qwen` or `$QWEN_HOME`);
+ * Defaults to the runtime output dir (`runtimeOutputDir`, `QWEN_RUNTIME_DIR`,
+ * or the global qwen dir);
  * overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
 export function getMemoryBaseDir(): string {
   if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
-    return process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    return resolvePath(undefined, process.env['QWEN_CODE_MEMORY_BASE_DIR']);
   }
-  return Storage.getGlobalQwenDir();
+  return Storage.getRuntimeBaseDir();
 }
 
-// Memoize by projectRoot — findCanonicalGitRoot() walks the file system (existsSync
-// per directory) and is called from hot-path code such as schedulers and scanners.
+// Memoize by projectRoot plus the runtime-specific base dir. In daemon mode,
+// different sessions can share a project root while writing to different output dirs.
 const _autoMemoryRootCache = new Map<string, string>();
 
 export function getAutoMemoryRoot(projectRoot: string): string {
-  const cached = _autoMemoryRootCache.get(projectRoot);
+  const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
+  const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
+  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${projectRoot}`;
+  const cached = _autoMemoryRootCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
   let result: string;
-  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
+  if (useLocalMemory) {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
     const canonicalRoot =
       findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
     result = path.join(
-      getMemoryBaseDir(),
+      memoryBaseDir,
       'projects',
       sanitizeCwd(canonicalRoot),
       AUTO_MEMORY_DIRNAME,
     );
   }
-  _autoMemoryRootCache.set(projectRoot, result);
+  _autoMemoryRootCache.set(cacheKey, result);
   return result;
 }
 
@@ -197,4 +208,48 @@ export function getAutoMemoryFilePath(
   relativePath: string,
 ): string {
   return path.join(getAutoMemoryRoot(projectRoot), relativePath);
+}
+
+/**
+ * Returns the user-level (cross-project) auto-memory root.
+ * Lives at `${getMemoryBaseDir()}/memories/` — typically `~/.qwen/memories/`.
+ * Unlike project memory, this is NOT scoped to a git root; it is shared
+ * across every project the user works in.
+ */
+export function getUserAutoMemoryRoot(): string {
+  return path.join(getMemoryBaseDir(), USER_AUTO_MEMORY_DIRNAME);
+}
+
+export function getUserAutoMemoryIndexPath(): string {
+  return path.join(getUserAutoMemoryRoot(), AUTO_MEMORY_INDEX_FILENAME);
+}
+
+export function getUserAutoMemoryTopicPath(type: AutoMemoryType): string {
+  return path.join(getUserAutoMemoryRoot(), getAutoMemoryTopicFilename(type));
+}
+
+/**
+ * Returns true if the given absolute path is inside the user-level
+ * auto-memory root. Uses path.relative() (not startsWith) so platform
+ * path-separator differences and path-traversal edge cases are handled.
+ */
+export function isUserAutoMemPath(absolutePath: string): boolean {
+  const normalizedPath = path.normalize(absolutePath);
+  const memRoot = path.normalize(getUserAutoMemoryRoot());
+  const rel = path.relative(memRoot, normalizedPath);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * True if the path lives in EITHER the project-level memory root for the
+ * given project OR the user-level memory root. Used by the extraction
+ * agent's sandbox to allow writes to both scopes.
+ */
+export function isAnyAutoMemPath(
+  absolutePath: string,
+  projectRoot: string,
+): boolean {
+  return (
+    isAutoMemPath(absolutePath, projectRoot) || isUserAutoMemPath(absolutePath)
+  );
 }

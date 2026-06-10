@@ -44,7 +44,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
@@ -68,6 +67,7 @@ import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
+import type { InstructionLoadReason } from '../hooks/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -105,7 +105,11 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem, createHookOutput } from '../hooks/index.js';
+import {
+  HookSystem,
+  createHookOutput,
+  createInstructionsLoadedCallback,
+} from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -157,8 +161,11 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot } from '../memory/paths.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  readAutoMemoryIndex,
+  readUserAutoMemoryIndex,
+} from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -180,6 +187,8 @@ export {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 };
+
+export type ModelInvocableCommandExecutorResult = string | { error: string };
 
 export enum ApprovalMode {
   PLAN = 'plan',
@@ -257,10 +266,41 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
  * Use `permissions.allow / ask / deny` for hard rules.
  */
 export interface AutoModeSettings {
+  classifier?: {
+    timeouts?: {
+      /** Stage-1 fast classifier timeout in milliseconds. */
+      stage1Ms?: number;
+      /** Stage-2 review classifier timeout in milliseconds. */
+      stage2Ms?: number;
+    };
+    thinking?: {
+      /** Whether stage 2 may use provider/API-level thinking. */
+      stage2Enabled?: boolean;
+    };
+  };
   hints?: {
     /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
     allow?: string[];
-    /** Natural-language descriptions of actions the user wants AUTO mode to block. */
+    /**
+     * Natural-language descriptions of destructive / irreversible actions the
+     * user wants AUTO mode to soft-block. Soft-block means the classifier
+     * blocks the action unless the user's most recent explicit request
+     * authorised that exact action and scope.
+     */
+    softDeny?: string[];
+    /**
+     * Natural-language descriptions of security-boundary actions the user
+     * wants the AUTO classifier to hard-block. Hard-block applies inside the
+     * classifier even when an autoMode allow hint or recent user request would
+     * normally authorise the action. This does not override
+     * `permissions.allow`; use `permissions.deny` for deterministic hard
+     * permission rules.
+     */
+    hardDeny?: string[];
+    /**
+     * @deprecated Use `softDeny`. Kept as a backward-compatible alias —
+     * entries here are merged into the SOFT BLOCK user section.
+     */
     deny?: string[];
   };
   /** Environment / context lines injected into the classifier's system prompt. */
@@ -623,6 +663,22 @@ export interface ConfigParameters {
    */
   disabledSlashCommands?: string[];
   /**
+   * Live-read provider for the set of skill names that should be hidden
+   * from `<available_skills>` and the `/<skill-name>` slash-command
+   * surface. Unlike `disabledSlashCommands` (which is a frozen snapshot),
+   * this is a function so the CLI layer can close over `LoadedSettings`
+   * and have post-`setValue` toggles take effect without restart.
+   *
+   * Must be attached at construction time — `Config.initialize()` calls
+   * `toolRegistry.warmAll()` which instantiates `SkillTool`, and that
+   * tool's constructor immediately calls `refreshSkills()`. A late-attach
+   * provider would let persisted disabled skills leak into the first
+   * `<available_skills>` build.
+   *
+   * Names returned must be lower-cased; consumers compare case-insensitively.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
@@ -672,7 +728,6 @@ export interface ConfigParameters {
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
-  checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
@@ -730,6 +785,8 @@ export interface ConfigParameters {
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
+  /** Prevent the system from sleeping while model or tool work is in flight. */
+  preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
@@ -942,6 +999,13 @@ const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.SHELL,
 ];
 
+// Shared empty set returned by `Config.getDisabledSkillNames()` when no
+// provider was attached. Frozen so callers cannot accidentally mutate the
+// shared instance and leak state across Config instances.
+const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set<string>(),
+);
+
 // Tracks whether the first Config in this process has claimed the global
 // QWEN_CODE_SESSION_ID env var. Prevents throwaway Config instances from
 // overwriting the real session's ID while still allowing nested qwen-code
@@ -998,7 +1062,10 @@ export class Config {
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
   private modelInvocableCommandsExecutor:
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
@@ -1022,6 +1089,9 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledSkillNamesProvider:
+    | (() => ReadonlySet<string>)
+    | null;
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1070,10 +1140,8 @@ export class Config {
     enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
-  private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -1110,6 +1178,7 @@ export class Config {
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
+  private readonly preventSystemSleep: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
@@ -1204,6 +1273,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
@@ -1260,7 +1330,6 @@ export class Config {
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
-    this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
       params.fileCheckpointingEnabled ??
       (!params.sdkMode && (params.interactive ?? false));
@@ -1314,6 +1383,7 @@ export class Config {
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
     this.shouldUseNodePtyShell =
       params.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
+    this.preventSystemSleep = params.preventSystemSleep ?? true;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? true;
     this.shellExecutionConfig = {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
@@ -1405,9 +1475,6 @@ export class Config {
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
-    if (this.getCheckpointingEnabled()) {
-      await this.getGitService();
-    }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
@@ -1464,6 +1531,14 @@ export class Config {
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'UserPromptExpansion':
+                result = await hookSystem.fireUserPromptExpansionEvent(
+                  (input['command_name'] as string) || '',
+                  (input['command_args'] as string) || '',
                   (input['prompt'] as string) || '',
                   signal,
                 );
@@ -1632,7 +1707,7 @@ export class Config {
       await this.extensionManager.refreshCache();
     }
 
-    await this.refreshHierarchicalMemory();
+    await this.refreshHierarchicalMemory('session_start');
     this.debugLogger.debug('Hierarchical memory loaded');
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
@@ -1819,14 +1894,15 @@ export class Config {
       .then(async () => {
         // After background discovery completes, push the newly-registered
         // MCP tools into the active GeminiChat so the next model request
-        // sees them. Interactive mode also calls setTools() via
-        // AppContainer's batch-flush effect — this trailing call is
-        // idempotent there, but it's the ONLY path that updates
-        // `chat.tools` for non-interactive runs (no AppContainer).
+        // sees both the updated declarations and added-tool reminder deltas.
+        // Interactive mode also calls setTools() via AppContainer's
+        // batch-flush effect — this trailing call is idempotent there, but
+        // it's the ONLY path that updates `chat.tools` for non-interactive
+        // runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
         // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
-        // every MCP tool — a regression vs the legacy synchronous path.
+        // progressive MCP tools — a regression vs the legacy synchronous path.
         try {
           await this.geminiClient?.setTools();
         } catch (err) {
@@ -1903,7 +1979,9 @@ export class Config {
     return failed;
   }
 
-  async refreshHierarchicalMemory(): Promise<void> {
+  async refreshHierarchicalMemory(
+    loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+  ): Promise<void> {
     const { memoryContent, fileCount, conditionalRules, projectRoot } =
       await loadServerHierarchicalMemory(
         this.getWorkingDir(),
@@ -1913,17 +1991,37 @@ export class Config {
         this.isTrustedFolder(),
         this.getImportFormat(),
         this.contextRuleExcludes,
-        { explicitOnly: this.getBareMode() },
+        {
+          explicitOnly: this.getBareMode(),
+          loadReason,
+          onInstructionsLoaded: createInstructionsLoadedCallback(
+            () => this.hookSystem,
+          ),
+        },
       );
     if (this.getManagedAutoMemoryEnabled()) {
-      const managedAutoMemoryIndex = await readAutoMemoryIndex(
-        this.getProjectRoot(),
-      );
+      // User-level read is best-effort — an EACCES on
+      // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
+      // section out of the system prompt. Project-level read still bubbles
+      // (its failure is a real config-load problem).
+      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
+        readAutoMemoryIndex(this.getProjectRoot()),
+        readUserAutoMemoryIndex().catch(() => null),
+      ]);
+      // Always surface the user-level section so the main assistant knows the
+      // dir exists and can route ad-hoc "remember this cross-project" saves
+      // there. When empty the prompt builder emits a "MEMORY.md is currently
+      // empty" placeholder — the same shape the per-project layer has used
+      // since day one — so the cost is one extra index header.
       this.setUserMemory(
         this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
+          {
+            memoryDir: getUserAutoMemoryRoot(),
+            indexContent: userAutoMemoryIndex,
+          },
         ),
       );
     } else {
@@ -2235,6 +2333,15 @@ export class Config {
     return (
       this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
     );
+  }
+
+  /**
+   * Get the human-readable display name for the currently selected model.
+   * Resolves the model id to its name from the model registry.
+   * Falls back to the raw model id when the model is not found.
+   */
+  getModelDisplayName(): string {
+    return this.modelsConfig.getModelDisplayName(this.getModel());
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -2646,6 +2753,18 @@ export class Config {
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
+  }
+
+  /**
+   * Returns the live set of skill names that are currently disabled.
+   * Unlike `getDisabledSlashCommands()` (frozen snapshot), this delegates
+   * to the provider supplied at construction so the CLI's `LoadedSettings`
+   * mutations are visible without restarting the process.
+   *
+   * Names are lower-cased. Empty set when no provider was supplied.
+   */
+  getDisabledSkillNames(): ReadonlySet<string> {
+    return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
   /**
@@ -3394,10 +3513,6 @@ export class Config {
     return [];
   }
 
-  getCheckpointingEnabled(): boolean {
-    return this.checkpointing;
-  }
-
   getFileCheckpointingEnabled(): boolean {
     return this.fileCheckpointingEnabled;
   }
@@ -3501,6 +3616,10 @@ export class Config {
 
   getAutoSkillEnabled(): boolean {
     return this.enableAutoSkill && !this.getBareMode();
+  }
+
+  getPreventSystemSleepEnabled(): boolean {
+    return this.preventSystemSleep;
   }
 
   /**
@@ -3813,14 +3932,6 @@ export class Config {
     return this.outputFormat;
   }
 
-  async getGitService(): Promise<GitService> {
-    if (!this.gitService) {
-      this.gitService = new GitService(this.targetDir, this.storage);
-      await this.gitService.initialize();
-    }
-    return this.gitService;
-  }
-
   /**
    * Returns the chat recording service.
    */
@@ -3994,7 +4105,10 @@ export class Config {
    * the command cannot be found or executed. Called by the CLI layer.
    */
   setModelInvocableCommandsExecutor(
-    executor: (name: string, args?: string) => Promise<string | null>,
+    executor: (
+      name: string,
+      args?: string,
+    ) => Promise<ModelInvocableCommandExecutorResult | null>,
   ): void {
     this.modelInvocableCommandsExecutor = executor;
   }
@@ -4004,7 +4118,10 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsExecutor():
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
   }
@@ -4273,7 +4390,7 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy);
+      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

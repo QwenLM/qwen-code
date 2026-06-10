@@ -9,6 +9,7 @@ import {
   AuthType,
   alibabaStandardProvider,
   buildInstallPlan,
+  getDefaultModelIds,
   resolveBaseUrl,
   providerMatchesCredentials,
 } from '@qwen-code/qwen-code-core';
@@ -33,6 +34,17 @@ describe('alibabaStandardProvider', () => {
     expect(urls).toContain(
       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     );
+  });
+
+  it('includes qwen3.7 models in default model IDs', () => {
+    expect(getDefaultModelIds(alibabaStandardProvider)).toEqual([
+      'qwen3.6-plus',
+      'qwen3.7-plus',
+      'qwen3.7-max',
+      'glm-5.1',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+    ]);
   });
 
   it('resolves baseUrl for known region', () => {

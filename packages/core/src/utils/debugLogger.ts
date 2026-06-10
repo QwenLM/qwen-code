@@ -8,11 +8,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
-import { trace } from '@opentelemetry/api';
 import { Storage } from '../config/storage.js';
 import { updateSymlink } from './symlink.js';
-import { getCurrentSessionId } from '../telemetry/session-context.js';
-import { deriveTraceId } from '../telemetry/trace-id-utils.js';
+import {
+  getTraceContext,
+  type TraceContext,
+} from '../telemetry/trace-context.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -21,6 +22,7 @@ export interface DebugLogSession {
 }
 
 export interface DebugLogger {
+  isEnabled: () => boolean;
   debug: (...args: unknown[]) => void;
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
@@ -32,11 +34,6 @@ let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession>();
-
-interface TraceContext {
-  traceId: string;
-  spanId: string;
-}
 
 function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
@@ -75,44 +72,6 @@ function formatArgs(args: unknown[]): string {
     })
     .map((arg) => (typeof arg === 'string' ? arg : util.inspect(arg)))
     .join(' ');
-}
-
-const ZERO_TRACE_ID = '00000000000000000000000000000000';
-
-function getActiveSpanTraceContext(): TraceContext | null {
-  try {
-    const activeSpan = trace.getActiveSpan();
-    if (activeSpan) {
-      const ctx = activeSpan.spanContext();
-      if (ctx.traceId !== ZERO_TRACE_ID) {
-        return { traceId: ctx.traceId, spanId: ctx.spanId };
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-let cachedSessionId: string | undefined;
-let cachedTraceId: string | undefined;
-
-function getSessionRootTraceContext(): TraceContext | null {
-  try {
-    const sessionId = getCurrentSessionId();
-    if (!sessionId) return null;
-    if (sessionId !== cachedSessionId) {
-      cachedSessionId = sessionId;
-      cachedTraceId = deriveTraceId(sessionId);
-    }
-    return { traceId: cachedTraceId!, spanId: '0'.repeat(16) };
-  } catch {
-    return null;
-  }
-}
-
-function getTraceContext(): TraceContext | null {
-  return getActiveSpanTraceContext() ?? getSessionRootTraceContext();
 }
 
 /**
@@ -182,8 +141,6 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
-  cachedSessionId = undefined;
-  cachedTraceId = undefined;
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
@@ -240,6 +197,7 @@ export function runWithDebugLogSession<T>(
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {
+    isEnabled: () => getActiveSession() !== null,
     debug: (...args: unknown[]) => {
       const session = getActiveSession();
       if (!session) return;

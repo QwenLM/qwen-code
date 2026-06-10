@@ -40,7 +40,9 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { createSessionRootContext } from './tracer.js';
 import { getCurrentSessionId, setSessionContext } from './session-context.js';
+import { setShellTracePropagation } from './trace-context.js';
 import { endInteractionSpan } from './session-tracing.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
@@ -565,7 +567,10 @@ export function initializeTelemetry(config: TelemetryRuntimeConfig): void {
     telemetryInitialized = true;
     activeMetricReader = metricReader;
     const sessionId = config.getSessionId();
-    setSessionContext(undefined, sessionId);
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
+    setShellTracePropagation(
+      config.getOutboundCorrelationPropagateTraceContext(),
+    );
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
@@ -639,6 +644,7 @@ export async function shutdownTelemetry(): Promise<void> {
       activeMetricReader = undefined;
       telemetryShutdownPromise = undefined;
       setSessionContext(undefined);
+      setShellTracePropagation(false);
     }
   })();
   return telemetryShutdownPromise;

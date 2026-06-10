@@ -16,6 +16,7 @@ import {
   Storage,
   applyProviderInstallPlan,
   resolveMetadataKey,
+  stripRuntimeSnapshotPrefix,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
   type ModelProvidersConfig,
@@ -435,6 +436,10 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     setValue(key: string, value: unknown): void {
+      // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+      if (key === 'model.name' && typeof value === 'string') {
+        value = stripRuntimeSnapshotPrefix(value);
+      }
       const parts = key.split('.');
       let current = data;
       for (let i = 0; i < parts.length; i++) {

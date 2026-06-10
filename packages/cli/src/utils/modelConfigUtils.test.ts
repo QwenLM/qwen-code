@@ -444,6 +444,72 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it('strips a runtime snapshot prefix from settings.model.name (read-side self-heal)', () => {
+      const modelProvider: ProviderModelConfig = {
+        id: 'gpt-4o',
+        name: 'GPT-4o',
+      };
+      const settings = makeMockSettings({
+        model: { name: '$runtime|openai|gpt-4o' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'gpt-4o', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Both read-side strip sites: the bare id is used for the provider
+      // lookup and passed through to resolveModelConfig as settings.model.
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider,
+          settings: expect.objectContaining({ model: 'gpt-4o' }),
+        }),
+      );
+    });
+
+    it('collapses a stacked runtime snapshot prefix from settings.model.name', () => {
+      const modelProvider: ProviderModelConfig = {
+        id: 'gpt-4o',
+        name: 'GPT-4o',
+      };
+      const settings = makeMockSettings({
+        model: { name: '$runtime|openai|$runtime|openai|gpt-4o' },
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [modelProvider],
+        },
+      });
+
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: 'gpt-4o', apiKey: '', baseUrl: '' },
+        sources: {},
+        warnings: [],
+      });
+
+      resolveCliGenerationConfig({
+        argv: {},
+        settings,
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelProvider,
+          settings: expect.objectContaining({ model: 'gpt-4o' }),
+        }),
+      );
+    });
+
     it('should not find modelProvider when authType is undefined', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
