@@ -1143,7 +1143,7 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly cronEnabled: boolean = false;
+  private readonly cronEnabled: boolean = true;
   private readonly forkSubagentEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
@@ -1328,7 +1328,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.cronEnabled = params.cronEnabled ?? false;
+    this.cronEnabled = params.cronEnabled ?? true;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -3312,8 +3312,7 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
-    // Cron is experimental and opt-in: enabled via settings or env var
-    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
   }
 
