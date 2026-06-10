@@ -22,6 +22,7 @@
 - [13. v1 传输层的局限与 v2 改进](#13-v1-传输层的局限与-v2-改进)
 - [14. ACP v1 与 v2 协议差异](#14-acp-v1-与-v2-协议差异)
 - [15. 相关链接](#15-相关链接)
+- [16. ACP v2 JSON-RPC 消息格式详解](#16-acp-v2-json-rpc-消息格式详解)
 
 ---
 
@@ -495,3 +496,485 @@ Zed 等    ──── /acp (标准 ACP HTTP)  ─────┘
 - [Python SDK](https://agentclientprotocol.com/libraries/python)
 - [Rust SDK](https://agentclientprotocol.com/libraries/rust)
 - [Kotlin SDK](https://agentclientprotocol.com/libraries/kotlin)
+
+---
+
+## 16. ACP v2 JSON-RPC 消息格式详解
+
+> 以下内容基于 ACP v2 RFD 草案，尚未正式发布，格式可能变化。
+
+### 16.1 Initialize（能力协商重构）
+
+v2 将 `clientCapabilities` 和 `agentCapabilities` 统一为 `capabilities`，所有能力声明使用 `{}` 表示支持：
+
+**请求：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "id": 1,
+  "params": {
+    "capabilities": {
+      "prompting": {},
+      "configOptions": {},
+      "elicitation": {}
+    },
+    "clientInfo": {
+      "name": "MyIDE",
+      "version": "2.0.0"
+    },
+    "protocolVersion": 2
+  }
+}
+```
+
+**响应：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "connectionId": "conn_xyz789",
+    "capabilities": {
+      "prompting": {},
+      "toolCalls": {},
+      "plans": {},
+      "configOptions": {}
+    },
+    "agentInfo": {
+      "name": "QwenCode",
+      "version": "1.5.0"
+    },
+    "protocolVersion": 2
+  }
+}
+```
+
+**v1 vs v2 对比：**
+
+```
+v1: "clientCapabilities": { "fs": { "read": true } }   ← 分离、布尔值
+v2: "capabilities": { "prompting": {} }                 ← 统一、空对象声明
+```
+
+### 16.2 Prompt 生命周期（异步化）
+
+v2 最重要的变化：Prompt 从同步变为异步。发送后立即收到空 ACK `{}`，后续通过 `state_change` 通知跟踪 Turn 状态。
+
+**发送 Prompt：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/prompt",
+  "id": 3,
+  "params": {
+    "sessionId": "sess_abc123",
+    "prompt": [{ "type": "text", "text": "帮我重构这个函数" }]
+  }
+}
+```
+
+**立即 ACK（通过 SSE 推送）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {}
+}
+```
+
+> v1 中 `result` 会包含完整的 Turn 结果（`stopReason`、`usage` 等），在 Turn 结束后才返回。v2 立即返回空对象，解耦了请求与 Turn 生命周期。
+
+**用户消息回显（通过 SSE 推送）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "user_message",
+      "messageId": "msg_u1",
+      "content": [{ "type": "text", "text": "帮我重构这个函数" }]
+    }
+  }
+}
+```
+
+**Turn 状态变更通知：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "state_change",
+      "state": "thinking"
+    }
+  }
+}
+```
+
+可能的状态值：`"thinking"` → `"tool_calling"` → `"thinking"` → `"idle"`
+
+**Agent 文本流式输出（与 v1 相同）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_a1",
+      "content": { "type": "text", "text": "好的，我来" }
+    }
+  }
+}
+```
+
+**Turn 结束（`state_change` 代替 v1 的 prompt response）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "state_change",
+      "state": "idle",
+      "stopReason": "end_turn",
+      "usage": {
+        "inputTokens": 1500,
+        "outputTokens": 800,
+        "cacheReadTokens": 200,
+        "cacheWriteTokens": 50
+      }
+    }
+  }
+}
+```
+
+### 16.3 Tool Call Update（统一 Upsert 语义）
+
+v2 用单一的 `tool_call_update` 替代 v1 的 `tool_call` + `tool_call_update` 两种消息，采用三态字段语义：
+
+**三态字段规则：**
+
+| 字段状态   | 含义     | 说明                 |
+| ---------- | -------- | -------------------- |
+| **存在**   | 设置新值 | 覆盖之前的值         |
+| **缺失**   | 保持不变 | 使用上次已知值       |
+| **`null`** | 清除     | 将该字段重置为"无值" |
+
+**创建工具调用（首次出现 `toolCallId`）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "messageId": "msg_a1",
+      "toolCallId": "tc_001",
+      "toolName": "read_file",
+      "status": "running",
+      "input": { "path": "/src/main.ts" },
+      "approvalStatus": "approved"
+    }
+  }
+}
+```
+
+**更新工具调用（进度/结果）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "messageId": "msg_a1",
+      "toolCallId": "tc_001",
+      "status": "completed",
+      "output": [{ "type": "text", "text": "// file content..." }]
+    }
+  }
+}
+```
+
+> 注意：`toolName`、`input`、`approvalStatus` 字段缺失 → 保持不变（不是 null，不是清空）。
+
+**清除字段示例：**
+
+```json
+{
+  "sessionUpdate": "tool_call_update",
+  "toolCallId": "tc_001",
+  "output": null
+}
+```
+
+> `output: null` 显式清除之前的输出。
+
+**v1 vs v2 对比：**
+
+```
+v1:  创建 → "sessionUpdate": "tool_call"
+     更新 → "sessionUpdate": "tool_call_update"
+     两个不同的消息类型
+
+v2:  统一 → "sessionUpdate": "tool_call_update"
+     首次出现 toolCallId = 创建（upsert）
+     后续同 toolCallId = 更新
+```
+
+### 16.4 Plan Update（带 ID 和类型标签）
+
+v2 将扁平的 `plan` 消息重构为 `plan_update`，引入 ID 和类型标签以支持多种计划变体：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "plan_update",
+      "planId": "plan_001",
+      "planType": "task_list",
+      "content": [
+        {
+          "id": "step_1",
+          "title": "读取现有代码",
+          "status": "completed"
+        },
+        {
+          "id": "step_2",
+          "title": "分析重构方案",
+          "status": "in_progress"
+        },
+        {
+          "id": "step_3",
+          "title": "执行重构",
+          "status": "pending"
+        }
+      ]
+    }
+  }
+}
+```
+
+**v1 vs v2 对比：**
+
+```
+v1:  "sessionUpdate": "plan"           ← 无 ID，扁平结构
+v2:  "sessionUpdate": "plan_update"    ← 带 planId + planType
+     planType 可选值：task_list、outline、checklist 等（可扩展）
+```
+
+### 16.5 Permission Request（服务端请求）
+
+权限请求是 Server 向 Client 发起的 JSON-RPC **request**（有 `id`），Client 必须响应：
+
+**Server → Client（通过 Session 级 SSE）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/request_permission",
+  "id": "perm_req_1",
+  "params": {
+    "sessionId": "sess_abc123",
+    "toolName": "write_file",
+    "input": {
+      "path": "/src/main.ts",
+      "content": "// new content..."
+    },
+    "description": "写入文件 /src/main.ts"
+  }
+}
+```
+
+**Client → Server（通过 POST /acp）：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "perm_req_1",
+  "result": {
+    "granted": true
+  }
+}
+```
+
+或拒绝：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "perm_req_1",
+  "result": {
+    "granted": false,
+    "reason": "用户拒绝写入该文件"
+  }
+}
+```
+
+### 16.6 Config Options（替代 Session Modes）
+
+v2 移除了独立的 `session/set_mode` API，统一为 Config Options：
+
+**Client → Server：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/set_config_option",
+  "id": 10,
+  "params": {
+    "sessionId": "sess_abc123",
+    "key": "model",
+    "value": "qwen-coder-plus"
+  }
+}
+```
+
+**Server 推送配置变更确认：**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123",
+    "update": {
+      "sessionUpdate": "config_option_update",
+      "key": "model",
+      "value": "qwen-coder-plus"
+    }
+  }
+}
+```
+
+常见配置键：`model`、`mode`（plan/code/architect）、`maxTokens` 等。
+
+### 16.7 枚举扩展机制（`_` 前缀）
+
+v2 将所有枚举从封闭改为开放，实现前向兼容：
+
+```
+标准值：  "end_turn", "tool_use", "max_tokens"
+扩展值：  "_qwen_timeout", "_ide_custom_stop"
+```
+
+**示例：Turn 以自定义原因结束**
+
+```json
+{
+  "sessionUpdate": "state_change",
+  "state": "idle",
+  "stopReason": "_qwen_rate_limited"
+}
+```
+
+**解析规则：**
+
+- 已知枚举值 → 正常处理
+- `_` 前缀未知值 → 视为扩展，安全忽略或展示原始字符串
+- 非 `_` 前缀未知值 → v1 会解析失败，v2 应按 unknown 处理
+
+### 16.8 完整交互时序（v2 Streamable HTTP）
+
+```
+Client                                          Server
+  │                                                │
+  │  POST /acp  {initialize, protocolVersion:2}    │
+  │───────────────────────────────────────────────►│
+  │  200 OK  {connectionId, capabilities}          │
+  │◄───────────────────────────────────────────────│
+  │                                                │
+  │  POST /acp  {initialized}                      │
+  │  Acp-Connection-Id: conn_1                     │
+  │───────────────────────────────────────────────►│
+  │  202 Accepted                                  │
+  │◄───────────────────────────────────────────────│
+  │                                                │
+  │  GET /acp (连接级 SSE)                          │
+  │  Acp-Connection-Id: conn_1                     │
+  │═══════════════════════════════════════════════►│
+  │  SSE stream opened ◄══════════════════════════ │
+  │                                                │
+  │  POST /acp  {session/new}                      │
+  │───────────────────────────────────────────────►│
+  │  202 Accepted                                  │
+  │◄───────────────────────────────────────────────│
+  │  ◄── SSE: {id:2, result:{sessionId:"sess_1"}} │
+  │                                                │
+  │  GET /acp (Session 级 SSE)                      │
+  │  Acp-Connection-Id: conn_1                     │
+  │  Acp-Session-Id: sess_1                        │
+  │═══════════════════════════════════════════════►│
+  │  SSE stream opened ◄══════════════════════════ │
+  │                                                │
+  │  POST /acp  {session/prompt}                   │
+  │  Acp-Session-Id: sess_1                        │
+  │───────────────────────────────────────────────►│
+  │  202 Accepted                                  │
+  │◄───────────────────────────────────────────────│
+  │                                                │
+  │  ◄── SSE: {id:3, result:{}}          ← v2 ACK │
+  │  ◄── SSE: state_change {thinking}              │
+  │  ◄── SSE: agent_message_chunk                  │
+  │  ◄── SSE: agent_message_chunk                  │
+  │  ◄── SSE: state_change {tool_calling}          │
+  │  ◄── SSE: tool_call_update (创建)               │
+  │  ◄── SSE: request_permission                   │
+  │                                                │
+  │  POST /acp  {perm response, granted:true}      │
+  │───────────────────────────────────────────────►│
+  │  202 Accepted                                  │
+  │◄───────────────────────────────────────────────│
+  │                                                │
+  │  ◄── SSE: tool_call_update (完成)               │
+  │  ◄── SSE: state_change {thinking}              │
+  │  ◄── SSE: agent_message_chunk                  │
+  │  ◄── SSE: plan_update                          │
+  │  ◄── SSE: usage_update                         │
+  │  ◄── SSE: state_change {idle, stopReason}      │
+  │                                                │
+  │  DELETE /acp                                   │
+  │  Acp-Connection-Id: conn_1                     │
+  │───────────────────────────────────────────────►│
+  │  202 Accepted (所有 SSE 流关闭)                 │
+  │◄───────────────────────────────────────────────│
+```
+
+### 16.9 v1 与 v2 消息格式速查对照
+
+| 场景             | v1 格式                                            | v2 格式                                                     |
+| ---------------- | -------------------------------------------------- | ----------------------------------------------------------- |
+| Prompt 响应      | Turn 结束后返回 `{id, result:{stopReason, usage}}` | 立即返回 `{id, result:{}}` + `state_change` 通知            |
+| 工具调用创建     | `"sessionUpdate": "tool_call"`                     | `"sessionUpdate": "tool_call_update"`（首次出现 ID = 创建） |
+| 工具调用更新     | `"sessionUpdate": "tool_call_update"`              | `"sessionUpdate": "tool_call_update"`（同 ID = 更新）       |
+| 字段更新语义     | 整体替换                                           | 三态：存在=设置，缺失=保持，null=清除                       |
+| 计划             | `"sessionUpdate": "plan"`                          | `"sessionUpdate": "plan_update"` + `planId` + `planType`    |
+| Turn 结束信号    | prompt response（JSON-RPC result）                 | `state_change {state:"idle", stopReason}`                   |
+| 能力声明         | `clientCapabilities` / `agentCapabilities` 分开    | 统一 `capabilities`，值为 `{}`                              |
+| 模式设置         | `session/set_mode`                                 | `session/set_config_option`                                 |
+| 未知枚举值       | 解析失败                                           | `_` 前缀安全忽略                                            |
+| FS/Terminal 能力 | Client 暴露 `fs/*`、`terminal/*`                   | 移除，改用 MCP Server 暴露                                  |
+| Message ID       | 可选                                               | 必须                                                        |
