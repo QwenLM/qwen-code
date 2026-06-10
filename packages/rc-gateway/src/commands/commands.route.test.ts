@@ -189,6 +189,96 @@ describe('GET /rc/commands', () => {
     expect(byName['fix']).toEqual([{ name: 'issue', required: true }]);
     expect(byName['plain']).toBeNull();
   });
+
+  it('carries an X-Commands-Revision hex header on a 200', async () => {
+    await writeFile(join(workspaceDir, 'triage.md'), cmd('triage'));
+    const app = express();
+    app.get(
+      '/rc/commands',
+      fakeClient([SESSION_READ, WRITE]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+    const res = await fetch(`${url}/rc/commands`);
+    expect(res.status).toBe(200);
+    const rev = res.headers.get('x-commands-revision');
+    expect(rev).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('304s with an empty body and echoed header on an If-None-Match round-trip', async () => {
+    await writeFile(join(workspaceDir, 'triage.md'), cmd('triage'));
+    const app = express();
+    app.get(
+      '/rc/commands',
+      fakeClient([SESSION_READ, WRITE]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+
+    const first = await fetch(`${url}/rc/commands`);
+    const rev = first.headers.get('x-commands-revision')!;
+
+    // Bare hex form.
+    const bare = await fetch(`${url}/rc/commands`, {
+      headers: { 'If-None-Match': rev },
+    });
+    expect(bare.status).toBe(304);
+    expect(await bare.text()).toBe('');
+    expect(bare.headers.get('x-commands-revision')).toBe(rev);
+
+    // Quoted form (the spec scenario's literal shape).
+    const quoted = await fetch(`${url}/rc/commands`, {
+      headers: { 'If-None-Match': `"${rev}"` },
+    });
+    expect(quoted.status).toBe(304);
+    expect(await quoted.text()).toBe('');
+  });
+
+  it('returns 200 + a different revision when the registry changes', async () => {
+    await writeFile(join(workspaceDir, 'triage.md'), cmd('triage'));
+    const app = express();
+    app.get(
+      '/rc/commands',
+      fakeClient([SESSION_READ, WRITE]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+
+    const first = await fetch(`${url}/rc/commands`);
+    const rev = first.headers.get('x-commands-revision')!;
+
+    // Add a second command, then poll with the stale revision.
+    await writeFile(join(workspaceDir, 'lint.md'), cmd('lint'));
+    const second = await fetch(`${url}/rc/commands`, {
+      headers: { 'If-None-Match': rev },
+    });
+    expect(second.status).toBe(200);
+    expect(second.headers.get('x-commands-revision')).not.toBe(rev);
+  });
+
+  it('gives different revisions to callers with different scopes (invocableByYou-folded)', async () => {
+    await writeFile(join(workspaceDir, 'w.md'), cmd('w'));
+    const app = express();
+    app.get(
+      '/rc/commands/read',
+      fakeClient([SESSION_READ]),
+      createListCommandsRoute(commandLoader()),
+    );
+    app.get(
+      '/rc/commands/write',
+      fakeClient([SESSION_READ, WRITE]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+
+    const readRev = (await fetch(`${url}/rc/commands/read`)).headers.get(
+      'x-commands-revision',
+    );
+    const writeRev = (await fetch(`${url}/rc/commands/write`)).headers.get(
+      'x-commands-revision',
+    );
+    expect(readRev).not.toBe(writeRev);
+  });
 });
 
 describe('POST /rc/session/:id/command/:name', () => {

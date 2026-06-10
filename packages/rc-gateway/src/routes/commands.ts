@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
@@ -70,7 +71,22 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
       invocableByYou:
         s.includes(WRITE) && s.includes(mapDeclaredScope(c.scope)) && !c.tool,
     }));
-    res.status(200).json({ v: 1, commands });
+
+    // Strong validator = hash of the exact bytes we'd return (design D1/D2):
+    // `invocableByYou` is already inside `commands`, so the revision auto-folds
+    // caller scope. Set the header BEFORE the conditional check so a 304 also
+    // carries it (D4). A 304 still pays the `load()` above — it saves only the
+    // body serialization + transfer (D6).
+    const body = { v: 1, commands };
+    const revision = createHash('sha256')
+      .update(JSON.stringify(body))
+      .digest('hex');
+    res.set('X-Commands-Revision', revision);
+    if (ifNoneMatchSatisfied(req.headers['if-none-match'], revision)) {
+      res.status(304).end();
+      return;
+    }
+    res.status(200).json(body);
   };
 }
 

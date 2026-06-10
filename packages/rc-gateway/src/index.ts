@@ -124,4 +124,5 @@ export {
   createListCommandsRoute,
   createInvokeCommandRoute,
   mapDeclaredScope,
+  ifNoneMatchSatisfied,
 } from './routes/commands.js';
