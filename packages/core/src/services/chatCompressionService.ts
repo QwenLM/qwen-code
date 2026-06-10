@@ -120,7 +120,7 @@ export interface CompactionThresholds {
  * Each tier is `max(proportional, absolute)`:
  *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
  *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
- *   hard = max(effectiveWindow - HARD_BUFFER,              auto)   // hard degrades to auto for tiny windows
+ *   hard = min(window, max(effectiveWindow - HARD_BUFFER,  auto + HARD_BUFFER))
  *
  * Small windows (where the absolute branch goes negative) automatically
  * fall back to the proportional branch. Large windows are dominated by
@@ -144,7 +144,10 @@ export function computeThresholds(window: number): CompactionThresholds {
   const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
 
   const rawHard = effectiveWindow - HARD_BUFFER;
-  const hard = Math.max(rawHard, auto);
+  // Guarantee hard > auto so compaction doesn't wait until the last moment.
+  // For tiny/zero windows where auto is already at the proportional floor,
+  // clamp hard to the window itself so it never exceeds the actual limit.
+  const hard = Math.min(window, Math.max(rawHard, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
 }
