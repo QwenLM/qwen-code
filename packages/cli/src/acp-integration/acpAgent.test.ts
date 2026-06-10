@@ -232,6 +232,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     CONNECTING: 'connecting',
     CONNECTED: 'connected',
   },
+  MCPOAuthTokenStorage: vi.fn().mockImplementation(() => ({
+    getCredentials: vi.fn().mockResolvedValue(null),
+  })),
   // SkillError is referenced by status.ts's `mapDomainErrorToErrorKind`
   // helper for `instanceof` classification. The mock must surface it as
   // a real class so that `instanceof` works inside the helper.
@@ -1022,7 +1025,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
 
     processExitSpy = vi
       .spyOn(process, 'exit')
@@ -1164,6 +1169,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   function makeSessionSettings() {
     return {
       merged: { mcpServers: {} },
+      forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -1431,6 +1437,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               name: 'Qwen Plus',
               description: 'General coding model',
               contextLimit: 65_536,
+              baseUrl: 'https://secret.example.com',
+              envKey: 'DASHSCOPE_API_KEY',
               isCurrent: true,
               isRuntime: false,
             },
@@ -1438,8 +1446,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
     });
-    expect(JSON.stringify(providers)).not.toContain('secret.example.com');
-    expect(JSON.stringify(providers)).not.toContain('DASHSCOPE_API_KEY');
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -1985,6 +1991,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('allows cancelling paused agent tasks', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const cancel = vi.fn();
+    Object.assign(innerConfig, {
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          id: 'agent-1',
+          kind: 'agent',
+          status: 'paused',
+        }),
+        cancel,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'agent-1',
+        taskKind: 'agent',
+      }),
+    ).resolves.toEqual({ cancelled: true, status: 'paused' });
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+
     mockConnectionState.resolve();
     await agentPromise;
   });

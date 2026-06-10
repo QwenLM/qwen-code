@@ -1006,7 +1006,7 @@ export function createServeApp(
   const sendBridgeError = (
     res: import('express').Response,
     err: unknown,
-    ctx?: { route?: string; sessionId?: string },
+    ctx?: BridgeErrorContext,
   ) => sendBridgeErrorImpl(res, err, ctx, daemonLog);
   const sendPermissionVoteError = (
     res: import('express').Response,
@@ -1652,11 +1652,25 @@ export function createServeApp(
         });
         return;
       }
+      if (installRequest.protocol) {
+        const allowedProtocols =
+          knownProvider.protocolOptions && knownProvider.protocolOptions.length
+            ? knownProvider.protocolOptions
+            : [knownProvider.protocol];
+        if (!allowedProtocols.includes(installRequest.protocol)) {
+          res.status(400).json({
+            error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
+            code: 'unsupported_protocol',
+          });
+          return;
+        }
+      }
       try {
         res.status(200).json(await deps.installAuthProvider(installRequest));
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',
+          providerId: installRequest.providerId,
         });
       }
     },
@@ -4082,6 +4096,25 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
 
 type OmitId<T> = Omit<T, 'id'>;
 
+type BridgeErrorContext = {
+  route?: string;
+  sessionId?: string;
+  [key: string]: string | number | boolean | undefined;
+};
+
+function bridgeErrorExtraContext(
+  ctx: BridgeErrorContext | undefined,
+): Record<string, string | number | boolean> {
+  const extra: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(ctx ?? {})) {
+    if (key === 'route' || key === 'sessionId' || value === undefined) {
+      continue;
+    }
+    extra[key] = value;
+  }
+  return extra;
+}
+
 /**
  * Map a thrown bridge error to an HTTP response.
  *
@@ -4096,7 +4129,7 @@ type OmitId<T> = Omit<T, 'id'>;
 function sendBridgeErrorImpl(
   res: import('express').Response,
   err: unknown,
-  ctx?: { route?: string; sessionId?: string },
+  ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
   if (err instanceof WorkspaceInitConflictError) {
@@ -4367,6 +4400,7 @@ function sendBridgeErrorImpl(
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
   recordDaemonBridgeError(err);
+  const extraContext = bridgeErrorExtraContext(ctx);
   recordDaemonError(undefined, err, {
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
@@ -4374,6 +4408,7 @@ function sendBridgeErrorImpl(
   emitDaemonLog('Daemon bridge error.', {
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    ...extraContext,
     'error.type': err instanceof Error ? err.name : typeof err,
     'error.message': (err instanceof Error ? err.message : String(err)).slice(
       0,
@@ -4387,12 +4422,14 @@ function sendBridgeErrorImpl(
       {
         ...(ctx?.route ? { route: ctx.route } : {}),
         ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        ...extraContext,
       },
     );
   } else {
     const ctxParts = [
       ctx?.route,
       ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
     ].filter(Boolean);
     const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
     writeStderrLine(

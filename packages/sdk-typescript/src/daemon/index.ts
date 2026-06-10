@@ -54,6 +54,7 @@ export {
   createDaemonToolPreview,
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DAEMON_PLAN_TOOL_CALL_ID,
   daemonBlockToHtml,
   daemonBlockToMarkdown,

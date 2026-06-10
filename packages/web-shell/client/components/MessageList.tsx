@@ -91,7 +91,6 @@ function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
     msg.tools.length === 1 &&
-    isSubAgentToolCall(msg.tools[0]) &&
     isBackgroundSubAgentToolCall(msg.tools[0])
   );
 }

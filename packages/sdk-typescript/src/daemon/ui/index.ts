@@ -23,6 +23,7 @@ export {
   selectTranscriptBlocksOrderedByEventId,
 } from './transcript.js';
 export { createDaemonTranscriptStore } from './store.js';
+export { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from './sentinels.js';
 export {
   daemonUiEventToTerminalText,
   transcriptBlockToTerminalText,

@@ -1760,6 +1760,32 @@ describe('Session', () => {
       ).resolves.toEqual({ stopReason: 'cancelled' });
 
       expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(
+          (session as unknown as Record<string, unknown>)[
+            'notificationProcessing'
+          ],
+        ).toBeNull(),
+      );
+    });
+
+    it('aborts in-flight background notification processing on cancel', async () => {
+      const notificationAbort = new AbortController();
+      const notificationProcessing = Promise.resolve();
+      const internals = session as unknown as Record<string, unknown>;
+      Object.assign(internals, {
+        notificationAbort,
+        notificationProcessing,
+      });
+
+      try {
+        await expect(session.cancelPendingPrompt()).resolves.toBeUndefined();
+
+        expect(notificationAbort.signal.aborted).toBe(true);
+      } finally {
+        internals['notificationAbort'] = null;
+        internals['notificationProcessing'] = null;
+      }
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {

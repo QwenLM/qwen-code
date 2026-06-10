@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
+import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
 
@@ -26,7 +28,7 @@ const {
   serialize: serializeGoalStatusMessage,
   parse: parseRawGoalStatusMessage,
 } = createSentinelSerializer<SerializedGoalStatusMessage>(
-  'web-shell:goal-status:v1:',
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
 );
 
 function parseGoalStatusMessage(
@@ -38,15 +40,6 @@ function parseGoalStatusMessage(
 }
 
 export { serializeGoalStatusMessage, parseGoalStatusMessage };
-
-function formatRuntime(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return `${totalMinutes}m ${totalSeconds % 60}s`;
-  const hours = Math.floor(totalMinutes / 60);
-  return `${hours}h ${totalMinutes % 60}m`;
-}
 
 function pluralTurns(n: number, t: ReturnType<typeof useI18n>['t']): string {
   return t(n === 1 ? 'goal.turn' : 'goal.turns', { count: n });

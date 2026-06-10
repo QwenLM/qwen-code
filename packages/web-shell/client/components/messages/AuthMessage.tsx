@@ -708,10 +708,22 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     ];
     if (modality) {
       advancedOptions.push(
-        { value: 'image', label: `${checkmark(modalityImage)} Image` },
-        { value: 'video', label: `${checkmark(modalityVideo)} Video` },
-        { value: 'audio', label: `${checkmark(modalityAudio)} Audio` },
-        { value: 'pdf', label: `${checkmark(modalityPdf)} PDF` },
+        {
+          value: 'image',
+          label: `${checkmark(modalityImage)} ${t('auth.advanced.modalityImage')}`,
+        },
+        {
+          value: 'video',
+          label: `${checkmark(modalityVideo)} ${t('auth.advanced.modalityVideo')}`,
+        },
+        {
+          value: 'audio',
+          label: `${checkmark(modalityAudio)} ${t('auth.advanced.modalityAudio')}`,
+        },
+        {
+          value: 'pdf',
+          label: `${checkmark(modalityPdf)} ${t('auth.advanced.modalityPdf')}`,
+        },
       );
     }
     advancedOptions.push({

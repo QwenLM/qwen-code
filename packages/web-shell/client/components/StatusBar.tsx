@@ -327,7 +327,9 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
             </button>
           )}
           {escapeHint ? (
-            <span className={styles.escapeHint}>{t('editor.escClearHint')}</span>
+            <span className={styles.escapeHint}>
+              {t('editor.escClearHint')}
+            </span>
           ) : modeIndicator ? (
             <button
               type="button"

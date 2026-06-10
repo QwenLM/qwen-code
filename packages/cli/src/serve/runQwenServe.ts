@@ -375,6 +375,12 @@ export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
+   * Whether to start the real ACP child eagerly after listen. Production
+   * keeps this on; tests can disable it so boot-path assertions do not wait
+   * on a real child bridge.
+   */
+  preheatBridge?: boolean;
+  /**
    * Workspace filesystem factory. When omitted, `runQwenServe`
    * constructs one using `boundWorkspace`, `trustedWorkspace`, and a
    * default warning-emit hook. Tests inject a real factory + custom
@@ -400,6 +406,11 @@ export interface RunQwenServeDeps {
    * audit emission stays visible in the operator log.
    */
   fsAuditEmit?: (event: BridgeEvent) => void;
+}
+
+function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
+  if (deps.preheatBridge !== undefined) return deps.preheatBridge;
+  return process.env['VITEST_WORKER_ID'] === undefined;
 }
 
 /**
@@ -960,6 +971,10 @@ export async function runQwenServe(
             settings: createLoadedSettingsAdapter(fresh),
             doRefreshAuth: false,
           });
+          emitDaemonLog('Auth provider installed.', {
+            'qwen-code.daemon.auth.provider_id': provider.id,
+            'qwen-code.daemon.auth.auth_type': plan.authType,
+          });
           return {
             v: 1,
             providerId: provider.id,
@@ -1314,7 +1329,7 @@ export async function runQwenServe(
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
-      if (!deps.bridge) {
+      if (!deps.bridge && shouldPreheatBridge(deps)) {
         bridge.preheat().catch((err) => {
           writeStderrLine(
             `qwen serve: ACP preheat failed, will retry on first session: ${

@@ -122,14 +122,17 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'auth_provider_install',
   'workspace_memory',
   'workspace_agents',
+  'workspace_agent_generate',
   'workspace_env',
   'workspace_preflight',
   'session_context',
   'session_context_usage',
   'session_supported_commands',
   'session_tasks',
+  'session_stats',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -137,6 +140,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
   // refused per-server cells).
   'mcp_guardrails',
+  'workspace_mcp_manage',
   // Issue #4175 PR 14b. Always-on. Daemon emits typed push events for
   // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
   // `mcp_child_refused_batch` coalesced per pass).
@@ -7754,6 +7758,29 @@ describe('auth device-flow routes', () => {
       .set('Host', `127.0.0.1:${baseOpts.port}`);
     expect(res.status).toBe(200);
     expect(res.body.features).toContain('auth_device_flow');
+  });
+
+  it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        protocol: 'qwen-oauth',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/auth/provider rejects private baseUrl values', async () => {

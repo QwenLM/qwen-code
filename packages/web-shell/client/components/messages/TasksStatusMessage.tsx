@@ -6,6 +6,7 @@ import type {
 import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
+import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import { formatToolDisplayName } from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
@@ -59,17 +60,6 @@ function sortTasks(
     if (aActive) return b.startTime - a.startTime;
     return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
   });
-}
-
-function formatRuntime(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes === 0) return `${seconds}s`;
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  if (hours === 0) return `${minutes}m ${seconds}s`;
-  return `${hours}h ${minutes}m`;
 }
 
 function formatTokenCount(tokens: number): string {

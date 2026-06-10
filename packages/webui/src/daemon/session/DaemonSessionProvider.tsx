@@ -18,6 +18,7 @@ import {
 } from 'react';
 import {
   DaemonClient,
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
@@ -1439,7 +1440,7 @@ function createGoalStatusUiEvent(
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
-    text: 'web-shell:goal-status:v1:' + JSON.stringify(status),
+    text: DAEMON_GOAL_STATUS_SENTINEL_PREFIX + JSON.stringify(status),
   };
 }
 

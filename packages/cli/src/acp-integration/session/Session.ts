@@ -400,6 +400,11 @@ export class Session implements SessionContext {
   private notificationQueue: Array<{ displayText: string; modelText: string }> =
     [];
   private notificationResolve: (() => void) | null = null;
+  /**
+   * Tracks background task notification prompts independently from user
+   * prompts.  Sharing `pendingPromptCompletion` would let a notification
+   * overwrite the active prompt's completion tracker.
+   */
   private notificationProcessing: Promise<void> | null = null;
   private notificationAbort: AbortController | null = null;
   private notificationDraining = false;
@@ -748,6 +753,13 @@ export class Session implements SessionContext {
     if (this.notificationAbort) {
       this.notificationAbort.abort();
       this.notificationAbort = null;
+    }
+    if (this.notificationProcessing) {
+      try {
+        await this.notificationProcessing;
+      } catch {
+        // Expected: notification processing was aborted or errored.
+      }
     }
 
     // Abort any in-progress cron execution (user prompt takes priority)
@@ -1840,7 +1852,7 @@ export class Session implements SessionContext {
         }
 
         if (Date.now() >= deadline) {
-          debugLogger.debug(
+          debugLogger.warn(
             'Timed out draining background task notifications; leaving tasks running.',
           );
           break;
@@ -1905,11 +1917,6 @@ export class Session implements SessionContext {
       }
     }
 
-    let resolveCompletion!: () => void;
-    this.pendingPromptCompletion = new Promise<void>((resolve) => {
-      resolveCompletion = resolve;
-    });
-
     const notificationSend = new AbortController();
     this.notificationAbort = notificationSend;
     try {
@@ -1921,7 +1928,6 @@ export class Session implements SessionContext {
       if (this.notificationAbort === notificationSend) {
         this.notificationAbort = null;
       }
-      resolveCompletion();
     }
   }
 
@@ -2032,8 +2038,11 @@ export class Session implements SessionContext {
                 }
 
                 if (functionCalls.length > 0) {
+                  const toolNames = functionCalls
+                    .map((call) => call.name || '(unknown)')
+                    .join(', ');
                   debugLogger.warn(
-                    `Ignoring ${functionCalls.length} tool call(s) requested while processing a background task notification.`,
+                    `Ignoring ${functionCalls.length} tool call(s) [${toolNames}] requested while processing background task notification: ${item.displayText.slice(0, 80)}`,
                   );
                 }
               }

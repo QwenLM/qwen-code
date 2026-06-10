@@ -827,8 +827,7 @@ export function App({
   currentModelRef.current = currentModel;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
-  const sessionDisplayName = (connection as { displayName?: string })
-    .displayName;
+  const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -1389,7 +1388,24 @@ export function App({
           );
         return true;
       } else if (goalArg) {
-        dispatchGoalSet(goalArg, Date.now());
+        const optimisticGoal = { condition: goalArg, setAt: Date.now() };
+        dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
+        if (!sendToDaemon) {
+          return true;
+        }
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) => {
+            const currentGoal = activeGoalRef.current;
+            if (
+              currentGoal?.condition === optimisticGoal.condition &&
+              currentGoal.setAt === optimisticGoal.setAt
+            ) {
+              dispatchGoalCleared(optimisticGoal);
+            }
+            reportError(error, 'Failed to send /goal command');
+          },
+        );
+        return true;
       }
 
       if (sendToDaemon) {
@@ -1418,6 +1434,8 @@ export function App({
         .catch((error: unknown) => {
           if (cancelSucceeded) {
             dispatchGoalCleared(goalToClear);
+            reportError(error, 'Goal cleared but follow-up prompt failed');
+            return;
           }
           reportError(error, 'Failed to clear /goal');
         });

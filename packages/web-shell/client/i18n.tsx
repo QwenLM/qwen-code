@@ -399,6 +399,10 @@ const EN: Messages = {
   'auth.advanced.modality': 'Enable modality',
   'auth.advanced.modalityDesc':
     'Enables multimodal input capabilities (image, video, etc.).',
+  'auth.advanced.modalityImage': 'Image',
+  'auth.advanced.modalityVideo': 'Video',
+  'auth.advanced.modalityAudio': 'Audio',
+  'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
     'Max input tokens (leave empty to auto-detect from model name).',
@@ -1191,6 +1195,10 @@ const ZH: Messages = {
   'auth.advanced.thinkingDesc': '允许模型在回复前进行扩展推理。',
   'auth.advanced.modality': '启用多模态',
   'auth.advanced.modalityDesc': '启用图片、视频等多模态输入能力。',
+  'auth.advanced.modalityImage': '图片',
+  'auth.advanced.modalityVideo': '视频',
+  'auth.advanced.modalityAudio': '音频',
+  'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
     '最大输入 token 数（留空则根据模型名称自动检测）。',

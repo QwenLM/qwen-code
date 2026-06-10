@@ -5693,37 +5693,65 @@ class QwenAgent implements Agent {
             'taskKind must be "agent", "shell", or "monitor"',
           );
         }
+        debugLogger.info(
+          `sessionTaskCancel requested sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind}`,
+        );
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         switch (taskKind) {
           case 'agent': {
             const task = config.getBackgroundTaskRegistry().get(taskId);
-            if (!task || task.status !== 'running') {
-              return { cancelled: false };
+            if (
+              !task ||
+              (task.status !== 'running' && task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
             }
             config.getBackgroundTaskRegistry().cancel(taskId);
-            return { cancelled: true };
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
           }
           case 'shell': {
             const task = config.getBackgroundShellRegistry().get(taskId);
             if (!task || task.status !== 'running') {
-              return { cancelled: false };
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
             }
             config.getBackgroundShellRegistry().requestCancel(taskId);
-            return { cancelled: true };
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
           }
           case 'monitor': {
             const task = config.getMonitorRegistry().get(taskId);
             if (!task || task.status !== 'running') {
-              return { cancelled: false };
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
             }
             config.getMonitorRegistry().cancel(taskId);
-            return { cancelled: true };
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
           }
-          default:
-            break;
+          default: {
+            const exhaustive: never = taskKind;
+            throw new Error(`Unhandled task kind: ${exhaustive}`);
+          }
         }
-        return { cancelled: false };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];
