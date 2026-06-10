@@ -6,8 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HookRunner } from './hookRunner.js';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
-import type { HookConfig, HookInput } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+} from './types.js';
+import type {
+  HookConfig,
+  HookInput,
+  UserPromptExpansionInput,
+  UserPromptSubmitInput,
+} from './types.js';
 
 // Hoisted mock
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -468,6 +478,213 @@ describe('HookRunner', () => {
 
       expect(onHookStart).toHaveBeenCalledTimes(1);
       expect(onHookEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it('should chain UserPromptExpansion additional context into the next hook input', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptExpansion',
+            additionalContext: 'Hook context',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptExpansionInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptExpansion,
+        }),
+        command_name: 'custom',
+        command_args: 'with args',
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptExpansion,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt\n\nHook context');
+    });
+
+    it('should preserve raw UserPromptSubmit additional context when chaining', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: '<xml><item>raw</item></xml>',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe(
+        'Base prompt\n\n<xml><item>raw</item></xml>',
+      );
+    });
+
+    it('should not append empty UserPromptSubmit additional context', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: '',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt');
+    });
+
+    it('should truncate UserPromptExpansion context before sanitizing it for chaining', async () => {
+      const unsafeContext =
+        '<tag>' +
+        'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH);
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptExpansion',
+            additionalContext: unsafeContext,
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptExpansionInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptExpansion,
+        }),
+        command_name: 'custom',
+        command_args: 'with args',
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptExpansion,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      const chainedContext = secondInput.prompt?.replace('Base prompt\n\n', '');
+      expect(chainedContext?.startsWith('&lt;tag&gt;')).toBe(true);
+      expect(chainedContext).toContain('x'.repeat(9_989));
+      expect(chainedContext).not.toContain('<tag>');
+      expect(chainedContext).toHaveLength(
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+      );
     });
   });
 

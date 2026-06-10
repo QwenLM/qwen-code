@@ -109,7 +109,42 @@ export default {
     'Analitza el projecte i crea un fitxer QWEN.md personalitzat.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Llistar les eines disponibles de Qwen Code. Ús: /tools [desc]',
-  'List available skills.': 'Llistar les habilitats disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    "Obrir el panell d'habilitats (explorar, cercar, activar, triar).",
+  'Manage Skills': 'Gestionar habilitats',
+  'Skills configuration saved.': "Configuració d'habilitats desada.",
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    "Configuració d'habilitats desada, però l'actualització ha fallat: {{error}}. Reinicia per assegurar-te que el nou estat s'apliqui.",
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    "L'espai de treball no és de confiança; els paràmetres de l'espai de treball s'ignoren a la configuració fusionada. Executa /trust primer, o edita ~/.qwen/settings.json directament per gestionar habilitats a l'àmbit d'usuari.",
+  'SkillManager not available.': 'SkillManager no disponible.',
+  'Loading skills…': 'Carregant habilitats…',
+  'Failed to load skills: {{error}}':
+    'No s’han pogut carregar les habilitats: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "No s'ha pogut desar la configuració d'habilitats: {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Totes les habilitats disponibles estan desactivades. Edita ~/.qwen/settings.json o .qwen/settings.json (skills.disabled) per tornar-les a activar.',
+  'Press esc to close.': 'Prem Esc per tancar.',
+  '{{count}} skills · ': '{{count}} habilitats · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilitats · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    "Espai alternar · Enter triar (omple l'entrada) · Esc desar i sortir · àmbit d'espai de treball",
+  'Search:': 'Cerca:',
+  'type to filter…': 'escriu per filtrar…',
+  'No skills are currently available.':
+    'No hi ha habilitats disponibles actualment.',
+  'All available skills are locked at a higher scope (see below).':
+    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
+  'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'higher scope': 'àmbit superior',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [bloquejada: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navega · Retrocés edita la cerca',
+  Bundled: 'Integrada',
   'Available Qwen Code CLI tools:': 'Eines del CLI de Qwen Code disponibles:',
   'No tools available': 'No hi ha eines disponibles',
   'View or change the approval mode for tool usage':
@@ -192,8 +227,8 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last result or code snippet to clipboard':
-    "Copiar l'últim resultat o fragment de codi al porta-retalls",
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
 
   // ============================================================================
   // Ordres - Agents
@@ -715,6 +750,8 @@ export default {
   'After tool execution fails': "Quan falla l'execució de l'eina",
   'When notifications are sent': "Quan s'envien notificacions",
   'When the user submits a prompt': "Quan l'usuari envia un missatge",
+  'When a slash command expands into a prompt':
+    "Quan una ordre de barra s'expandeix en un missatge",
   'When a new session is started': "Quan s'inicia una nova sessió",
   'Right before Qwen Code concludes its response':
     'Immediatament abans que Qwen Code conclou la seva resposta',
@@ -736,6 +773,8 @@ export default {
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
   'Input to command is JSON with original user prompt text.':
     "L'entrada a l'ordre és JSON amb el text original del missatge de l'usuari.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
     "L'entrada a l'ordre és JSON amb la font d'inici de sessió.",
   'Input to command is JSON with session end reason.':
@@ -759,6 +798,8 @@ export default {
     "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
     "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
+  'block expanded prompt submission and show stderr to user only':
+    "blocar l'enviament del missatge expandit i mostrar stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
     "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
@@ -798,6 +839,24 @@ export default {
   'Resume a previous session': 'Reprendre una sessió anterior',
   'Fork the current conversation into a new session':
     'Bifurca la conversa actual en una sessió nova',
+  'Spawn a background agent that inherits the full conversation':
+    'Inicia un agent en segon pla que hereta tota la conversa',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Proporcioneu una directiva. Ús: /fork <directiva>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "No es pot crear una bifurcació mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
+  'Cannot fork before the first conversation turn.':
+    'No es pot crear una bifurcació abans del primer torn de conversa.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'L’ordre /fork requereix el feature gate de fork. Definiu QWEN_CODE_ENABLE_FORK_SUBAGENT=1 per activar-lo.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'eina d'agent no està disponible; no es pot crear una bifurcació.",
+  'Failed to launch fork: {{error}}':
+    'No s’ha pogut iniciar la bifurcació: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'usuari ha iniciat una bifurcació en segon pla amb /fork: {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "S'ha bifurcat a un agent en segon pla. Hereta aquesta conversa i s'executa sense bloquejar — feu-ne el seguiment al tauler de tasques en segon pla; informarà quan acabi.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "No es pot bifurcar mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'No conversation to branch.': 'No hi ha cap conversa per bifurcar.',
@@ -846,13 +905,14 @@ export default {
   // Ordres - Mode d'aprovació
   // ============================================================================
   'Tool Approval Mode': "Mode d'aprovació d'eines",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analitzar només, sense modificar fitxers ni executar ordres',
   'Require approval for file edits or shell commands':
     'Requerir aprovació per a edicions de fitxers o ordres shell',
   'Automatically approve file edits':
     'Aprovar automàticament les edicions de fitxers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utilitzar el classificador per aprovar automàticament les crides segures a eines',
   'Automatically approve all tools': 'Aprovar automàticament totes les eines',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     "Existeix un mode d'aprovació de l'espai de treball i té prioritat. El canvi a nivell d'usuari no tindrà cap efecte.",

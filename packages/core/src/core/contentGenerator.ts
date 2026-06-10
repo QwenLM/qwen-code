@@ -310,6 +310,24 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
+function getModuleNotFoundError(
+  error: unknown,
+): NodeJS.ErrnoException | undefined {
+  let current = error;
+
+  while (current instanceof Error) {
+    if (
+      'code' in current &&
+      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
+    ) {
+      return current as NodeJS.ErrnoException;
+    }
+    current = current.cause;
+  }
+
+  return undefined;
+}
+
 export async function createContentGenerator(
   generatorConfig: ContentGeneratorConfig,
   config: Config,
@@ -327,51 +345,64 @@ export async function createContentGenerator(
 
   let baseGenerator: ContentGenerator;
 
-  if (authType === AuthType.USE_OPENAI) {
-    const { createOpenAIContentGenerator } = await import(
-      './openaiContentGenerator/index.js'
-    );
-    baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
-  } else if (authType === AuthType.QWEN_OAUTH) {
-    const { getQwenOAuthClient: getQwenOauthClient } = await import(
-      '../qwen/qwenOAuth2.js'
-    );
-    const { QwenContentGenerator } = await import(
-      '../qwen/qwenContentGenerator.js'
-    );
+  try {
+    if (authType === AuthType.USE_OPENAI) {
+      const { createOpenAIContentGenerator } = await import(
+        './openaiContentGenerator/index.js'
+      );
+      baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+    } else if (authType === AuthType.QWEN_OAUTH) {
+      const { getQwenOAuthClient: getQwenOauthClient } = await import(
+        '../qwen/qwenOAuth2.js'
+      );
+      const { QwenContentGenerator } = await import(
+        '../qwen/qwenContentGenerator.js'
+      );
 
-    try {
-      const qwenClient = await getQwenOauthClient(
-        config,
-        isInitialAuth ? { requireCachedCredentials: true } : undefined,
+      try {
+        const qwenClient = await getQwenOauthClient(
+          config,
+          isInitialAuth ? { requireCachedCredentials: true } : undefined,
+        );
+        baseGenerator = new QwenContentGenerator(
+          qwenClient,
+          generatorConfig,
+          config,
+        );
+      } catch (error) {
+        if (getModuleNotFoundError(error)) {
+          throw error;
+        }
+        throw new Error(error instanceof Error ? error.message : String(error));
+      }
+    } else if (authType === AuthType.USE_ANTHROPIC) {
+      const { createAnthropicContentGenerator } = await import(
+        './anthropicContentGenerator/index.js'
       );
-      baseGenerator = new QwenContentGenerator(
-        qwenClient,
-        generatorConfig,
-        config,
+      baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
+    } else if (
+      authType === AuthType.USE_GEMINI ||
+      authType === AuthType.USE_VERTEX_AI
+    ) {
+      const { createGeminiContentGenerator } = await import(
+        './geminiContentGenerator/index.js'
       );
-    } catch (error) {
+      baseGenerator = createGeminiContentGenerator(generatorConfig, config);
+    } else {
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}`,
+        `Error creating contentGenerator: Unsupported authType: ${authType}`,
       );
     }
-  } else if (authType === AuthType.USE_ANTHROPIC) {
-    const { createAnthropicContentGenerator } = await import(
-      './anthropicContentGenerator/index.js'
-    );
-    baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
-  } else if (
-    authType === AuthType.USE_GEMINI ||
-    authType === AuthType.USE_VERTEX_AI
-  ) {
-    const { createGeminiContentGenerator } = await import(
-      './geminiContentGenerator/index.js'
-    );
-    baseGenerator = createGeminiContentGenerator(generatorConfig, config);
-  } else {
-    throw new Error(
-      `Error creating contentGenerator: Unsupported authType: ${authType}`,
-    );
+  } catch (error) {
+    const moduleNotFoundError = getModuleNotFoundError(error);
+    if (moduleNotFoundError) {
+      throw new Error(
+        `Qwen Code was updated in the background and needs to be restarted.\n` +
+          `Please exit and restart Qwen Code to use the '${authType}' provider.`,
+        { cause: moduleNotFoundError },
+      );
+    }
+    throw error;
   }
 
   return new LoggingContentGenerator(baseGenerator, config, generatorConfig);

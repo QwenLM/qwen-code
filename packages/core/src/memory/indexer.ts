@@ -6,9 +6,14 @@
 
 import * as fs from 'node:fs/promises';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
-import { getAutoMemoryIndexPath, getAutoMemoryMetadataPath } from './paths.js';
+import {
+  getAutoMemoryIndexPath,
+  getAutoMemoryMetadataPath,
+  getUserAutoMemoryIndexPath,
+} from './paths.js';
 import {
   scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import type { AutoMemoryMetadata } from './types.js';
@@ -80,6 +85,20 @@ export async function rebuildManagedAutoMemoryIndex(
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
+    encoding: 'utf-8',
+  });
+  return content;
+}
+
+/**
+ * Rebuild the MEMORY.md index for the user-level (cross-project) memory dir.
+ * Mirrors {@link rebuildManagedAutoMemoryIndex} but uses the global root
+ * and skips metadata (user memory has no per-project state file).
+ */
+export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+  const docs = await scanUserAutoMemoryTopicDocuments();
+  const content = buildManagedAutoMemoryIndex(docs);
+  await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
   });
   return content;

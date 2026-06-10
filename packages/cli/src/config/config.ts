@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -36,7 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings } from './settings.js';
+import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -133,7 +134,6 @@ export interface CliArgs {
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
-  checkpointing: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
   telemetryOtlpProtocol: string | undefined;
@@ -666,11 +666,6 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
-        .option('checkpointing', {
-          type: 'boolean',
-          description: 'Enables checkpointing of file edits',
-          default: false,
-        })
         .option('acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
@@ -695,8 +690,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -910,10 +905,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .deprecateOption(
           'sandbox-image',
           'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'checkpointing',
-          'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -1130,6 +1121,7 @@ export async function loadHierarchicalGeminiMemory(
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -1149,6 +1141,7 @@ export async function loadHierarchicalGeminiMemory(
     folderTrust,
     memoryImportFormat,
     contextRuleExcludes,
+    options,
   );
 }
 
@@ -1298,6 +1291,45 @@ function parseMcpConfig(
   }
 }
 
+/**
+ * Builds the live-read closure for `Config.getDisabledSkillNames()`.
+ *
+ * The returned function reads through `loadedSettings.merged` on every
+ * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * are reflected without rebuilding `Config`. The closure is over the
+ * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
+ * distinction matters because `LoadedSettings.setValue` replaces the
+ * internal `_merged` object on every call. A closure over `.merged` would
+ * stay frozen at construction time.
+ *
+ * Use this from every `loadCliConfig` call site (interactive entry, ACP
+ * session start, etc.) so all surfaces — `<available_skills>` in the
+ * model description, `/skill-name` slash commands, `/skills` listing and
+ * completion — agree on which skills are currently disabled.
+ */
+export function buildDisabledSkillNamesProvider(
+  loadedSettings: LoadedSettings,
+): () => ReadonlySet<string> {
+  return () => {
+    // Defensive: settings.json is user-editable, so the `disabled` slot
+    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
+    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
+    // fallback only catches `null`/`undefined`, so we MUST also guard
+    // against non-array values before `.filter()` — otherwise calling
+    // `"all".filter` throws `TypeError: list.filter is not a function`
+    // and bricks every skill invocation (validateToolParams + execute
+    // both call this provider without a try/catch).
+    const raw = loadedSettings.merged.skills?.disabled;
+    const list = Array.isArray(raw) ? raw : [];
+    return new Set(
+      list
+        .filter((n): n is string => typeof n === 'string')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean),
+    );
+  };
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1311,6 +1343,21 @@ export async function loadCliConfig(
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
+  /**
+   * Live-read provider for the set of disabled skill names. Forwarded to
+   * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
+   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
+   * mutations within the same process.
+   *
+   * Callers MUST close over the live `LoadedSettings` instance, NOT over
+   * the `settings: Settings` snapshot passed as the first argument here —
+   * `LoadedSettings.setValue` replaces `_merged`, so any closure over a
+   * snapshot would only see cold data and the dialog/subcommand toggles
+   * would not take effect on the model side. Use
+   * `buildDisabledSkillNamesProvider(loadedSettings)` to construct it
+   * correctly.
+   */
+  disabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
@@ -1759,6 +1806,7 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
@@ -1809,8 +1857,6 @@ export async function loadCliConfig(
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    checkpointing:
-      argv.checkpointing || settings.general?.checkpointing?.enabled,
     plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
@@ -1857,6 +1903,7 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
