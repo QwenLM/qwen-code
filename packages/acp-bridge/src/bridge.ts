@@ -2290,6 +2290,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return lastActivityTimestamp;
     },
 
+    get idleSinceMs() {
+      return lastActivityTimestamp !== null
+        ? Date.now() - lastActivityTimestamp
+        : null;
+    },
+
     isChannelLive() {
       return !!liveChannelInfo();
     },
