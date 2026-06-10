@@ -223,6 +223,49 @@ describe('tasks', () => {
       expect(updated!.blocks).toEqual(['2', '3']);
     });
 
+    it('persists completion even when unblocking one dependent fails', async () => {
+      // Regression: unblockDependents used Promise.all, so a single
+      // dependent failing (e.g. corrupt task file) rejected out of
+      // updateTask *before* the completed status was written — the
+      // task stayed in_progress on disk while the healthy dependents
+      // were already unblocked.
+      const blocker = await createTask('team', {
+        subject: 'Blocker',
+        description: 'A',
+      });
+      const healthy = await createTask('team', {
+        subject: 'Healthy dependent',
+        description: 'B',
+      });
+      const corrupt = await createTask('team', {
+        subject: 'Corrupt dependent',
+        description: 'C',
+      });
+      await blockTask('team', blocker.id, healthy.id);
+      await blockTask('team', blocker.id, corrupt.id);
+
+      // Truncate the second dependent's file so its unblock throws.
+      const corruptPath = path.join(
+        tmpDir,
+        'tasks',
+        'team',
+        `${corrupt.id}.json`,
+      );
+      await fs.writeFile(corruptPath, '{ "id": "3", "subj', 'utf-8');
+
+      const updated = await updateTask('team', blocker.id, {
+        status: 'completed',
+      });
+      expect(updated!.status).toBe('completed');
+
+      // Completed status reached disk and the healthy dependent
+      // was unblocked despite the corrupt sibling.
+      const persisted = await getTask('team', blocker.id);
+      expect(persisted!.status).toBe('completed');
+      const unblocked = await getTask('team', healthy.id);
+      expect(unblocked!.blockedBy).toEqual([]);
+    });
+
     it('deduplicates block IDs', async () => {
       const task = await createTask('team', {
         subject: 'Test',

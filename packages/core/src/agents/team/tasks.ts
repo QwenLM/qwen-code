@@ -611,7 +611,12 @@ async function unblockDependents(
   completedId: string,
   dependentIds: string[],
 ): Promise<void> {
-  await Promise.all(
+  // Best-effort, like deleteTask's edge cleanup: this runs before the
+  // caller persists the completed status, so a single dependent failing
+  // (corrupt JSON, EACCES, lock exhaustion) must not reject — that would
+  // abort the completion write and leave the task `in_progress` on disk
+  // while the dependents that did succeed are already unblocked.
+  const results = await Promise.allSettled(
     dependentIds.map(async (depId) => {
       const depPath = getTaskPath(teamName, depId);
       let release: (() => Promise<void>) | undefined;
@@ -633,6 +638,11 @@ async function unblockDependents(
       }
     }),
   );
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      debug.warn(`unblockDependents(${completedId}): ${r.reason}`);
+    }
+  }
   notifyTasksUpdated(teamName);
 }
 
