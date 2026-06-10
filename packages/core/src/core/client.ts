@@ -1362,6 +1362,11 @@ export class GeminiClient {
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
       messageType !== SendMessageType.Notification &&
+      // Teammate envelopes are machine-driven re-entries like Cron /
+      // Notification, not user prompts: user-authored UserPromptSubmit
+      // hooks must not fire on (or be able to block) internal team
+      // coordination traffic.
+      messageType !== SendMessageType.Teammate &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -1406,7 +1411,15 @@ export class GeminiClient {
       }
     }
 
-    if (messageType === SendMessageType.Notification) {
+    if (
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      // Teammate envelopes record like notifications: the UI rendered
+      // them as a compact `●` line (the displayText) and the envelope
+      // is the model-bound payload, so a resumed session restores the
+      // same info item. Without this they were the one top-level
+      // interaction missing from chat recording entirely.
       this.config
         .getChatRecordingService()
         ?.recordNotification(request, options?.notificationDisplayText);
