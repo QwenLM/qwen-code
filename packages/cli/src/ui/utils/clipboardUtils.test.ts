@@ -363,8 +363,6 @@ describe('clipboardUtils', () => {
     });
 
     it('should return null on spawn timeout (5s)', async () => {
-      vi.useFakeTimers();
-
       let callCount = 0;
       mockSpawn.mockImplementation(() => {
         callCount++;
@@ -394,16 +392,9 @@ describe('clipboardUtils', () => {
         return child;
       });
 
-      const resultPromise = saveClipboardImage('/tmp/test');
-
-      // Advance past the 5s timeout
-      await vi.advanceTimersByTimeAsync(5100);
-
-      const result = await resultPromise;
+      const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
-
-      vi.useRealTimers();
-    });
+    }, 10000);
 
     it('should return null on spawn error', async () => {
       let callCount = 0;
