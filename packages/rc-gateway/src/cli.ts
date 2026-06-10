@@ -15,7 +15,7 @@ import { SnoozeStore } from './routing/snooze.js';
 import { loadLayeredRoutingMatcher } from './routing/rules.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
-import { loadPolicyFile } from './policy/loader.js';
+import { loadLayeredPolicy } from './policy/loader.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
@@ -70,12 +70,18 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     routing,
   });
 
-  // Load the policy fail-closed: absent file → default-prompt (auto-votes
-  // nothing → behavior identical to pre-policy). Shares the gateway's audit so
-  // policy_decision entries land in the same log.
-  const policy = (await loadPolicyFile(
+  // Load the policy fail-closed, layered over the same workspace cwd resolved
+  // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
+  // <cwd>/.qwen/policy.yaml (workspace rules prepended → override at equal
+  // specificity). Absent user file → default-prompt; a MALFORMED user file still
+  // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
+  // malformed workspace file is logged + ignored (fail-closed: keep user policy).
+  const policy = await loadLayeredPolicy(
     join(homedir(), '.qwen', 'rc', 'policy.yaml'),
-  )) ?? { defaults: { action: 'prompt', requireScope: 'approve' }, rules: [] };
+    workspaceCwd,
+    // eslint-disable-next-line no-console
+    (msg) => console.warn(msg),
+  );
   const enforcer = notifier
     ? new PolicyEnforcer(handle.daemon, policy, audit)
     : undefined;
