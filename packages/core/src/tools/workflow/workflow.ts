@@ -6,7 +6,8 @@
 
 /**
  * @fileoverview WorkflowTool — user-facing tool that executes a workflow script
- * via WorkflowOrchestrator (P1: sequential agent dispatch only).
+ * via WorkflowOrchestrator. Supports sequential `agent()`, plus concurrent
+ * fan-out via `parallel()` / `pipeline()` throttled at the dispatch layer.
  */
 
 import {
@@ -57,14 +58,17 @@ const WORKFLOW_PARAM_SCHEMA = {
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, { label? })`, and read `args`. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
-        'through a shared per-run window (16 agents in flight by default) and resolves ' +
-        'to a position-aligned array — a thunk that throws becomes `null` at ' +
-        'its index (errors-as-data), and parallel() only rejects on abort. ' +
-        '`pipeline(items, ...stages)` runs each item through the stages ' +
-        '(staggered, no inter-stage barrier); a stage that throws or returns ' +
-        '`null` drops that item to `null`. Pass THUNKS to parallel, not eager ' +
-        'calls: `parallel([() => agent(...)])`, not `parallel([agent(...)])`. ' +
-        'At most 1000 agent() calls per run. ' +
+        'through a shared per-run window (default `min(16, cpus-2)` agents ' +
+        'in flight; override via `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`) and ' +
+        'resolves to a position-aligned array — a thunk that throws, or ' +
+        'resolves to a non-JSON-serializable value, becomes `null` at its ' +
+        'index (errors-as-data); parallel() itself rejects only on invalid ' +
+        'arguments or abort. `pipeline(items, ...stages)` runs each item ' +
+        'through the stages (staggered, no inter-stage barrier); a stage ' +
+        'that throws or returns `null` drops that item to `null`. Pass ' +
+        'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
+        'not `parallel([agent(...)])`. At most 1000 agent() calls per run ' +
+        '(override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`). ' +
         '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
@@ -257,11 +261,11 @@ export class WorkflowTool extends BaseDeclarativeTool<
       ToolDisplayNames.WORKFLOW,
       'Execute a workflow script that orchestrates subagents. ' +
         'Supports `phase`, `log`, sequential `agent`, and concurrent fan-out ' +
-        'via `parallel(thunks)` / `pipeline(items, ...stages)` (16 agents in ' +
-        'flight per run by default, up to 1000 agents total). No schema, no resume, no ' +
-        'background execution yet. Scripts run in a node:vm sandbox without ' +
-        'access to the filesystem or shell; all I/O happens through the ' +
-        'spawned agents.',
+        'via `parallel(thunks)` / `pipeline(items, ...stages)` (default ' +
+        '`min(16, cpus-2)` agents in flight per run, up to 1000 agents ' +
+        'total; both env-overridable). No schema, no resume, no background ' +
+        'execution yet. Scripts run in a node:vm sandbox without access to ' +
+        'the filesystem or shell; all I/O happens through the spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,

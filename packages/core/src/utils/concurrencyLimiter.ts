@@ -91,5 +91,21 @@ export function createConcurrencyLimiter(
       pump();
     });
 
+  // Drain the queue the moment the signal fires, rather than waiting for
+  // some in-flight thunk's finally to re-run pump(). Without this, a thunk
+  // that never settles would hold the slot and wedge every queued job
+  // forever. Cleanup matters: a listener on a long-lived parent signal that
+  // outlives many limiters would leak — `{ once: true }` covers it (abort
+  // fires at most once per AbortSignal).
+  if (signal && !signal.aborted) {
+    signal.addEventListener(
+      'abort',
+      () => {
+        while (queue.length > 0) queue.shift()!.reject(abortError());
+      },
+      { once: true },
+    );
+  }
+
   return { run };
 }

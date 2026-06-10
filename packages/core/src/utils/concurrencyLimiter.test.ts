@@ -72,6 +72,31 @@ describe('createConcurrencyLimiter', () => {
       await expect(limiter.run(async () => 1)).rejects.toThrow(/abort/i);
     });
 
+    // Defensive: queued jobs must be rejected the moment the signal fires,
+    // NOT lazily on the next in-flight settlement. Otherwise a non-settling
+    // in-flight thunk (a buggy/hung future dispatcher) would wedge every
+    // queued job forever. Production today wouldn't hit this because
+    // subagent.execute always settles, but the limiter shouldn't lean on
+    // an unenforced invariant.
+    it('rejects queued jobs promptly when the signal aborts, even if in-flight never settles', async () => {
+      const ac = new AbortController();
+      const limiter = createConcurrencyLimiter(1, ac.signal);
+      // Hold the one slot with a thunk that never settles.
+      limiter.run(() => new Promise<never>(() => {})).catch(() => {});
+      // Queue a second job; with abort it must reject promptly, not wait for
+      // the hung in-flight to settle.
+      const queued = limiter.run(async () => 'never');
+      setTimeout(() => ac.abort(), 5);
+      await expect(
+        Promise.race([
+          queued,
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error('hung')), 200),
+          ),
+        ]),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('does not start queued thunks after abort', async () => {
       const ac = new AbortController();
       const limiter = createConcurrencyLimiter(1, ac.signal);

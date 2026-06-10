@@ -226,11 +226,12 @@ export class WorkflowOrchestrator {
   constructor(private readonly dispatch: WorkflowAgentDispatch) {}
 
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
-    // Signal threading lives in createProductionDispatch (closure-captured)
-    // rather than per-run state. Sandbox-level signal is intentionally not
-    // exposed in P1 — sync-loop protection is provided by the 30s vm
-    // timeout in workflow-sandbox.ts; async-loop cancellation flows
-    // through dispatch's subagent.execute path.
+    // Signal threading: createProductionDispatch closure-captures a signal
+    // for subagent.execute cancellation. P2 additionally derives a per-run
+    // limiter from req.abortOnTimeout?.signal so wall-clock abort drains
+    // queued dispatches promptly. Sync-loop protection is the 30s vm
+    // timeout in workflow-sandbox.ts; async-loop cancellation flows through
+    // dispatch's subagent.execute path.
     const runId = generateRunId();
 
     const maxAgents = resolveMaxAgentsPerRun();
@@ -317,17 +318,24 @@ async function settleToNullArray(
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
   );
-  if (signal?.aborted) throw new Error('Workflow run aborted.');
+  // Use DOMException('AbortError') so this rejection is classified by
+  // isAbortError() (utils/errors.ts) the same way as the limiter's abort —
+  // a plain `new Error(...)` would not be recognised and would surface as a
+  // generic run failure rather than a clean cancellation.
+  if (signal?.aborted)
+    throw new DOMException('Workflow run aborted.', 'AbortError');
   return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
 }
 
 /**
  * Build the host-side `parallel(thunks)` impl. Each thunk is a vm-realm
  * function whose agent() calls throttle through the per-run concurrency window
- * at the dispatch layer. A thunk that rejects becomes `null` at its index
- * (errors-as-data); `parallel()` itself only rejects on abort. The result
- * array is revived into the vm realm by the sandbox wrapper (JSON round-trip)
- * — this host array never reaches the script directly.
+ * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
+ * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
+ * itself rejects only when given invalid arguments (non-array / non-function
+ * element) or when the run is aborted. The result array is revived into the
+ * vm realm by the sandbox wrapper (per-element JSON round-trip) — this host
+ * array never reaches the script directly.
  */
 function makeParallelImpl(
   signal?: AbortSignal,

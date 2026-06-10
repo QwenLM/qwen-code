@@ -221,9 +221,9 @@ export interface SandboxOptions {
 
 /**
  * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
- * for any realistic P1 sequential workflow (single agent capped at
- * 10 min × ~10 agents max practical → ~100 min upper bound, but typical
- * workflows finish in seconds). 30 min stops 0-token hang patterns
+ * for realistic workflows (typical runs finish in seconds; even a long
+ * pipeline with the 1000-agent cap is bounded well under this). 30 min
+ * stops 0-token hang patterns (e.g. an in-script `await new Promise(() => {})`)
  * before they waste operator hours.
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
