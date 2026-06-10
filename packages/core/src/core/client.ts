@@ -224,6 +224,12 @@ export class GeminiClient {
   private everAnnouncedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
 
+  private resetSkillReminderDedup(): void {
+    this.announcedSkillReminderKeys = new Set();
+    this.everAnnouncedSkillReminderKeys = new Set();
+    this.skillRemindersInitialized = false;
+  }
+
   /**
    * Tracks the most recently injected date string to prevent injecting
    * duplicate or conflicting dates when a session spans midnight.
@@ -711,9 +717,7 @@ export class GeminiClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
-    this.announcedSkillReminderKeys = new Set();
-    this.everAnnouncedSkillReminderKeys = new Set();
-    this.skillRemindersInitialized = false;
+    this.resetSkillReminderDedup();
     const [startupContext] = await getInitialChatHistory(this.config);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
@@ -745,9 +749,7 @@ export class GeminiClient {
       return;
     }
 
-    this.announcedSkillReminderKeys = new Set();
-    this.everAnnouncedSkillReminderKeys = new Set();
-    this.skillRemindersInitialized = false;
+    this.resetSkillReminderDedup();
     const [startupContext] = await getInitialChatHistory(this.config);
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
@@ -1063,9 +1065,7 @@ export class GeminiClient {
       // after this re-seeds from that snapshot and emits nothing, and only
       // genuinely new skills/commands are announced thereafter (avoids
       // re-injecting the full listing on resume / post-compaction).
-      this.announcedSkillReminderKeys = new Set();
-      this.everAnnouncedSkillReminderKeys = new Set();
-      this.skillRemindersInitialized = false;
+      this.resetSkillReminderDedup();
       history = await getInitialChatHistory(this.config, extraHistory);
       const systemInstruction = this.getMainSessionSystemInstruction();
 

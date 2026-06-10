@@ -3243,7 +3243,11 @@ export class CoreToolScheduler {
                 activatedEntries = collected.entries.filter(
                   (e) => e.level !== undefined && activatedSet.has(e.name),
                 );
-              } catch {
+              } catch (error) {
+                debugLogger.warn(
+                  'coreToolScheduler: collectAvailableSkillEntries failed in activation path',
+                  error,
+                );
                 activatedEntries = activatedSkills.map((name) => ({
                   name,
                   description: '',

@@ -636,7 +636,7 @@ describe('buildAvailableSkillsReminder', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when collectAvailableSkillEntries returns empty', async () => {
+  it('returns a no-skills-available reminder when collectAvailableSkillEntries returns empty', async () => {
     vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
       availableSkills: [],
       pendingConditionalSkillNames: new Set(),
@@ -644,7 +644,9 @@ describe('buildAvailableSkillsReminder', () => {
       entries: [],
     });
     const result = await buildAvailableSkillsReminder(mockConfig as Config);
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result).toContain('<system-reminder>');
+    expect(result).toContain('No skills are currently available');
   });
 
   it('returns a system-reminder with available_skills block on success', async () => {

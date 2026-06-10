@@ -14,13 +14,13 @@ import type {
 import { createDebugLogger } from './debugLogger.js';
 import { getFolderStructure } from './getFolderStructure.js';
 import { escapeSystemReminderTags } from './xml.js';
-
-const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+
+const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
@@ -288,7 +288,9 @@ export async function buildAvailableSkillsReminder(
     return null;
   }
   if (entries.length === 0) {
-    return null;
+    return wrapSystemReminder(
+      'No skills are currently available. Skills can be added by creating directories with SKILL.md files or by configuring MCP servers with model-invocable prompts.',
+    );
   }
   const block = renderAvailableSkillsBlock(
     trimSkillEntriesTowardsBudget(entries),

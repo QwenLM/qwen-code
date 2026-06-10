@@ -7281,6 +7281,105 @@ Other open files:
       expect(priv().skillRemindersInitialized).toBe(false);
       expect(mockChat.addHistory).not.toHaveBeenCalled();
     });
+
+    it('command entries use cmd: key prefix and are not suppressed by activatedConditional', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['mcp-prompt-a']),
+      );
+
+      // First drain: seed with a command entry (no level)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [
+          {
+            name: 'existing-skill',
+            description: 'desc',
+            level: 'project' as const,
+          },
+        ],
+      });
+      await drain();
+
+      // Second drain: add a command entry (no level — MCP prompt/command)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [
+          {
+            name: 'existing-skill',
+            description: 'desc',
+            level: 'project' as const,
+          },
+          { name: 'mcp-prompt-a', description: 'a command' },
+        ],
+      });
+      await drain();
+
+      // Command entries (no level) should NOT be suppressed by activatedConditional
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('mcp-prompt-a');
+    });
+
+    it('command entry prunes and re-announces correctly', async () => {
+      // First drain: seed with a command
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [{ name: 'cmd-a', description: 'desc' }],
+      });
+      await drain();
+
+      // Second drain: command removed
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.has('cmd:cmd-a')).toBe(false);
+
+      // Third drain: command re-added
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [{ name: 'cmd-a', description: 'desc' }],
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('cmd-a');
+    });
+
+    it('resetSkillReminderDedup clears all dedup state', async () => {
+      // Seed the dedup state via drain
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(priv().everAnnouncedSkillReminderKeys.size).toBe(2);
+
+      // Reset via helper
+      priv().resetSkillReminderDedup();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+      expect(priv().everAnnouncedSkillReminderKeys.size).toBe(0);
+    });
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 });
