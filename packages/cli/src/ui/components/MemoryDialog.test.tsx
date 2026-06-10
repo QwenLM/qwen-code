@@ -42,6 +42,7 @@ describe('MemoryDialog', () => {
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
       getBareMode: vi.fn(() => false),
+      isSafeMode: vi.fn(() => false),
       // Stale snapshot getters — the dialog must NOT read its toggle state
       // from these; it reads from the live merged settings instead.
       getManagedAutoMemoryEnabled: vi.fn(() => false),
