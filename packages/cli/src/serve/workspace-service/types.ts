@@ -141,8 +141,8 @@ export interface DaemonWorkspaceService {
     opts?: { entryIndex?: number },
   ): Promise<RestartMcpServerResult>;
 
-  /** Reload environment variables and refresh auth on idle sessions. */
-  reloadEnv(ctx: WorkspaceRequestContext): Promise<EnvReloadResponse>;
+  /** Reload all settings (env + model + permissions + tools + memory). */
+  reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
 }
 
 // -- Result types for workspace mutations --
@@ -150,12 +150,12 @@ export interface DaemonWorkspaceService {
 import type { EnvReloadResult } from '../../config/settings.js';
 export type { EnvReloadResult };
 
-export interface EnvReloadResponse {
-  updatedKeys: string[];
-  removedKeys: string[];
-  childReloaded: boolean;
+export interface ReloadResponse {
+  env: EnvReloadResult;
+  changedKeys: string[];
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
+  childReloaded: boolean;
   childError?: string;
 }
 

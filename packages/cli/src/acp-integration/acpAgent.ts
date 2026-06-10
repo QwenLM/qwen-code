@@ -144,6 +144,12 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
+import {
+  updateOutputLanguageFile,
+  resolveOutputLanguage,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -6549,9 +6555,16 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
-      case SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv: {
-        const fresh = loadSettings(cwd, { skipLoadEnvironment: true });
-        const envResult = reloadEnvironment(fresh.merged, cwd);
+      case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
+        const oldMerged = structuredClone(this.settings.merged);
+
+        this.settings.reloadScopeFromDisk(SettingScope.User);
+        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const newMerged = this.settings.merged;
+
+        const envResult = reloadEnvironment(newMerged, cwd);
+
+        const changed = diffSettingsKeys(oldMerged, newMerged);
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
@@ -6565,12 +6578,55 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
-            if (!authType) {
-              skipped.push(id);
-              return;
+
+            if (changed.has('modelProviders')) {
+              config.reloadModelProvidersConfig(newMerged.modelProviders);
             }
-            config.reloadModelProvidersConfig(fresh.merged.modelProviders);
-            await config.refreshAuth(authType);
+
+            const newModelName = newMerged.model?.name;
+            if (
+              changed.has('model') &&
+              newModelName &&
+              newModelName !== config.getModel() &&
+              authType
+            ) {
+              await config.switchModel(authType, newModelName);
+            } else if (
+              (changed.has('modelProviders') || changed.has('env')) &&
+              authType
+            ) {
+              await config.refreshAuth(authType);
+            }
+
+            if (changed.has('tools')) {
+              const disabled = normalizeDisabledToolList(
+                newMerged.tools?.disabled,
+              );
+              config.setDisabledTools(new Set(disabled));
+            }
+
+            if (changed.has('permissions')) {
+              config.getPermissionManager()?.updatePersistentRules({
+                allow: newMerged.permissions?.allow,
+                ask: newMerged.permissions?.ask,
+                deny: newMerged.permissions?.deny,
+              });
+            }
+
+            if (changed.has('tools')) {
+              const newMode = newMerged.tools?.approvalMode;
+              if (
+                newMode &&
+                APPROVAL_MODES.includes(newMode as ApprovalMode) &&
+                newMode !== config.getApprovalMode()
+              ) {
+                config.setApprovalMode(newMode as ApprovalMode);
+              }
+            }
+
+            await config.refreshHierarchicalMemory();
+            await config.getGeminiClient()?.refreshSystemInstruction();
+
             refreshed.push(id);
           }),
         );
@@ -6581,7 +6637,8 @@ class QwenAgent implements Agent {
         }
 
         return {
-          ...envResult,
+          env: envResult,
+          changedKeys: [...changed],
           sessionsRefreshed: refreshed,
           sessionsSkipped: skipped,
         };
@@ -6932,4 +6989,21 @@ class QwenAgent implements Agent {
     if (!baseModelId) return baseModelId;
     return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
   }
+}
+
+function diffSettingsKeys(
+  oldMerged: Record<string, unknown>,
+  newMerged: Record<string, unknown>,
+): Set<string> {
+  const changed = new Set<string>();
+  const allKeys = new Set([
+    ...Object.keys(oldMerged),
+    ...Object.keys(newMerged),
+  ]);
+  for (const key of allKeys) {
+    if (JSON.stringify(oldMerged[key]) !== JSON.stringify(newMerged[key])) {
+      changed.add(key);
+    }
+  }
+  return changed;
 }

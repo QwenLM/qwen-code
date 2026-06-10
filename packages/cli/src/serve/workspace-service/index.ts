@@ -59,7 +59,7 @@ export type {
   WorkspaceRequestContext,
   RestartMcpServerResult,
   EnvReloadResult,
-  EnvReloadResponse,
+  ReloadResponse,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -553,30 +553,34 @@ export function createDaemonWorkspaceService(
       return result;
     },
 
-    async reloadEnv(ctx: WorkspaceRequestContext) {
-      if (!deps.reloadDaemonEnv) {
-        throw new Error('reloadDaemonEnv not configured');
+    async reload(ctx: WorkspaceRequestContext) {
+      if (deps.reloadDaemonEnv) {
+        await deps.reloadDaemonEnv(boundWorkspace);
       }
-      const result = await deps.reloadDaemonEnv(boundWorkspace);
 
       let childReloaded = false;
+      let env: { updatedKeys: string[]; removedKeys: string[] } = {
+        updatedKeys: [],
+        removedKeys: [],
+      };
+      let changedKeys: string[] = [];
       let sessionsRefreshed: string[] | undefined;
       let sessionsSkipped: string[] | undefined;
       let childError: string | undefined;
       try {
         const childResult = await invokeWorkspaceCommand<{
-          updatedKeys: string[];
-          removedKeys: string[];
+          env: { updatedKeys: string[]; removedKeys: string[] };
+          changedKeys: string[];
           sessionsRefreshed: string[];
           sessionsSkipped: string[];
         }>(
-          SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv,
-          {
-            cwd: boundWorkspace,
-          },
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          { cwd: boundWorkspace },
           { timeoutMs: 30_000 },
         );
         childReloaded = true;
+        env = childResult.env;
+        changedKeys = childResult.changedKeys;
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
       } catch (err) {
@@ -584,20 +588,19 @@ export function createDaemonWorkspaceService(
           childError = 'ACP child not running';
         } else {
           childError = err instanceof Error ? err.message : String(err);
-          writeStderrLine(
-            `qwen serve: reload-env child forwarding failed: ${childError}`,
-          );
+          writeStderrLine(`qwen serve: reload failed: ${childError}`);
         }
       }
 
       publishWorkspaceEvent({
-        type: 'env_reloaded',
-        data: { ...result, childReloaded, sessionsRefreshed },
+        type: 'settings_reloaded',
+        data: { env, changedKeys, childReloaded, sessionsRefreshed },
         originatorClientId: ctx.originatorClientId,
       });
 
       return {
-        ...result,
+        env,
+        changedKeys,
         childReloaded,
         sessionsRefreshed,
         sessionsSkipped,

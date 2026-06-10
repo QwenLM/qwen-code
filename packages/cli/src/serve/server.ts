@@ -673,8 +673,8 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
-  if (req.method === 'POST' && path === '/workspace/reload-env') {
-    return { route: 'POST /workspace/reload-env' };
+  if (req.method === 'POST' && path === '/workspace/reload') {
+    return { route: 'POST /workspace/reload' };
   }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {
@@ -1312,7 +1312,7 @@ export function createServeApp(
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
         rateLimit: opts.rateLimit === true,
-        reloadEnvAvailable: deps.workspace !== undefined,
+        reloadAvailable: deps.workspace !== undefined,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -2964,21 +2964,17 @@ export function createServeApp(
   });
 
   app.post(
-    '/workspace/reload-env',
+    '/workspace/reload',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
-        const ctx = buildWorkspaceCtx(
-          req,
-          'POST /workspace/reload-env',
-          clientId,
-        );
-        const result = await workspace.reloadEnv(ctx);
+        const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
+        const result = await workspace.reload(ctx);
         res.status(200).json(result);
       } catch (err) {
-        sendBridgeError(res, err, { route: 'POST /workspace/reload-env' });
+        sendBridgeError(res, err, { route: 'POST /workspace/reload' });
       }
     },
   );

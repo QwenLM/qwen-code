@@ -172,9 +172,9 @@ function mockWorkspaceService(
       restarted: true,
       durationMs: 42,
     }),
-    reloadEnv: vi.fn().mockResolvedValue({
-      updatedKeys: [],
-      removedKeys: [],
+    reload: vi.fn().mockResolvedValue({
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
       childReloaded: false,
     }),
     ...overrides,

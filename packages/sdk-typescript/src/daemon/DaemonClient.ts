@@ -64,7 +64,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
-  DaemonEnvReloadResponse,
+  DaemonReloadResponse,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -1524,12 +1524,12 @@ export class DaemonClient {
     );
   }
 
-  async reloadEnv(opts?: {
+  async reload(opts?: {
     clientId?: string;
     timeoutMs?: number;
-  }): Promise<DaemonEnvReloadResponse> {
+  }): Promise<DaemonReloadResponse> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/reload-env`,
+      `${this.baseUrl}/workspace/reload`,
       {
         method: 'POST',
         headers: this.headers(
@@ -1540,9 +1540,9 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/reload-env');
+          throw await this.failOnError(res, 'POST /workspace/reload');
         }
-        return (await res.json()) as DaemonEnvReloadResponse;
+        return (await res.json()) as DaemonReloadResponse;
       },
       opts?.timeoutMs,
     );
