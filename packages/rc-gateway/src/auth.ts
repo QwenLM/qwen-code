@@ -49,6 +49,8 @@ export function enforceSessionLock(audit?: AuditRecorder): RequestHandler {
       void audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,
+        shareId: req.rcClient?.shareId,
+        shareLabel: req.rcClient?.shareLabel,
         detail: { reason: 'session_locked', path: req.path },
       });
       res.status(403).json({ error: 'Session locked', code: 'session_locked' });
@@ -68,6 +70,8 @@ export function requireScope(
       void audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,
+        shareId: req.rcClient?.shareId,
+        shareLabel: req.rcClient?.shareLabel,
         detail: { required: scope },
       });
       res

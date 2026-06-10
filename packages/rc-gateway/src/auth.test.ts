@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import type { Request, Response } from 'express';
 import { TokenStore } from './tokenStore.js';
 import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
-import { SESSION_READ } from './scopes.js';
+import { SESSION_READ, APPROVE } from './scopes.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -118,6 +118,49 @@ describe('auth middleware', () => {
       actorTokenId: 'x',
       detail: { required: SESSION_READ },
     });
+  });
+
+  it('scope_denied for a guest carries shareId+shareLabel (label on every audit line)', async () => {
+    const audit = fakeAudit();
+    const share = await store.issueShare({
+      scopes: [SESSION_READ], // view-only: lacks APPROVE
+      label: 'review for Sam',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const req = {
+      headers: { authorization: `Bearer ${share.token}` },
+    } as Request;
+    // bearerResolve enriches rcClient.shareId/shareLabel, then a scope it
+    // lacks is denied — that denial row must be attributable + labeled.
+    bearerResolve(store, audit)(req, fakeRes(), () => {});
+    requireScope(APPROVE, audit)(req, fakeRes(), () => {});
+    const denied = audit.calls.find((c) => c.action === 'scope_denied');
+    expect(denied!.shareId).toBe(share.id);
+    expect(denied!.shareLabel).toBe('review for Sam');
+
+    // enforceSessionLock denial on a cross-session probe is likewise labeled.
+    const req2 = {
+      ...req,
+      params: { id: 's2' },
+      path: '/rc/session/s2/events',
+    } as unknown as Request;
+    enforceSessionLock(audit)(req2, fakeRes(), () => {});
+    const locked = audit.calls.find(
+      (c) => c.detail?.reason === 'session_locked',
+    );
+    expect(locked!.shareId).toBe(share.id);
+    expect(locked!.shareLabel).toBe('review for Sam');
+  });
+
+  it('scope_denied for a normal token leaves shareId/shareLabel unset', () => {
+    const audit = fakeAudit();
+    const req = { rcClient: { id: 'x', scopes: [] } } as Request;
+    requireScope(SESSION_READ, audit)(req, fakeRes(), () => {});
+    const denied = audit.calls.find((c) => c.action === 'scope_denied');
+    expect(denied!.shareId).toBeUndefined();
+    expect(denied!.shareLabel).toBeUndefined();
   });
 
   it('bearerResolve carries sessionLockId onto rcClient for a share token', async () => {

@@ -43,6 +43,14 @@ So a guest can reach exactly:
 Owner-only `share_created`/`share_revoked` are produced by the owner (actor =
 owner, not the share) but carry `detail.shareId`.
 
+**Also tagged (added after opus review):** the `scope_denied` rows emitted by
+the `requireScope` / `enforceSessionLock` middleware in `auth.ts`. A guest can
+trip these (a view-only share POSTing a vote → `requireScope(APPROVE)` denial;
+a share probing another session → `enforceSessionLock` denial). They run after
+`bearerResolve`, so `req.rcClient.shareId/shareLabel` are already set; without
+tagging, the `--share-id` filter would surface these (via `actorTokenId`)
+unlabeled, breaking the "label in every line" requirement.
+
 ## Decisions
 
 - **D1 — `AuditEntry` gains optional `shareId?: string` and
