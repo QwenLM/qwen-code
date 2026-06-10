@@ -68,6 +68,8 @@ export {
 export {
   loadPolicy,
   loadPolicyFile,
+  loadLayeredPolicy,
+  mergePolicies,
   PolicyError,
   type Policy,
   type PolicyRule,

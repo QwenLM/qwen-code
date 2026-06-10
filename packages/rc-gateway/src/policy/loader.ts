@@ -5,6 +5,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 
 export type PolicyAction = 'allow' | 'deny' | 'prompt';
@@ -161,4 +162,60 @@ export async function loadPolicyFile(path: string): Promise<Policy | null> {
     throw err;
   }
   return loadPolicy(text);
+}
+
+/** The fail-closed fallback when no user policy.yaml exists: prompt everything. */
+const DEFAULT_PROMPT_POLICY: Policy = {
+  defaults: { action: 'prompt', requireScope: 'approve' },
+  rules: [],
+};
+
+/**
+ * Merge a workspace policy over a user policy by PREPENDING the workspace rules
+ * (design D1: the evaluator breaks specificity/priority ties by earlier index, so
+ * lower-indexed workspace rules win an equal-specificity tie — the spec's
+ * workspace-override scenario). `workspace === null` returns `user` UNCHANGED, so
+ * a workspace-less boot is byte-identical to today. The user `defaults` are kept;
+ * a workspace `defaults` block is intentionally IGNORED (D3) so a workspace file
+ * cannot silently flip the global fallback action. Pure.
+ */
+export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
+  if (!workspace) return user;
+  return {
+    defaults: user.defaults,
+    rules: [...workspace.rules, ...user.rules],
+  };
+}
+
+/**
+ * Load the user policy and, when a workspace cwd is given, the workspace override
+ * `<workspaceCwd>/.qwen/policy.yaml`, then merge (workspace prepended). The user
+ * file is loaded with cycle-14 semantics UNCHANGED: absent (ENOENT) → the
+ * default-prompt policy; malformed → THROWS {@link PolicyError} (boot fails — a
+ * malformed user policy must not be silently downgraded). The WORKSPACE layer is
+ * fail-CLOSED: a malformed or unreadable workspace file is logged via `warn` and
+ * IGNORED (keep the user policy — never apply unparseable `allow`s, never crash
+ * boot). So this function throws ONLY on a malformed user file. `warn` defaults to
+ * a no-op (the CLI passes a `console.warn` wrapper).
+ */
+export async function loadLayeredPolicy(
+  userPath: string,
+  workspaceCwd: string | undefined,
+  warn: (msg: string) => void = () => {},
+): Promise<Policy> {
+  const user = (await loadPolicyFile(userPath)) ?? DEFAULT_PROMPT_POLICY;
+  let workspace: Policy | null = null;
+  if (workspaceCwd) {
+    try {
+      workspace = await loadPolicyFile(
+        join(workspaceCwd, '.qwen', 'policy.yaml'),
+      );
+    } catch (err) {
+      warn(
+        `[policy] ignoring workspace policy.yaml: ${(err as Error).message}`,
+      );
+      workspace = null;
+    }
+  }
+  return mergePolicies(workspace, user);
 }
