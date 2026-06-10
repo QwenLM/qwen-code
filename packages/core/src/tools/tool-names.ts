@@ -62,6 +62,7 @@ export const ToolNames = {
   COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
   COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
   COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  WORKFLOW: 'workflow',
 } as const;
 
 /**
@@ -111,6 +112,7 @@ export const ToolDisplayNames = {
   COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
   COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
   COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  WORKFLOW: 'Workflow',
 } as const;
 
 // Migration from old tool names to new tool names

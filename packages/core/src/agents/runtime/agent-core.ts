@@ -112,6 +112,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
 ]);
 
 /**
