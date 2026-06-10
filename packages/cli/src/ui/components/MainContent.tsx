@@ -562,7 +562,7 @@ export const MainContent = () => {
         </Box>
         <OverflowProvider>
           <ScrollableList
-            hasFocus={!uiState.isEditorDialogOpen && !uiState.dialogsVisible}
+            hasFocus={!uiState.dialogsVisible}
             data={allVirtualItems}
             renderItem={renderVirtualItem}
             estimatedItemHeight={virtualEstimatedItemHeight}
