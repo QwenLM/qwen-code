@@ -797,6 +797,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // external schedulers. Updated on prompt start/end and session
   // spawn/restore. `null` until the first activity after boot.
   let lastActivityTimestamp: number | null = null;
+  let activePromptCounter = 0;
   function touchActivity(): void {
     lastActivityTimestamp = Date.now();
   }
@@ -1211,6 +1212,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } catch {
             /* bus already closed */
           }
+          if (sessEntry.promptActive) activePromptCounter--;
           byId.delete(sid);
           telemetry.metrics?.sessionLifecycle('die');
           // Tombstone the id so any late `extNotification` from the
@@ -2281,11 +2283,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     get activePromptCount() {
-      let count = 0;
-      for (const entry of byId.values()) {
-        if (entry.promptActive) count++;
-      }
-      return count;
+      return activePromptCounter;
     },
 
     get lastActivityAt() {
@@ -2547,6 +2545,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   entry.activePromptOriginatorClientId = originatorClientId;
                 }
                 entry.promptActive = true;
+                activePromptCounter++;
                 touchActivity();
                 try {
                   // Echo the user prompt to the session bus so other SSE-subscribed
@@ -2571,6 +2570,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   echoPromptToSessionBus(entry, normalized, originatorClientId);
                 } catch (echoErr) {
                   entry.promptActive = false;
+                  activePromptCounter--;
                   delete entry.activePromptOriginatorClientId;
                   throw echoErr;
                 }
@@ -2579,6 +2579,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .finally(() => {
                     delete entry.activePromptOriginatorClientId;
                     entry.promptActive = false;
+                    activePromptCounter--;
                     touchActivity();
                   });
 
@@ -3092,6 +3093,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // cancelled, SSE permission_resolved emits, audit records.
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
+      if (entry.promptActive) activePromptCounter--;
       byId.delete(sessionId);
       telemetry.metrics?.sessionLifecycle('close');
       // Tombstone the closed sessionId so any late `extNotification`
@@ -4291,6 +4293,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // byId.get(sessionId) (same order as closeSession).
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
+      if (entry.promptActive) activePromptCounter--;
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
