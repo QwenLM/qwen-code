@@ -1103,6 +1103,55 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('keeps forward-failed prompt cancellations out of blocks', async () => {
+    const session = createMockSession({
+      events: async function* forwardFailedPromptCancelledEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'prompt_cancelled',
+          data: {
+            sessionId: 'session-1',
+            reason: 'forward_failed',
+          },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_error',
+          data: {
+            sessionId: 'session-1',
+            message: '无效的api key',
+            code: '-32603',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'error',
+        text: '无效的api key',
+        source: 'turn_error',
+      }),
+    ]);
+  });
+
   it('exposes catchingUp on resume and clears it on replay_complete', async () => {
     // Resume subscriptions (session carries a Last-Event-ID) get a
     // deterministic catch-up indicator: `catchingUp` arms on connect and

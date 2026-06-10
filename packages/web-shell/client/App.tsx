@@ -584,7 +584,7 @@ export function App({
     });
   }, []);
 
-  const messages = useMessages();
+  const messages = useMessages(t);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(

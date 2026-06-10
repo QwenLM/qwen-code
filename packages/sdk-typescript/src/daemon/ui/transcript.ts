@@ -274,7 +274,9 @@ function applyDaemonTranscriptEvent(
       // Idempotent — safe if the daemon also later emits terminal
       // tool_call_update frames.
       propagateCancellationToInFlightTools(next);
-      appendPromptCancelledBlock(next, event);
+      if (event.reason !== 'forward_failed') {
+        appendPromptCancelledBlock(next, event);
+      }
       break;
     case 'followup.suggestion':
       // Sidechannel: latest assist hint replaces any prior one for the
