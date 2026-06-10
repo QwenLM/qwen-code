@@ -1015,7 +1015,7 @@ export class McpClientManager {
    * `stop` to release cleanly.
    */
   async discoverAllMcpTools(cliConfig: Config): Promise<void> {
-    if (!cliConfig.isTrustedFolder()) {
+    if (cliConfig.isTrustedFolder?.() === false) {
       return;
     }
     if (this.pool) {
@@ -1223,6 +1223,12 @@ export class McpClientManager {
     );
     const serverConfig = servers[serverName];
     if (!serverConfig) {
+      return;
+    }
+    if (cliConfig.isTrustedFolder?.() === false) {
+      debugLogger.debug(
+        `Skipping MCP server in untrusted folder: ${serverName}`,
+      );
       return;
     }
     // disabled gate.

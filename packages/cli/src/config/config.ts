@@ -1803,14 +1803,9 @@ export async function loadCliConfig(
   const mcpServers = bareMode
     ? {}
     : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
-  // Non-interactive / headless sessions (SDK, `-p`, piped) have no user to show
-  // the approval dialog to, so gated servers are auto-approved there (#4615,
-  // decision: lenient, matching Claude Code). The gate only applies to
-  // interactive sessions, where the startup dialog can collect a decision.
-  const pendingMcpServers =
-    bareMode || !interactive
-      ? undefined
-      : getPendingGatedMcpServers(mcpServers, cwd);
+  const pendingMcpServers = bareMode
+    ? undefined
+    : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,

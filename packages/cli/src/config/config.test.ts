@@ -18,6 +18,7 @@ import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -884,11 +885,13 @@ describe('loadCliConfig', () => {
     mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    resetMcpApprovalsForTesting();
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
 
@@ -1002,6 +1005,55 @@ describe('loadCliConfig', () => {
     expect(servers['ide-only'].command).toBe('ide-cmd');
     expect(servers['settings-only'].command).toBe('settings-only-cmd');
     // Session servers are never approval-gated.
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
+  });
+
+  it('gates unapproved workspace MCP servers in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+          'user-server': {
+            command: 'user-cmd',
+          },
+        },
+      },
+      argv,
+    );
+
+    expect(config.isInteractive()).toBe(false);
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
+    expect(config.isMcpServerPendingApproval('user-server')).toBe(false);
+  });
+
+  it('keeps session-injected MCP servers ungated in non-interactive runs', async () => {
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-cmd',
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      {
+        'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+      },
+    );
+
+    expect(config.isMcpServerPendingApproval('workspace-server')).toBe(true);
     expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
   });
 

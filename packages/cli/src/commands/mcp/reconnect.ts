@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
@@ -53,13 +54,15 @@ async function createMinimalConfig(): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
   const fileService = new FileDiscoveryService(cwd);
+  const mcpServers = await getMcpServersFromConfig();
 
   const config = new Config({
     sessionId: 'mcp-reconnect',
     targetDir: cwd,
     cwd,
     debugMode: false,
-    mcpServers: settings.merged.mcpServers || {},
+    mcpServers,
+    pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
   });

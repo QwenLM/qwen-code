@@ -806,6 +806,35 @@ describe('McpClientManager', () => {
     expect(mockedMcpClient.discover).not.toHaveBeenCalled();
   });
 
+  it('should not discover a single server if folder is not trusted', async () => {
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => false,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isMcpServerPendingApproval: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    await manager.discoverMcpToolsForServer('test-server', mockConfig);
+
+    expect(McpClient).not.toHaveBeenCalled();
+    expect(mockedMcpClient.connect).not.toHaveBeenCalled();
+    expect(mockedMcpClient.discover).not.toHaveBeenCalled();
+  });
+
   it('should not connect a project server that is pending approval (#4615)', async () => {
     const mockedMcpClient = {
       connect: vi.fn(),
