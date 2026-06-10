@@ -1559,6 +1559,118 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.tokenCount).toBe(23_000);
   });
 
+  it('keeps the in-memory tokenCount across SSE re-subscribe when replay has no usage', async () => {
+    const events = vi.fn(async function* usageThenReusableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        const event: DaemonEvent = {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'counted' },
+              _meta: { usage: { inputTokens: 7_000, totalTokens: 7_500 } },
+            },
+          },
+        };
+        yield event;
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+      yield* [];
+    });
+    const session = createMockSession({ events });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+
+    // The stream ended once and the provider re-subscribed on the same
+    // session object; its (empty) original replay snapshot must not reset
+    // the live count.
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(connection?.tokenCount).toBe(7_000);
+  });
+
+  it('resets tokenCount when reconnect attaches a different session without replay usage', async () => {
+    const firstEvents = createClosableEvents();
+    const firstSession = createMockSession({
+      sessionId: 'session-usage-a',
+      events: async function* usageThenGoneEvents() {
+        const event: DaemonEvent = {
+          id: 5,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'counted' },
+              _meta: { usage: { inputTokens: 7_000, totalTokens: 7_500 } },
+            },
+          },
+        };
+        yield event;
+        await firstEvents.closed.promise;
+        yield* [];
+        throw Object.assign(new Error('missing session'), { status: 404 });
+      },
+    });
+    const secondSession = createMockSession({
+      sessionId: 'session-usage-b',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(firstSession, secondSession);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.tokenCount).toBe(7_000);
+
+    firstEvents.close();
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({ sessionId: 'session-usage-b' });
+    expect(connection?.tokenCount).toBe(0);
+  });
+
   it('bumps workspace event signals from replay snapshot events', async () => {
     const session = createMockSession({
       replaySnapshot: {
