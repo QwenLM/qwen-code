@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -19,7 +19,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -75,6 +75,7 @@
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },

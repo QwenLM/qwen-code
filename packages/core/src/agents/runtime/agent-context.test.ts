@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
@@ -158,6 +159,57 @@ describe('agent-context (merging)', () => {
       });
       expect(getRuntimeContentGenerator()).toBe(view);
       expect(getCurrentAgentId()).toBeNull();
+    });
+  });
+});
+
+describe('agent-context (depth) — #3731 Phase 3', () => {
+  it('returns 0 outside any frame', () => {
+    expect(getCurrentAgentDepth()).toBe(0);
+  });
+
+  it('top-level subagent has depth 0', async () => {
+    await runWithAgentContext('top', async () => {
+      expect(getCurrentAgentDepth()).toBe(0);
+    });
+  });
+
+  it('auto-increments per nesting: top=0, child=1, grandchild=2', async () => {
+    await runWithAgentContext('top', async () => {
+      expect(getCurrentAgentDepth()).toBe(0);
+      await runWithAgentContext('child', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+        await runWithAgentContext('grandchild', async () => {
+          expect(getCurrentAgentDepth()).toBe(2);
+        });
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+      expect(getCurrentAgentDepth()).toBe(0);
+    });
+    expect(getCurrentAgentDepth()).toBe(0);
+  });
+
+  it('sibling subagents at the same nesting level both see the same depth', async () => {
+    await runWithAgentContext('parent', async () => {
+      await runWithAgentContext('siblingA', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+      await runWithAgentContext('siblingB', async () => {
+        expect(getCurrentAgentDepth()).toBe(1);
+      });
+    });
+  });
+
+  it('callers do not pass depth — it is computed from parent frame only', async () => {
+    // Defensive: confirm `runWithAgentContext`'s signature still takes
+    // only (agentId, fn). Phase 3 depth tracking must remain a
+    // caller-invisible internal concern.
+    await runWithAgentContext('outer', async () => {
+      const before = getCurrentAgentDepth();
+      // No way to pass depth in — the helper computes it.
+      await runWithAgentContext('inner', async () => {
+        expect(getCurrentAgentDepth()).toBe(before + 1);
+      });
     });
   });
 });

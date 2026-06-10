@@ -203,6 +203,61 @@ describe('SchemaValidator', () => {
       expect(params.is_active).toBe(true);
     });
 
+    it('should not corrupt string fields whose value is literally "true"/"false"', () => {
+      const mixedSchema = {
+        type: 'object',
+        properties: {
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+          is_active: { type: 'boolean' },
+        },
+        required: ['old_string', 'new_string', 'is_active'],
+      };
+      // A self-hosted LLM sends `is_active` as the string "false" (the case this
+      // coercion exists for) which fails initial validation and triggers
+      // fixBooleanValues. The string-typed `old_string`/`new_string` arguments
+      // legitimately hold the text "true"/"false" and must survive untouched —
+      // previously they were rewritten into booleans, corrupting the edit.
+      const params = {
+        old_string: 'true',
+        new_string: 'false',
+        is_active: 'false',
+      };
+      expect(SchemaValidator.validate(mixedSchema, params)).toBeNull();
+      expect(params.old_string).toBe('true');
+      expect(params.new_string).toBe('false');
+      expect(params.is_active).toBe(false);
+    });
+
+    it('should not coerce string booleans for fields that also accept string', () => {
+      const unionSchema = {
+        type: 'object',
+        properties: {
+          value: { anyOf: [{ type: 'string' }, { type: 'boolean' }] },
+          is_active: { type: 'boolean' },
+        },
+        required: ['value', 'is_active'],
+      };
+      const params = { value: 'true', is_active: 'true' };
+      expect(SchemaValidator.validate(unionSchema, params)).toBeNull();
+      // `value` accepts string, so the literal "true" is left as a string.
+      expect(params.value).toBe('true');
+      expect(params.is_active).toBe(true);
+    });
+
+    it('should coerce string booleans inside arrays of booleans', () => {
+      const arraySchema = {
+        type: 'object',
+        properties: {
+          flags: { type: 'array', items: { type: 'boolean' } },
+        },
+        required: ['flags'],
+      };
+      const params = { flags: ['true', 'false', 'true'] };
+      expect(SchemaValidator.validate(arraySchema, params)).toBeNull();
+      expect(params.flags).toEqual([true, false, true]);
+    });
+
     it('should pass through actual boolean values unchanged', () => {
       const params = { is_background: true };
       expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
