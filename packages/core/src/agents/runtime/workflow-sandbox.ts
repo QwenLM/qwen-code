@@ -520,8 +520,23 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // revival above) -- so the value the script sees has vm-realm prototypes
       // whose constructors can't reach host process. Agent results are JSON
       // strings (and null slots), so the round-trip is lossless for P2.
-      function reviveInRealm(hostValue) {
-        return JSON.parse(JSON.stringify(hostValue));
+      //
+      // EAD-1 (P2 self-review): revive PER-ELEMENT, not the whole array in one
+      // JSON.stringify. A single slot whose VALUE is non-serializable (a thunk
+      // that returns a BigInt or a circular object) must become null at its
+      // index -- it must NOT throw on the whole array and destroy every sibling
+      // result, which would defeat errors-as-data for return values. The outer
+      // [] is built in-realm here, so the result keeps vm-realm prototypes.
+      function reviveInRealm(hostArr) {
+        const out = [];
+        for (let i = 0; i < hostArr.length; i++) {
+          try {
+            out[i] = JSON.parse(JSON.stringify(hostArr[i]));
+          } catch (_e) {
+            out[i] = null;
+          }
+        }
+        return out;
       }
       if (__b.hasParallel) {
         const callParallel = vmAsync(function (thunks) {
@@ -534,8 +549,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         globalThis.parallel = function parallel() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'parallel() is not supported in P1. Sequential agent() is the only ' +
-              'execution mode in P1. Concurrent fan-out is scheduled for P2.'
+              'parallel() is unavailable: this sandbox was created without a ' +
+              'parallel implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no concurrent-dispatch capability.'
             ));
           });
         };
@@ -553,8 +569,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         globalThis.pipeline = function pipeline() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-              'is scheduled for P2.'
+              'pipeline() is unavailable: this sandbox was created without a ' +
+              'pipeline implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no staggered multi-stage capability.'
             ));
           });
         };

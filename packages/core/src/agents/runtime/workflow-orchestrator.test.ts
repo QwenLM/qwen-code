@@ -337,6 +337,24 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).rejects.toThrow(/array of functions/);
     });
 
+    // EAD-1 (P2 self-review): a thunk that resolves to a non-JSON-serializable
+    // value (BigInt / circular) must become null at its index — NOT crash the
+    // whole batch. The in-realm revival is per-element, so one bad slot cannot
+    // destroy its siblings (errors-as-data holds for return values too).
+    it('a thunk returning a non-serializable value becomes null without crashing siblings', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => "a",
+          () => 1n,
+          () => "c",
+          () => { const o = {}; o.self = o; return o; },
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['a', null, 'c', null]);
+    });
+
     it('caps concurrent agents within a fan-out to the shared per-run window', async () => {
       let inFlight = 0;
       let peak = 0;
@@ -405,6 +423,61 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         }),
       ).rejects.toThrow(/stages must be functions/);
     });
+
+    // TST-1 (P2 self-review): pipeline must share the SAME per-run window as
+    // parallel — a pipeline impl that gave itself a separate (or no) limiter
+    // would let concurrency exceed the cap. Drive 50 item-chains, each calling
+    // one agent per stage, and assert peak in-flight === cap.
+    it('caps concurrent agents across a pipeline fan-out (shares the run window)', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return 'ok';
+      });
+      await orchestrator.run({
+        script: `return await pipeline(
+          Array.from({ length: 50 }, (_, i) => i),
+          (x) => agent("s1-" + x),
+        );`,
+        args: undefined,
+      });
+      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      expect(peak).toBe(cap);
+    });
+
+    // TST-2 (P2 self-review): pipeline is parallel-of-chains — STAGGERED, with
+    // NO inter-stage barrier. Item 0's chain (fast) must reach stage 2 long
+    // before item 1's slow stage 1 finishes. A barrier impl (all items clear
+    // stage 1 before any enters stage 2) would delay s2-0 until ~120ms; the
+    // staggered impl reaches it in ~a few ms. The 50ms threshold cleanly
+    // separates the two regardless of machine speed.
+    it('is staggered with no inter-stage barrier (item A reaches stage 2 before item B finishes stage 1)', async () => {
+      const log: Array<{ p: string; t: number }> = [];
+      const t0 = Date.now();
+      const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+        log.push({ p: prompt, t: Date.now() - t0 });
+        // Only item 1's first stage is slow.
+        await new Promise((r) => setTimeout(r, prompt === 's1-1' ? 120 : 2));
+        return 'ok';
+      });
+      // Stage 2's first arg is the PREVIOUS stage's result; use the `item`
+      // arg (2nd) to label by the original item.
+      await orchestrator.run({
+        script: `return await pipeline([0, 1],
+          (prev, item) => agent("s1-" + item),
+          (prev, item) => agent("s2-" + item),
+        );`,
+        args: undefined,
+      });
+      const s2of0 = log.find((e) => e.p === 's2-0');
+      expect(s2of0).toBeDefined();
+      // Item 0 entered stage 2 well before item 1's 120ms stage 1 completed.
+      expect(s2of0!.t).toBeLessThan(50);
+    }, 10_000);
   });
 
   describe('1000-agent cap', () => {
@@ -451,5 +524,30 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         }),
       ).rejects.toThrow(/abort/i);
     });
+
+    // TST-3 (P2 self-review): the pre-aborted case above only exercises the
+    // fast-path. Abort MID-FLIGHT — after dispatches have already started —
+    // and confirm parallel() rejects rather than resolving with a silent array
+    // of nulls (which would let an aborted/timed-out workflow continue).
+    it('parallel() rejects when aborted MID-FLIGHT (after dispatches started)', async () => {
+      const ac = new AbortController();
+      let dispatched = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatched++;
+        await new Promise((r) => setTimeout(r, 40));
+        return 'ok';
+      });
+      const p = orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: 6 }, () => () => agent("x"))
+        );`,
+        args: undefined,
+        abortOnTimeout: ac,
+      });
+      // Abort once at least one dispatch is in flight.
+      setTimeout(() => ac.abort(), 10);
+      await expect(p).rejects.toThrow(/abort/i);
+      expect(dispatched).toBeGreaterThan(0);
+    }, 10_000);
   });
 });

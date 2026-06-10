@@ -709,28 +709,30 @@ describe('createWorkflowSandbox security', () => {
     expect(['undefined', 'threw', 'no-iterator']).toContain(result);
   });
 
-  // FIX-F (Round 4 UP Critical): P2/P5 primitives are stub-throwing globals
-  // so model-authored scripts get a clear "scheduled for PN" error rather
-  // than `ReferenceError: parallel is not defined` (which the model would
-  // misdiagnose as a bug in its own script).
-  it('parallel() throws a P1-unsupported error rather than ReferenceError', async () => {
+  // FIX-F (Round 4 UP Critical): an un-injected sandbox exposes stub-throwing
+  // parallel/pipeline globals so a model-authored script gets a clear
+  // "unavailable" error rather than `ReferenceError: parallel is not defined`
+  // (which the model would misdiagnose as a bug in its own script). In
+  // production the orchestrator always injects real impls; these stubs only
+  // fire for a bare sandbox constructed without them.
+  it('parallel() throws an availability error rather than ReferenceError when not injected', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return parallel([() => agent("a")]);`),
-    ).rejects.toThrow(/parallel.*not supported in P1/);
+    ).rejects.toThrow(/parallel\(\) is unavailable/);
   });
 
-  it('pipeline() throws a P1-unsupported error rather than ReferenceError', async () => {
+  it('pipeline() throws an availability error rather than ReferenceError when not injected', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return pipeline([1, 2], x => x, x => x);`),
-    ).rejects.toThrow(/pipeline.*not supported in P1/);
+    ).rejects.toThrow(/pipeline\(\) is unavailable/);
   });
 
   it('workflow() throws a P1-unsupported error rather than ReferenceError', async () => {

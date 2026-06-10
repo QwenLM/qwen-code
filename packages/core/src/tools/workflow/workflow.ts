@@ -255,11 +255,13 @@ export class WorkflowTool extends BaseDeclarativeTool<
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      'Execute a workflow script that orchestrates subagents sequentially. ' +
-        'P1 supports `phase`, `log`, and sequential `agent` only. No parallel, ' +
-        'no pipeline, no schema, no resume, no background execution. ' +
-        'Scripts run in a node:vm sandbox without access to the filesystem or ' +
-        'shell; all I/O happens through the spawned agents.',
+      'Execute a workflow script that orchestrates subagents. ' +
+        'Supports `phase`, `log`, sequential `agent`, and concurrent fan-out ' +
+        'via `parallel(thunks)` / `pipeline(items, ...stages)` (≤16 agents in ' +
+        'flight per run, ≤1000 agents total). No schema, no resume, no ' +
+        'background execution yet. Scripts run in a node:vm sandbox without ' +
+        'access to the filesystem or shell; all I/O happens through the ' +
+        'spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
