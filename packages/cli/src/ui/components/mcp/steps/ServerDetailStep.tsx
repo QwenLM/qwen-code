@@ -35,6 +35,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   onAuthenticate,
   onClearAuth,
   onBack,
+  isActive = true,
 }) => {
   const statusColor = server
     ? server.isDisabled
@@ -106,7 +107,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
         onBack();
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   if (!server) {
@@ -218,6 +219,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       <Box>
         <RadioButtonSelect<ServerAction>
           items={actions}
+          isFocused={isActive}
           showNumbers={false}
           onSelect={(value: ServerAction) => {
             switch (value) {

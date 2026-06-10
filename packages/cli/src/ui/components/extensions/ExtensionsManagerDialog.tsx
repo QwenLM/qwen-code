@@ -21,6 +21,9 @@ import { TabBar } from './TabBar.js';
 import { DiscoverTab } from './tabs/DiscoverTab.js';
 import { InstalledTab } from './tabs/InstalledTab.js';
 import { SourcesTab } from './tabs/SourcesTab.js';
+import { ConsentPrompt } from '../ConsentPrompt.js';
+import { SettingInputPrompt } from '../SettingInputPrompt.js';
+import { PluginChoicePrompt } from '../PluginChoicePrompt.js';
 
 export interface StatusMessage {
   type: 'info' | 'success' | 'error';
@@ -56,9 +59,25 @@ export function ExtensionsManagerDialog({
   config,
   initialTab,
 }: ExtensionsManagerDialogProps) {
-  const { extensionsUpdateState } = useUIState();
+  const {
+    extensionsUpdateState,
+    confirmUpdateExtensionRequests,
+    settingInputRequests,
+    pluginChoiceRequests,
+  } = useUIState();
   const { columns } = useTerminalSize();
   const boxWidth = columns - 4;
+
+  // Install flows raise interactive requests (consent, setting input, plugin
+  // choice). They are rendered here, inside the dialog, so the dialog stays
+  // mounted and keeps its tab/list state; DialogManager skips them while this
+  // dialog is open. (Unmounting would reset the active tab and drop the
+  // reload signal that refreshes the Installed tab after an install.)
+  const consentRequest = confirmUpdateExtensionRequests?.[0];
+  const settingRequest = settingInputRequests?.[0];
+  const pluginChoiceRequest = pluginChoiceRequests?.[0];
+  const hasPendingRequest =
+    !!consentRequest || !!settingRequest || !!pluginChoiceRequest;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
     initialTab ?? EXTENSIONS_TABS.INSTALLED,
@@ -113,7 +132,7 @@ export function ExtensionsManagerDialog({
         onClose();
       }
     },
-    { isActive: !tabLocked },
+    { isActive: !tabLocked && !hasPendingRequest },
   );
 
   if (!config) {
@@ -135,7 +154,34 @@ export function ExtensionsManagerDialog({
 
   return (
     <Box flexDirection="column" width={boxWidth}>
+      {consentRequest ? (
+        <ConsentPrompt
+          prompt={consentRequest.prompt}
+          onConfirm={consentRequest.onConfirm}
+          terminalWidth={boxWidth}
+        />
+      ) : settingRequest ? (
+        <SettingInputPrompt
+          key={settingRequest.settingName}
+          settingName={settingRequest.settingName}
+          settingDescription={settingRequest.settingDescription}
+          sensitive={settingRequest.sensitive}
+          onSubmit={settingRequest.onSubmit}
+          onCancel={settingRequest.onCancel}
+          terminalWidth={boxWidth}
+        />
+      ) : pluginChoiceRequest ? (
+        <PluginChoicePrompt
+          key={pluginChoiceRequest.marketplaceName}
+          marketplaceName={pluginChoiceRequest.marketplaceName}
+          plugins={pluginChoiceRequest.plugins}
+          onSelect={pluginChoiceRequest.onSelect}
+          onCancel={pluginChoiceRequest.onCancel}
+          terminalWidth={boxWidth}
+        />
+      ) : null}
       <Box
+        display={hasPendingRequest ? 'none' : 'flex'}
         borderStyle="single"
         borderColor={theme.border.default}
         flexDirection="column"
@@ -150,7 +196,9 @@ export function ExtensionsManagerDialog({
           {activeTab === EXTENSIONS_TABS.DISCOVER && (
             <DiscoverTab
               config={config}
-              isActive={activeTab === EXTENSIONS_TABS.DISCOVER}
+              isActive={
+                activeTab === EXTENSIONS_TABS.DISCOVER && !hasPendingRequest
+              }
               onLockChange={handleLockChange}
               onStatus={setStatus}
               onInstalled={bumpReload}
@@ -161,7 +209,9 @@ export function ExtensionsManagerDialog({
           {activeTab === EXTENSIONS_TABS.INSTALLED && (
             <InstalledTab
               config={config}
-              isActive={activeTab === EXTENSIONS_TABS.INSTALLED}
+              isActive={
+                activeTab === EXTENSIONS_TABS.INSTALLED && !hasPendingRequest
+              }
               onLockChange={handleLockChange}
               onStatus={setStatus}
               extensionsUpdateState={extensionsUpdateState}
@@ -171,7 +221,9 @@ export function ExtensionsManagerDialog({
           {activeTab === EXTENSIONS_TABS.SOURCES && (
             <SourcesTab
               config={config}
-              isActive={activeTab === EXTENSIONS_TABS.SOURCES}
+              isActive={
+                activeTab === EXTENSIONS_TABS.SOURCES && !hasPendingRequest
+              }
               onLockChange={handleLockChange}
               onStatus={setStatus}
               onChanged={bumpReload}

@@ -253,6 +253,7 @@ export const ExtensionActionsView = ({
     return (
       <UninstallConfirmStep
         selectedExtension={extension}
+        isActive={isActive}
         onConfirm={handleUninstall}
         onNavigateBack={() => setSub('detail')}
       />

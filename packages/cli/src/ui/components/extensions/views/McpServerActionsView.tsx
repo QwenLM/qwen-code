@@ -36,6 +36,8 @@ interface McpServerActionsViewProps {
   config: Config;
   /** Name of the installed MCP server to manage. */
   serverName: string;
+  /** Whether this view should respond to keyboard input. */
+  isActive: boolean;
   onStatus: (status: StatusMessage | null) => void;
   /** Ask the parent list to reload (state changed). */
   onReload: () => void;
@@ -52,6 +54,7 @@ interface McpServerActionsViewProps {
 export const McpServerActionsView = ({
   config,
   serverName,
+  isActive,
   onStatus,
   onReload,
   onExit,
@@ -250,6 +253,7 @@ export const McpServerActionsView = ({
     return (
       <AuthenticateStep
         server={server}
+        isActive={isActive}
         onBack={() => {
           setSub('detail');
           void reload();
@@ -260,7 +264,11 @@ export const McpServerActionsView = ({
 
   if (sub === 'tool-detail') {
     return (
-      <ToolDetailStep tool={selectedTool} onBack={() => setSub('tools')} />
+      <ToolDetailStep
+        tool={selectedTool}
+        isActive={isActive}
+        onBack={() => setSub('tools')}
+      />
     );
   }
 
@@ -269,6 +277,7 @@ export const McpServerActionsView = ({
       <ToolListStep
         tools={getServerTools()}
         serverName={serverName}
+        isActive={isActive}
         onSelect={(tool) => {
           setSelectedTool(tool);
           setSub('tool-detail');
@@ -281,6 +290,7 @@ export const McpServerActionsView = ({
   return (
     <ServerDetailStep
       server={server}
+      isActive={isActive}
       onViewTools={() => setSub('tools')}
       onReconnect={() => void handleReconnect()}
       onDisable={() => void handleToggleDisable()}

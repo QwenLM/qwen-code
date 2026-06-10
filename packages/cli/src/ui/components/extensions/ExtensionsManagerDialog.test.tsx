@@ -649,4 +649,25 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('owner/repo (GitHub)');
     expect(frame).toContain('@scope/name (npm)');
   });
+
+  it('renders a pending install consent prompt in place of the tabs', async () => {
+    const uiState = {
+      extensionsUpdateState: new Map<string, ExtensionUpdateState>(),
+      confirmUpdateExtensionRequests: [
+        { prompt: 'Do you trust this extension?', onConfirm: vi.fn() },
+      ],
+      settingInputRequests: [],
+      pluginChoiceRequests: [],
+    } as unknown as UIState;
+    const { lastFrame } = renderDialog(createConfig(createManager()), {
+      initialTab: EXTENSIONS_TABS.DISCOVER,
+      uiState,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Do you trust this extension?');
+    });
+    // The tab content is hidden while the prompt is shown, but the dialog
+    // (and its tab state) stays mounted.
+    expect(lastFrame()).not.toContain('Discover extensions');
+  });
 });

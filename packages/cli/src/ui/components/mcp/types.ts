@@ -138,6 +138,8 @@ export interface ServerDetailStepProps {
   onClearAuth?: () => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -164,6 +166,8 @@ export interface ToolListStepProps {
   onSelect: (tool: MCPToolDisplayInfo) => void;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -174,6 +178,8 @@ export interface ToolDetailStepProps {
   tool: MCPToolDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**
@@ -184,6 +190,8 @@ export interface AuthenticateStepProps {
   server: MCPServerDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
+  /** 是否响应键盘输入（默认 true） */
+  isActive?: boolean;
 }
 
 /**

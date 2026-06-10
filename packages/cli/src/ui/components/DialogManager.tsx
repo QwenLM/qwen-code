@@ -145,7 +145,13 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.confirmUpdateExtensionRequests.length > 0) {
+  // Extension install/update requests (consent, setting input, plugin choice)
+  // are rendered inside the ExtensionsManagerDialog when it is open, so the
+  // dialog keeps its tab/list state instead of being unmounted.
+  if (
+    uiState.confirmUpdateExtensionRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.confirmUpdateExtensionRequests[0];
     return (
       <ConsentPrompt
@@ -163,7 +169,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.settingInputRequests.length > 0) {
+  if (
+    uiState.settingInputRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.settingInputRequests[0];
     // Use settingName as key to force re-mount when switching between different settings
     return (
@@ -178,7 +187,10 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.pluginChoiceRequests.length > 0) {
+  if (
+    uiState.pluginChoiceRequests.length > 0 &&
+    !uiState.isExtensionsManagerDialogOpen
+  ) {
     const request = uiState.pluginChoiceRequests[0];
     return (
       <PluginChoicePrompt

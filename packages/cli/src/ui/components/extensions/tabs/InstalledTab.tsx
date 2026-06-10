@@ -374,6 +374,7 @@ export const InstalledTab = ({
       <McpServerActionsView
         config={config}
         serverName={selectedItem.mcp.name}
+        isActive={isActive}
         onStatus={onStatus}
         onReload={load}
         onExit={goToList}

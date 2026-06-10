@@ -57,6 +57,7 @@ function copyToClipboardViaOsc52(text: string): boolean {
 export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   server,
   onBack,
+  isActive = true,
 }) => {
   const config = useConfig();
   const [authState, setAuthState] = useState<AuthState>('idle');
@@ -202,7 +203,7 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         });
       }
     },
-    { isActive: true },
+    { isActive },
   );
 
   useEffect(() => {
