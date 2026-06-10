@@ -596,6 +596,16 @@ export interface AcpSessionBridge {
    */
   isChannelLive(): boolean;
 
+  /** Number of sessions with an active prompt (promptActive === true). */
+  readonly activePromptCount: number;
+
+  /**
+   * Epoch-ms timestamp of the last "activity" event (prompt start/end,
+   * session spawn/restore). `null` when the daemon has never processed
+   * any activity since boot.
+   */
+  readonly lastActivityAt: number | null;
+
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;
 

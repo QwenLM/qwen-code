@@ -793,6 +793,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let channelInfo: ChannelInfo | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Tracks the most recent "activity" event for idle-detection by
+  // external schedulers. Updated on prompt start/end and session
+  // spawn/restore. `null` until the first activity after boot.
+  let lastActivityTimestamp: number | null = null;
+  function touchActivity(): void {
+    lastActivityTimestamp = Date.now();
+  }
+
   function cancelIdleTimer(): void {
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
@@ -1906,6 +1914,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
     // Drain any guardrail events that fired during this session's
     // `newSession` handler (before this entry registered) onto the
@@ -2271,6 +2280,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return byId.size;
     },
 
+    get activePromptCount() {
+      let count = 0;
+      for (const entry of byId.values()) {
+        if (entry.promptActive) count++;
+      }
+      return count;
+    },
+
+    get lastActivityAt() {
+      return lastActivityTimestamp;
+    },
+
     isChannelLive() {
       return !!liveChannelInfo();
     },
@@ -2526,6 +2547,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   entry.activePromptOriginatorClientId = originatorClientId;
                 }
                 entry.promptActive = true;
+                touchActivity();
                 try {
                   // Echo the user prompt to the session bus so other SSE-subscribed
                   // clients see the input alongside the agent response.
@@ -2557,6 +2579,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .finally(() => {
                     delete entry.activePromptOriginatorClientId;
                     entry.promptActive = false;
+                    touchActivity();
                   });
 
                 // Race against channel termination: if the underlying transport
