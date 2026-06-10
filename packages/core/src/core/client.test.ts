@@ -65,6 +65,9 @@ import {
   buildAddedMcpToolsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
+import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import type { AvailableSkillEntry } from '../tools/skill-utils.js';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
@@ -155,6 +158,14 @@ vi.mock('../utils/gitUtils.js', async (importOriginal) => {
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
+vi.mock('../tools/skill-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/skill-utils.js')>();
+  return {
+    ...actual,
+    collectAvailableSkillEntries: vi.fn(),
+  };
+});
 vi.mock('../utils/environmentContext', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/environmentContext.js')>();
@@ -487,6 +498,7 @@ describe('Gemini Client (client.ts)', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getSkillManager: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
         isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
@@ -7030,5 +7042,245 @@ Other open files:
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(2);
     });
+  });
+
+  describe('drainSkillAndCommandReminders', () => {
+    const makeEntries = (
+      names: string[],
+      level: 'project' | 'bundled' = 'project',
+    ): AvailableSkillEntry[] =>
+      names.map((name) => ({ name, description: `desc-${name}`, level }));
+
+    const mockSkillManager = {
+      listSkills: vi.fn().mockResolvedValue([]),
+      getActivatedSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+    };
+
+    const mockChat = {
+      addHistory: vi.fn(),
+      getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+    };
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const priv = () => client as any;
+
+    async function drain() {
+      await priv().drainSkillAndCommandReminders();
+    }
+
+    beforeEach(() => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set<string>(),
+      );
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue(
+        mockSkillManager as ReturnType<Config['getSkillManager']>,
+      );
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
+        name === ToolNames.SKILL ? ({} as any) : undefined,
+      );
+      priv().chat = mockChat;
+      mockChat.addHistory.mockClear();
+    });
+
+    afterEach(() => {
+      priv().announcedSkillReminderKeys = new Set();
+      priv().everAnnouncedSkillReminderKeys = new Set();
+      priv().skillRemindersInitialized = false;
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set<string>(),
+      );
+    });
+
+    it('first drain seeds announced set and emits nothing', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(true);
+      expect(priv().announcedSkillReminderKeys.size).toBe(2);
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('second drain with a genuinely new skill emits a reminder', async () => {
+      // First drain: seed
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      // Second drain: skill-b is new
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a', 'skill-b']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-b');
+    });
+
+    it('second drain with no new skills emits nothing', async () => {
+      const entries = makeEntries(['skill-a']);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+
+      await drain(); // seed
+      await drain(); // same skills
+
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('removed skill prunes its key so re-adding re-announces', async () => {
+      // First drain: seed with skill-a
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      // Second drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      expect(priv().announcedSkillReminderKeys.size).toBe(0);
+
+      // Third drain: skill-a re-added (user re-enabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('conditional path-activation is skipped on first appearance (not double-announced)', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['skill-a']),
+      );
+
+      // First drain: seed
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing']),
+      });
+      await drain();
+
+      // Second drain: skill-a appears (was path-activated and announced inline by coreToolScheduler)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-a']),
+      });
+      await drain();
+
+      // Should NOT emit because skill-a was path-activated (announced inline)
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('path-activated skill re-announces after disable/re-enable', async () => {
+      mockSkillManager.getActivatedSkillNames.mockReturnValue(
+        new Set(['skill-a']),
+      );
+
+      // First drain: seed with skill-a
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      // Second drain: skill-a still present, was path-activated — skip
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      // Third drain: skill-a removed (user disabled)
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+      await drain();
+
+      // Fourth drain: skill-a re-added (user re-enabled) — SHOULD re-announce
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('returns early when Skill tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-a']),
+      });
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+    });
+
+    it('returns early and logs when collectAvailableSkillEntries throws', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockRejectedValue(
+        new Error('load failed'),
+      );
+
+      await drain();
+
+      expect(priv().skillRemindersInitialized).toBe(false);
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 });

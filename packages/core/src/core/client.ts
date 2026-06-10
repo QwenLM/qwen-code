@@ -221,6 +221,7 @@ export class GeminiClient {
   // snapshot instead of re-announcing — mirrors Claude Code's
   // suppressNextSkillListing / "don't re-inject on compact".
   private announcedSkillReminderKeys = new Set<string>();
+  private everAnnouncedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
 
   /**
@@ -710,6 +711,9 @@ export class GeminiClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
+    this.announcedSkillReminderKeys = new Set();
+    this.everAnnouncedSkillReminderKeys = new Set();
+    this.skillRemindersInitialized = false;
     const [startupContext] = await getInitialChatHistory(this.config);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
@@ -741,6 +745,9 @@ export class GeminiClient {
       return;
     }
 
+    this.announcedSkillReminderKeys = new Set();
+    this.everAnnouncedSkillReminderKeys = new Set();
+    this.skillRemindersInitialized = false;
     const [startupContext] = await getInitialChatHistory(this.config);
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
@@ -895,7 +902,11 @@ export class GeminiClient {
         skillManager,
         this.config,
       ));
-    } catch {
+    } catch (error) {
+      debugLogger.warn(
+        'drainSkillAndCommandReminders: collectAvailableSkillEntries failed',
+        error,
+      );
       return;
     }
 
@@ -916,12 +927,16 @@ export class GeminiClient {
       this.skillRemindersInitialized = true;
       for (const key of currentKeys) {
         this.announcedSkillReminderKeys.add(key);
+        this.everAnnouncedSkillReminderKeys.add(key);
       }
       return;
     }
 
     // Conditional path-activations are announced inline on the tool result by
-    // coreToolScheduler; record them as announced here so we don't double-announce.
+    // coreToolScheduler; suppress the drain announcement only on the skill's
+    // FIRST appearance (the inline announcement already covers it). If a skill
+    // was previously announced, then pruned (user-disabled), and re-enabled, it
+    // must be re-announced — the model needs to learn it's available again.
     const activatedConditional = skillManager.getActivatedSkillNames();
 
     const newEntries: AvailableSkillEntry[] = [];
@@ -930,8 +945,14 @@ export class GeminiClient {
       if (this.announcedSkillReminderKeys.has(key)) {
         continue;
       }
+      const wasKnownBefore = this.everAnnouncedSkillReminderKeys.has(key);
       this.announcedSkillReminderKeys.add(key);
-      if (entry.level !== undefined && activatedConditional.has(entry.name)) {
+      this.everAnnouncedSkillReminderKeys.add(key);
+      if (
+        entry.level !== undefined &&
+        activatedConditional.has(entry.name) &&
+        !wasKnownBefore
+      ) {
         continue;
       }
       newEntries.push(entry);

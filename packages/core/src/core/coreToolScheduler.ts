@@ -3244,7 +3244,11 @@ export class CoreToolScheduler {
                   (e) => e.level !== undefined && activatedSet.has(e.name),
                 );
               } catch {
-                activatedEntries = [];
+                activatedEntries = activatedSkills.map((name) => ({
+                  name,
+                  description: '',
+                  level: 'project' as const,
+                }));
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(

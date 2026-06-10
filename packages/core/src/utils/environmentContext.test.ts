@@ -18,6 +18,8 @@ import {
   buildAddedMcpToolsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
+  buildAvailableSkillsReminder,
+  buildAddedSkillsReminder,
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -32,12 +34,22 @@ import { prependToFirstTextPart } from './partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { getFolderStructure } from './getFolderStructure.js';
+import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 
 vi.mock('../config/config.js');
 vi.mock('./getFolderStructure.js', () => ({
   getFolderStructure: vi.fn(),
 }));
 vi.mock('../tools/read-many-files.js');
+vi.mock('../tools/skill-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/skill-utils.js')>();
+  return {
+    ...actual,
+    collectAvailableSkillEntries: vi.fn(),
+  };
+});
 
 describe('getDirectoryContextString', () => {
   let mockConfig: Partial<Config>;
@@ -599,5 +611,121 @@ describe('getStartupContextLength', () => {
       ),
     );
     expect(getStartupContextLength([merged])).toBe(0);
+  });
+});
+
+describe('buildAvailableSkillsReminder', () => {
+  let mockConfig: Partial<Config>;
+  const mockSkillManager = { listSkills: vi.fn() };
+
+  beforeEach(() => {
+    mockConfig = {
+      getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
+    } as unknown as Partial<Config>;
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('returns null when skillManager is absent', async () => {
+    vi.mocked(mockConfig.getSkillManager!).mockReturnValue(
+      undefined as unknown as ReturnType<Config['getSkillManager']>,
+    );
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when collectAvailableSkillEntries returns empty', async () => {
+    vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set(),
+      modelInvocableCommands: [],
+      entries: [],
+    });
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+    expect(result).toBeNull();
+  });
+
+  it('returns a system-reminder with available_skills block on success', async () => {
+    const entries: AvailableSkillEntry[] = [
+      {
+        name: 'test-skill',
+        description: 'A test skill',
+        level: 'project',
+      },
+    ];
+    vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain(SYSTEM_REMINDER_CLOSE);
+    expect(result).toContain('<available_skills>');
+    expect(result).toContain('test-skill');
+  });
+
+  it('returns null and logs warning when collectAvailableSkillEntries throws', async () => {
+    vi.mocked(collectAvailableSkillEntries).mockRejectedValue(
+      new Error('skill load error'),
+    );
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+    expect(result).toBeNull();
+  });
+
+  it('trims descriptions when entries exceed budget', async () => {
+    const longDesc = 'A'.repeat(500) + '\nSecond line that should be dropped';
+    const entries: AvailableSkillEntry[] = Array.from(
+      { length: 30 },
+      (_, i) => ({
+        name: `skill-${i}`,
+        description: longDesc,
+        level: 'project' as const,
+      }),
+    );
+    vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+    expect(result).not.toBeNull();
+    // Trimmed entries should NOT contain the second line
+    expect(result).not.toContain('Second line that should be dropped');
+  });
+});
+
+describe('buildAddedSkillsReminder', () => {
+  it('returns null for empty entries', () => {
+    const result = buildAddedSkillsReminder([]);
+    expect(result).toBeNull();
+  });
+
+  it('returns a system-reminder with newly available skills', () => {
+    const entries: AvailableSkillEntry[] = [
+      { name: 'new-skill', description: 'Just added', level: 'project' },
+    ];
+    const result = buildAddedSkillsReminder(entries);
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain(SYSTEM_REMINDER_CLOSE);
+    expect(result).toContain('<available_skills>');
+    expect(result).toContain('new-skill');
+    expect(result).toContain('became available after startup');
+  });
+
+  it('includes multiple entries', () => {
+    const entries: AvailableSkillEntry[] = [
+      { name: 'skill-a', description: 'First', level: 'user' },
+      { name: 'skill-b', description: 'Second', level: 'project' },
+    ];
+    const result = buildAddedSkillsReminder(entries);
+    expect(result).toContain('skill-a');
+    expect(result).toContain('skill-b');
   });
 });
