@@ -5,12 +5,20 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { RUNTIME_SNAPSHOT_PREFIX } from '@qwen-code/qwen-code-core';
 import {
   DISCONTINUED_MESSAGES,
   isDiscontinuedModel,
   parseAcpModelId,
   QWEN_OAUTH_AUTH_TYPE,
+  RUNTIME_PREFIX,
 } from './discontinuedModel.js';
+
+describe('RUNTIME_PREFIX', () => {
+  it('stays in sync with core RUNTIME_SNAPSHOT_PREFIX', () => {
+    expect(RUNTIME_PREFIX).toBe(RUNTIME_SNAPSHOT_PREFIX);
+  });
+});
 
 describe('parseAcpModelId', () => {
   it('extracts authType and base model id from a registry entry', () => {

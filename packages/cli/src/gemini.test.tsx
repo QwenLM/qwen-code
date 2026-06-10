@@ -799,7 +799,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       bare: undefined,
       approvalMode: undefined,
       telemetry: undefined,
-      checkpointing: undefined,
       telemetryTarget: undefined,
       telemetryOtlpEndpoint: undefined,
       telemetryOtlpProtocol: undefined,

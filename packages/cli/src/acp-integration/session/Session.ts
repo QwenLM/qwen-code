@@ -138,6 +138,8 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
 interface BackgroundNotificationQueueItem {
   displayText: string;
   modelText: string;
@@ -249,6 +251,14 @@ function isUserPromptRecord(record: ChatRecord): boolean {
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
+  availableSkillDetails?: Array<{
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+    modelInvocable?: boolean;
+  }>;
 }
 
 export async function buildAvailableCommandsSnapshot(
@@ -280,19 +290,56 @@ export async function buildAvailableCommandsSnapshot(
   });
 
   let availableSkills: string[] | undefined;
+  const skillDetailsByName = new Map<
+    string,
+    NonNullable<AvailableCommandsSnapshot['availableSkillDetails']>[number]
+  >();
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = await skillManager.listSkills();
       availableSkills = skills.map((skill) => skill.name);
+      for (const skill of skills) {
+        skillDetailsByName.set(skill.name, {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          filePath: skill.filePath,
+          level: skill.level,
+          modelInvocable: skill.disableModelInvocation !== true,
+        });
+      }
     }
   } catch (error) {
     debugLogger.error('Error loading available skills:', error);
   }
 
+  for (const command of slashCommands) {
+    if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
+      continue;
+    }
+    const existing = skillDetailsByName.get(command.skillDetail.name);
+    skillDetailsByName.set(command.skillDetail.name, {
+      ...existing,
+      ...command.skillDetail,
+      modelInvocable: command.modelInvocable === true,
+    });
+  }
+  const availableSkillDetails =
+    skillDetailsByName.size > 0
+      ? Array.from(skillDetailsByName.values())
+      : undefined;
+  // Always derive the name list from the details map so the two stay in sync.
+  // skillManager only contributes its own skills to `availableSkills`, but the
+  // slashCommands loop above also adds bundled skills to `skillDetailsByName`;
+  // a `??=` would leave bundled skills in details but missing from the name
+  // list whenever skillManager succeeded.
+  availableSkills = availableSkillDetails?.map((skill) => skill.name);
+
   return {
     availableCommands,
     ...(availableSkills !== undefined ? { availableSkills } : {}),
+    ...(availableSkillDetails !== undefined ? { availableSkillDetails } : {}),
   };
 }
 
@@ -325,6 +372,7 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  private midTurnDrainUnavailable = false;
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -936,7 +984,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1182,7 +1236,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1449,6 +1509,68 @@ export class Session implements SessionContext {
     });
   }
 
+  async #drainMidTurnUserMessages(): Promise<Part[]> {
+    if (this.midTurnDrainUnavailable) return [];
+
+    try {
+      const response = await this.client.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        {
+          sessionId: this.sessionId,
+        },
+      );
+      // A client may legally resolve with `result: null` (passed through
+      // unwrapped by the ACP SDK); guard the object access so that doesn't
+      // throw a TypeError and get misclassified as a transient drain error.
+      const messages =
+        response &&
+        typeof response === 'object' &&
+        Array.isArray(response['messages'])
+          ? response['messages'].filter(
+              (message): message is string =>
+                typeof message === 'string' && message.trim().length > 0,
+            )
+          : [];
+
+      return messages.map((message) => {
+        const part = {
+          text: `\n[User message received during tool execution]: ${message}`,
+        };
+        this.config
+          .getChatRecordingService()
+          ?.recordMidTurnUserMessage([part], message);
+        return part;
+      });
+    } catch (error) {
+      // The ACP SDK rejects with the raw JSON-RPC error object
+      // (`{ code, message, data }`), which is not an `Error` instance, so
+      // classify on the JSON-RPC code (-32601 = "Method not found") and fall
+      // back to the message. Otherwise the one-shot latch never trips and every
+      // tool batch keeps paying a failed `extMethod` round-trip all session.
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : error && typeof error === 'object' && 'message' in error
+            ? String((error as { message?: unknown }).message)
+            : String(error);
+      const errorCode =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      const isPermanentError =
+        errorCode === -32601 || /method not found/i.test(errorMessage);
+
+      if (isPermanentError) {
+        this.midTurnDrainUnavailable = true;
+      }
+
+      debugLogger.warn(
+        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
+      );
+      return [];
+    }
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -1617,7 +1739,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
         } catch (error) {
@@ -1972,7 +2100,7 @@ export class Session implements SessionContext {
 
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills } =
+      const { availableCommands, availableSkills, availableSkillDetails } =
         await buildAvailableCommandsSnapshot(this.config);
 
       const update: SessionUpdate = {
@@ -1982,6 +2110,7 @@ export class Session implements SessionContext {
           ? {
               _meta: {
                 availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
               },
             }
           : {}),

@@ -7,7 +7,7 @@ Use this file to choose the correct destination page under `docs/`.
 - `docs/users/overview.md`, `quickstart.md`, `common-workflow.md` Good for
   entry points, first-run guidance, and broad user workflows.
 - `docs/users/features/*.md` Good for user-visible features such as skills,
-  MCP, sandbox, sub-agents, commands, checkpointing, and approval modes.
+  MCP, sandbox, sub-agents, commands, and approval modes.
 - `docs/users/configuration/*.md` Good for settings, auth, model providers,
   themes, trusted folders, `.qwen` files, and similar configuration topics.
 - `docs/users/integration-*.md` and `docs/users/ide-integration/*.md` Good for
