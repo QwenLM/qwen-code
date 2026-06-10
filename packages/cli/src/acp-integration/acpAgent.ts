@@ -123,7 +123,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
-import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  loadSettings,
+  reloadEnvironment,
+  SettingScope,
+} from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
@@ -6410,6 +6414,43 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv: {
+        const fresh = loadSettings(cwd, { skipLoadEnvironment: true });
+        const envResult = reloadEnvironment(fresh.merged, cwd);
+
+        const sessions = [...this.sessions.entries()];
+        const refreshed: string[] = [];
+        const skipped: string[] = [];
+
+        const results = await Promise.allSettled(
+          sessions.map(async ([id, session]) => {
+            if (!session.isIdle()) {
+              skipped.push(id);
+              return;
+            }
+            const config = session.getConfig();
+            const authType = config.getAuthType();
+            if (!authType) {
+              skipped.push(id);
+              return;
+            }
+            config.reloadModelProvidersConfig(fresh.merged.modelProviders);
+            await config.refreshAuth(authType);
+            refreshed.push(id);
+          }),
+        );
+        for (let i = 0; i < results.length; i++) {
+          if (results[i]!.status === 'rejected') {
+            skipped.push(sessions[i]![0]);
+          }
+        }
+
+        return {
+          ...envResult,
+          sessionsRefreshed: refreshed,
+          sessionsSkipped: skipped,
+        };
       }
       default:
         throw RequestError.methodNotFound(method);

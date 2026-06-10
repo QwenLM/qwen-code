@@ -1111,6 +1111,15 @@ export interface DaemonShellCommandResult {
  *   total has reached `clientBudget`. Caller should free a slot
  *   (disconnect another server) before retrying.
  */
+export interface DaemonEnvReloadResponse {
+  updatedKeys: string[];
+  removedKeys: string[];
+  childReloaded: boolean;
+  sessionsRefreshed?: string[];
+  sessionsSkipped?: string[];
+  childError?: string;
+}
+
 export type DaemonMcpRestartResult =
   | {
       serverName: string;

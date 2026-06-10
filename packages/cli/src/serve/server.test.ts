@@ -214,7 +214,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
-      f !== 'rate_limit',
+      f !== 'rate_limit' &&
+      f !== 'workspace_reload_env',
   ),
   'workspace_settings',
   'workspace_init',
@@ -237,6 +238,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'rate_limit',
+  'workspace_reload_env',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1374,6 +1376,20 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { rateLimit: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_reload_env') {
+          expect(predicate({ reloadEnvAvailable: true })).toBe(true);
+          expect(predicate({ reloadEnvAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              reloadEnvAvailable: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,

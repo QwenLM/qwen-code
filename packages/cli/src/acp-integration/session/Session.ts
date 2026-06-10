@@ -466,6 +466,15 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  isIdle(): boolean {
+    return (
+      !this.pendingPrompt &&
+      !this.pendingPromptCompletion &&
+      !this.cronProcessing &&
+      !this.cronAbortController
+    );
+  }
+
   getTurnCount(): number {
     return this.turn;
   }
@@ -772,6 +781,7 @@ export class Session implements SessionContext {
       return result;
     } finally {
       resolveCompletion();
+      this.pendingPromptCompletion = null;
     }
   }
 

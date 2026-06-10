@@ -59,6 +59,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonEnvReloadResponse,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -1029,10 +1030,7 @@ export class DaemonClient {
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/branch`,
       {
         method: 'POST',
-        headers: this.headers(
-          { 'Content-Type': 'application/json' },
-          clientId,
-        ),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({ name: req.name }),
       },
       async (res) => {
@@ -1461,6 +1459,30 @@ export class DaemonClient {
         return (await res.json()) as DaemonMcpRestartResult;
       },
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  async reloadEnv(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonEnvReloadResponse> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/reload-env`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/reload-env');
+        }
+        return (await res.json()) as DaemonEnvReloadResponse;
+      },
+      opts?.timeoutMs,
     );
   }
 

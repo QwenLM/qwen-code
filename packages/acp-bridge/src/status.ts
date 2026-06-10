@@ -136,6 +136,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   // Runtime MCP server mutation ext-methods
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  workspaceReloadEnv: 'qwen/control/workspace/reload_env',
 } as const;
 
 export type ServeStatus =
