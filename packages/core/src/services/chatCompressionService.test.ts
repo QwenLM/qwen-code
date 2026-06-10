@@ -931,6 +931,18 @@ describe('ChatCompressionService', () => {
       model: 'gemini-pro',
       contextWindowSize: 6_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+    const debug = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: ReturnType<typeof vi.fn>;
+          debug: typeof debug;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn: vi.fn(),
+      debug,
+    });
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -954,9 +966,15 @@ describe('ChatCompressionService', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.originalTokenCount).toBe(5_000);
     expect(result.info.newTokenCount).toBeGreaterThan(1_000);
-    expect(result.info.newTokenCount).toBeLessThan(5_000);
+    expect(result.info.newTokenCount).toBeLessThan(1_100);
     expect(result.newHistory).not.toBeNull();
     expect(result.newHistory![0].parts![0].text).toContain('Summary');
+    expect(debug).toHaveBeenCalledWith(
+      expect.stringContaining('usage metadata missing'),
+    );
+    expect(debug).toHaveBeenCalledWith(
+      expect.stringContaining('API-reported non-visible remainder (1000)'),
+    );
   });
 
   it('should reject inflated local delta if usage metadata is missing', async () => {
