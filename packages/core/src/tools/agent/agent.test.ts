@@ -171,7 +171,6 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
-      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -269,8 +268,6 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
 
       const interactiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -285,8 +282,6 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(false);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(false);
 
       const nonInteractiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -306,12 +301,10 @@ describe('AgentTool', () => {
       );
     });
 
-    it('includes fork discipline when interactive even if the legacy flag is off', async () => {
+    it('includes fork discipline when interactive', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(false);
 
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -1134,19 +1127,12 @@ describe('AgentTool', () => {
       vi.mocked(AgentHeadless.create).mockClear();
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
 
-      // Fork only requires interactive mode.
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
     });
 
-    it('forks in interactive mode even if the legacy flag method returns false', async () => {
-      vi.mocked(
-        config.isForkSubagentEnabled as ReturnType<typeof vi.fn>,
-      ).mockReturnValue(false);
-
+    it('forks in interactive mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
         description: 'General-purpose agent',
@@ -2959,9 +2945,6 @@ describe('AgentTool', () => {
     });
 
     it('persists fork capability snapshots in the bootstrap transcript', async () => {
-      // Fork requires interactive mode
-      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
-        vi.fn().mockReturnValue(true);
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);

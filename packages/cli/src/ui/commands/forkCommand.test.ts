@@ -45,7 +45,6 @@ describe('forkCommand', () => {
       getHistoryShallow: () => historyWithTurn,
     }),
     getModel: () => 'test-model',
-    isForkSubagentEnabled: () => true,
     getToolRegistry: () => ({ getTool: mockGetTool }),
     ...overrides,
   });
