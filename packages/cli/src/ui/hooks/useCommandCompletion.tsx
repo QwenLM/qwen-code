@@ -37,11 +37,10 @@ export interface UseCommandCompletionReturn {
   showSuggestions: boolean;
   isLoadingSuggestions: boolean;
   isPerfectMatch: boolean;
-  dismissed: boolean;
-  setDismissed: React.Dispatch<React.SetStateAction<boolean>>;
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
+  dismissCompletion: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
@@ -80,9 +79,10 @@ export function useCommandCompletion(
     setIsLoadingSuggestions,
     setIsPerfectMatch,
     setVisibleStartIndex,
-    setDismissed,
 
     resetCompletionState,
+    dismissCompletion,
+    clearDismissed,
     navigateUp,
     navigateDown,
   } = useCompletion();
@@ -180,10 +180,10 @@ export function useCommandCompletion(
   const prevQueryRef = useRef<string | null>(null);
   useEffect(() => {
     if (query !== prevQueryRef.current) {
-      setDismissed(false);
+      clearDismissed();
       prevQueryRef.current = query;
     }
-  }, [query, setDismissed]);
+  }, [query, clearDismissed]);
 
   useEffect(() => {
     if (
@@ -210,7 +210,6 @@ export function useCommandCompletion(
     dismissed,
     resetCompletionState,
     setShowSuggestions,
-    setDismissed,
   ]);
 
   const handleAutocomplete = useCallback(
@@ -339,11 +338,10 @@ export function useCommandCompletion(
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
-    dismissed,
-    setDismissed,
     setActiveSuggestionIndex,
     setShowSuggestions,
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
     handleAutocomplete,

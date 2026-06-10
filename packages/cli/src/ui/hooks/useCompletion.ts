@@ -23,7 +23,10 @@ export interface UseCompletionReturn {
   setIsLoadingSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   setIsPerfectMatch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
-  setDismissed: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Dismisses the completion dropdown and prevents re-open until query changes. */
+  dismissCompletion: () => void;
+  /** Clears the dismissed flag so the dropdown can re-open. */
+  clearDismissed: () => void;
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
@@ -47,31 +50,34 @@ export function useCompletion(): UseCompletionReturn {
     setShowSuggestions(false);
     setIsLoadingSuggestions(false);
     setIsPerfectMatch(false);
+  }, []);
+
+  const dismissCompletion = useCallback(() => {
     setDismissed(true);
+    resetCompletionState();
+  }, [resetCompletionState]);
+
+  const clearDismissed = useCallback(() => {
+    setDismissed(false);
   }, []);
 
   const navigateUp = useCallback(() => {
     if (suggestions.length === 0) return;
 
     setActiveSuggestionIndex((prevActiveIndex) => {
-      // Calculate new active index, handling wrap-around
       const newActiveIndex =
         prevActiveIndex <= 0 ? suggestions.length - 1 : prevActiveIndex - 1;
 
-      // Adjust scroll position based on the new active index
       setVisibleStartIndex((prevVisibleStart) => {
-        // Case 1: Wrapped around to the last item
         if (
           newActiveIndex === suggestions.length - 1 &&
           suggestions.length > MAX_SUGGESTIONS_TO_SHOW
         ) {
           return Math.max(0, suggestions.length - MAX_SUGGESTIONS_TO_SHOW);
         }
-        // Case 2: Scrolled above the current visible window
         if (newActiveIndex < prevVisibleStart) {
           return newActiveIndex;
         }
-        // Otherwise, keep the current scroll position
         return prevVisibleStart;
       });
 
@@ -83,31 +89,27 @@ export function useCompletion(): UseCompletionReturn {
     if (suggestions.length === 0) return;
 
     setActiveSuggestionIndex((prevActiveIndex) => {
-      // Calculate new active index, handling wrap-around
       const newActiveIndex =
         prevActiveIndex >= suggestions.length - 1 ? 0 : prevActiveIndex + 1;
 
-      // Adjust scroll position based on the new active index
       setVisibleStartIndex((prevVisibleStart) => {
-        // Case 1: Wrapped around to the first item
         if (
           newActiveIndex === 0 &&
           suggestions.length > MAX_SUGGESTIONS_TO_SHOW
         ) {
           return 0;
         }
-        // Case 2: Scrolled below the current visible window
         const visibleEndIndex = prevVisibleStart + MAX_SUGGESTIONS_TO_SHOW;
         if (newActiveIndex >= visibleEndIndex) {
           return newActiveIndex - MAX_SUGGESTIONS_TO_SHOW + 1;
         }
-        // Otherwise, keep the current scroll position
         return prevVisibleStart;
       });
 
       return newActiveIndex;
     });
   }, [suggestions.length]);
+
   return {
     suggestions,
     activeSuggestionIndex,
@@ -123,9 +125,10 @@ export function useCompletion(): UseCompletionReturn {
     setVisibleStartIndex,
     setIsLoadingSuggestions,
     setIsPerfectMatch,
-    setDismissed,
 
     resetCompletionState,
+    dismissCompletion,
+    clearDismissed,
     navigateUp,
     navigateDown,
   };

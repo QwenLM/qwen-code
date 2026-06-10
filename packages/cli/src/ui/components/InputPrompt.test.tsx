@@ -272,12 +272,11 @@ describe('InputPrompt', () => {
       showSuggestions: false,
       visibleStartIndex: 0,
       isPerfectMatch: false,
-      dismissed: false,
-      setDismissed: vi.fn(),
       midInputGhostText: null,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       resetCompletionState: vi.fn(),
+      dismissCompletion: vi.fn(),
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
@@ -1874,10 +1873,10 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should reset completion state on Enter after accepting @path suggestion', async () => {
-    // @path completion: pressing Enter should accept the suggestion AND
-    // reset completion state so the dropdown closes (important for folder
-    // paths which don't append a trailing space by design).
+  it('should dismiss completion on Enter after accepting @path suggestion', async () => {
+    // @path completion: pressing Enter should dismiss the completion
+    // (set dismissed flag + reset state) so the dropdown stays closed
+    // even if the @ token re-glob and produces new suggestions.
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
@@ -1896,12 +1895,12 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    // Enter should accept the suggestion and reset completion state.
+    // Enter should accept the suggestion and dismiss completion.
     stdin.write('\r');
     await wait();
 
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
-    expect(mockCommandCompletion.resetCompletionState).toHaveBeenCalled();
+    expect(mockCommandCompletion.dismissCompletion).toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
     unmount();
   });

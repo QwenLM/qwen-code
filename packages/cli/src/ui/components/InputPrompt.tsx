@@ -290,6 +290,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   });
 
   const resetCompletionState = completion.resetCompletionState;
+  const dismissCompletion = completion.dismissCompletion;
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
   const resetCommandSearchCompletionState =
@@ -1001,12 +1002,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               ? completion.suggestions[targetIndex]
               : undefined;
           acceptActiveCompletionSuggestion();
-          // On Enter, reset completion state after accepting the suggestion
-          // so the dropdown closes (important for @folder paths which
+          // On Enter, dismiss the completion after accepting the suggestion
+          // so the dropdown stays closed (important for @folder paths which
           // don't append a trailing space by design). Without this, the
           // @ completion pattern re-matches and re-shows the dropdown.
           if (key.name === 'return') {
-            completion.resetCompletionState();
+            dismissCompletion();
           }
           // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
           // matches BOTH Tab and Enter (see keyBindings.ts and the
@@ -1369,6 +1370,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchCompletion,
       handleClipboardImage,
       resetCompletionState,
+      dismissCompletion,
       escPressCount,
       showEscapePrompt,
       resetEscapeState,
