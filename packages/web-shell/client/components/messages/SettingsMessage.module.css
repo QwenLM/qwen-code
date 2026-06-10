@@ -89,6 +89,13 @@
   font-weight: 700;
 }
 
+/* Stays secondary and unbolded even on the selected row, like the native
+   CLI's scope message. */
+.scopeHint {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
 .value {
   flex-shrink: 0;
   color: var(--accent-color);

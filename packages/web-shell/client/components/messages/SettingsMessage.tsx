@@ -58,6 +58,23 @@ function scopeHasValue(
   return val !== undefined;
 }
 
+/* Mirrors the native CLI's getScopeMessageForSetting(): "(Modified in X)"
+   when only the other scope has a value, "(Also modified in X)" when both
+   do. Returns the i18n key; undefined when the other scope is untouched. */
+function scopeHintKey(
+  setting: DaemonSettingDescriptor,
+  scope: Scope,
+): 'settings.modifiedIn' | 'settings.alsoModifiedIn' | undefined {
+  const otherHasValue =
+    scope === 'workspace'
+      ? setting.values.user !== undefined
+      : setting.values.workspace !== undefined;
+  if (!otherHasValue) return undefined;
+  return scopeHasValue(setting, scope)
+    ? 'settings.alsoModifiedIn'
+    : 'settings.modifiedIn';
+}
+
 function resolveValue(setting: DaemonSettingDescriptor, scope: Scope): unknown {
   const scopeVal =
     scope === 'user' ? setting.values.user : setting.values.workspace;
@@ -103,7 +120,7 @@ function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
   }));
 }
 
-interface FlatRow {
+export interface FlatRow {
   type: 'header' | 'setting';
   category?: string;
   setting?: DaemonSettingDescriptor;
@@ -121,8 +138,12 @@ function flattenGroups(groups: CategoryGroup[]): FlatRow[] {
 }
 
 /* Wraps around at both ends (matching the native CLI) while skipping
-   category-header rows. */
-function nextSettingIdx(rows: FlatRow[], current: number, dir: 1 | -1): number {
+   category-header rows. Exported for tests. */
+export function nextSettingIdx(
+  rows: FlatRow[],
+  current: number,
+  dir: 1 | -1,
+): number {
   const n = rows.length;
   if (n === 0) return current;
   let i = current;
@@ -455,6 +476,7 @@ export function SettingsMessage({
           const isEditing = editMode?.key === setting.key;
           const isSubDialog = SUB_DIALOG_KEYS.has(setting.key);
           const hasScopeValue = scopeHasValue(setting, scope);
+          const hintKey = scopeHintKey(setting, scope);
 
           return (
             <div
@@ -475,7 +497,23 @@ export function SettingsMessage({
             >
               <div className={styles.row}>
                 <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
-                <span className={styles.label}>{setting.label}</span>
+                <span className={styles.label}>
+                  {setting.label}
+                  {/* Cross-scope hint inline after the label, same as the
+                      native CLI — never a separate row. */}
+                  {hintKey && (
+                    <span className={styles.scopeHint}>
+                      {' '}
+                      {t(hintKey, {
+                        scope: t(
+                          scope === 'workspace'
+                            ? 'settings.scope.user'
+                            : 'settings.scope.workspace',
+                        ),
+                      })}
+                    </span>
+                  )}
+                </span>
                 <span className={styles.value}>
                   {busyKey === setting.key
                     ? '...'
