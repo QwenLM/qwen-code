@@ -124,20 +124,20 @@ export function createDaemonSessionActions({
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, { controller: ctrl });
       try {
+        // Normalize images once and pass the same array to both calls
+        const normalizedImages: Array<{ data: string; mimeType: string }> = (
+          options?.images ?? []
+        ).map((img) => ({
+          data: img.data,
+          mimeType:
+            img.mimeType || img.mediaType || img.media_type || 'image/*',
+        }));
         if (options?.optimisticUserMessage !== false) {
-          // Convert images from {data, media_type} to {data, mimeType} format
-          const normalizedImages: Array<{ data: string; mimeType: string }> = (
-            options?.images ?? []
-          ).map((img) => ({
-            data: img.data,
-            mimeType:
-              img.mimeType || img.mediaType || img.media_type || 'image/*',
-          }));
           store.appendLocalUserMessage(text, normalizedImages);
         }
         const result = await session.prompt(
           {
-            prompt: toDaemonPromptContent(text, options?.images),
+            prompt: toDaemonPromptContent(text, normalizedImages),
           },
           ctrl.signal,
         );

@@ -174,7 +174,7 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'user.shell.command':
       return '';
     case 'user.image.delta':
-      return `[image: ${event.mimeType}]`;
+      return `[image: ${sanitizeTerminalText(event.mimeType)}]`;
     default:
       return assertNever(event);
   }
