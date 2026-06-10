@@ -57,6 +57,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  unregisterGoalHook,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -2571,6 +2572,7 @@ class QwenAgent implements Agent {
       );
     }
 
+    unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
     this.sessions.delete(sessionId);
   }
@@ -5752,6 +5754,25 @@ class QwenAgent implements Agent {
             throw new Error(`Unhandled task kind: ${exhaustive}`);
           }
         }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const cleared = unregisterGoalHook(config, sessionId);
+        debugLogger.info(
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+        );
+        return {
+          cleared: !!cleared,
+          condition: cleared?.condition,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];

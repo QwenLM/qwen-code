@@ -652,6 +652,22 @@ export function createDaemonSessionActions({
       }
     },
 
+    async clearGoal() {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Clear goal failed',
+      );
+      try {
+        return await withActionTimeout(
+          session.clearGoal(),
+          'Clear goal timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(store, 'Clear goal failed', error);
+      }
+    },
+
     async getStats() {
       const session = requireSessionForAction(
         addNotice,

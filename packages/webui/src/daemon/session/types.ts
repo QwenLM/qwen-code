@@ -246,6 +246,7 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
 }
 

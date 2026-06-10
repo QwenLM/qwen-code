@@ -3521,6 +3521,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async clearSessionGoal(sessionId) {
+      return requestSessionStatus<{ cleared: boolean; condition?: string }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
+      );
+    },
+
     async getSessionStatsStatus(sessionId) {
       return requestSessionStatus<ServeSessionStatsStatus>(
         sessionId,

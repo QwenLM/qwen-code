@@ -1156,6 +1156,26 @@ export class DaemonClient {
     );
   }
 
+  async sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
+        }
+        return (await res.json()) as { cleared: boolean; condition?: string };
+      },
+    );
+  }
+
   async sessionStats(
     sessionId: string,
     clientId?: string,

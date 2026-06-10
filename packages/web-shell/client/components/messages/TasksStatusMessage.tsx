@@ -507,7 +507,10 @@ export function TasksStatusMessage({
       )}
 
       {step === 'detail' && selectedTask && (
-        <TaskDetail task={selectedTask} t={t} />
+        <>
+          {actionError && <div className={styles.error}>{actionError}</div>}
+          <TaskDetail task={selectedTask} t={t} />
+        </>
       )}
 
       <div

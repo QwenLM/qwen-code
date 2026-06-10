@@ -390,6 +390,11 @@ export interface AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor',
   ): Promise<{ cancelled: boolean }>;
 
+  /** Clear an active goal in a live session without cancelling the running prompt. */
+  clearSessionGoal(
+    sessionId: string,
+  ): Promise<{ cleared: boolean; condition?: string }>;
+
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;
 

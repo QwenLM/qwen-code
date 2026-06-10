@@ -169,6 +169,7 @@ function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
 }
 
+// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
 const GOAL_CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
@@ -1382,7 +1383,11 @@ export function App({
           return true;
         }
         sendPrompt(text, images, { optimisticUserMessage: false })
-          .then(() => dispatchGoalCleared(goalToClear))
+          .then(() => {
+            if (activeGoalRef.current === goalToClear) {
+              dispatchGoalCleared(goalToClear);
+            }
+          })
           .catch((error: unknown) =>
             reportError(error, 'Failed to send /goal command'),
           );
@@ -1422,26 +1427,20 @@ export function App({
   const handleBusyGoalClear = useCallback(
     (text: string) => {
       const goalToClear = activeGoalRef.current;
-      let cancelSucceeded = false;
       store.appendLocalUserMessage(text);
       sessionActions
-        .cancel()
+        .clearGoal()
         .then(() => {
-          cancelSucceeded = true;
-          return sendPrompt(text, undefined, { optimisticUserMessage: false });
-        })
-        .then(() => dispatchGoalCleared(goalToClear))
-        .catch((error: unknown) => {
-          if (cancelSucceeded) {
+          if (activeGoalRef.current === goalToClear) {
             dispatchGoalCleared(goalToClear);
-            reportError(error, 'Goal cleared but follow-up prompt failed');
-            return;
           }
+        })
+        .catch((error: unknown) => {
           reportError(error, 'Failed to clear /goal');
         });
       return true;
     },
-    [dispatchGoalCleared, reportError, sendPrompt, sessionActions, store],
+    [dispatchGoalCleared, reportError, sessionActions, store],
   );
 
   const handleSubmit = useCallback(

@@ -376,6 +376,10 @@ export class DaemonSessionClient {
     );
   }
 
+  async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.client.sessionGoalClear(this.sessionId, this.clientId);
+  }
+
   async stats(): Promise<DaemonSessionStatsStatus> {
     return await this.client.sessionStats(this.sessionId, this.clientId);
   }

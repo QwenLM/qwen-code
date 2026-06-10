@@ -366,7 +366,8 @@ function parseIPv6FirstHextet(host: string): number | undefined {
 }
 
 function isBlockedAuthProviderHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
+  const stripped = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+  const host = stripped.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
 
   const bareHost =
@@ -2045,6 +2046,28 @@ export function createServeApp(
       } catch (err) {
         sendBridgeError(res, err, {
           route: 'POST /session/:id/tasks/:taskId/cancel',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/session/:id/goal/clear',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      try {
+        res.status(200).json(await bridge.clearSessionGoal(sessionId));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/goal/clear',
           sessionId,
         });
       }

@@ -1898,12 +1898,19 @@ export class Session implements SessionContext {
         );
       })
       .finally(() => {
-        this.notificationProcessing = null;
-        const registry = this.config.getBackgroundTaskRegistry();
-        if (this.notificationQueue.length > 0) {
-          this.#scheduleBackgroundTaskNotificationProcessing();
-        } else if (!registry.hasUnfinalizedTasks()) {
-          registry.setNotificationCallback(undefined);
+        try {
+          this.notificationProcessing = null;
+          const registry = this.config.getBackgroundTaskRegistry();
+          if (this.notificationQueue.length > 0) {
+            this.#scheduleBackgroundTaskNotificationProcessing();
+          } else if (!registry.hasUnfinalizedTasks()) {
+            registry.setNotificationCallback(undefined);
+          }
+        } catch (cleanupError) {
+          this.notificationProcessing = null;
+          debugLogger.warn(
+            `Error in notification processing cleanup: ${this.#formatError(cleanupError)}`,
+          );
         }
       });
   }
@@ -1953,6 +1960,8 @@ export class Session implements SessionContext {
           },
           async () => {
             let turnCount = 0;
+            const chat = this.#getCurrentChat();
+            const historySnapshot = chat.getHistoryShallow();
             try {
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
@@ -1979,6 +1988,7 @@ export class Session implements SessionContext {
                     promptId,
                     nextMessage.parts ?? [],
                     pendingSend.signal,
+                    { skipCompression: true },
                   );
                 if (!sendResult.responseStream) {
                   this.#preserveUnsentMessageHistory(
@@ -2055,6 +2065,7 @@ export class Session implements SessionContext {
                 `[notification error] ${msg}`,
               );
             } finally {
+              chat.setHistory(historySnapshot);
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(

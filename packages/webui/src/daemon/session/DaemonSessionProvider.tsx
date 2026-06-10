@@ -1411,23 +1411,11 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   const condition = getString(goal, 'condition');
   if (!condition) return null;
 
-  const reasons = Array.isArray(loop['reasons'])
-    ? loop['reasons'].filter(
-        (reason): reason is string => typeof reason === 'string',
-      )
-    : [];
-  const iterationCount = getNumber(loop, 'iterationCount');
-  const iterations = getNumber(goal, 'iterations') ?? iterationCount;
-  const setAt = getNumber(goal, 'setAt');
-  const lastReason = getString(goal, 'lastReason') ?? reasons.at(-1);
-
-  return createGoalStatusUiEvent(event, {
-    kind: 'checking',
-    condition,
-    ...(iterations !== undefined ? { iterations } : {}),
-    ...(setAt !== undefined ? { setAt } : {}),
-    ...(lastReason ? { lastReason } : {}),
-  });
+  // Suppress per-iteration "checking" events from the transcript to avoid
+  // flooding with one card per stop-hook turn. The active goal state is
+  // already visible in the status bar; only terminal events and the initial
+  // "set" event are shown as transcript cards.
+  return null;
 }
 
 function createGoalStatusUiEvent(

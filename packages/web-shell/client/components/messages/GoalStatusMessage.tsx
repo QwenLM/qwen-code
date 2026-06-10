@@ -31,11 +31,21 @@ const {
   DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
 );
 
+const VALID_GOAL_KINDS = new Set<string>([
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'checking',
+]);
+
 function parseGoalStatusMessage(
   content: string,
 ): SerializedGoalStatusMessage | null {
   const parsed = parseRawGoalStatusMessage(content);
   if (!parsed || !parsed.kind || !parsed.condition) return null;
+  if (!VALID_GOAL_KINDS.has(parsed.kind)) return null;
   return parsed;
 }
 
