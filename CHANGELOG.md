@@ -95,7 +95,7 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 
 ### Changed
 
-- core: replace tail-preservation compaction with summary + restoration attachments ([#4599](https://github.com/QwenLM/qwen-code/pull/4599))
+- **BREAKING** core: replace tail-preservation compaction with summary + restoration attachments ([#4599](https://github.com/QwenLM/qwen-code/pull/4599))
 
 ### Fixed
 
@@ -118,7 +118,7 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 - memory: load .qwen/QWEN.local.md as project-local context (#4091) ([#4394](https://github.com/QwenLM/qwen-code/pull/4394))
 - core: limit background agent concurrency ([#4324](https://github.com/QwenLM/qwen-code/pull/4324))
 - core: enable Token Plan cache control ([#4495](https://github.com/QwenLM/qwen-code/pull/4495))
-- core: redesign auto-compaction thresholds with three-tier ladder ([#4345](https://github.com/QwenLM/qwen-code/pull/4345))
+- **BREAKING** core: redesign auto-compaction thresholds with three-tier ladder ([#4345](https://github.com/QwenLM/qwen-code/pull/4345))
 - telemetry: client-side HTTP span + opt-in W3C traceparent propagation (#4384) ([#4390](https://github.com/QwenLM/qwen-code/pull/4390))
 - cli: headless / non-interactive runaway-protection guardrails (#4103) ([#4502](https://github.com/QwenLM/qwen-code/pull/4502))
 - cli: dense inline panel + keyboard navigation for parallel agent fan-out ([#4477](https://github.com/QwenLM/qwen-code/pull/4477))

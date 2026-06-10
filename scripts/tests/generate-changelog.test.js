@@ -25,6 +25,7 @@ describe('categorize', () => {
       type: 'feat',
       scope: 'cli',
       description: 'add x',
+      breaking: false,
     });
   });
 
@@ -33,14 +34,25 @@ describe('categorize', () => {
       type: 'fix',
       scope: null,
       description: 'bar',
+      breaking: false,
     });
   });
 
-  it('ignores the breaking-change "!" marker', () => {
+  it('captures the breaking-change "!" marker', () => {
     expect(categorize('feat(core)!: breaking')).toEqual({
       type: 'feat',
       scope: 'core',
       description: 'breaking',
+      breaking: true,
+    });
+  });
+
+  it('captures "!" even without a scope', () => {
+    expect(categorize('feat!: drop legacy flag')).toEqual({
+      type: 'feat',
+      scope: null,
+      description: 'drop legacy flag',
+      breaking: true,
     });
   });
 
@@ -49,6 +61,7 @@ describe('categorize', () => {
       type: null,
       scope: null,
       description: 'Improve hooks matcher display',
+      breaking: false,
     });
   });
 });
@@ -96,6 +109,18 @@ describe('parseReleaseEntries', () => {
     ]);
   });
 
+  it('parses GitHub App authors with a [bot] suffix', () => {
+    const body = '* chore(deps): bump foo by @dependabot[bot] in ' + PR(33);
+    expect(parseReleaseEntries(body)).toEqual([
+      {
+        title: 'chore(deps): bump foo',
+        author: 'dependabot[bot]',
+        prUrl: PR(33),
+        prNumber: '33',
+      },
+    ]);
+  });
+
   it('binds the trailing " by @… in …" to the last occurrence', () => {
     const body = '* fix: stop saying "done" by @carol in ' + PR(5);
     expect(parseReleaseEntries(body)).toEqual([
@@ -135,6 +160,16 @@ describe('formatEntry', () => {
     expect(
       formatEntry({ title: 'Support openrouter', prNumber: '9', prUrl: PR(9) }),
     ).toBe(`- Support openrouter ([#9](${PR(9)}))`);
+  });
+
+  it('flags a breaking change with a BREAKING prefix', () => {
+    expect(
+      formatEntry({
+        title: 'refactor(core)!: replace X',
+        prNumber: '8',
+        prUrl: PR(8),
+      }),
+    ).toBe(`- **BREAKING** core: replace X ([#8](${PR(8)}))`);
   });
 });
 

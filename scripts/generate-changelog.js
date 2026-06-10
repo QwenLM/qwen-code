@@ -26,12 +26,12 @@
  * Requires the GitHub CLI (`gh`) to be installed and authenticated.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getArgs, readJson } from './lib/release-helpers.js';
-import { isMainModule } from './release-script-utils.js';
+import { readJson } from './lib/release-helpers.js';
+import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -67,21 +67,32 @@ const STABLE_TAG_RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
  *   * fix(core): do a thing by @octocat in https://github.com/o/r/pull/42
  * The title is captured greedily so a trailing " by @user in <pr-url>" binds to
  * the last occurrence, and "New Contributors" / "Full Changelog" lines (which
- * lack the " by @… in …/pull/N" tail) are skipped.
+ * lack the " by @… in …/pull/N" tail) are skipped. The author group allows a
+ * trailing `[bot]` so GitHub App authors (e.g. `@dependabot[bot]`) still match.
  */
 const ENTRY_RE =
-  /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
+  /^[*-]\s+(.+)\s+by\s+@([A-Za-z0-9-]+(?:\[bot\])?)\s+in\s+(https?:\/\/\S+\/pull\/(\d+))\s*$/;
 
-/** Splits a conventional-commit subject into `{ type, scope, description }`. */
+/**
+ * Splits a conventional-commit subject into
+ * `{ type, scope, description, breaking }`. The `!` breaking-change marker
+ * (e.g. `feat(core)!: …`) is captured so it can be surfaced in the output.
+ */
 export function categorize(title) {
-  const match = /^(\w+)(?:\(([^)]*)\))?!?:\s*(.+)$/.exec(title.trim());
+  const match = /^(\w+)(?:\(([^)]*)\))?(!)?:\s*(.+)$/.exec(title.trim());
   if (!match) {
-    return { type: null, scope: null, description: title.trim() };
+    return {
+      type: null,
+      scope: null,
+      description: title.trim(),
+      breaking: false,
+    };
   }
   return {
     type: match[1].toLowerCase(),
     scope: match[2] || null,
-    description: match[3],
+    description: match[4],
+    breaking: Boolean(match[3]),
   };
 }
 
@@ -114,7 +125,7 @@ export function parseReleaseEntries(body) {
 
 /** Render a single "What's Changed" entry as a changelog list item. */
 export function formatEntry(entry) {
-  const { type, scope, description } = categorize(entry.title);
+  const { type, scope, description, breaking } = categorize(entry.title);
   let text;
   if (TYPE_TO_SECTION[type]) {
     // Recognised type: drop the redundant leading keyword (the section heading
@@ -123,6 +134,9 @@ export function formatEntry(entry) {
   } else {
     // Unknown or prefix-less title: keep it verbatim.
     text = entry.title;
+  }
+  if (breaking) {
+    text = `**BREAKING** ${text}`;
   }
   return `- ${text} ([#${entry.prNumber}](${entry.prUrl}))`;
 }
@@ -222,14 +236,22 @@ export function selectStableReleases(rawReleases) {
 
 /** Fetch every release (paginated) as newline-delimited JSON via the gh CLI. */
 function fetchReleasesJsonl(repo) {
-  const command =
-    `gh api 'repos/${repo}/releases?per_page=100' --paginate ` +
-    `--jq '.[] | {tag: .tag_name, date: .published_at, ` +
-    `prerelease: .prerelease, draft: .draft, url: .html_url, body: .body}'`;
-  return execSync(command, {
-    encoding: 'utf-8',
-    maxBuffer: 256 * 1024 * 1024,
-  });
+  // Validate before shelling out, and pass args via execFileSync (no shell) so
+  // a `repo` value can never be interpreted as a shell command.
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error(`Invalid repository "${repo}"; expected "owner/name".`);
+  }
+  return execFileSync(
+    'gh',
+    [
+      'api',
+      `repos/${repo}/releases?per_page=100`,
+      '--paginate',
+      '--jq',
+      '.[] | {tag: .tag_name, date: .published_at, prerelease: .prerelease, draft: .draft, url: .html_url, body: .body}',
+    ],
+    { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 },
+  );
 }
 
 /** Parse newline-delimited JSON (one release object per line). */
@@ -264,8 +286,14 @@ Options:
 `;
 
 function main() {
-  const args = getArgs();
-  if (args.help || args.h) {
+  // parseArgs rejects unknown options (so a `--dryrun` typo errors instead of
+  // silently overwriting) and handles `-h`/`--help` natively.
+  const args = parseArgs(process.argv.slice(2), {
+    '--repo': { key: 'repo', type: 'value' },
+    '--output': { key: 'output', type: 'value' },
+    '--dry-run': { key: 'dry-run', type: 'flag' },
+  });
+  if (args.help) {
     process.stdout.write(HELP);
     return;
   }
@@ -275,6 +303,15 @@ function main() {
 
   const rawReleases = parseJsonl(fetchReleasesJsonl(repo));
   const releases = selectStableReleases(rawReleases);
+  if (releases.length === 0) {
+    // A populated repo returning zero stable releases means the fetch failed
+    // (rate limit, auth expiry, transient 5xx). Refuse to overwrite a good
+    // CHANGELOG with an empty stub; the next release run regenerates it.
+    console.error(
+      `ERROR: no stable releases found for ${repo}; refusing to overwrite ${path.basename(output)}.`,
+    );
+    process.exit(1);
+  }
   const changelog = buildChangelog(releases);
 
   if (args['dry-run']) {

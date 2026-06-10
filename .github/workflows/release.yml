@@ -451,6 +451,7 @@ jobs:
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |-
+          set -euo pipefail
           node scripts/generate-changelog.js
           git add CHANGELOG.md
           if git diff --cached --quiet -- CHANGELOG.md; then
