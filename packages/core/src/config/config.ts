@@ -759,6 +759,7 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   forkSubagentEnabled?: boolean;
+  workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -1144,6 +1145,7 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
+  private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1328,6 +1330,7 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -3318,6 +3321,19 @@ export class Config {
     if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
     return this.forkSubagentEnabled;
   }
+
+  isWorkflowsEnabled(): boolean {
+    // Workflows are experimental and opt-in: enabled via settings or env var
+    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+    return this.workflowsEnabled;
+  }
+
+  setWorkflowsEnabled(enabled: boolean): void {
+    this.workflowsEnabled = enabled;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -4237,6 +4253,14 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+    }
+
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
       });
     }
 
