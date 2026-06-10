@@ -166,16 +166,6 @@ export class TeamManager {
    *  the envelope, while teammates have no way to learn it. */
   private readonly envelopeNonce: string = randomBytes(8).toString('hex');
 
-  /** Separate per-session nonce for the `<task_content_…>` envelope
-   *  that wraps a teammate-authored task description delivered to the
-   *  claiming teammate. MUST be distinct from `envelopeNonce`: the
-   *  task-content prompt is shown to the teammate's model, so reusing
-   *  `envelopeNonce` here would leak the leader-trust nonce and let a
-   *  teammate forge a `<teammate_message_…>` envelope the leader
-   *  trusts. This nonce only needs to stop the task author from forging
-   *  the task-content closing tag. */
-  private readonly taskContentNonce: string = randomBytes(8).toString('hex');
-
   /** Names of teammates with a pending leader-requested shutdown.
    *  Gates both the per-idle mailbox read in flushNextMessage and
    *  the shutdown_approved abort path in sendMessage. Tracked
@@ -1141,10 +1131,24 @@ export class TeamManager {
    */
   private setupEventBridge(agentId: string, agentName: string): void {
     const agent = this.getAgentFromBackend(agentId);
-    if (!agent) return;
+    if (!agent) {
+      // The teammate was spawned and written to the team file but the
+      // backend can't hand back an agent — it will never receive messages
+      // or auto-claim tasks and just sits until the stall timeout. Surface
+      // it instead of failing silently.
+      debug.warn(
+        `setupEventBridge: backend has no agent handle for "${agentName}" (${agentId}); it will not receive messages.`,
+      );
+      return;
+    }
 
     const emitter = agent.getEventEmitter();
-    if (!emitter) return;
+    if (!emitter) {
+      debug.warn(
+        `setupEventBridge: agent "${agentName}" (${agentId}) has no event emitter; it will not receive messages.`,
+      );
+      return;
+    }
 
     // Track activity for stall detection.
     const recordActivity = () => {
@@ -1415,17 +1419,16 @@ export class TeamManager {
         // prompt with full tool access, and `subject`/`description` are
         // written by another agent — which may itself have ingested
         // injected text from external data — so frame the content as data
-        // to act on, not as instructions to obey. The per-session
-        // A dedicated `taskContentNonce` (NOT the leader-trust
-        // `envelopeNonce`) means the task author cannot forge the closing
-        // tag to break out of the envelope, e.g. via a `</task_content>`
-        // payload in the description. It MUST differ from `envelopeNonce`
-        // because this prompt is delivered to the claiming teammate —
-        // reusing the leader nonce here would leak it and let a teammate
-        // forge a `<teammate_message_…>` envelope the leader trusts.
+        // to act on, not as instructions to obey. A FRESH random nonce is
+        // generated per claim (not a shared per-session one): a teammate
+        // that learned a previous task's nonce — by claiming it — still
+        // cannot forge the closing tag of a *later* task's envelope to
+        // break out and inject the next claimant. It is also distinct from
+        // the leader-trust `envelopeNonce`, so it can never leak that.
         // Mirrors treating `send_message` as a privileged sink.
-        const open = `<task_content_${this.taskContentNonce}>`;
-        const close = `</task_content_${this.taskContentNonce}>`;
+        const taskNonce = randomBytes(8).toString('hex');
+        const open = `<task_content_${taskNonce}>`;
+        const close = `</task_content_${taskNonce}>`;
         const taskPrompt =
           `You have been assigned task #${claimed.id}.\n\n` +
           `${open}\n` +

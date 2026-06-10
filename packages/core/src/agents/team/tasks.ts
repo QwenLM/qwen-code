@@ -744,12 +744,22 @@ export async function unassignTeammateTasks(
   const owned = inProgress.filter(
     (task) => task.owner === agentId || task.owner === bareName,
   );
-  await Promise.all(
+  // allSettled (not all): if one task file is corrupt or its lock times
+  // out, the remaining tasks must still be freed — otherwise a single bad
+  // task strands every other task on the terminated teammate, and the
+  // caller's re-scan (gated on this resolving) never fires.
+  const results = await Promise.allSettled(
     owned.map((task) =>
       updateTask(teamName, task.id, { status: 'pending', owner: null }),
     ),
   );
-  return owned.length;
+  const failed = results.filter((r) => r.status === 'rejected');
+  if (failed.length > 0) {
+    debug.warn(
+      `unassignTeammateTasks: ${failed.length}/${owned.length} task(s) failed to unassign for ${agentId}`,
+    );
+  }
+  return results.length - failed.length;
 }
 
 /**

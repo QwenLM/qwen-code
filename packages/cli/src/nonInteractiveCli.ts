@@ -385,7 +385,17 @@ export async function runNonInteractive(
           approvalListener = (event) => {
             const mode = config.getApprovalMode();
             if (mode === ApprovalMode.YOLO) {
-              void event.respond(ToolConfirmationOutcome.ProceedOnce);
+              // `respond` may reject if the teammate terminates between the
+              // approval request and our response — catch it so it doesn't
+              // become an unhandledRejection that can crash the process.
+              event
+                .respond(ToolConfirmationOutcome.ProceedOnce)
+                .catch((err) => {
+                  debugLogger.warn(
+                    'Teammate approval ProceedOnce failed:',
+                    err,
+                  );
+                });
               return;
             }
             // Surface a clear reason on stderr — otherwise the
@@ -402,7 +412,9 @@ export async function runNonInteractive(
             pendingTeammateMessages.push(
               `<team_notice>\n${reason}\n</team_notice>`,
             );
-            void event.respond(ToolConfirmationOutcome.Cancel);
+            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
+              debugLogger.warn('Teammate approval Cancel failed:', err);
+            });
           };
         }
         manager

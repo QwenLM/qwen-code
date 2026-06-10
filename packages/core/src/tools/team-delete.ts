@@ -15,6 +15,9 @@ import type { Config } from '../config/config.js';
 import { deleteTeamDirs } from '../agents/team/teamHelpers.js';
 import { unregisterLeader } from '../agents/team/leaderPermissionBridge.js';
 import { isTeammate } from '../agents/team/identity.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debug = createDebugLogger('TEAM_DELETE');
 
 export type TeamDeleteParams = Record<string, never>;
 
@@ -56,8 +59,17 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     const teamFile = manager.getTeamFile();
     const teamName = teamFile.name;
 
-    // Clean up: stop all agents, remove files.
-    await manager.cleanup();
+    // Clean up: stop all agents, remove files. If cleanup throws (e.g. a
+    // backend times out waiting for an agent to settle), swallow it and
+    // still tear down the on-disk artifacts and reset Config state below —
+    // otherwise the session is left permanently in a "team active" state
+    // that blocks every future team_create with no recovery short of a
+    // restart.
+    try {
+      await manager.cleanup();
+    } catch (err) {
+      debug.warn('Team cleanup failed; resetting team state anyway:', err);
+    }
 
     // Clean up file system artifacts.
     // deleteTeamDirs removes both the team dir (containing inboxes)
