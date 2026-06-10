@@ -170,6 +170,13 @@ export class SchemaValidator {
         data as Record<string, unknown>,
         anySchema as Record<string, unknown>,
       );
+      // Coerce numeric strings ("3", "5.0") to actual numbers when the schema
+      // expects integer/number. LLMs frequently emit numeric parameters as
+      // strings which strict MCP servers (e.g. Playwright) reject.
+      fixNumericValues(
+        data as Record<string, unknown>,
+        anySchema as Record<string, unknown>,
+      );
 
       valid = validate(data);
       if (!valid && validate.errors) {
@@ -271,6 +278,53 @@ function fixStringifiedJsonValues(
       } catch {
         // Not valid JSON — leave the value unchanged
       }
+    }
+  }
+}
+
+/**
+ * Coerces string numeric values to actual numbers.
+ * LLMs frequently emit numeric parameters as strings (e.g. `{"depth": "3"}`)
+ * which strict MCP servers (e.g. Playwright) reject with schema validation
+ * errors like "params/depth must be number".
+ *
+ * Only coerces when:
+ * 1. The value is a string that looks like a clean number
+ * 2. The schema accepts integer/number but NOT string
+ */
+function fixNumericValues(
+  data: Record<string, unknown>,
+  schema: Record<string, unknown>,
+) {
+  const properties = schema['properties'] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const items = schema['items'] as Record<string, unknown> | undefined;
+
+  for (const key of Object.keys(data)) {
+    if (!(key in data)) continue;
+    const value = data[key];
+    const childSchema = Array.isArray(data) ? items : properties?.[key];
+
+    if (typeof value === 'object' && value !== null) {
+      fixNumericValues(value as Record<string, unknown>, childSchema ?? {});
+      continue;
+    }
+
+    if (typeof value !== 'string') continue;
+
+    const accepted = childSchema ? getAcceptedTypes(childSchema) : null;
+    if (!accepted || accepted.has('string')) continue;
+    const wantsInteger = accepted.has('integer');
+    const wantsNumber = accepted.has('number');
+    if (!wantsInteger && !wantsNumber) continue;
+
+    const trimmed = value.trim();
+    if (!/^-?\d+(\.\d+)?$/.test(trimmed)) continue;
+
+    const parsed = wantsInteger ? parseInt(trimmed, 10) : parseFloat(trimmed);
+    if (Number.isFinite(parsed)) {
+      data[key] = parsed;
     }
   }
 }
