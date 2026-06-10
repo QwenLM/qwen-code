@@ -1289,6 +1289,7 @@ export function createDaemonSubagentManager(
     getSdkMode: () => false,
     getProjectRoot: () => boundWorkspace,
     getActiveExtensions: () => [],
+    isSafeMode: () => false,
   } as unknown as Record<string | symbol, unknown>;
   const guarded = new Proxy(stub, {
     get(target, prop) {
