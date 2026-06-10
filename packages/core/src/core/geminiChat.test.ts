@@ -7535,15 +7535,14 @@ describe('GeminiChat', async () => {
       expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
     });
 
-    it('NOOP when after estimate is not lower than before', () => {
+    it('NOOP when nothing is compressible', () => {
       chat.setHistory([
         userMsg('hello'),
         modelMsg('hi'),
         userMsg('how are you'),
         modelMsg('good'),
       ]);
-      // Set beforeTokens very low so afterTokens >= beforeTokens is guaranteed
-      chat.setLastPromptTokenCount(1);
+      chat.setLastPromptTokenCount(1000);
 
       const result = chat.compressFast();
 
@@ -7571,8 +7570,7 @@ describe('GeminiChat', async () => {
       expect(result.microcompactMeta!.toolsCleared).toBeGreaterThan(0);
     });
 
-    it('updates lastPromptTokenCount on COMPRESSED', () => {
-      // Build a history with substantial thinking parts to guarantee COMPRESSED
+    it('adjusts lastPromptTokenCount by estimated delta on COMPRESSED', () => {
       const history: Content[] = [];
       for (let i = 0; i < 5; i++) {
         history.push(
@@ -7584,12 +7582,38 @@ describe('GeminiChat', async () => {
         );
       }
       chat.setHistory(history);
-      chat.setLastPromptTokenCount(5000);
+      const apiBaseline = 50000;
+      chat.setLastPromptTokenCount(apiBaseline);
 
       const result = chat.compressFast();
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeLessThan(apiBaseline);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
       expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
+    });
+
+    it('falls back to estimateContentTokens when lastPromptTokenCount is 0', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(0);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.originalTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(
+        result.info.originalTokenCount,
+      );
     });
   });
 });

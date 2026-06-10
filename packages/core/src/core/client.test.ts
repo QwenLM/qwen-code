@@ -2612,7 +2612,6 @@ describe('Gemini Client (client.ts)', () => {
 
     it('returns early on NOOP without touching FileReadCache', async () => {
       const { clear } = mockFileReadCacheStub();
-      const setLastPromptTokenCount = vi.fn();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 100,
@@ -2622,7 +2621,6 @@ describe('Gemini Client (client.ts)', () => {
       });
       client['chat'] = {
         compressFast,
-        setLastPromptTokenCount,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2631,13 +2629,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.NOOP);
       expect(compressFast).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
-      expect(setLastPromptTokenCount).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(false);
     });
 
     it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
-      const setLastPromptTokenCount = vi.fn();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -2658,7 +2654,6 @@ describe('Gemini Client (client.ts)', () => {
       });
       client['chat'] = {
         compressFast,
-        setLastPromptTokenCount,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2667,14 +2662,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(clear).toHaveBeenCalledOnce();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
-      expect(setLastPromptTokenCount).toHaveBeenCalledWith(200);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
     it('performs surgical disarm and falls back to clear() on inode miss', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
-      const setLastPromptTokenCount = vi.fn();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -2693,11 +2686,9 @@ describe('Gemini Client (client.ts)', () => {
           thresholdMinutes: 60,
         },
       });
-      // Create the real file so fsPromises.stat succeeds
       await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
       client['chat'] = {
         compressFast,
-        setLastPromptTokenCount,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2706,14 +2697,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
       expect(clear).toHaveBeenCalledOnce();
-      expect(setLastPromptTokenCount).toHaveBeenCalledWith(300);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
     it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValue(true); // all match
-      const setLastPromptTokenCount = vi.fn();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -2735,7 +2724,6 @@ describe('Gemini Client (client.ts)', () => {
       await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
       client['chat'] = {
         compressFast,
-        setLastPromptTokenCount,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2744,7 +2732,6 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
-      expect(setLastPromptTokenCount).toHaveBeenCalledWith(400);
       expect(client['forceFullIdeContext']).toBe(true);
     });
   });

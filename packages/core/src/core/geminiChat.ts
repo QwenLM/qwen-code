@@ -1506,7 +1506,10 @@ export class GeminiChat {
     info: ChatCompressionInfo;
     microcompactMeta?: MicrocompactMeta;
   } {
-    const beforeTokens = this.lastPromptTokenCount;
+    // Use the same estimator on both sides so the NOOP gate compares
+    // apples to apples. The API-authoritative lastPromptTokenCount is
+    // then adjusted by the estimated delta — never replaced wholesale.
+    const beforeEstimate = estimateContentTokens(this.history);
 
     // Step 1: force microcompaction (clear old tool results + media)
     const mcResult = microcompactHistory(
@@ -1522,21 +1525,26 @@ export class GeminiChat {
       .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
       .filter((c): c is Content => c !== null);
 
-    const afterTokens = estimateContentTokens(newHistory);
+    const afterEstimate = estimateContentTokens(newHistory);
 
-    if (afterTokens >= beforeTokens) {
+    if (afterEstimate >= beforeEstimate) {
+      const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
       return {
         info: {
-          originalTokenCount: beforeTokens,
-          newTokenCount: beforeTokens,
+          originalTokenCount: apiBaseline,
+          newTokenCount: apiBaseline,
           compressionStatus: CompressionStatus.NOOP,
         },
       };
     }
 
+    const reduction = beforeEstimate - afterEstimate;
+    const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+    const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
+
     const info: ChatCompressionInfo = {
-      originalTokenCount: beforeTokens,
-      newTokenCount: afterTokens,
+      originalTokenCount: apiBaseline,
+      newTokenCount: adjustedTokenCount,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
     };
@@ -1547,8 +1555,8 @@ export class GeminiChat {
     });
     this.setHistory(newHistory);
     clearDetailedSpanState();
-    this.lastPromptTokenCount = afterTokens;
-    this.telemetryService?.setLastPromptTokenCount(afterTokens);
+    this.lastPromptTokenCount = adjustedTokenCount;
+    this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
     return { info, microcompactMeta: mcMeta };

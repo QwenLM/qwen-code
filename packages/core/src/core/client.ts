@@ -18,7 +18,10 @@ import process from 'node:process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
-import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -2399,6 +2402,54 @@ export class GeminiClient {
   }
 
   /**
+   * Surgically disarm FileReadCache entries for files evicted by
+   * microcompaction. Falls back to a blanket clear() when any evicted
+   * path can't be resolved.
+   *
+   * Shared by the time-based microcompaction path and /compress-fast.
+   */
+  private async disarmFileReadCacheAfterEviction(
+    meta: MicrocompactMeta,
+    logTag: string,
+  ): Promise<void> {
+    const fileReadCache = this.config.getFileReadCache();
+    if (meta.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          `(${meta.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+      return;
+    }
+    if (meta.evictedReadPaths.length === 0) {
+      return;
+    }
+    const statResults = await Promise.all(
+      meta.evictedReadPaths.map((p) =>
+        fsPromises.stat(p).catch(() => undefined),
+      ),
+    );
+    let fullyDisarmed = true;
+    for (const stats of statResults) {
+      if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+        fullyDisarmed = false;
+      }
+    }
+    if (fullyDisarmed) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
+      );
+    } else {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          '(an evicted path was unresolvable)',
+      );
+      fileReadCache.clear();
+    }
+  }
+
+  /**
    * Fast, rule-based compression without any LLM side-query.
    * Delegates to {@link GeminiChat.compressFast} and handles post-compression
    * FileReadCache disarming.
@@ -2410,35 +2461,14 @@ export class GeminiClient {
       return info;
     }
 
-    // Lightweight: setHistory() already called in compressFast().
-    // Reuse microcompaction's surgical FileReadCache disarm pattern.
-    const m = microcompactMeta;
-    const fileReadCache = this.config.getFileReadCache();
-    if (m && m.unresolvedEvictedReads > 0) {
-      debugLogger.debug(
-        `[FILE_READ_CACHE] clear after compress-fast ` +
-          `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+    if (microcompactMeta) {
+      await this.disarmFileReadCacheAfterEviction(
+        microcompactMeta,
+        'compress-fast',
       );
-      fileReadCache.clear();
-    } else if (m && m.evictedReadPaths.length > 0) {
-      const statResults = await Promise.all(
-        m.evictedReadPaths.map((p) =>
-          fsPromises.stat(p).catch(() => undefined),
-        ),
-      );
-      let fullyDisarmed = true;
-      for (const stats of statResults) {
-        if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-          fullyDisarmed = false;
-        }
-      }
-      if (!fullyDisarmed) {
-        fileReadCache.clear();
-      }
     }
     this.forceFullIdeContext = true;
 
-    this.getChat().setLastPromptTokenCount(info.newTokenCount);
     return info;
   }
 }
