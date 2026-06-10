@@ -380,7 +380,7 @@ export function SettingsDialog({
 
       // Update output language rule file immediately (no restart needed for LLM effect)
       if (key === 'general.outputLanguage' && typeof parsed === 'string') {
-        updateOutputLanguageFile(parsed);
+        updateOutputLanguageFile(parsed, config?.getOutputLanguageFilePath?.());
       }
 
       // Mark as needing restart and show prompt
