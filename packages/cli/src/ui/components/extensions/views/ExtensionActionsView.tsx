@@ -46,7 +46,6 @@ interface ExtensionActionsViewProps {
 const SCOPE_LABEL: Record<ExtensionScope, string> = {
   user: 'User',
   project: 'Project',
-  local: 'Local',
 };
 
 function scopeItems(): Array<{
@@ -58,10 +57,9 @@ function scopeItems(): Array<{
     { key: 'user', label: t('Global (User Scope)'), value: 'user' },
     {
       key: 'project',
-      label: t('Project (All Collaborators)'),
+      label: t('Project (Workspace)'),
       value: 'project',
     },
-    { key: 'local', label: t('Local (Only You)'), value: 'local' },
   ];
 }
 

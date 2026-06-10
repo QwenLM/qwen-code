@@ -13,7 +13,6 @@ export default {
 
   'User level': '用户级',
   'Project level': '项目级',
-  'Local level': '本地级',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -58,11 +57,9 @@ export default {
   Favorites: '收藏',
   'Global (User Scope)': '全局（用户作用域）',
   'Install Extension': '安装扩展',
-  'Install for all collaborators on this repository (project scope)':
-    '为此仓库的所有协作者安装（项目作用域）',
+  'Install for the current workspace (project scope)':
+    '为当前工作区安装（项目作用域）',
   'Install for you (user scope)': '仅为你安装（用户作用域）',
-  'Install for you, in this repo only (local scope)':
-    '仅为你安装，且仅在此仓库（本地作用域）',
   'Install {{count}} extension(s) to which scope?':
     '将 {{count}} 个扩展安装到哪个作用域？',
   Installed: '已安装',
@@ -73,8 +70,6 @@ export default {
     '成功 {{ok}} 个，失败 {{fail}} 个：{{detail}}',
   'Installing...': '安装中...',
   'Last updated: {{date}}': '最近更新：{{date}}',
-  Local: '本地',
-  'Local (Only You)': '本地（仅你自己）',
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}。',
   'MCP servers': 'MCP 服务器',
@@ -90,7 +85,7 @@ export default {
   'Note: Uninstall permanently removes this extension.':
     '注意：卸载将永久移除此扩展。',
   'Open homepage': '打开主页',
-  'Project (All Collaborators)': '项目（所有协作者）',
+  'Project (Workspace)': '项目（工作区）',
   'Remove from Favorites': '从收藏中移除',
   'Remove marketplace': '移除市场源',
   'Remove marketplace "{{name}}"?': '移除市场源 "{{name}}"？',

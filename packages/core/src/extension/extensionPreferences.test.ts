@@ -48,10 +48,25 @@ describe('ExtensionPreferencesStore', () => {
 
   it('records and reads per-extension scope intent', () => {
     store.setScope('alpha', 'project');
-    store.setScope('beta', 'local');
+    store.setScope('beta', 'user');
     expect(store.getScope('alpha')).toBe('project');
-    expect(store.getScope('beta')).toBe('local');
-    expect(store.getScopes()).toEqual({ alpha: 'project', beta: 'local' });
+    expect(store.getScope('beta')).toBe('user');
+    expect(store.getScopes()).toEqual({ alpha: 'project', beta: 'user' });
+  });
+
+  it('drops unknown scope values when reading persisted preferences', () => {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        favorites: [],
+        scopes: { alpha: 'project', beta: 'user', gamma: 'bogus' },
+      }),
+    );
+    expect(store.getScope('alpha')).toBe('project');
+    expect(store.getScope('beta')).toBe('user');
+    expect(store.getScope('gamma')).toBeUndefined();
+    expect(store.getScopes()).toEqual({ alpha: 'project', beta: 'user' });
   });
 
   it('clears all preference state for an extension', () => {

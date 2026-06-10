@@ -189,10 +189,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('By: 42Crunch');
     expect(frame).toContain('Will install:');
     expect(frame).toContain('42crunch-audit');
-    // Inline action selector with the three CC scopes + homepage + back.
+    // Inline action selector with the two scopes + homepage + back.
     expect(frame).toContain('Install for you (user scope)');
     expect(frame).toContain('project scope');
-    expect(frame).toContain('local scope');
     expect(frame).toContain('Open homepage');
     expect(frame).toContain('Back to extension list');
   });
@@ -450,7 +449,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B'); // highlight Change scope
     stdin.write('\r'); // enter scope-select
     await waitFor(() => {
-      expect(lastFrame()).toContain('Project (All Collaborators)');
+      expect(lastFrame()).toContain('Project (Workspace)');
     });
     stdin.write('\x1B[B'); // highlight Project (index 1)
     stdin.write('\r'); // select Project
@@ -460,7 +459,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
         'project',
       );
     });
-    // Project/Local scope => disable at User, enable at Workspace.
+    // Project scope => disable at User, enable at Workspace.
     expect(manager.disableExtension).toHaveBeenCalledWith(
       'alpha',
       SettingScope.User,
@@ -480,7 +479,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     stdin.write('\x1B[B'); // highlight Change scope
     stdin.write('\r'); // enter scope-select again
     await waitFor(() => {
-      expect(lastFrame()).toContain('Current: Project (All Collaborators)');
+      expect(lastFrame()).toContain('Current: Project (Workspace)');
     });
   });
 

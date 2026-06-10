@@ -29,14 +29,9 @@ export interface ExtensionsTabDef {
 }
 
 /**
- * Scope groups used to organize the Installed tab, mirroring Claude Code.
+ * Scope groups used to organize the Installed tab.
  */
-export type InstalledGroup =
-  | 'favorites'
-  | 'local'
-  | 'user'
-  | 'project'
-  | 'disabled';
+export type InstalledGroup = 'favorites' | 'user' | 'project' | 'disabled';
 
 /** Minimal display info for an MCP server shown in the Installed tab. */
 export interface InstalledMcpInfo {

@@ -12,18 +12,20 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('EXT_PREFERENCES');
 
 /**
- * Install/visibility scope intent recorded for an extension. This mirrors the
- * Claude Code plugin scopes so the Installed view can group extensions the way
- * the user installed them:
+ * Install/visibility scope intent recorded for an extension. The Installed
+ * view uses it to group extensions the way the user installed them:
  * - `user`    -> Global (User Scope), available everywhere.
- * - `project` -> Project (All Collaborators), enabled for the current workspace.
- * - `local`   -> Local (Only You), enabled for the current workspace privately.
+ * - `project` -> Project (Workspace), enabled for the current workspace only.
  *
  * Enable/disable state itself still lives in `extension-enablement.json`; this
  * value only records *where the user chose to install* an extension so the UI
- * can render the same grouping Claude Code does.
+ * can render the right grouping.
  */
-export type ExtensionScope = 'user' | 'project' | 'local';
+export type ExtensionScope = 'user' | 'project';
+
+function isExtensionScope(value: unknown): value is ExtensionScope {
+  return value === 'user' || value === 'project';
+}
 
 export interface ExtensionPreferences {
   /** Names of extensions/MCP servers the user has favorited. */
@@ -49,12 +51,15 @@ export class ExtensionPreferencesStore {
     try {
       const content = fs.readFileSync(this.filePath, 'utf-8');
       const parsed = JSON.parse(content) as Partial<ExtensionPreferences>;
+      const rawScopes =
+        parsed.scopes && typeof parsed.scopes === 'object' ? parsed.scopes : {};
+      const scopes: Record<string, ExtensionScope> = {};
+      for (const [name, value] of Object.entries(rawScopes)) {
+        if (isExtensionScope(value)) scopes[name] = value;
+      }
       return {
         favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
-        scopes:
-          parsed.scopes && typeof parsed.scopes === 'object'
-            ? parsed.scopes
-            : {},
+        scopes,
       };
     } catch (error) {
       if (

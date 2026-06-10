@@ -15,7 +15,6 @@ export default {
 
   'User level': 'User level',
   'Project level': 'Project level',
-  'Local level': 'Local level',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -61,11 +60,9 @@ export default {
   Favorites: 'Favorites',
   'Global (User Scope)': 'Global (User Scope)',
   'Install Extension': 'Install Extension',
-  'Install for all collaborators on this repository (project scope)':
-    'Install for all collaborators on this repository (project scope)',
+  'Install for the current workspace (project scope)':
+    'Install for the current workspace (project scope)',
   'Install for you (user scope)': 'Install for you (user scope)',
-  'Install for you, in this repo only (local scope)':
-    'Install for you, in this repo only (local scope)',
   'Install {{count}} extension(s) to which scope?':
     'Install {{count}} extension(s) to which scope?',
   Installed: 'Installed',
@@ -76,8 +73,6 @@ export default {
     'Installed {{ok}}, failed {{fail}}: {{detail}}',
   'Installing...': 'Installing...',
   'Last updated: {{date}}': 'Last updated: {{date}}',
-  Local: 'Local',
-  'Local (Only You)': 'Local (Only You)',
   MCP: 'MCP',
   'MCP "{{name}}" {{state}}.': 'MCP "{{name}}" {{state}}.',
   'MCP servers': 'MCP servers',
@@ -95,7 +90,7 @@ export default {
   'Note: Uninstall permanently removes this extension.':
     'Note: Uninstall permanently removes this extension.',
   'Open homepage': 'Open homepage',
-  'Project (All Collaborators)': 'Project (All Collaborators)',
+  'Project (Workspace)': 'Project (Workspace)',
   'Remove from Favorites': 'Remove from Favorites',
   'Remove marketplace': 'Remove marketplace',
   'Remove marketplace "{{name}}"?': 'Remove marketplace "{{name}}"?',

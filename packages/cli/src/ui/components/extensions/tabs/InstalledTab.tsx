@@ -36,7 +36,6 @@ const debugLogger = createDebugLogger('INSTALLED_TAB');
 
 const GROUP_ORDER: InstalledGroup[] = [
   'favorites',
-  'local',
   'user',
   'project',
   'disabled',
@@ -47,8 +46,6 @@ const groupLabel = (group: InstalledGroup): string => {
   switch (group) {
     case 'favorites':
       return t('Favorites');
-    case 'local':
-      return t('Local level');
     case 'user':
       return t('User level');
     case 'project':
@@ -79,7 +76,6 @@ function groupFor(
   if (!isActive) return 'disabled';
   if (isFavorite) return 'favorites';
   if (scope === 'project') return 'project';
-  if (scope === 'local') return 'local';
   return 'user';
 }
 
