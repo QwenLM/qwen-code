@@ -84,6 +84,9 @@ export function parseArgDecls(raw: unknown): ArgDecl[] | null | undefined {
  */
 export class CommandLoader {
   private readonly warnedCollisions = new Set<string>();
+  /** `source:file:reason` keys already audited, to dedup parse_failed across the
+   * per-request `load()` calls (mirrors `warnedCollisions`). */
+  private readonly warnedParseFailures = new Set<string>();
 
   constructor(
     private readonly resolveWorkspaceCwd: () => Promise<string | undefined>,
@@ -155,21 +158,31 @@ export class CommandLoader {
     source: 'workspace' | 'user',
     file: string,
   ): LoadedCommand | null {
-    const parsed = parseFrontMatter(text);
-    // No front-matter → not a command file at all (e.g. a README.md). Skip it
-    // silently; only a front-mattered-but-INVALID file is a "parse failure".
-    if (!parsed) return null;
-    const fm = parsed.frontMatter;
-
-    // Emit slash_command_parse_failed once and return null. `reason` is a short
-    // field token, never file content.
+    // Emit slash_command_parse_failed (once per source:file:reason for the
+    // loader's lifetime — load() runs per request) and return null. `reason` is
+    // a short field token, never file content.
     const reject = (reason: string): null => {
-      void this.audit?.record({
-        action: 'slash_command_parse_failed',
-        detail: { file, source, reason },
-      });
+      const key = `${source}:${file}:${reason}`;
+      if (!this.warnedParseFailures.has(key)) {
+        this.warnedParseFailures.add(key);
+        void this.audit?.record({
+          action: 'slash_command_parse_failed',
+          detail: { file, source, reason },
+        });
+      }
       return null;
     };
+
+    const parsed = parseFrontMatter(text);
+    if (!parsed) {
+      // A file opening with a `---` delimiter is an INTENDED command file whose
+      // front-matter failed to parse (YAML error / unterminated / non-mapping)
+      // → surface it. A file with no opening delimiter is a plain .md (e.g. a
+      // README) and is skipped silently (not a command at all).
+      const firstLine = text.replace(/\r\n/g, '\n').split('\n', 1)[0]?.trim();
+      return firstLine === '---' ? reject('frontmatter') : null;
+    }
+    const fm = parsed.frontMatter;
 
     const name = fm['name'];
     if (typeof name !== 'string' || !NAME_RE.test(name)) return reject('name');

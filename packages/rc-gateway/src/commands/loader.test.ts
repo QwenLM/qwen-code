@@ -268,4 +268,34 @@ describe('CommandLoader', () => {
       audit.entries.some((e) => e.action === 'slash_command_parse_failed'),
     ).toBe(false);
   });
+
+  it('a file opening with --- but broken YAML → parse_failed (reason: frontmatter)', async () => {
+    const audit = new FakeAudit();
+    // Opens with `---` (intended command) but the YAML is malformed.
+    await writeFile(
+      join(workspaceDir, 'broken.md'),
+      `---\nname: [unterminated flow\n---\nbody`,
+    );
+    const cmds = await loader(audit).load();
+    expect(cmds).toHaveLength(0);
+    expect(
+      audit.entries.find((e) => e.action === 'slash_command_parse_failed')
+        ?.detail,
+    ).toMatchObject({ file: 'broken.md', reason: 'frontmatter' });
+  });
+
+  it('parse_failed is audited once per file+reason across repeated load() calls', async () => {
+    const audit = new FakeAudit();
+    await writeFile(
+      join(workspaceDir, 'bad.md'),
+      `---\nname: bad\ndescription: bad\nscope: owner\n---\nbody`,
+    );
+    const ldr = loader(audit);
+    await ldr.load();
+    await ldr.load();
+    await ldr.load();
+    expect(
+      audit.entries.filter((e) => e.action === 'slash_command_parse_failed'),
+    ).toHaveLength(1);
+  });
 });
