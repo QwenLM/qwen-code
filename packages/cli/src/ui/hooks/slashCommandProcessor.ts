@@ -760,6 +760,7 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'auto-improve-source':
                       actions.openAutoImproveSourceDialog();
+                      return { type: 'handled' };
                     case 'stats':
                       actions.openStatsDialog();
                       return { type: 'handled' };
