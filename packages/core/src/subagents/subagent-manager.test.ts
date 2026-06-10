@@ -126,15 +126,18 @@ describe('SubagentManager', () => {
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
       // Check disallowedTools before tools to avoid substring match
-      if (yamlString.includes('disallowedTools: write_file')) {
-        // Scalar form
-        return {
-          name: 'test-agent',
-          description: 'A test subagent',
-          disallowedTools: 'write_file',
-        };
-      }
       if (yamlString.includes('disallowedTools:')) {
+        const dtLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('disallowedTools:'));
+        const dtInline = dtLine?.replace('disallowedTools:', '').trim();
+        if (dtInline && dtInline !== '') {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            disallowedTools: dtInline,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -142,6 +145,21 @@ describe('SubagentManager', () => {
         };
       }
       if (yamlString.includes('tools:')) {
+        const toolsLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('tools:'));
+        const inlineValue = toolsLine?.replace('tools:', '').trim();
+        if (
+          inlineValue &&
+          !inlineValue.startsWith('\n') &&
+          inlineValue !== ''
+        ) {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            tools: inlineValue,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -297,6 +315,52 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse comma-separated tools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+tools: Read, Bash, Grep, Glob, WebSearch, WebFetch, mcp__context7__*
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual([
+        'Read',
+        'Bash',
+        'Grep',
+        'Glob',
+        'WebSearch',
+        'WebFetch',
+        'mcp__context7__*',
+      ]);
+    });
+
+    it('should parse single tool string into array', () => {
+      const markdownWithSingle = `---
+name: test-agent
+description: A test subagent
+tools: Read
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithSingle,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual(['Read']);
+    });
+
     it('should parse content with disallowedTools array', () => {
       const markdownWithDisallowed = `---
 name: test-agent
@@ -335,6 +399,29 @@ You are a helpful assistant.
       );
 
       expect(config.disallowedTools).toEqual(['write_file']);
+    });
+
+    it('should parse comma-separated disallowedTools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+disallowedTools: write_file, mcp__slack, Bash
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual([
+        'write_file',
+        'mcp__slack',
+        'Bash',
+      ]);
     });
 
     it('should parse content with model selector', () => {
