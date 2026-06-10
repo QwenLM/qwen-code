@@ -125,7 +125,15 @@ export function createDaemonSessionActions({
       activePromptsRef.current.set(sessionId, { controller: ctrl });
       try {
         if (options?.optimisticUserMessage !== false) {
-          store.appendLocalUserMessage(text);
+          // Convert images from {data, media_type} to {data, mimeType} format
+          const normalizedImages: Array<{ data: string; mimeType: string }> = (
+            options?.images ?? []
+          ).map((img) => ({
+            data: img.data,
+            mimeType:
+              img.mimeType || img.mediaType || img.media_type || 'image/*',
+          }));
+          store.appendLocalUserMessage(text, normalizedImages);
         }
         const result = await session.prompt(
           {

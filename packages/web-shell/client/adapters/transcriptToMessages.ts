@@ -18,6 +18,7 @@ import type {
   DaemonMessageToolCallStatus,
   DaemonMessageToolKind,
   DaemonMessageTodoItem,
+  DaemonUserMessage,
 } from './messageTypes.js';
 
 interface PermissionToolInfo {
@@ -75,15 +76,25 @@ export function transcriptBlocksToDaemonMessages(
     const block = blocks[i];
 
     switch (block.kind) {
-      case 'user':
+      case 'user': {
         currentAssistantIdx = null;
         needsNewContentMessage = false;
-        messages.push({
+        const textBlock = block as DaemonTextTranscriptBlock;
+        const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
-          content: (block as DaemonTextTranscriptBlock).text,
-        });
+          content: textBlock.text,
+        };
+        // Attach images if present
+        if (textBlock.images && textBlock.images.length > 0) {
+          msg.images = textBlock.images.map((img) => ({
+            data: img.data,
+            mimeType: img.mimeType || 'image/*',
+          }));
+        }
+        messages.push(msg);
         break;
+      }
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;

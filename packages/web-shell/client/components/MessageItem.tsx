@@ -33,8 +33,13 @@ export const MessageItem = memo(function MessageItem({
   workspaceCwd,
 }: MessageItemProps) {
   switch (message.role) {
-    case 'user':
-      return <UserMessage content={message.content} />;
+    case 'user': {
+      const userMsg = message as {
+        role: 'user';
+        images?: Array<{ data: string; mimeType: string }>;
+      };
+      return <UserMessage content={message.content} images={userMsg.images} />;
+    }
     case 'assistant':
       return (
         <AssistantMessage
@@ -106,8 +111,21 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
-    case 'user':
-      return next.role === 'user' && prev.content === next.content;
+    case 'user': {
+      const prevUser = prev as {
+        role: 'user';
+        images?: Array<{ data: string; mimeType: string }>;
+      };
+      const nextUser = next as {
+        role: 'user';
+        images?: Array<{ data: string; mimeType: string }>;
+      };
+      return (
+        next.role === 'user' &&
+        prev.content === next.content &&
+        stableImagesEqual(prevUser.images, nextUser.images)
+      );
+    }
     case 'assistant':
       return (
         next.role === 'assistant' &&
@@ -209,6 +227,17 @@ function areToolListsEqual(
 }
 
 const jsonCache = new WeakMap<object, string>();
+
+function stableImagesEqual(
+  a: Array<{ data: string; mimeType: string }> | undefined,
+  b: Array<{ data: string; mimeType: string }> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every(
+    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+  );
+}
 
 function stableJson(value: unknown): string {
   if (value === undefined) return '';

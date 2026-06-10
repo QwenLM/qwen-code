@@ -23,6 +23,7 @@ import {
   getOutputText,
   getString,
   getTextContent,
+  extractContentPart,
   isRecord,
   redactSensitiveFields,
   stringifyJson,
@@ -419,7 +420,36 @@ function normalizeSessionUpdate(
       ) {
         return [];
       }
-      const text = getTextContent(update['content']);
+      const content = update['content'];
+      const part = extractContentPart(content);
+      if (part) {
+        if (part.kind === 'image') {
+          const data = part.source.data;
+          let mimeType = part.mediaType || 'image/*';
+          if (mimeType === 'image/*' && data) {
+            // Strip data: URI prefix if present before magic-byte sniffing
+            const rawData = data.startsWith('data:')
+              ? (data.split(',')[1] ?? '')
+              : data;
+            const prefix = rawData.slice(0, 10);
+            if (prefix.startsWith('iVBORw0KGg')) mimeType = 'image/png';
+            else if (prefix.startsWith('/9j/')) mimeType = 'image/jpeg';
+            else if (prefix.startsWith('R0lGOD')) mimeType = 'image/gif';
+            else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
+          }
+          if (data) {
+            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+          }
+          return [];
+        }
+        if (part.kind === 'text') {
+          return part.text
+            ? [{ ...base, type: 'user.text.delta', text: part.text }]
+            : [];
+        }
+        return [];
+      }
+      const text = getTextContent(content);
       return text ? [{ ...base, type: 'user.text.delta', text }] : [];
     }
     case 'agent_message_chunk': {

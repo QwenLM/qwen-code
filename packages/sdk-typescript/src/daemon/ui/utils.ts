@@ -141,23 +141,47 @@ export function extractContentPart(
     return undefined;
   }
   if (type === 'image') {
+    // Support both formats:
+    // 1. { type: 'image', source: { data/url, mediaType } } (SDK format)
+    // 2. { type: 'image', data, mimeType } (daemon echo / web-shell format)
+    // 3. { type: 'image', data, media_type } (legacy format)
     const source = isRecord(value['source']) ? value['source'] : undefined;
-    if (!source) return undefined;
+    let url: string | undefined;
+    let data: string | undefined;
+    if (source) {
+      url =
+        typeof source['url'] === 'string'
+          ? (source['url'] as string)
+          : undefined;
+      data =
+        typeof source['data'] === 'string'
+          ? (source['data'] as string)
+          : undefined;
+    }
+    // Fallback: check root-level data (daemon echo format)
+    if (!url && !data) {
+      data =
+        typeof value['data'] === 'string'
+          ? (value['data'] as string)
+          : undefined;
+      url =
+        typeof value['url'] === 'string' ? (value['url'] as string) : undefined;
+    }
+    if (!url && !data) return undefined;
     const mediaType =
       (typeof value['mediaType'] === 'string'
         ? (value['mediaType'] as string)
         : undefined) ??
-      (typeof source['mediaType'] === 'string'
+      (typeof value['mimeType'] === 'string'
+        ? (value['mimeType'] as string)
+        : undefined) ??
+      (typeof value['media_type'] === 'string'
+        ? (value['media_type'] as string)
+        : undefined) ??
+      (source && typeof source['mediaType'] === 'string'
         ? (source['mediaType'] as string)
         : undefined) ??
       'image/*';
-    const url =
-      typeof source['url'] === 'string' ? (source['url'] as string) : undefined;
-    const data =
-      typeof source['data'] === 'string'
-        ? (source['data'] as string)
-        : undefined;
-    if (!url && !data) return undefined;
     return {
       kind: 'image',
       mediaType,

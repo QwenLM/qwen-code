@@ -93,11 +93,16 @@ const RESYNC_PASSTHROUGH_TYPES: ReadonlySet<string> = new Set([
 export function appendLocalUserTranscriptMessage(
   state: DaemonTranscriptState,
   text: string,
-  opts: DaemonTranscriptReducerOptions = {},
+  opts: DaemonTranscriptReducerOptions & {
+    images?: Array<{ data: string; mimeType: string }>;
+  } = {},
 ): DaemonTranscriptState {
   const next = cloneTranscriptState(state, opts);
   finishAssistant(next);
   const block = createTextBlock(next, 'user', text);
+  if (opts.images && opts.images.length > 0) {
+    (block as DaemonTextTranscriptBlock).images = [...opts.images];
+  }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
@@ -180,6 +185,30 @@ function applyDaemonTranscriptEvent(
       }
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
+    case 'user.image.delta': {
+      if (!next.activeUserBlockId) {
+        const block = createTextBlock(
+          next,
+          'user',
+          '',
+        ) as DaemonTextTranscriptBlock;
+        block.images = [{ data: event.data, mimeType: event.mimeType }];
+        appendBlock(next, block);
+        next.activeUserBlockId = block.id;
+      } else {
+        // Use getWritableBlockById to ensure COW safety when mutating block.images
+        const block = getWritableBlockById(next, next.activeUserBlockId) as
+          | DaemonTextTranscriptBlock
+          | undefined;
+        if (block && block.kind === 'user') {
+          if (!block.images) {
+            block.images = [];
+          }
+          block.images.push({ data: event.data, mimeType: event.mimeType });
+        }
+      }
+      break;
+    }
     case 'assistant.text.delta':
       appendTextDelta(
         next,
