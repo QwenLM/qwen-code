@@ -25,21 +25,27 @@ These commands help you save, restore, and summarize work progress.
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
 | `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| `/restore`  | Restore a tool call to state before it was suggested      | `/restore` (list) or `/restore <ID>` |
+| `/delete`   | Delete a previous session                                 | `/delete`                            |
+| `/branch`   | Fork the current conversation into a new session          | `/branch` or `/fork`                 |
+| `/rewind`   | Rewind conversation to a previous turn                    | `/rewind` or `/rollback`             |
+| `/export`   | Export session history to file                            | `/export html`, `/export md`         |
+| `/rename`   | Rename or tag the current session                         | `/rename My Feature` or `/tag`       |
 
 ### 1.2 Interface and Workspace Control
 
 Commands for adjusting interface appearance and work environment.
 
-| Command      | Description                              | Usage Examples                |
-| ------------ | ---------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
-| `/context`   | Show context window usage breakdown      | `/context`                    |
-| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
-| `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor   | `/editor`                     |
+| Command           | Description                                        | Usage Examples                |
+| ----------------- | -------------------------------------------------- | ----------------------------- |
+| `/clear`          | Clear terminal screen content                      | `/clear` (shortcut: `Ctrl+L`) |
+| `/context`        | Show context window usage breakdown                | `/context`                    |
+| → `detail`        | Show per-item context usage breakdown              | `/context detail`             |
+| `/theme`          | Change Qwen Code visual theme                      | `/theme`                      |
+| `/vim`            | Turn input area Vim editing mode on/off            | `/vim`                        |
+| `/directory`      | Manage multi-directory support workspace           | `/dir add ./src,./tests`      |
+| `/editor`         | Open dialog to select supported editor             | `/editor`                     |
+| `/terminal-setup` | Configure terminal keybindings for multiline input | `/terminal-setup`             |
 
 ### 1.3 Language Settings
 
@@ -76,6 +82,15 @@ Commands for managing AI tools and models.
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
 | `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
 | `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
+| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                       |
+| `/permissions`   | Manage permission rules                       | `/permissions`                                |
+| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`            |
+| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`               |
+| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`            |
+| `/tasks`         | List background tasks                         | `/tasks`                                      |
+| `/lsp`           | Show LSP server status                        | `/lsp`                                        |
+| `/trust`         | Manage folder trust settings                  | `/trust`                                      |
+| `/diff`          | Show working-tree change stats versus HEAD    | `/diff`                                       |
 
 ### 1.5 Built-in Skills
 
@@ -189,7 +204,7 @@ progress; otherwise it waits for the current turn to finish and then fires).
 Unlike the manual command, the auto-trigger is fully silent on failure: if
 generation errors or there is nothing to summarize, no message is added to
 the history. Controlled by the `general.showSessionRecap` setting
-(default: `true`); the manual `/recap` command always works regardless of
+(default: `false`); the manual `/recap` command always works regardless of
 this setting.
 
 **Example:**
@@ -221,6 +236,12 @@ Commands for obtaining information and performing system settings.
 | `/stats`        | Display detailed statistics for current session | `/stats`                         |
 | `/settings`     | Open settings editor                            | `/settings`                      |
 | `/auth`         | Change authentication method                    | `/auth`                          |
+| `/doctor`       | Run installation and environment diagnostics    | `/doctor`, `/doctor memory`      |
+| `/docs`         | Open full Qwen Code documentation in browser    | `/docs`                          |
+| `/ide`          | Manage IDE integration                          | `/ide status`, `/ide install`    |
+| `/insight`      | Generate programming insights from chat history | `/insight`                       |
+| `/setup-github` | Set up GitHub Actions                           | `/setup-github`                  |
+| `/statusline`   | Configure status line UI                        | `/statusline`                    |
 | `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
 | `/copy`         | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |

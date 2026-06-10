@@ -90,8 +90,8 @@ How should we handle database migration?
 ```json
 // .qwen/settings.json
 {
-  "permissions": {
-    "defaultMode": "plan"
+  "tools": {
+    "approvalMode": "plan"
   }
 }
 ```
@@ -153,8 +153,8 @@ You can review each proposed change and approve or reject it individually.
 ```bash
 // .qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "default"
+  "tools": {
+    "approvalMode": "default"
   }
 }
 ```
@@ -336,10 +336,8 @@ YOLO Mode grants Qwen Code the highest permissions, automatically approving all 
 ```bash
 // .qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "yolo",
-"confirmShellCommands": false,
-"confirmFileEdits": false
+  "tools": {
+    "approvalMode": "yolo"
   }
 }
 ```
@@ -372,10 +370,8 @@ Default Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Default Mode
 // Project-level: ./.qwen/settings.json
 // User-level: ~/.qwen/settings.json
 {
-  "permissions": {
-"defaultMode": "auto-edit",  // or "plan" or "yolo"
-"confirmShellCommands": true,
-"confirmFileEdits": true
+  "tools": {
+    "approvalMode": "auto-edit"  // or "plan", "auto", "yolo"
   }
 }
 ```
