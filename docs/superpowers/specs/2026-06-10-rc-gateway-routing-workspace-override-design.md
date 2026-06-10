@@ -51,10 +51,12 @@ gateway-side at boot in `cli.ts` and pass the compiled matcher into the existing
 routing.yaml` no longer nukes the operator's user-level silences) and still
   fail-open in the safe direction (routing only suppresses → a dropped layer =
   MORE notifications, never a missed prompt). `loadLayeredRoutingMatcher` is
-  therefore **never-throw** (per-file catches the `RoutingError`; `compileRouting`
-  is total — it only filters/maps). cli.ts keeps an outer try/catch as
-  belt-and-suspenders; the only genuine throw source is `capabilities()`, caught
-  separately.
+  therefore **never-throw** (per-file `loadOneFailOpen` catches ANY error —
+  `RoutingError`, YAML parse error, or fs EACCES/EISDIR; `compileRouting` is
+  total — it only filters/maps). Because that contract holds, cli.ts does NOT
+  wrap the loader call in a redundant outer try/catch (it would be dead code);
+  the only genuine throw source at boot is `capabilities()`, which cli.ts catches
+  separately to skip just the workspace layer.
 - **D5 — `warnedDeferred` module-global is unchanged.** Loading two files per
   boot means the once-per-process "ignoring not-yet-supported field" warning can
   fire on whichever layer trips it first; an unhonored field in the other file is

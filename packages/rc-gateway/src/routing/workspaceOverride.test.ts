@@ -123,7 +123,14 @@ describe('loadLayeredRoutingMatcher', () => {
     const r = await loadLayeredRoutingMatcher(userPath, workspaceCwd, warn);
     expect(r.ruleCount).toBe(1);
     expect(r.matcher?.firstDrop(EV)).toBe('w');
-    expect(warnings.some((w) => w.includes('routing.yaml'))).toBe(true);
+    // The user-layer label is 'ignoring routing.yaml:'; the workspace label is
+    // 'ignoring workspace routing.yaml:' — assert the user one specifically.
+    expect(warnings.some((w) => w.includes('ignoring routing.yaml'))).toBe(
+      true,
+    );
+    expect(warnings.some((w) => w.includes('workspace routing.yaml'))).toBe(
+      false,
+    );
   });
 
   it('fail-open: both malformed → no matcher, never throws', async () => {

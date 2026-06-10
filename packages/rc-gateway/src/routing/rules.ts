@@ -252,10 +252,12 @@ export function mergeRoutingConfigs(
 }
 
 /**
- * Load one routing file FAIL-OPEN: a missing file (ENOENT) yields `null`, and a
- * malformed file ({@link RoutingError}) is logged via `warn` and ALSO yields
- * `null` — routing only suppresses, so the safe default on misconfig is more
- * notifications, never a missed prompt. Never throws.
+ * Load one routing file FAIL-OPEN: a missing file (ENOENT) yields `null`, and
+ * ANY other failure — a {@link RoutingError} (malformed schema), a YAML parse
+ * error, or an fs error like EACCES/EISDIR — is logged via `warn` and ALSO
+ * yields `null`. Routing only suppresses, so the safe default on misconfig is
+ * more notifications, never a missed prompt. This broad catch is what makes the
+ * function (and its caller) never throw.
  */
 async function loadOneFailOpen(
   path: string,
