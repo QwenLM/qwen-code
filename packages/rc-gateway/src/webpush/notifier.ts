@@ -97,6 +97,30 @@ export class PushNotifier {
         // (scopesFor already drops expired tokens, so an expired share is gone.)
         const lock = this.tokens.sessionLockFor(r.tokenId);
         if (lock !== undefined && lock !== ctx.sessionId) return;
+        // Per-subscription routing drop (cycle 33): an operator routing.yaml
+        // rule carrying scopeIn/tokenIdsIn can suppress THIS subscription (by
+        // its owning-token scopes or id) without silencing the whole fan-out.
+        // Suppress-only and ahead of the implicit prefs/quiet/working gates so
+        // "why no push" surfaces the explicit operator decision first. Same
+        // reason token as the global drop, discriminated by subscriptionId.
+        // Optional method → a matcher without it performs no per-sub drop.
+        const perSubDrop = this.routing?.firstDropForSubscription?.(
+          { kind: payload.kind, sessionName: ctx.sessionName },
+          { tokenId: r.tokenId, scopes },
+        );
+        if (perSubDrop) {
+          void this.audit?.record({
+            action: 'push_suppressed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              reason: 'routing_rule',
+              ruleId: perSubDrop,
+              subscriptionId: r.id,
+            },
+          });
+          return;
+        }
         // Per-subscription prefs filter (cycle 16): absent prefs → receive all;
         // a list → only those kinds; [] → nothing. Skip is silent (no audit),
         // matching the cycle-9 scope-skip posture. Runs after scope + snooze.

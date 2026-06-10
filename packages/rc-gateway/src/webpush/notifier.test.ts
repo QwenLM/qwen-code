@@ -506,6 +506,127 @@ describe('PushNotifier', () => {
     expect(notifierAudit.calls[0].detail).toMatchObject({ reason: 'snoozed' });
   });
 
+  it('a per-subscription routing drop suppresses only the matched sub, auditing subscriptionId', async () => {
+    // share = guest sub (drop target); approver = normal sub (delivered).
+    const share = await tokens.issueShare({
+      scopes: [SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    const guestSub = await store.add(share.id, {
+      endpoint: 'https://push.example.com/guest',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifierAudit = fakeAudit();
+    // Drop only the guest token's subscription.
+    const routing = {
+      firstDrop: () => null,
+      firstDropForSubscription: (
+        _ev: { kind: string },
+        sub: { tokenId: string },
+      ) => (sub.tokenId === share.id ? 'mute-guests' : null),
+    };
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+
+    // Only the approver sub is delivered; the guest sub is suppressed.
+    expect(sent.map((s) => s.endpoint)).toEqual([
+      'https://push.example.com/approver',
+    ]);
+    const supp = notifierAudit.calls.filter(
+      (c) => c.action === 'push_suppressed',
+    );
+    expect(supp).toHaveLength(1);
+    expect(supp[0].target).toBe('s1');
+    expect(supp[0].detail).toMatchObject({
+      kind: 'permission.required',
+      reason: 'routing_rule',
+      ruleId: 'mute-guests',
+      subscriptionId: guestSub.id,
+    });
+  });
+
+  it('a routing matcher WITHOUT firstDropForSubscription leaves per-sub delivery unchanged', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    // Old-style stub: only firstDrop, no per-sub method (proves the ?. guard).
+    const routing = { firstDrop: () => null };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('permission.required');
+  });
+
+  it('notifyToken (/test) is NOT gated by a per-subscription routing drop rule', async () => {
+    const owner = await tokens.issue([SESSION_READ], 'owner');
+    await store.add(owner.id, {
+      endpoint: 'https://push.example.com/owner',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const payload: PushPayload = {
+      v: 1,
+      kind: 'task.completed',
+      sessionId: 'test',
+      summary: 'Task finished',
+      url: '/ui/?session=test',
+    };
+    const routing = {
+      firstDrop: () => null,
+      firstDropForSubscription: () => 'drop-everything',
+    };
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      routing,
+    );
+    await notifier.notifyToken(owner.id, payload);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.kind).toBe('task.completed');
+  });
+
   it('notifyToken (/test) is NOT gated by a routing drop rule', async () => {
     const owner = await tokens.issue([SESSION_READ], 'owner');
     await store.add(owner.id, {
