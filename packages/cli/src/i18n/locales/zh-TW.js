@@ -88,6 +88,7 @@ export default {
     '注意：卸載將永久移除此擴展。',
   'Open homepage': '開啟主頁',
   'Project (Workspace)': '專案（工作區）',
+  'Refreshed {{count}} extension(s).': '已刷新 {{count}} 個擴充。',
   'Remove from Favorites': '從收藏中移除',
   'Remove marketplace': '移除市場來源',
   'Remove marketplace "{{name}}"?': '移除市場來源 "{{name}}"？',
@@ -97,8 +98,8 @@ export default {
   'Set "{{name}}" scope to {{scope}}.':
     '已將 "{{name}}" 的作用域設為 {{scope}}。',
   Sources: '來源',
-  'Type to search · Space to toggle · Enter to view · Esc to go back':
-    '輸入以搜尋 · Space 切換 · Enter 查看 · Esc 返回',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    '輸入以搜尋 · Space 切換 · Enter 查看 · Ctrl+R 刷新 · Esc 返回',
   Uninstall: '卸載',
   'Uninstalled "{{name}}".': '已卸載 "{{name}}"。',
   'Update Now': '立即更新',

@@ -38,7 +38,7 @@ function footerHint(tab: ExtensionsTab): string {
   switch (tab) {
     case EXTENSIONS_TABS.DISCOVER:
       return t(
-        'Type to search · Space to toggle · Enter to view · Esc to go back',
+        'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
       );
     case EXTENSIONS_TABS.INSTALLED:
       return t(

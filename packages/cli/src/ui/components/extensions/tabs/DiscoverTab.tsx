@@ -121,23 +121,38 @@ export const DiscoverTab = ({
     setScrollOffset(0);
   }, [marketplaceFilter]);
 
-  const load = useCallback(async () => {
-    if (!extensionManager) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const discovered = await extensionManager.discoverPlugins();
-      setPlugins(discovered);
-      setCursor((prev) => (prev < discovered.length ? prev : 0));
-    } catch (error) {
-      debugLogger.error('Failed to discover plugins:', error);
-      onStatus({ type: 'error', text: getErrorMessage(error) });
-    } finally {
-      setLoading(false);
-    }
-  }, [extensionManager, onStatus]);
+  const load = useCallback(
+    async (options?: { refresh?: boolean }) => {
+      if (!extensionManager) {
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      try {
+        const discovered = await extensionManager.discoverPlugins(options);
+        setPlugins(discovered);
+        setCursor((prev) => (prev < discovered.length ? prev : 0));
+        if (options?.refresh) {
+          onStatus({
+            type: 'success',
+            text: t('Refreshed {{count}} extension(s).', {
+              count: String(discovered.length),
+            }),
+          });
+        }
+      } catch (error) {
+        debugLogger.error('Failed to discover plugins:', error);
+        onStatus({ type: 'error', text: getErrorMessage(error) });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [extensionManager, onStatus],
+  );
+
+  const handleReload = useCallback(() => {
+    void load({ refresh: true });
+  }, [load]);
 
   useEffect(() => {
     load();
@@ -366,6 +381,11 @@ export const DiscoverTab = ({
       }
       if (key.name === 'backspace' || key.name === 'delete') {
         setQuery((q) => q.slice(0, -1));
+        return;
+      }
+      // Ctrl+R: refresh / re-discover all sources.
+      if (key.ctrl && key.name === 'r') {
+        handleReload();
         return;
       }
       // Printable character -> append to the search query.

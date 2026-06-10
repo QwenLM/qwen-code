@@ -91,6 +91,7 @@ export default {
     'Note: Uninstall permanently removes this extension.',
   'Open homepage': 'Open homepage',
   'Project (Workspace)': 'Project (Workspace)',
+  'Refreshed {{count}} extension(s).': 'Refreshed {{count}} extension(s).',
   'Remove from Favorites': 'Remove from Favorites',
   'Remove marketplace': 'Remove marketplace',
   'Remove marketplace "{{name}}"?': 'Remove marketplace "{{name}}"?',
@@ -99,8 +100,8 @@ export default {
   'Scope:': 'Scope:',
   'Set "{{name}}" scope to {{scope}}.': 'Set "{{name}}" scope to {{scope}}.',
   Sources: 'Sources',
-  'Type to search · Space to toggle · Enter to view · Esc to go back':
-    'Type to search · Space to toggle · Enter to view · Esc to go back',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
   Uninstall: 'Uninstall',
   'Uninstalled "{{name}}".': 'Uninstalled "{{name}}".',
   'Update Now': 'Update Now',
