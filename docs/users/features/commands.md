@@ -25,7 +25,12 @@ These commands help you save, restore, and summarize work progress.
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
 | `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| `/restore`  | Restore a tool call to state before it was suggested      | `/restore` (list) or `/restore <ID>` |
+| `/delete`   | Delete a previous session                                 | `/delete`                            |
+| `/branch`   | Fork the current conversation into a new session          | `/branch` or `/fork`                 |
+| `/rewind`   | Rewind conversation to a previous turn                    | `/rewind` or `/rollback`             |
+| `/export`   | Export session history to file                            | `/export html`, `/export md`         |
+| `/rename`   | Rename or tag the current session                         | `/rename My Feature` or `/tag`       |
 
 ### 1.2 Interface and Workspace Control
 
@@ -43,6 +48,7 @@ Commands for adjusting interface appearance and work environment.
 | `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                               |
 | `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                           |
 | `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch` |
+| `/terminal-setup`    | Configure terminal keybindings for multiline input                                                                                                                                | `/terminal-setup`                       |
 
 ### 1.3 Language Settings
 
@@ -79,6 +85,15 @@ Commands for managing AI tools and models.
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
 | `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
 | `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
+| `/hooks`         | Manage Qwen Code hooks                        | `/hooks`, `/hooks list`                       |
+| `/permissions`   | Manage permission rules                       | `/permissions`                                |
+| `/agents`        | Manage subagents                              | `/agents manage`, `/agents create`            |
+| `/arena`         | Manage Arena sessions                         | `/arena start`, `/arena status`               |
+| `/goal`          | Set a goal — keep working until condition met | `/goal <condition>`, `/goal clear`            |
+| `/tasks`         | List background tasks                         | `/tasks`                                      |
+| `/lsp`           | Show LSP server status                        | `/lsp`                                        |
+| `/trust`         | Manage folder trust settings                  | `/trust`                                      |
+| `/diff`          | Show working-tree change stats versus HEAD    | `/diff`                                       |
 
 ### 1.5 Built-in Skills
 
@@ -192,7 +207,7 @@ progress; otherwise it waits for the current turn to finish and then fires).
 Unlike the manual command, the auto-trigger is fully silent on failure: if
 generation errors or there is nothing to summarize, no message is added to
 the history. Controlled by the `general.showSessionRecap` setting
-(default: `true`); the manual `/recap` command always works regardless of
+(default: `false`); the manual `/recap` command always works regardless of
 this setting.
 
 **Example:**
@@ -278,6 +293,11 @@ Commands for obtaining information and performing system settings.
 | `/stats tools`  | Show per-tool call counts                                                                                                                                                                                                                                                                       | `/stats tools`                   |
 | `/settings`     | Open settings editor                                                                                                                                                                                                                                                                            | `/settings`                      |
 | `/auth`         | Change authentication method                                                                                                                                                                                                                                                                    | `/auth`                          |
+| `/doctor`       | Run installation and environment diagnostics                                                                                                                                                                                                                                                    | `/doctor`, `/doctor memory`      |
+| `/docs`         | Open full Qwen Code documentation in browser                                                                                                                                                                                                                                                    | `/docs`                          |
+| `/ide`          | Manage IDE integration                                                                                                                                                                                                                                                                          | `/ide status`, `/ide install`    |
+| `/insight`      | Generate programming insights from chat history                                                                                                                                                                                                                                                 | `/insight`                       |
+| `/setup-github` | Set up GitHub Actions                                                                                                                                                                                                                                                                           | `/setup-github`                  |
 | `/bug`          | Submit issue about Qwen Code                                                                                                                                                                                                                                                                    | `/bug Button click unresponsive` |
 | `/copy`         | Copy AI output to clipboard (`/copy N` = Nth-last AI message)                                                                                                                                                                                                                                   | `/copy` or `/copy 2`             |
 | `/quit`         | Exit Qwen Code immediately                                                                                                                                                                                                                                                                      | `/quit` or `/exit`               |
