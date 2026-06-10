@@ -2980,7 +2980,7 @@ describe('createServeApp', () => {
           },
         ]),
       );
-      expect(bridge.listCalls).toEqual([WS_BOUND, WS_BOUND]);
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
     it('includes persisted sessions from the CLI session store', async () => {
@@ -3044,7 +3044,7 @@ describe('createServeApp', () => {
           }),
         ]),
       );
-      expect(bridge.listCalls).toEqual([WS_BOUND, WS_BOUND]);
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
     it('preserves persisted createdAt when a live entry exists', async () => {

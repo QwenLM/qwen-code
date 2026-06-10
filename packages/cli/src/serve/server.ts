@@ -223,12 +223,7 @@ export async function listWorkspaceSessionsForResponse(
   });
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
-  const liveSessionIds = new Set(
-    bridge.listWorkspaceSessions(workspaceCwd).map((s) => s.sessionId),
-  );
-
   for (const item of persisted.items) {
-    if (!isFirstPage && liveSessionIds.has(item.sessionId)) continue;
     bySessionId.set(item.sessionId, {
       sessionId: item.sessionId,
       workspaceCwd: item.cwd,
@@ -240,19 +235,19 @@ export async function listWorkspaceSessionsForResponse(
     });
   }
 
-  if (isFirstPage) {
-    for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
-      const existing = bySessionId.get(live.sessionId);
-      bySessionId.set(live.sessionId, {
-        ...existing,
-        ...live,
-        createdAt: existing?.createdAt ?? live.createdAt,
-        title: live.title ?? existing?.title,
-        updatedAt: live.updatedAt ?? existing?.updatedAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-      });
-    }
+  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  for (const live of liveSessions) {
+    const existing = bySessionId.get(live.sessionId);
+    if (!existing && !isFirstPage) continue;
+    bySessionId.set(live.sessionId, {
+      ...existing,
+      ...live,
+      createdAt: existing?.createdAt ?? live.createdAt,
+      title: live.title ?? existing?.title,
+      updatedAt: live.updatedAt ?? existing?.updatedAt,
+      clientCount: live.clientCount,
+      hasActivePrompt: live.hasActivePrompt,
+    });
   }
 
   const sorted = [...bySessionId.values()].sort((a, b) => {
