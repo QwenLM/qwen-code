@@ -89,8 +89,6 @@ export type {
   ResourceState,
 } from './workspace/index.js';
 
-// ── Shared (daemon → webui bridge) ─────────────────────────────────
-export { daemonTranscriptToUnifiedMessages } from './transcriptAdapter.js';
 export {
   useDaemonFollowupSuggestion,
   type UseDaemonFollowupSuggestionReturn,

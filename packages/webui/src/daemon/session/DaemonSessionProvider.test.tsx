@@ -153,8 +153,12 @@ const sdkMocks = vi.hoisted(() => {
         takeSession(client),
     );
     static load = vi.fn(
-      async (client: unknown, _sessionId: string): Promise<MockSession> =>
-        takeSession(client),
+      async (
+        client: unknown,
+        _sessionId: string,
+        _opts?: unknown,
+        _clientId?: string,
+      ): Promise<MockSession> => takeSession(client),
     );
   }
 
@@ -1006,6 +1010,99 @@ describe('DaemonSessionProvider', () => {
     expect(blocks.some((block) => block.kind === 'error')).toBe(false);
   });
 
+  it('keeps cancellation turn errors in the transcript', async () => {
+    const session = createMockSession({
+      events: async function* cancellationTurnErrorEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'working' },
+            },
+          },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_error',
+          data: {
+            promptId: 'prompt-1',
+            message: 'Request was aborted.',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'assistant',
+        text: 'working',
+        streaming: false,
+      }),
+      expect.objectContaining({
+        kind: 'error',
+        text: 'Request was aborted.',
+        source: 'turn_error',
+      }),
+    ]);
+  });
+
+  it('exposes prompt cancellation events as transcript blocks', async () => {
+    const session = createMockSession({
+      events: async function* promptCancelledEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 11,
+          v: 1,
+          type: 'prompt_cancelled',
+          data: {
+            sessionId: 'session-1',
+            reason: 'user_cancel',
+          },
+        };
+        if (opts.signal?.aborted) return;
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      {
+        kind: 'prompt_cancelled',
+        reason: 'user_cancel',
+      },
+    ]);
+  });
+
   it('exposes catchingUp on resume and clears it on replay_complete', async () => {
     // Resume subscriptions (session carries a Last-Event-ID) get a
     // deterministic catch-up indicator: `catchingUp` arms on connect and
@@ -1807,6 +1904,57 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('uses session-scoped client IDs when switching between loaded sessions', async () => {
+    const firstSession = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+    });
+    const secondSession = createMockSession({
+      sessionId: 'session-b',
+      clientId: 'client-b',
+    });
+    const firstSessionReloaded = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+    });
+    sdkMocks.sessions.push(firstSession, secondSession, firstSessionReloaded);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const loadB = requireActions(actions)
+      .loadSession('session-b')
+      .catch(() => undefined);
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await loadB;
+
+    const loadA = requireActions(actions)
+      .loadSession('session-a')
+      .catch(() => undefined);
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+    await loadA;
+
+    const loadCalls = sdkMocks.MockDaemonSessionClient.load.mock.calls;
+    expect(loadCalls[0]?.[1]).toBe('session-b');
+    expect(loadCalls[0]?.[3]).not.toBe('client-a');
+    expect(loadCalls[1]?.[1]).toBe('session-a');
+    expect(loadCalls[1]?.[3]).toBe('client-a');
+  });
+
   it('exposes daemon capabilities on the connection state', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
@@ -2005,16 +2153,13 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
-    let loadRejection!: Promise<void>;
     await act(async () => {
       const loadPromise = requireActions(actions).loadSession('session-b');
-      loadRejection = await expect(loadPromise).rejects.toMatchObject({
+      await expect(loadPromise).rejects.toMatchObject({
         name: 'AbortError',
       });
       await flushPromises();
     });
-
-    await loadRejection;
     expect(blocks).toEqual([]);
   });
 

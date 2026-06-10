@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonPromptCancelledTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -273,6 +274,7 @@ function applyDaemonTranscriptEvent(
       // Idempotent — safe if the daemon also later emits terminal
       // tool_call_update frames.
       propagateCancellationToInFlightTools(next);
+      appendPromptCancelledBlock(next, event);
       break;
     case 'followup.suggestion':
       // Sidechannel: latest assist hint replaces any prior one for the
@@ -897,6 +899,26 @@ function appendStatusBlock(
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
+}
+
+function appendPromptCancelledBlock(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
+): void {
+  const block: DaemonPromptCancelledTranscriptBlock = {
+    id: allocateBlockId(state, 'prompt_cancelled'),
+    kind: 'prompt_cancelled',
+    clientReceivedAt: state.now,
+    createdAt: state.now,
+    updatedAt: state.now,
+    ...(event.reason ? { reason: event.reason } : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  appendBlock(state, block);
+  clearActiveText(state);
 }
 
 function createTextBlock(

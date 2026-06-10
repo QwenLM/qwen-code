@@ -22,16 +22,28 @@ describe('getStableClientId', () => {
     expect(getStableClientId('custom-id')).toBe('custom-id');
   });
 
-  it('generates and persists client ID in sessionStorage', () => {
+  it('generates a client ID without session storage compatibility fallback', () => {
     const id = getStableClientId(undefined);
     expect(id).toMatch(/^webui_/);
-    expect(window.sessionStorage.getItem('qwen-code-webui-client-id')).toBe(id);
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
   });
 
-  it('returns the same ID on subsequent calls (per-tab stable)', () => {
+  it('does not reuse the old tab-level client ID key', () => {
+    window.sessionStorage.setItem('qwen-code-webui-client-id', 'old-client');
+
     const id1 = getStableClientId(undefined);
-    const id2 = getStableClientId(undefined);
-    expect(id1).toBe(id2);
+
+    expect(id1).toMatch(/^webui_/);
+    expect(id1).not.toBe('old-client');
+  });
+
+  it('prefers a session-specific client ID when available', () => {
+    persistStableClientId('client-session-a', 'session-a');
+
+    expect(getStableClientId(undefined, 'session-a')).toBe('client-session-a');
+    expect(getStableClientId(undefined, 'session-b')).toMatch(/^webui_/);
   });
 
   it('does not use localStorage (multi-tab isolation)', () => {
@@ -45,13 +57,22 @@ describe('persistStableClientId', () => {
     window.sessionStorage.clear();
   });
 
-  it('persists daemon-issued client ID for later reconnects', () => {
-    const initial = getStableClientId(undefined);
-    expect(initial).toMatch(/^webui_/);
-
+  it('does not persist daemon-issued client ID without a session', () => {
     persistStableClientId('client-daemon');
 
-    expect(getStableClientId(undefined)).toBe('client-daemon');
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
+    expect(getStableClientId(undefined)).toMatch(/^webui_/);
+  });
+
+  it('persists daemon-issued client IDs per session', () => {
+    persistStableClientId('client-a', 'session-a');
+    persistStableClientId('client-b', 'session-b');
+
+    expect(getStableClientId(undefined, 'session-a')).toBe('client-a');
+    expect(getStableClientId(undefined, 'session-b')).toBe('client-b');
+    expect(getStableClientId(undefined)).toMatch(/^webui_/);
   });
 
   it('ignores missing client ID', () => {

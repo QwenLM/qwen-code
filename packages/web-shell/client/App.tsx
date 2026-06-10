@@ -237,7 +237,10 @@ function formatError(error: unknown, fallback: string): string {
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }
 
 interface AlreadyDispatchedError extends Error {
@@ -1792,15 +1795,10 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
-    sessionActions
-      .cancel()
-      .then(() => {
-        store.dispatch([{ type: 'status', text: t('request.cancelled') }]);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to cancel request');
-      });
-  }, [sessionActions, store, t, reportError]);
+    sessionActions.cancel().catch((error: unknown) => {
+      reportError(error, 'Failed to cancel request');
+    });
+  }, [sessionActions, reportError]);
 
   const handleFocusActiveAgents = useCallback((): boolean => {
     if (floatingAgents.length === 0) return false;
@@ -1818,7 +1816,6 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
       if (bottomHidden) return;

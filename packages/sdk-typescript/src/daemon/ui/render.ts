@@ -127,6 +127,8 @@ export function daemonBlockToMarkdown(
       return blockquote(`debug: ${text(block.text)}`);
     case 'error':
       return `> [!CAUTION]\n${blockquote(text(block.text))}`;
+    case 'prompt_cancelled':
+      return '*Prompt cancelled*';
     default:
       return '';
   }
@@ -436,6 +438,8 @@ export function daemonBlockToPlainText(
       return `[debug] ${clean(block.text)}`;
     case 'error':
       return `[error] ${clean(block.text)}`;
+    case 'prompt_cancelled':
+      return '[cancelled] prompt cancelled';
     default:
       return '';
   }
@@ -606,6 +610,8 @@ export function daemonBlockToHtml(
       return `<div class="daemon-block daemon-debug">${sanitizer(cap(block.text))}</div>`;
     case 'error':
       return `<div class="daemon-block daemon-error" role="alert">${sanitizer(cap(block.text))}</div>`;
+    case 'prompt_cancelled':
+      return '<div class="daemon-block daemon-cancelled">prompt cancelled</div>';
     default:
       return '';
   }

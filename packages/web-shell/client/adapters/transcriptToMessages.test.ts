@@ -4,6 +4,7 @@ import type {
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
+  DaemonTranscriptBlock,
   DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
@@ -37,6 +38,19 @@ function statusBlock(
     id,
     kind: 'status',
     text,
+    clientReceivedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+function promptCancelledBlock(
+  id: string,
+  createdAt: number,
+): DaemonTranscriptBlock {
+  return {
+    id,
+    kind: 'prompt_cancelled',
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
@@ -1817,6 +1831,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
       content: 'Working on it...',
       variant: 'info',
     });
+  });
+
+  it('renders prompt cancellation blocks as system messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      promptCancelledBlock('cancel-1', 20),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'cancel-1',
+        role: 'system',
+        content: 'Request cancelled.',
+        variant: 'info',
+      },
+    ]);
+  });
+
+  it('renders localized prompt cancellation messages', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [promptCancelledBlock('cancel-1', 20)],
+      { labels: { promptCancelled: '请求已取消。' } },
+    );
+
+    expect(messages).toEqual([
+      {
+        id: 'cancel-1',
+        role: 'system',
+        content: '请求已取消。',
+        variant: 'info',
+      },
+    ]);
   });
 
   it('keeps assistant text after a completed agent in the main transcript', () => {

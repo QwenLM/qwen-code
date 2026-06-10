@@ -613,7 +613,8 @@ export type DaemonTranscriptBlockKind =
   | 'permission'
   | 'status'
   | 'error'
-  | 'debug';
+  | 'debug'
+  | 'prompt_cancelled';
 
 export interface DaemonTranscriptBlockBase {
   id: string;
@@ -736,13 +737,20 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   source?: 'turn_error';
 }
 
+export interface DaemonPromptCancelledTranscriptBlock
+  extends DaemonTranscriptBlockBase {
+  kind: 'prompt_cancelled';
+  reason?: string;
+}
+
 export type DaemonTranscriptBlock =
   | DaemonTextTranscriptBlock
   | DaemonToolTranscriptBlock
   | DaemonShellTranscriptBlock
   | DaemonUserShellTranscriptBlock
   | DaemonPermissionTranscriptBlock
-  | DaemonStatusTranscriptBlock;
+  | DaemonStatusTranscriptBlock
+  | DaemonPromptCancelledTranscriptBlock;
 
 /**
  * PR-E sidechannel state — workspace / session state mirror that tracks

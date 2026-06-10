@@ -292,19 +292,23 @@ export function DaemonSessionProvider({
               restoreSessionId && restoreMode === 'resume'
                 ? DaemonSessionClient.resume
                 : DaemonSessionClient.load;
+            const targetSessionId = restoreSessionId ?? reconnectSessionId;
+            const requestClientId = clientId
+              ? clientIdRef.current
+              : getStableClientId(undefined, targetSessionId);
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   { workspaceCwd: effectWorkspaceCwd },
-                  clientIdRef.current,
+                  requestClientId,
                 )
               : reconnectSessionId
                 ? await DaemonSessionClient.load(
                     client,
                     reconnectSessionId,
                     { workspaceCwd: effectWorkspaceCwd },
-                    clientIdRef.current,
+                    requestClientId,
                   )
                 : await DaemonSessionClient.createOrAttach(
                     client,
@@ -319,11 +323,14 @@ export function DaemonSessionProvider({
                           : {}),
                       workspaceCwd: effectWorkspaceCwd,
                     },
-                    clientIdRef.current,
+                    requestClientId,
                   );
             if (!clientId && nextSession.clientId) {
               clientIdRef.current = nextSession.clientId;
-              persistStableClientId(nextSession.clientId);
+              persistStableClientId(
+                nextSession.clientId,
+                nextSession.sessionId,
+              );
             }
             if (disposed || abort.signal.aborted) {
               void detachDaemonClient({
