@@ -121,7 +121,7 @@ describe('statsCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('Session duration');
+      expect(result.content).toContain('Session duration: 0s');
     });
 
     it('stats model subcommand should return text in non-interactive mode', async () => {

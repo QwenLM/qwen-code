@@ -12,6 +12,9 @@ import { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('USAGE_HISTORY');
 
 export interface UsageSummaryRecord {
   version: 1;
@@ -174,7 +177,10 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
     if (!fs.existsSync(projectsDir)) return [];
-  } catch {
+  } catch (e) {
+    debugLogger.debug(
+      `rebuildFromSessionJsonl: cannot access projectsDir: ${e}`,
+    );
     return [];
   }
 
@@ -183,7 +189,8 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
   let projectDirs: string[];
   try {
     projectDirs = fs.readdirSync(projectsDir);
-  } catch {
+  } catch (e) {
+    debugLogger.debug(`rebuildFromSessionJsonl: cannot read projectsDir: ${e}`);
     return [];
   }
 
@@ -192,7 +199,10 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
     let files: string[];
     try {
       files = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.jsonl'));
-    } catch {
+    } catch (e) {
+      debugLogger.debug(
+        `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
+      );
       continue;
     }
 
@@ -239,7 +249,10 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
             telemetry.getMetrics(),
           ),
         );
-      } catch {
+      } catch (e) {
+        debugLogger.debug(
+          `rebuildFromSessionJsonl: failed to process ${file}: ${e}`,
+        );
         continue;
       }
     }
@@ -260,8 +273,8 @@ export async function loadUsageHistory(): Promise<UsageSummaryRecord[]> {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
     const filtered = records.filter((r) => r.version === 1);
     if (filtered.length > 0) return filtered;
-  } catch {
-    // File doesn't exist or is unreadable — fall through to rebuild
+  } catch (e) {
+    debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
   return rebuildFromSessionJsonl();
