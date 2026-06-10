@@ -228,8 +228,8 @@ export default {
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
   'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Copier le dernier résultat ou extrait de code dans le presse-papiers',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copier la dernière réponse IA dans le presse-papiers (/copy N pour la Nième)',
 
   // ============================================================================
   // Commandes - Agents
@@ -860,6 +860,24 @@ export default {
   'Resume a previous session': 'Reprendre une session précédente',
   'Fork the current conversation into a new session':
     'Créer une branche de la conversation actuelle dans une nouvelle session',
+  'Spawn a background agent that inherits the full conversation':
+    'Lancer un agent en arrière-plan qui hérite de toute la conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Veuillez fournir une directive. Utilisation : /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
+  'Cannot fork before the first conversation turn.':
+    'Impossible de créer un fork avant le premier tour de conversation.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'La commande /fork nécessite le feature gate fork. Définissez QWEN_CODE_ENABLE_FORK_SUBAGENT=1 pour l’activer.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'outil agent est indisponible ; impossible de créer un fork.",
+  'Failed to launch fork: {{error}}':
+    'Échec du lancement du fork : {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'utilisateur a lancé un fork en arrière-plan via /fork : {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "Fork lancé dans un agent en arrière-plan. Il hérite de cette conversation et s'exécute sans bloquer — suivez-le dans le panneau des tâches en arrière-plan ; il fera un rapport une fois terminé.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "Impossible de créer une branche pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'No conversation to branch.':

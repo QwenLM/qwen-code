@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SkillCommandLoader } from './SkillCommandLoader.js';
-import { CommandKind } from '../ui/commands/types.js';
+import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
   type Config,
@@ -31,15 +31,20 @@ function makeSkillPrompt(body: string): string {
 describe('SkillCommandLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: { listSkills: ReturnType<typeof vi.fn> };
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
+    mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getBareMode: vi.fn().mockReturnValue(false),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -334,6 +339,41 @@ describe('SkillCommandLoader', () => {
       'proj-skill',
       'ext-skill',
     ]);
+  });
+
+  describe('allowedTools grant', () => {
+    it('grants allowedTools as session allow rules when the command runs', async () => {
+      const skill = makeSkill({
+        level: 'user',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not grant when the skill declares no allowedTools', async () => {
+      const skill = makeSkill({ level: 'user' }); // no allowedTools
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
   });
 
   describe('skills.disabled filter', () => {

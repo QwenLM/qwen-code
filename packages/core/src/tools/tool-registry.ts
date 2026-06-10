@@ -31,6 +31,12 @@ type ToolParams = Record<string, unknown>;
 /** Factory function for lazy tool instantiation via dynamic import. */
 export type ToolFactory = () => Promise<AnyDeclarativeTool>;
 
+export interface DeferredToolSummary {
+  name: string;
+  description: string;
+  serverName?: string;
+}
+
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
@@ -709,21 +715,31 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns a lightweight summary ({name, description}) of tools that are
+   * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the system prompt so the model knows what is
+   * set of on-demand tools in the startup reminder so the model knows what is
    * reachable via ToolSearch. `alwaysLoad` tools are excluded.
    */
-  getDeferredToolSummary(): Array<{ name: string; description: string }> {
-    const summary: Array<{ name: string; description: string }> = [];
+  getDeferredToolSummary(): DeferredToolSummary[] {
+    const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (tool.shouldDefer && !tool.alwaysLoad) {
-        summary.push({ name: tool.name, description: tool.description });
+        summary.push({
+          name: tool.name,
+          description: tool.description,
+          ...(tool instanceof DiscoveredMCPTool
+            ? { serverName: tool.serverName }
+            : {}),
+        });
       }
     });
-    // Stable order so the system prompt text is deterministic across runs.
+    // Stable order so the startup reminder text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
+  }
+
+  getMcpServerInstructions(): Map<string, string> {
+    return this.mcpClientManager.getServerInstructions();
   }
 
   /**

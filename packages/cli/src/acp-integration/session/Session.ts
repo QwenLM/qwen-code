@@ -55,8 +55,10 @@ import {
   MessageBusType,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
-  STARTUP_CONTEXT_MODEL_ACK,
+  getStartupContextLength,
+  isSystemReminderContent,
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   abortGoalForStopHookCap,
@@ -71,8 +73,10 @@ import {
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
+  acquireSleepInhibitor,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -134,6 +138,19 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+interface BackgroundNotificationQueueItem {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: string;
+  kind: 'agent' | 'monitor' | 'shell';
+  toolUseId?: string;
+}
+
+const MAX_NOTIFICATION_QUEUE = 20;
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -177,15 +194,21 @@ export async function fireSessionPermissionDeniedForAutoMode(
     !config.getDisableAllHooks?.() &&
     shouldFirePermissionDeniedForAutoMode(decision, outcome)
   ) {
-    await config
-      .getHookSystem?.()
-      ?.firePermissionDeniedEvent(
-        toolName,
-        toolParams,
-        callId,
-        getAutoModePermissionDeniedReason(decision),
-        signal,
+    try {
+      await config
+        .getHookSystem?.()
+        ?.firePermissionDeniedEvent(
+          toolName,
+          toolParams,
+          callId,
+          getAutoModePermissionDeniedReason(decision),
+          signal,
+        );
+    } catch (hookError) {
+      debugLogger.warn(
+        `PermissionDenied hook failed for tool ${callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
       );
+    }
   }
 }
 
@@ -228,6 +251,14 @@ function isUserPromptRecord(record: ChatRecord): boolean {
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
+  availableSkillDetails?: Array<{
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+    modelInvocable?: boolean;
+  }>;
 }
 
 export async function buildAvailableCommandsSnapshot(
@@ -259,19 +290,56 @@ export async function buildAvailableCommandsSnapshot(
   });
 
   let availableSkills: string[] | undefined;
+  const skillDetailsByName = new Map<
+    string,
+    NonNullable<AvailableCommandsSnapshot['availableSkillDetails']>[number]
+  >();
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = await skillManager.listSkills();
       availableSkills = skills.map((skill) => skill.name);
+      for (const skill of skills) {
+        skillDetailsByName.set(skill.name, {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          filePath: skill.filePath,
+          level: skill.level,
+          modelInvocable: skill.disableModelInvocation !== true,
+        });
+      }
     }
   } catch (error) {
     debugLogger.error('Error loading available skills:', error);
   }
 
+  for (const command of slashCommands) {
+    if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
+      continue;
+    }
+    const existing = skillDetailsByName.get(command.skillDetail.name);
+    skillDetailsByName.set(command.skillDetail.name, {
+      ...existing,
+      ...command.skillDetail,
+      modelInvocable: command.modelInvocable === true,
+    });
+  }
+  const availableSkillDetails =
+    skillDetailsByName.size > 0
+      ? Array.from(skillDetailsByName.values())
+      : undefined;
+  // Always derive the name list from the details map so the two stay in sync.
+  // skillManager only contributes its own skills to `availableSkills`, but the
+  // slashCommands loop above also adds bundled skills to `skillDetailsByName`;
+  // a `??=` would leave bundled skills in details but missing from the name
+  // list whenever skillManager succeeded.
+  availableSkills = availableSkillDetails?.map((skill) => skill.name);
+
   return {
     availableCommands,
     ...(availableSkills !== undefined ? { availableSkills } : {}),
+    ...(availableSkillDetails !== undefined ? { availableSkillDetails } : {}),
   };
 }
 
@@ -304,6 +372,21 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  private midTurnDrainUnavailable = false;
+
+  // Background notification drain state. ACP does not have the TUI's idle
+  // hook, so the session serializes registry callbacks through this queue.
+  private notificationQueue: BackgroundNotificationQueueItem[] = [];
+  private notificationProcessing = false;
+  private notificationAbortController: AbortController | null = null;
+  private notificationCompletion: Promise<void> | null = null;
+
+  // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
+  // against the race where #drainNotificationQueue's finally block kicks off
+  // #drainCronQueue after the session has already been disposed (e.g. /clear
+  // or session reload), which would otherwise execute orphaned cron prompts
+  // on a session whose registries are already unregistered.
+  private disposed = false;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -346,6 +429,8 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+
+    this.#registerBackgroundNotificationCallbacks();
   }
 
   getId(): string {
@@ -354,6 +439,27 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.notificationQueue = [];
+    this.cronQueue = [];
+    this.notificationAbortController?.abort();
+    this.notificationAbortController = null;
+    this.notificationProcessing = false;
+    this.notificationCompletion = null;
+
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+    }
+    this.cronProcessing = false;
+    this.cronCompletion = null;
+
+    this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
+    this.config.getMonitorRegistry().setNotificationCallback(undefined);
+    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
   }
 
   /**
@@ -395,7 +501,13 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+    if (
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.notificationProcessing ||
+      this.notificationAbortController
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -431,7 +543,13 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+    if (
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.notificationProcessing ||
+      this.notificationAbortController
+    ) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -448,7 +566,7 @@ export class Session implements SessionContext {
     apiHistory: Content[],
     targetTurnIndex: number,
   ): number {
-    const startIndex = this.#hasStartupContext(apiHistory) ? 2 : 0;
+    const startIndex = getStartupContextLength(apiHistory);
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -470,18 +588,6 @@ export class Session implements SessionContext {
     return -1;
   }
 
-  #hasStartupContext(apiHistory: Content[]): boolean {
-    if (apiHistory.length < 2) return false;
-    const first = apiHistory[0];
-    const second = apiHistory[1];
-    if (first?.role !== 'user' || second?.role !== 'model') return false;
-    return (
-      second.parts?.some(
-        (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
-      ) ?? false
-    );
-  }
-
   #isUserTextContent(content: Content): boolean {
     if (content.role !== 'user') return false;
     if (!content.parts || content.parts.length === 0) return false;
@@ -491,14 +597,24 @@ export class Session implements SessionContext {
     );
     if (hasFunctionResponse) return false;
 
+    // Exclude pure <system-reminder> entries (the startup prelude and the
+    // mid-history MCP added-tool reminders). They are structural, not real
+    // user prompts; counting them would shift the rewind truncation index and
+    // silently drop a real turn. A genuine user turn that merely has a
+    // per-turn reminder prepended still has a non-reminder prompt part, so it
+    // is NOT excluded.
+    if (isSystemReminderContent(content)) return false;
+
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
+    const hadNotification =
+      !!this.notificationAbortController || this.notificationProcessing;
 
-    if (!hadPrompt && !hadCron) {
+    if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error('Not currently generating');
     }
 
@@ -514,6 +630,13 @@ export class Session implements SessionContext {
       this.cronQueue = [];
       this.cronProcessing = false;
     }
+
+    if (this.notificationAbortController) {
+      this.notificationAbortController.abort();
+      this.notificationAbortController = null;
+    }
+    this.notificationQueue = [];
+    this.notificationProcessing = false;
 
     // Stop scheduler and emit exit summary
     const scheduler = this.config.isCronEnabled()
@@ -560,6 +683,23 @@ export class Session implements SessionContext {
       }
     }
 
+    // A background notification turn mutates the same chat history as a user
+    // prompt. Abort it before awaiting the drain so user input is not blocked
+    // behind notification tool calls.
+    if (this.notificationAbortController) {
+      this.notificationAbortController.abort();
+      this.notificationAbortController = null;
+      this.notificationQueue = [];
+      this.notificationProcessing = false;
+    }
+    if (this.notificationCompletion) {
+      try {
+        await this.notificationCompletion;
+      } catch {
+        // Notification errors are surfaced through the session stream.
+      }
+    }
+
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
       return { stopReason: 'cancelled' };
@@ -577,6 +717,7 @@ export class Session implements SessionContext {
       this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
       return result;
     } finally {
       resolveCompletion();
@@ -843,7 +984,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1089,7 +1236,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1356,6 +1509,68 @@ export class Session implements SessionContext {
     });
   }
 
+  async #drainMidTurnUserMessages(): Promise<Part[]> {
+    if (this.midTurnDrainUnavailable) return [];
+
+    try {
+      const response = await this.client.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        {
+          sessionId: this.sessionId,
+        },
+      );
+      // A client may legally resolve with `result: null` (passed through
+      // unwrapped by the ACP SDK); guard the object access so that doesn't
+      // throw a TypeError and get misclassified as a transient drain error.
+      const messages =
+        response &&
+        typeof response === 'object' &&
+        Array.isArray(response['messages'])
+          ? response['messages'].filter(
+              (message): message is string =>
+                typeof message === 'string' && message.trim().length > 0,
+            )
+          : [];
+
+      return messages.map((message) => {
+        const part = {
+          text: `\n[User message received during tool execution]: ${message}`,
+        };
+        this.config
+          .getChatRecordingService()
+          ?.recordMidTurnUserMessage([part], message);
+        return part;
+      });
+    } catch (error) {
+      // The ACP SDK rejects with the raw JSON-RPC error object
+      // (`{ code, message, data }`), which is not an `Error` instance, so
+      // classify on the JSON-RPC code (-32601 = "Method not found") and fall
+      // back to the message. Otherwise the one-shot latch never trips and every
+      // tool batch keeps paying a failed `extMethod` round-trip all session.
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : error && typeof error === 'object' && 'message' in error
+            ? String((error as { message?: unknown }).message)
+            : String(error);
+      const errorCode =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      const isPermanentError =
+        errorCode === -32601 || /method not found/i.test(errorMessage);
+
+      if (isPermanentError) {
+        this.midTurnDrainUnavailable = true;
+      }
+
+      debugLogger.warn(
+        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
+      );
+      return [];
+    }
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -1379,10 +1594,12 @@ export class Session implements SessionContext {
    * as a mutex to prevent concurrent access to the chat.
    */
   async #drainCronQueue(): Promise<void> {
+    if (this.disposed) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
+    if (this.notificationProcessing) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -1399,6 +1616,8 @@ export class Session implements SessionContext {
       this.cronProcessing = false;
       resolveCompletion();
       this.cronCompletion = null;
+
+      void this.#drainNotificationQueue();
 
       // Stop scheduler if all jobs were deleted during execution
       if (this.config.isCronEnabled()) {
@@ -1520,7 +1739,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
         } catch (error) {
@@ -1548,9 +1773,334 @@ export class Session implements SessionContext {
     );
   }
 
+  #registerBackgroundNotificationCallbacks(): void {
+    const backgroundRegistry = this.config.getBackgroundTaskRegistry();
+    backgroundRegistry.setNotificationCallback(
+      (displayText, modelText, meta) => {
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: meta.agentId,
+          status: meta.status,
+          kind: 'agent',
+          toolUseId: meta.toolUseId,
+        });
+      },
+    );
+
+    const monitorRegistry = this.config.getMonitorRegistry();
+    monitorRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      if (meta.status === 'running') {
+        return;
+      }
+
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.monitorId,
+        status: meta.status,
+        kind: 'monitor',
+        toolUseId: meta.toolUseId,
+      });
+    });
+
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      this.#enqueueBackgroundNotification({
+        displayText,
+        modelText,
+        taskId: meta.shellId,
+        status: meta.status,
+        kind: 'shell',
+      });
+    });
+  }
+
+  #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
+    while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
+      const evicted = this.notificationQueue.shift()!;
+      debugLogger.warn(
+        `Notification queue overflow: evicting task=${evicted.taskId} kind=${evicted.kind}`,
+      );
+    }
+    this.notificationQueue.push(item);
+    void this.#drainNotificationQueue();
+  }
+
+  async #drainNotificationQueue(): Promise<void> {
+    if (this.disposed) return;
+    if (this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      return;
+    }
+    if (this.notificationQueue.length === 0) return;
+
+    this.notificationProcessing = true;
+    let resolveCompletion!: () => void;
+    this.notificationCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      while (this.notificationQueue.length > 0) {
+        if (
+          this.pendingPrompt ||
+          this.cronProcessing ||
+          this.cronAbortController
+        ) {
+          break;
+        }
+        const item = this.notificationQueue.shift()!;
+        await this.#executeBackgroundNotificationPrompt(item);
+      }
+    } finally {
+      this.notificationProcessing = false;
+      resolveCompletion();
+      this.notificationCompletion = null;
+
+      void this.#drainCronQueue();
+
+      if (
+        this.notificationQueue.length > 0 &&
+        !this.pendingPrompt &&
+        !this.cronProcessing &&
+        !this.cronAbortController
+      ) {
+        void this.#drainNotificationQueue();
+      }
+    }
+  }
+
+  async #executeBackgroundNotificationPrompt(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const ac = new AbortController();
+        this.notificationAbortController = ac;
+        const promptId =
+          this.config.getSessionId() + '########notification' + Date.now();
+
+        try {
+          await this.#emitBackgroundNotificationDisplay(item);
+
+          const notificationParts: Part[] = [{ text: item.modelText }];
+          this.config
+            .getChatRecordingService()
+            ?.recordNotification(notificationParts, item.displayText);
+
+          const notificationReminders =
+            await this.#buildInitialSystemReminders();
+          let nextMessage: Content | null = {
+            role: 'user',
+            parts: [...notificationReminders, ...notificationParts],
+          };
+
+          while (nextMessage !== null) {
+            if (ac.signal.aborted) {
+              await this.#emitBackgroundNotificationEndTurn('cancelled');
+              return;
+            }
+
+            const functionCalls: FunctionCall[] = [];
+            let usageMetadata: GenerateContentResponseUsageMetadata | null =
+              null;
+            let responseText = '';
+            const streamStartTime = Date.now();
+
+            const sendResult = await this.#sendMessageStreamWithAutoCompression(
+              promptId,
+              nextMessage.parts ?? [],
+              ac.signal,
+            );
+            if (!sendResult.responseStream) {
+              this.#preserveUnsentMessageHistory(
+                nextMessage,
+                sendResult.stopReason === 'cancelled',
+              );
+              await this.#emitBackgroundNotificationEndTurn(
+                sendResult.stopReason,
+              );
+              return;
+            }
+
+            const responseStream = sendResult.responseStream;
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (ac.signal.aborted) {
+                await this.#emitBackgroundNotificationEndTurn('cancelled');
+                return;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  if (part.thought) {
+                    await this.messageEmitter.emitMessage(
+                      part.text,
+                      'assistant',
+                      true,
+                    );
+                  } else {
+                    responseText += part.text;
+                  }
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+
+            if (responseText.length > 0) {
+              await this.#emitBackgroundNotificationResponse(
+                item,
+                responseText,
+                ac.signal,
+              );
+            }
+
+            if (this.messageRewriter) {
+              await this.messageRewriter.flushTurn(ac.signal);
+            }
+
+            if (usageMetadata) {
+              this.#recordPromptTokenCount(usageMetadata);
+              const durationMs = Date.now() - streamStartTime;
+              await this.messageEmitter.emitUsageMetadata(
+                usageMetadata,
+                '',
+                durationMs,
+              );
+            }
+
+            if (functionCalls.length > 0) {
+              const toolResponseParts = await this.runToolCalls(
+                ac.signal,
+                promptId,
+                functionCalls,
+              );
+              nextMessage = { role: 'user', parts: toolResponseParts };
+            }
+          }
+
+          if (this.messageRewriter) {
+            await this.messageRewriter.waitForPendingRewrites();
+          }
+
+          await this.#emitBackgroundNotificationEndTurn('end_turn');
+        } catch (error) {
+          if (ac.signal.aborted) {
+            await this.#emitBackgroundNotificationEndTurn('cancelled');
+            return;
+          }
+          debugLogger.error('Error processing background notification:', error);
+          const msg = error instanceof Error ? error.message : String(error);
+          try {
+            await this.messageEmitter.emitAgentMessage(
+              `[notification error] ${msg}`,
+            );
+          } catch (emitError) {
+            debugLogger.error(
+              'Failed to emit background notification error:',
+              emitError,
+            );
+          } finally {
+            await this.#emitBackgroundNotificationEndTurn('end_turn');
+          }
+        } finally {
+          if (this.notificationAbortController === ac) {
+            this.notificationAbortController = null;
+          }
+        }
+      },
+    );
+  }
+
+  async #emitBackgroundNotificationDisplay(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: item.displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      },
+    });
+  }
+
+  async #emitBackgroundNotificationResponse(
+    item: BackgroundNotificationQueueItem,
+    text: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const update: SessionUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        source: 'background_notification_response',
+        qwenDiscreteMessage: true,
+        backgroundTask: {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      },
+    };
+
+    if (this.messageRewriter) {
+      await this.messageRewriter.interceptUpdate(update, signal);
+      return;
+    }
+
+    await this.sendUpdate(update);
+  }
+
+  async #emitBackgroundNotificationEndTurn(
+    reason: PromptResponse['stopReason'],
+  ): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason,
+        source: 'background_notification',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Background notification end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills } =
+      const { availableCommands, availableSkills, availableSkillDetails } =
         await buildAvailableCommandsSnapshot(this.config);
 
       const update: SessionUpdate = {
@@ -1560,6 +2110,7 @@ export class Session implements SessionContext {
           ? {
               _meta: {
                 availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
               },
             }
           : {}),
@@ -1948,14 +2499,26 @@ export class Session implements SessionContext {
       }
 
       // Explicit allow (user rule matched, or tool's L3 default is 'allow')
-      // is authoritative — AUTO classifier must not be allowed to override
-      // it. Parallels coreToolScheduler.ts:1337-1366; without this, an ACP
-      // session in AUTO mode could see a user-written `Bash(git push *)`
-      // allow rule reach the classifier and get blocked by a conservative
-      // Stage-1 verdict. Also resets the denialTracking streak so a
-      // following classifier-eligible call doesn't surprise the user with
-      // a manual prompt right after an allow-rule call just worked.
-      let autoModeAllowed = finalPermission === 'allow';
+      // is authoritative for ordinary calls. In AUTO, protected
+      // self-modification writes must still reach the classifier/fail-closed
+      // path so allow rules cannot bypass AUTO mode's safety boundary.
+      // Also resets the denialTracking streak so a following
+      // classifier-eligible call doesn't surprise the user with a manual
+      // prompt right after an allow-rule call just worked.
+      const forceAutoReviewForAllow =
+        approvalMode === ApprovalMode.AUTO &&
+        shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+      const confirmationPermission = getEffectivePermissionForConfirmation(
+        finalPermission,
+        forceAutoReviewForAllow,
+      );
+      if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+        debugLogger.info(
+          `Auto mode: L4 allow overridden by protected-write guard for ${fc.name}`,
+        );
+      }
+      let autoModeAllowed =
+        finalPermission === 'allow' && !forceAutoReviewForAllow;
       if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
         this.config.setAutoModeDenialState(
           recordAllow(this.config.getAutoModeDenialState()),
@@ -2068,7 +2631,7 @@ export class Session implements SessionContext {
 
       if (
         !autoModeAllowed &&
-        needsConfirmation(finalPermission, approvalMode, fc.name)
+        needsConfirmation(confirmationPermission, approvalMode, fc.name)
       ) {
         confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
@@ -2296,7 +2859,16 @@ export class Session implements SessionContext {
         }
       }
 
-      const toolResult: ToolResult = await invocation.execute(abortSignal);
+      const sleepInhibitorHandle = acquireSleepInhibitor(
+        this.config,
+        `Qwen Code is executing tool ${fc.name}`,
+      );
+      let toolResult: ToolResult;
+      try {
+        toolResult = await invocation.execute(abortSignal);
+      } finally {
+        sleepInhibitorHandle.release();
+      }
 
       // Clean up event listeners
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());

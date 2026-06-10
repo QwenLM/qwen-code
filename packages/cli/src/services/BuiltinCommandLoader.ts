@@ -27,6 +27,7 @@ import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
+import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
@@ -102,6 +103,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       authCommand,
       branchCommand,
       btwCommand,
+      forkCommand,
       bugCommand,
       clearCommand,
       compressCommand,

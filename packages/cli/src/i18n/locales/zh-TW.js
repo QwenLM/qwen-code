@@ -206,8 +206,8 @@ export default {
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last result or code snippet to clipboard':
-    '將最後的結果或代碼片段複製到剪貼板',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',
@@ -756,6 +756,24 @@ export default {
     '根據你的聊天記錄生成個性化編程洞察',
   'Resume a previous session': '恢復先前會話',
   'Fork the current conversation into a new session': '將目前對話分支到新會話',
+  'Spawn a background agent that inherits the full conversation':
+    '啟動繼承完整對話的背景智能體',
+  'Please provide a directive. Usage: /fork <directive>':
+    '請提供指令。用法：/fork <指令>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
+  'Cannot fork before the first conversation turn.':
+    '首次對話輪次前無法分支。',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    '/fork 命令需要啟用 fork 功能開關。設定 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以啟用。',
+  'The agent tool is unavailable; cannot fork.':
+    'Agent 工具不可用；無法分支。',
+  'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
+  'the background agent could not be started.': '背景智能體無法啟動。',
+  'User launched a background fork via /fork: {{directive}}':
+    '使用者透過 /fork 啟動了背景分支：{{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    '已分支到背景智能體。它會繼承此對話並以非阻塞方式執行，可在背景任務面板中追蹤；完成後會回報結果。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'No conversation to branch.': '沒有可分支的對話。',
