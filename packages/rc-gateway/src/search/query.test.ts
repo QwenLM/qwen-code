@@ -12,113 +12,148 @@ function m(q: string, hay: string): boolean {
   return matchesQuery(parseQuery(q), hay.toLowerCase());
 }
 
-describe('parseQuery', () => {
-  it('plain space-separated words → one AND group of plain terms (back-compat)', () => {
-    const plan = parseQuery('oauth Flow');
-    expect(plan.orGroups).toEqual([
-      [
-        { kind: 'plain', value: 'oauth', negated: false },
-        { kind: 'plain', value: 'flow', negated: false },
-      ],
-    ]);
-    expect(plan.seed).toBe('oauth');
+describe('parseQuery (behavioral / back-compat)', () => {
+  it('plain space-separated words → AND of substrings', () => {
+    expect(m('oauth Flow', 'the oauth flow works')).toBe(true);
+    expect(m('oauth Flow', 'oauth only')).toBe(false);
+    expect(parseQuery('oauth Flow').seed).toBe('oauth');
   });
 
-  it('empty / whitespace / lone * / OR-only → no groups', () => {
-    expect(parseQuery('').orGroups).toEqual([]);
-    expect(parseQuery('   ').orGroups).toEqual([]);
-    expect(parseQuery('*').orGroups).toEqual([]);
-    expect(parseQuery('OR').orGroups).toEqual([]);
-    expect(parseQuery('OR OR').orGroups).toEqual([]);
+  it('empty / whitespace / lone * / OR-only → empty plan (matches nothing)', () => {
+    for (const q of ['', '   ', '*', 'OR', 'OR OR']) {
+      expect(parseQuery(q).node).toBeNull();
+      expect(m(q, 'anything at all')).toBe(false);
+    }
   });
 
-  it('uppercase-only operators: lowercase or/not/and are plain terms', () => {
-    const plan = parseQuery('error or warning');
-    expect(plan.orGroups).toEqual([
-      [
-        { kind: 'plain', value: 'error', negated: false },
-        { kind: 'plain', value: 'or', negated: false },
-        { kind: 'plain', value: 'warning', negated: false },
-      ],
-    ]);
-    // `not found` stays a 2-term AND, NOT a negation.
-    expect(parseQuery('not found').orGroups[0]).toEqual([
-      { kind: 'plain', value: 'not', negated: false },
-      { kind: 'plain', value: 'found', negated: false },
-    ]);
+  it('operators are UPPERCASE-only: lowercase or/not/and are plain terms', () => {
+    // `error or warning` is a 3-term AND needing the literal "or" too. (Note
+    // "or" is a substring of "err-or", so the false case must drop a term.)
+    expect(m('error or warning', 'error or warning here')).toBe(true);
+    expect(m('error or warning', 'just a warning')).toBe(false); // no "error"
+    // `not found` is a 2-term AND, NOT a negation.
+    expect(m('not found', 'not found here')).toBe(true);
+    expect(m('not found', 'this found text')).toBe(false); // missing "not"
   });
 
-  it('OR splits groups; AND is a no-op keyword', () => {
-    expect(parseQuery('a b OR c d').orGroups).toEqual([
-      [
-        { kind: 'plain', value: 'a', negated: false },
-        { kind: 'plain', value: 'b', negated: false },
-      ],
-      [
-        { kind: 'plain', value: 'c', negated: false },
-        { kind: 'plain', value: 'd', negated: false },
-      ],
-    ]);
-    expect(parseQuery('a AND b').orGroups).toEqual([
-      [
-        { kind: 'plain', value: 'a', negated: false },
-        { kind: 'plain', value: 'b', negated: false },
-      ],
-    ]);
+  it('OR splits alternatives; AND is an accepted no-op keyword', () => {
+    expect(m('a b OR c d', 'c d here')).toBe(true);
+    expect(m('a b OR c d', 'a b here')).toBe(true);
+    expect(m('a b OR c d', 'a only')).toBe(false);
+    expect(m('a AND b', 'a b')).toBe(true);
+    expect(m('a AND b', 'a only')).toBe(false);
   });
 
   it('negation via -term and NOT term', () => {
-    expect(parseQuery('-foo').orGroups[0]).toEqual([
-      { kind: 'plain', value: 'foo', negated: true },
-    ]);
-    expect(parseQuery('NOT foo').orGroups[0]).toEqual([
-      { kind: 'plain', value: 'foo', negated: true },
-    ]);
+    expect(m('error -warning', 'an error occurred')).toBe(true);
+    expect(m('error -warning', 'an error and a warning')).toBe(false);
+    expect(m('NOT secret', 'public text')).toBe(true);
+    expect(m('NOT secret', 'this is secret')).toBe(false);
   });
 
   it('negated phrase via NOT "..." and -"..."', () => {
-    expect(parseQuery('NOT "foo bar"').orGroups[0]).toEqual([
-      { kind: 'phrase', value: 'foo bar', negated: true },
-    ]);
-    expect(parseQuery('-"foo bar"').orGroups[0]).toEqual([
-      { kind: 'phrase', value: 'foo bar', negated: true },
-    ]);
+    expect(m('NOT "foo bar"', 'baz qux')).toBe(true);
+    expect(m('NOT "foo bar"', 'a foo bar here')).toBe(false);
+    expect(m('-"foo bar"', 'a foo bar here')).toBe(false);
   });
 
   it('phrase normalizes internal whitespace; unclosed quote runs to end', () => {
-    expect(parseQuery('"foo   bar"').orGroups[0]).toEqual([
-      { kind: 'phrase', value: 'foo bar', negated: false },
-    ]);
-    expect(parseQuery('"unclosed phrase').orGroups[0]).toEqual([
-      { kind: 'phrase', value: 'unclosed phrase', negated: false },
-    ]);
+    expect(m('"foo   bar"', 'x foo bar y')).toBe(true);
+    expect(m('"foo   bar"', 'foo then bar')).toBe(false);
+    expect(m('"unclosed phrase', 'an unclosed phrase!')).toBe(true);
   });
 
-  it('prefix term strips the trailing *; empty stem is dropped', () => {
-    expect(parseQuery('oauth*').orGroups[0]).toEqual([
-      { kind: 'prefix', value: 'oauth', negated: false },
-    ]);
-    // a bare `*` produced no term, so this is an all-empty parse.
-    expect(parseQuery('*').orGroups).toEqual([]);
+  it('prefix strips trailing * (token-start match); bare * is dropped', () => {
+    expect(m('oauth*', 'an oauthToken here')).toBe(true);
+    expect(m('oauth*', 'reoauth here')).toBe(false);
+    expect(parseQuery('*').node).toBeNull();
   });
 
-  it('seed is the first non-negated term; all-negation → empty seed', () => {
+  it('seed is the first effectively non-negated term; all-negation → empty', () => {
     expect(parseQuery('-a b').seed).toBe('b');
     expect(parseQuery('NOT a NOT b').seed).toBe('');
+    expect(parseQuery('a b').seed).toBe('a');
+    expect(parseQuery('NOT (a b)').seed).toBe(''); // both negated by the group
   });
 
   it('treats interior exotic/Unicode whitespace as a separator (no infinite loop)', () => {
-    // Regression: the tokenizer once skipped only [ \t\n\r] but stopped words on
-    // /\s/, so an interior NBSP/\v/\f/Unicode space wedged the event loop. A
-    // hang would blow the per-test timeout; reaching the assertion proves it.
     for (const ws of ['\u00a0', '\v', '\f', '\u2003']) {
-      expect(parseQuery(`a${ws}b`).orGroups).toEqual([
-        [
-          { kind: 'plain', value: 'a', negated: false },
-          { kind: 'plain', value: 'b', negated: false },
-        ],
-      ]);
+      expect(m(`a${ws}b`, 'has a and b')).toBe(true);
+      expect(m(`a${ws}b`, 'only a')).toBe(false);
     }
+  });
+});
+
+describe('parseQuery — parenthesised grouping (cycle 32)', () => {
+  it('(a OR b) AND c distributes the AND over the OR', () => {
+    expect(m('(a OR b) AND c', 'a c')).toBe(true);
+    expect(m('(a OR b) AND c', 'b c')).toBe(true);
+    expect(m('(a OR b) AND c', 'x b c y')).toBe(true);
+    expect(m('(a OR b) AND c', 'a only')).toBe(false);
+    expect(m('(a OR b) AND c', 'c only')).toBe(false);
+  });
+
+  it('grouping changes precedence vs the bare form', () => {
+    // bare: a OR (b AND c)  —  grouped: (a OR b) AND c
+    expect(m('a OR b AND c', 'a')).toBe(true); // a alone satisfies the OR
+    expect(m('(a OR b) AND c', 'a')).toBe(false); // c required
+  });
+
+  it('precedence parity: a OR b AND c ≡ a OR (b AND c)', () => {
+    for (const hay of ['a', 'b c', 'b', 'c', 'nothing']) {
+      expect(m('a OR b AND c', hay)).toBe(m('a OR (b AND c)', hay));
+    }
+  });
+
+  it('nested groups: ((a OR b) AND c) OR d', () => {
+    expect(m('((a OR b) AND c) OR d', 'just d')).toBe(true);
+    expect(m('((a OR b) AND c) OR d', 'a c')).toBe(true);
+    expect(m('((a OR b) AND c) OR d', 'a only')).toBe(false);
+    expect(m('((a OR b) AND c) OR d', 'b only')).toBe(false);
+  });
+
+  it('NOT negates a whole group', () => {
+    expect(m('NOT (a OR b)', 'c only')).toBe(true);
+    expect(m('NOT (a OR b)', 'has a here')).toBe(false);
+    expect(m('NOT (a OR b)', 'has b here')).toBe(false);
+  });
+
+  it('a literal paren must be phrase-quoted (bare parens are grouping)', () => {
+    // bare: getUser( → atom "getuser" (empty group dropped) → substring match.
+    expect(m('getUser(', 'call getUser( now')).toBe(true);
+    // quoted phrase keeps the paren literally.
+    expect(m('"a(b"', 'x a(b y')).toBe(true);
+    expect(m('"a(b"', 'x a b y')).toBe(false);
+  });
+
+  it('is total on malformed parens/operators (never throws, never loops)', () => {
+    const malformed = [
+      '(',
+      ')',
+      '()',
+      '((a)',
+      'a)',
+      '(NOT)',
+      'a AND',
+      'OR b',
+      'NOT',
+      '((((',
+      '))))',
+      '(a OR) b',
+      'a ) ( b',
+    ];
+    for (const q of malformed) {
+      expect(() =>
+        matchesQuery(parseQuery(q), 'some haystack text'),
+      ).not.toThrow();
+    }
+    // A few that should reduce to a usable query:
+    expect(parseQuery('(').node).toBeNull();
+    expect(parseQuery('()').node).toBeNull();
+    expect(parseQuery('(NOT)').node).toBeNull();
+    expect(parseQuery('NOT').node).toBeNull();
+    expect(m('((a)', 'has a here')).toBe(true);
+    expect(m('a)', 'has a here')).toBe(true);
   });
 });
 
@@ -126,8 +161,7 @@ describe('matchesQuery', () => {
   it('plain AND requires every term as a substring', () => {
     expect(m('oauth flow', 'the oauth flow works')).toBe(true);
     expect(m('oauth flow', 'the oauth works')).toBe(false);
-    // substring (not word-boundary) for plain terms — back-compat.
-    expect(m('oauth', 'reoauthxyz')).toBe(true);
+    expect(m('oauth', 'reoauthxyz')).toBe(true); // substring, not word-boundary
   });
 
   it('phrase requires the contiguous (whitespace-normalized) phrase', () => {
@@ -141,25 +175,16 @@ describe('matchesQuery', () => {
     expect(m('oauth*', 'plain oauth here')).toBe(true);
   });
 
-  it('OR matches when ANY group matches', () => {
+  it('OR matches when ANY alternative matches', () => {
     expect(m('a b OR c', 'only c present')).toBe(true);
     expect(m('a b OR c', 'a and b present')).toBe(true);
     expect(m('a b OR c', 'none here')).toBe(false);
   });
 
-  it('NOT / - exclude records containing the term', () => {
-    expect(m('error -warning', 'an error occurred')).toBe(true);
-    expect(m('error -warning', 'an error and a warning')).toBe(false);
-    expect(m('NOT secret', 'public text')).toBe(true);
-    expect(m('NOT secret', 'this is secret')).toBe(false);
-  });
-
   it('combinations: a "b c" OR -d', () => {
-    const plan = parseQuery('a "b c" OR -d');
-    // group1: contains "a" AND phrase "b c"; group2: does NOT contain "d".
-    expect(matchesQuery(plan, 'a then b c'.toLowerCase())).toBe(true); // group1 hits
-    expect(matchesQuery(plan, 'has d only'.toLowerCase())).toBe(false); // g1 misses "b c"; g2 has "d"
-    expect(matchesQuery(plan, 'fresh text'.toLowerCase())).toBe(true); // g2: contains no "d"
+    expect(m('a "b c" OR -d', 'a then b c')).toBe(true); // g1 hits
+    expect(m('a "b c" OR -d', 'has d only')).toBe(false); // g1 misses, g2 has d
+    expect(m('a "b c" OR -d', 'fresh text')).toBe(true); // g2: no d
   });
 
   it('prefix inside an OR group: oauth* OR token', () => {

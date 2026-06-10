@@ -6,52 +6,66 @@
 
 /**
  * A pure query language for the on-demand transcript scan (`searchTranscripts`).
- * Supports phrase quoting, boolean `OR`/`NOT`, and a `term*` prefix wildcard,
- * compiled to a disjunction-of-conjunctions plan evaluated against a record's
- * lowercased searchable text. See the cycle-27 design doc for the grammar and
- * the deviations from the proposal's FTS5 syntax.
+ * Supports phrase quoting, boolean `OR`/`AND`/`NOT`, a `term*` prefix wildcard,
+ * and parenthesised grouping, parsed to a boolean AST and evaluated recursively
+ * against a record's lowercased searchable text. See the cycle-32 design doc for
+ * the grammar and the deviations from the proposal's FTS5 syntax.
  *
- * Operators are UPPERCASE-ONLY (`OR`, `NOT`, `AND`); lowercase `or`/`not`/`and`
- * are ordinary terms, so every all-lowercase query stays a pure-AND substring
- * search (back-compat with cycle 19). The parser is total — it never throws.
+ * Operators are UPPERCASE-ONLY (`OR`, `AND`, `NOT`); lowercase `or`/`and`/`not`
+ * are ordinary terms, so every all-lowercase query WITHOUT parens stays a
+ * pure-AND substring search (back-compat with cycle 19). Precedence: `OR`
+ * lowest, then implicit `AND`, then `NOT`/atom/parens. The parser is total — it
+ * never throws and never loops.
+ *
+ * NOTE (cycle-32 deviation): bare `(`/`)` are now grouping syntax, so a literal
+ * paren must be phrase-quoted (`"getUser("`) to match as a substring.
  */
 
-/** One compiled term. `value` is already lowercased (phrase: whitespace-normalized). */
+/** One compiled atom. `value` is already lowercased (phrase: whitespace-normalized). */
 export interface QueryTerm {
   kind: 'plain' | 'phrase' | 'prefix';
   value: string;
-  negated: boolean;
 }
 
-/** A compiled query: ANY OR-group fully matching (AND within a group) = a hit. */
+/** A boolean expression node. `not` negates its single child. */
+export type QueryNode =
+  | { t: 'and' | 'or'; kids: QueryNode[] }
+  | { t: 'not'; kid: QueryNode }
+  | { t: 'atom'; term: QueryTerm };
+
+/** A compiled query: a boolean tree (or `null` = empty query → matches nothing). */
 export interface QueryPlan {
-  orGroups: QueryTerm[][];
+  node: QueryNode | null;
   /**
-   * The first non-negated term's literal (lowercased) for snippet centering, or
-   * `''` when the query is all-negation / empty. `searchTranscripts` passes this
-   * to `snippet(text, seed)`.
+   * The first effectively-non-negated atom's literal (lowercased) for snippet
+   * centering, or `''` when the query is all-negation / empty.
+   * `searchTranscripts` passes this to `snippet(text, seed)`.
    */
   seed: string;
 }
 
-type Token = { type: 'word' | 'phrase'; text: string };
+type Token =
+  | { type: 'word'; text: string }
+  | { type: 'phrase'; text: string }
+  | { type: 'lparen' }
+  | { type: 'rparen' };
 
-/**
- * Split a query into word/phrase tokens. A `"` opens a phrase that runs to the
- * next `"` or end-of-input (an unclosed quote → phrase-to-end, never an error);
- * otherwise a run of non-whitespace, non-`"` characters is a word.
- */
 const WS = /\s/;
 
+/**
+ * Split a query into word / phrase / paren tokens. A `"` opens a phrase that
+ * runs to the next `"` or end-of-input (unclosed → phrase-to-end, never an
+ * error); `(` and `)` are their own tokens (so `(abc` → `lparen` + word `abc`);
+ * otherwise a run of non-whitespace, non-`"`, non-paren characters is a word.
+ */
 function tokenize(q: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   while (i < q.length) {
     const ch = q[i];
     // Skip whitespace using the SAME predicate the word-scanner stops on — a
-    // mismatch (e.g. skip on a literal space-set but stop on /\s/) leaves a
-    // char that is neither skipped nor consumed, so `j` never advances and the
-    // loop spins forever on an interior NBSP/\v/\f/Unicode space.
+    // mismatch leaves a char that is neither skipped nor consumed, so the loop
+    // spins forever on an interior NBSP/\v/\f/Unicode space.
     if (WS.test(ch)) {
       i++;
       continue;
@@ -66,9 +80,26 @@ function tokenize(q: string): Token[] {
       i = close + 1;
       continue;
     }
-    // A word: run up to the next whitespace or quote.
+    if (ch === '(') {
+      tokens.push({ type: 'lparen' });
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      tokens.push({ type: 'rparen' });
+      i++;
+      continue;
+    }
+    // A word: run up to the next whitespace, quote, or paren.
     let j = i;
-    while (j < q.length && !WS.test(q[j]) && q[j] !== '"') j++;
+    while (
+      j < q.length &&
+      !WS.test(q[j]) &&
+      q[j] !== '"' &&
+      q[j] !== '(' &&
+      q[j] !== ')'
+    )
+      j++;
     tokens.push({ type: 'word', text: q.slice(i, j) });
     i = j;
   }
@@ -80,73 +111,115 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Build an atom term from a word's text, or null when it carries no value. */
+function wordTerm(text: string): QueryTerm | null {
+  if (text.endsWith('*')) {
+    const value = text.slice(0, -1).toLowerCase();
+    return value ? { kind: 'prefix', value } : null;
+  }
+  const value = text.toLowerCase();
+  return value ? { kind: 'plain', value } : null;
+}
+
 /**
- * Parse a query string into a {@link QueryPlan}. Total (never throws). Empty
- * OR-groups are dropped; an all-empty parse yields `orGroups: []`, which
- * `matchesQuery` treats as "matches nothing" (the caller returns no results).
+ * Parse a query string into a {@link QueryPlan}. Total (never throws, never
+ * loops): every recursion either consumes a token or the caller's guard stops
+ * it, and a `pos === before` safety break in the AND-loop guarantees progress.
  */
 export function parseQuery(q: string): QueryPlan {
   const tokens = tokenize(q);
-  const groups: QueryTerm[][] = [];
-  let current: QueryTerm[] = [];
-  let pendingNegate = false;
+  let pos = 0;
+  let seed = '';
 
-  const pushTerm = (
-    kind: QueryTerm['kind'],
-    value: string,
-    negated: boolean,
-  ): void => {
-    if (!value) return;
-    current.push({ kind, value, negated });
+  const peek = (): Token | undefined => tokens[pos];
+  const isWord = (t: Token | undefined, text: string): boolean =>
+    t !== undefined && t.type === 'word' && t.text === text;
+
+  // Record the first effectively-positive atom's value for snippet centering.
+  const recordSeed = (term: QueryTerm, effNeg: boolean): void => {
+    if (!effNeg && seed === '') seed = term.value;
   };
 
-  for (const tok of tokens) {
-    if (tok.type === 'phrase') {
-      const value = tok.text.replace(/\s+/g, ' ').trim().toLowerCase();
-      pushTerm('phrase', value, pendingNegate);
-      pendingNegate = false;
-      continue;
+  // OR has the lowest precedence: a sequence of AND-groups separated by `OR`.
+  const parseOr = (effNeg: boolean): QueryNode | null => {
+    const kids: QueryNode[] = [];
+    const first = parseAnd(effNeg);
+    if (first) kids.push(first);
+    while (isWord(peek(), 'OR')) {
+      pos++; // consume OR
+      const next = parseAnd(effNeg);
+      if (next) kids.push(next);
+    }
+    if (kids.length === 0) return null;
+    if (kids.length === 1) return kids[0];
+    return { t: 'or', kids };
+  };
+
+  // Implicit AND between adjacent atoms; `AND` keyword is an accepted no-op.
+  // Stops at `OR`, `)`, or end-of-input.
+  const parseAnd = (effNeg: boolean): QueryNode | null => {
+    const kids: QueryNode[] = [];
+    for (;;) {
+      const t = peek();
+      if (t === undefined || t.type === 'rparen' || isWord(t, 'OR')) break;
+      if (isWord(t, 'AND')) {
+        pos++; // no-op separator
+        continue;
+      }
+      const before = pos;
+      const atom = parseAtom(effNeg);
+      if (atom) kids.push(atom);
+      if (pos === before) break; // safety: guarantee progress (totality)
+    }
+    if (kids.length === 0) return null;
+    if (kids.length === 1) return kids[0];
+    return { t: 'and', kids };
+  };
+
+  const parseAtom = (effNeg: boolean): QueryNode | null => {
+    const t = peek();
+    if (t === undefined || t.type === 'rparen') return null;
+
+    if (t.type === 'lparen') {
+      pos++; // consume (
+      const inner = parseOr(effNeg);
+      if (peek()?.type === 'rparen') pos++; // consume optional closing )
+      return inner;
     }
 
-    const w = tok.text;
-    if (w === 'OR') {
-      if (current.length) groups.push(current);
-      current = [];
-      pendingNegate = false;
-      continue;
-    }
-    if (w === 'AND') continue; // implicit AND — accept the keyword as a no-op.
-    if (w === 'NOT' || w === '-') {
-      pendingNegate = true;
-      continue;
+    // NOT / lone `-` prefix → negate the following atom (which may be a group).
+    if (isWord(t, 'NOT') || isWord(t, '-')) {
+      pos++;
+      const kid = parseAtom(!effNeg);
+      return kid ? { t: 'not', kid } : null;
     }
 
-    let negated = pendingNegate;
-    pendingNegate = false;
-    let text = w;
+    if (t.type === 'phrase') {
+      pos++;
+      const value = t.text.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!value) return null;
+      const term: QueryTerm = { kind: 'phrase', value };
+      recordSeed(term, effNeg);
+      return { t: 'atom', term };
+    }
+
+    // A word atom, possibly with a leading `-` (negation) and/or trailing `*`.
+    pos++;
+    let text = t.text;
+    let neg = false;
     if (text.startsWith('-')) {
-      negated = true;
+      neg = true;
       text = text.slice(1);
     }
-    if (text.endsWith('*')) {
-      pushTerm('prefix', text.slice(0, -1).toLowerCase(), negated);
-    } else {
-      pushTerm('plain', text.toLowerCase(), negated);
-    }
-  }
-  if (current.length) groups.push(current);
+    const term = wordTerm(text);
+    if (!term) return null;
+    recordSeed(term, neg ? !effNeg : effNeg);
+    const atom: QueryNode = { t: 'atom', term };
+    return neg ? { t: 'not', kid: atom } : atom;
+  };
 
-  let seed = '';
-  outer: for (const g of groups) {
-    for (const t of g) {
-      if (!t.negated) {
-        seed = t.value;
-        break outer;
-      }
-    }
-  }
-
-  return { orGroups: groups, seed };
+  const node = parseOr(false);
+  return { node, seed };
 }
 
 /**
@@ -167,26 +240,33 @@ function prefixRegex(t: QueryTerm): RegExp {
   return re;
 }
 
-/** Does a single term match the (already lowercased) haystack? */
+/** Does a single atom term match the (already lowercased) haystack? */
 function termMatch(t: QueryTerm, hayLower: string): boolean {
-  let hit: boolean;
-  if (t.kind === 'prefix') {
-    hit = prefixRegex(t).test(hayLower);
-  } else {
-    // plain and phrase are both substring matches.
-    hit = hayLower.includes(t.value);
+  if (t.kind === 'prefix') return prefixRegex(t).test(hayLower);
+  // plain and phrase are both substring matches.
+  return hayLower.includes(t.value);
+}
+
+function evalNode(node: QueryNode, hayLower: string): boolean {
+  switch (node.t) {
+    case 'atom':
+      return termMatch(node.term, hayLower);
+    case 'not':
+      return !evalNode(node.kid, hayLower);
+    case 'and':
+      return node.kids.every((k) => evalNode(k, hayLower));
+    case 'or':
+      return node.kids.some((k) => evalNode(k, hayLower));
+    default:
+      return false; // unreachable: the union above is exhaustive.
   }
-  return t.negated ? !hit : hit;
 }
 
 /**
- * Evaluate a compiled plan against a record's lowercased searchable text. A hit
- * requires ANY OR-group whose every term matches. An empty plan (no groups)
- * never matches.
+ * Evaluate a compiled plan against a record's lowercased searchable text. An
+ * empty plan (`node === null`) never matches.
  */
 export function matchesQuery(plan: QueryPlan, hayLower: string): boolean {
-  if (plan.orGroups.length === 0) return false;
-  return plan.orGroups.some((group) =>
-    group.every((t) => termMatch(t, hayLower)),
-  );
+  if (plan.node === null) return false;
+  return evalNode(plan.node, hayLower);
 }

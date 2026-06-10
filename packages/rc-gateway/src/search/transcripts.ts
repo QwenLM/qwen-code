@@ -120,7 +120,7 @@ export async function searchTranscripts(
   opts: SearchOptions = {},
 ): Promise<SearchHit[]> {
   const plan = parseQuery(query);
-  if (plan.orGroups.length === 0) return [];
+  if (plan.node === null) return [];
 
   const wantType =
     opts.kind && opts.kind !== 'all' ? KIND_MAP[opts.kind] : undefined;
