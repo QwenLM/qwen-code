@@ -817,6 +817,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // external schedulers. Updated on prompt start/end and session
   // spawn/restore. `null` until the first activity after boot.
   let lastActivityTimestamp: number | null = null;
+  let activePromptCounter = 0;
   function touchActivity(): void {
     lastActivityTimestamp = Date.now();
   }
@@ -2462,11 +2463,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     get activePromptCount() {
-      let count = 0;
-      for (const entry of byId.values()) {
-        if (entry.promptActive) count++;
-      }
-      return count;
+      return activePromptCounter;
     },
 
     get lastActivityAt() {
@@ -2723,6 +2720,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
                 entry.promptActive = true;
+                activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();
                 if (originatorClientId === undefined) {
@@ -2753,6 +2751,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   echoPromptToSessionBus(entry, normalized, originatorClientId);
                 } catch (echoErr) {
                   entry.promptActive = false;
+                  activePromptCounter--;
                   delete entry.activePromptOriginatorClientId;
                   throw echoErr;
                 }
@@ -2760,6 +2759,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .prompt(normalized)
                   .finally(() => {
                     entry.promptActive = false;
+                    activePromptCounter--;
                     entry.sessionLastSeenAt = Date.now();
                     touchActivity();
                     delete entry.activePromptOriginatorClientId;
