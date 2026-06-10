@@ -162,15 +162,20 @@ describe('SubagentManager', () => {
           runConfig: { max_time_minutes: 5, max_turns: 10 },
         };
       }
-      if (yamlString.includes('background:')) {
+      if (
+        yamlString.includes('background:') ||
+        yamlString.includes('approvalMode:')
+      ) {
         const bgMatch = yamlString.match(/background:\s*"?(true|false)"?/);
-        const bgValue = bgMatch?.[1] === 'true' ? true : false;
-        return {
+        const approvalMatch = yamlString.match(/approvalMode:\s*"?([\w-]+)"?/);
+        const result: Record<string, unknown> = {
           name: yamlString.match(/name:\s*(\S+)/)?.[1] ?? 'test-agent',
           description:
             yamlString.match(/description:\s*(.+)/)?.[1] ?? 'A test subagent',
-          background: bgValue,
         };
+        if (bgMatch) result['background'] = bgMatch[1] === 'true';
+        if (approvalMatch) result['approvalMode'] = approvalMatch[1];
+        return result;
       }
       if (yamlString.includes('name: agent1')) {
         return { name: 'agent1', description: 'First agent' };
@@ -592,6 +597,54 @@ You are an agent.
       );
 
       expect(config.background).toBeUndefined();
+    });
+
+    it('should parse approvalMode: bubble from frontmatter', () => {
+      const md = `---
+name: bubbler
+description: A background agent that bubbles approvals
+background: true
+approvalMode: bubble
+---
+
+You are a bubbler.
+`;
+      const config = manager.parseSubagentContent(
+        md,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.approvalMode).toBe('bubble');
+    });
+
+    it('should reject an unknown approvalMode value', () => {
+      const md = `---
+name: weird
+description: An agent with a bogus mode
+approvalMode: telepathy
+---
+
+You are weird.
+`;
+      expect(() =>
+        manager.parseSubagentContent(md, validConfig.filePath!, 'project'),
+      ).toThrow(/Invalid "approvalMode"/);
+    });
+
+    it('should round-trip approvalMode: bubble through serialize', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        approvalMode: 'bubble',
+      });
+      expect(serialized).toContain('approvalMode: bubble');
+
+      const reparsed = manager.parseSubagentContent(
+        serialized,
+        validConfig.filePath!,
+        'project',
+      );
+      expect(reparsed.approvalMode).toBe('bubble');
     });
   });
 

@@ -21,9 +21,16 @@
  *   and don't participate in the headless holdback.
  */
 
+import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
+import {
+  AgentEventType,
+  type AgentApprovalRequestEvent,
+  type AgentEventEmitter,
+  type AgentToolResultEvent,
+} from './runtime/agent-events.js';
 import type { AgentExternalInput } from './runtime/agent-types.js';
 import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 
@@ -85,6 +92,14 @@ export const MAX_RETAINED_TERMINAL_AGENTS = 32;
 const CANCEL_GRACE_MS = 5000;
 
 /**
+ * Outcome used to auto-reject a parked approval that can no longer be
+ * answered (the agent terminated, or the entry was gone when the event
+ * arrived). `Cancel` resolves the parked tool call as denied so the
+ * agent's reasoning loop unblocks instead of hanging.
+ */
+const REJECTED_OUTCOME = ToolConfirmationOutcome.Cancel;
+
+/**
  * Single source of truth for the human-facing label of a background
  * entry. Shared by the notification payload (model-facing) and the TUI
  * dialog (user-facing) so the two surfaces never drift.
@@ -131,6 +146,34 @@ export interface AgentCompletionStats {
   totalTokens: number;
   toolUses: number;
   durationMs: number;
+}
+
+/**
+ * A tool call from a background agent that is parked waiting for the user
+ * to approve or reject it from the parent session's UI ("permission
+ * bubbling"). Without this, a background agent whose `approvalMode` still
+ * requires confirmation for some call would be auto-denied — defeating the
+ * point of backgrounding. The entry holds everything the shared
+ * confirmation component needs to render plus the `respond` callback that
+ * resumes the parked tool call.
+ *
+ * `confirmationDetails` deliberately omits `onConfirm` (the runtime owns
+ * that via `respond`) — the UI renders the rest and calls `respond` with
+ * the chosen outcome.
+ */
+export interface BackgroundApproval {
+  /** Tool-call id the approval belongs to. */
+  callId: string;
+  /** Tool name (e.g. `Shell`) — drives the row/notification label. */
+  name: string;
+  /** Render-friendly one-line description of the call. */
+  description: string;
+  /** Everything the confirmation UI needs except the owned `onConfirm`. */
+  confirmationDetails: AgentApprovalRequestEvent['confirmationDetails'];
+  /** Resolve the parked call with the user's outcome. */
+  respond: AgentApprovalRequestEvent['respond'];
+  /** Emission timestamp (ms) — newest-first ordering in the UI. */
+  at: number;
 }
 
 /**
@@ -201,6 +244,14 @@ export interface AgentTask extends TaskBase {
    * initializes the array lazily.
    */
   recentActivities?: readonly BackgroundActivity[];
+  /**
+   * Tool calls this background agent has parked awaiting user approval
+   * (permission bubbling). Empty/absent unless the agent opted into
+   * bubbling AND a tool call reached `awaiting_approval`. Each is answered
+   * via its `respond` callback; answering removes it from this list.
+   * Newest last, mirroring `recentActivities`.
+   */
+  pendingApprovals?: readonly BackgroundApproval[];
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
   /**
@@ -278,6 +329,17 @@ export type BackgroundStatusChangeCallback = (entry?: AgentTask) => void;
 /** Fires on `appendActivity` — scoped to detail-view consumers. */
 export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
 
+/**
+ * Fires when a background agent's pending-approval queue changes (a tool
+ * call is parked for confirmation, or a parked one is answered/cleared).
+ * Distinct from `statusChange` so the footer pill and roster snapshot can
+ * react to "needs approval" without re-rendering on every tool call, and
+ * distinct from `activityChange` so a consumer can subscribe to approvals
+ * alone. The arg carries the affected entry (with its current
+ * `pendingApprovals`).
+ */
+export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
+
 type MessageWaiter = () => void;
 
 export interface BackgroundTaskRegistryOptions {
@@ -292,6 +354,7 @@ export class BackgroundTaskRegistry {
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
   private activityChangeCallback?: BackgroundActivityChangeCallback;
+  private approvalChangeCallback?: BackgroundApprovalChangeCallback;
 
   constructor(options: BackgroundTaskRegistryOptions = {}) {
     const configured =
@@ -382,6 +445,7 @@ export class BackgroundTaskRegistry {
     entry.stats = stats;
     debugLogger.info(`Background agent completed: ${agentId}`);
 
+    this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
   }
@@ -431,6 +495,7 @@ export class BackgroundTaskRegistry {
     entry.stats = stats;
     debugLogger.info(`Background agent failed: ${agentId}`);
 
+    this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
   }
@@ -456,6 +521,14 @@ export class BackgroundTaskRegistry {
     if (!entry || entry.status !== 'running') return;
     const persistedStatus = options.persistedStatus ?? 'cancelled';
 
+    // Reject parked approvals BEFORE aborting. Order matters: abort()
+    // synchronously unwinds the agent's awaiting tool batch, which emits a
+    // synthetic TOOL_RESULT for the parked call — the approval bridge's
+    // onResult then clears the queue, and a reject that ran after the abort
+    // would find nothing left to answer. Rejecting first guarantees each
+    // parked call's `respond(Cancel)` actually fires, and the bridge's
+    // subsequent clear is a no-op on the already-emptied queue.
+    this.rejectPendingApprovals(entry);
     entry.abortController.abort();
     entry.status = 'cancelled';
     entry.endTime = Date.now();
@@ -501,6 +574,7 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.notified = true;
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
+    this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
   }
 
@@ -523,6 +597,7 @@ export class BackgroundTaskRegistry {
     entry.endTime ??= Date.now();
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
+    this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
   }
@@ -555,6 +630,135 @@ export class BackgroundTaskRegistry {
     }
     entry.recentActivities = next;
     this.emitActivityChange(entry);
+  }
+
+  /**
+   * Park a tool call awaiting user approval ("permission bubbling"). No-op
+   * (and the call is auto-rejected by the caller) if the entry is not a
+   * running background agent — late approvals after cancellation must not
+   * resurrect a parked prompt. Duplicate callIds are ignored so a
+   * re-emitted event can't double-list the same call.
+   */
+  addPendingApproval(agentId: string, approval: BackgroundApproval): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry || !entry.isBackgrounded || entry.status !== 'running') {
+      return false;
+    }
+    const prior = entry.pendingApprovals ?? [];
+    if (prior.some((a) => a.callId === approval.callId)) return false;
+    entry.pendingApprovals = [...prior, approval];
+    debugLogger.info(
+      `Parked approval for background agent ${agentId} ` +
+        `(call ${approval.callId}, ${entry.pendingApprovals.length} pending)`,
+    );
+    this.emitApprovalChange(entry);
+    return true;
+  }
+
+  /**
+   * Answer a parked approval with the user's outcome. Invokes the parked
+   * call's `respond` callback (which re-enters the agent's runtime frames
+   * and resumes the tool), removes it from the queue, and fires an approval
+   * change. No-op if the call isn't parked (already answered or cleared).
+   */
+  async resolvePendingApproval(
+    agentId: string,
+    callId: string,
+    outcome: Parameters<BackgroundApproval['respond']>[0],
+    payload?: Parameters<BackgroundApproval['respond']>[1],
+  ): Promise<boolean> {
+    const entry = this.agents.get(agentId);
+    if (!entry) return false;
+    const approval = entry.pendingApprovals?.find((a) => a.callId === callId);
+    if (!approval) return false;
+    // Remove before responding so a re-entrant read inside the respond
+    // chain (or a racing TOOL_RESULT clear) sees the call already gone.
+    entry.pendingApprovals = (entry.pendingApprovals ?? []).filter(
+      (a) => a.callId !== callId,
+    );
+    this.emitApprovalChange(entry);
+    try {
+      await approval.respond(outcome, payload);
+    } catch (error) {
+      debugLogger.error(
+        `Failed to resolve background approval for ${agentId}/${callId}:`,
+        error,
+      );
+    }
+    return true;
+  }
+
+  /**
+   * Drop a parked approval WITHOUT responding. Used when the underlying
+   * tool call settled through another path (e.g. the scheduler resolved it
+   * via an IDE confirmation handler) so the stale prompt must clear without
+   * double-answering. Mirrors the foreground `pendingConfirmation` clear in
+   * the Agent tool's TOOL_RESULT handler.
+   */
+  clearPendingApproval(agentId: string, callId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry?.pendingApprovals?.length) return;
+    const next = entry.pendingApprovals.filter((a) => a.callId !== callId);
+    if (next.length === entry.pendingApprovals.length) return;
+    entry.pendingApprovals = next;
+    this.emitApprovalChange(entry);
+  }
+
+  /** Read a background agent's parked approvals (empty if none). */
+  getPendingApprovals(agentId: string): readonly BackgroundApproval[] {
+    return this.agents.get(agentId)?.pendingApprovals ?? [];
+  }
+
+  /**
+   * Subscribe to a background agent's tool-call event stream and bridge
+   * approval requests into this registry's parked-approval queue. Returns
+   * an unsubscribe function the caller MUST invoke when the agent
+   * terminates. Only wire this up when the agent opted into permission
+   * bubbling — otherwise the scheduler auto-denies before any
+   * `TOOL_WAITING_APPROVAL` fires and this would never see an event anyway.
+   *
+   * On agent termination any still-parked approval is auto-rejected via its
+   * `respond` callback (handled by the caller's cleanup of the agent), so
+   * the reasoning loop never hangs on an unanswered prompt.
+   */
+  bridgeApprovalEvents(
+    agentId: string,
+    emitter: AgentEventEmitter,
+  ): () => void {
+    const onWaiting = (event: AgentApprovalRequestEvent) => {
+      const parked = this.addPendingApproval(agentId, {
+        callId: event.callId,
+        name: event.name,
+        description: event.description,
+        confirmationDetails: event.confirmationDetails,
+        respond: event.respond,
+        at: event.timestamp,
+      });
+      // If the entry is already gone/terminal we couldn't park it — reject
+      // so the agent's reasoning loop doesn't block forever on this call.
+      // `.catch()` rather than try/catch: respond is async and a late
+      // rejection (frames torn down post-termination) must not escape as
+      // an unhandledRejection.
+      if (!parked) {
+        void event.respond(REJECTED_OUTCOME).catch((error) => {
+          debugLogger.error(
+            `Failed to reject unparkable approval ${agentId}/${event.callId}:`,
+            error,
+          );
+        });
+      }
+    };
+    const onResult = (event: AgentToolResultEvent) => {
+      // A result for a parked call means it settled elsewhere — clear the
+      // stale prompt (without responding again).
+      this.clearPendingApproval(agentId, event.callId);
+    };
+    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    return () => {
+      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+    };
   }
 
   get(agentId: string): AgentTask | undefined {
@@ -729,6 +933,12 @@ export class BackgroundTaskRegistry {
     this.activityChangeCallback = cb;
   }
 
+  setApprovalChangeCallback(
+    cb: BackgroundApprovalChangeCallback | undefined,
+  ): void {
+    this.approvalChangeCallback = cb;
+  }
+
   abortAll(options: BackgroundTaskCancelOptions = {}): void {
     const cancelOptions: BackgroundTaskCancelOptions = {
       persistedStatus: 'running',
@@ -897,5 +1107,40 @@ export class BackgroundTaskRegistry {
     } catch (error) {
       debugLogger.error('Failed to emit background activity change:', error);
     }
+  }
+
+  private emitApprovalChange(entry: AgentTask): void {
+    if (!this.approvalChangeCallback) return;
+    try {
+      this.approvalChangeCallback(entry);
+    } catch (error) {
+      debugLogger.error('Failed to emit background approval change:', error);
+    }
+  }
+
+  /**
+   * Auto-reject and drop every parked approval for an entry. Called when
+   * the entry reaches a terminal state so the agent's reasoning loop never
+   * hangs on a prompt no one will answer, and the UI surface clears. Each
+   * parked call is resolved with `Cancel` (denied). Safe to call on entries
+   * with no parked approvals.
+   */
+  private rejectPendingApprovals(entry: AgentTask): void {
+    const parked = entry.pendingApprovals;
+    if (!parked?.length) return;
+    entry.pendingApprovals = [];
+    for (const approval of parked) {
+      // `respond` is async — a `.catch()` on the promise is the only thing
+      // that actually intercepts its rejection (a surrounding try/catch
+      // would only see synchronous throws and let the rejection escape as
+      // an unhandledRejection).
+      void approval.respond(REJECTED_OUTCOME).catch((error) => {
+        debugLogger.error(
+          `Failed to auto-reject parked approval ${entry.agentId}/${approval.callId}:`,
+          error,
+        );
+      });
+    }
+    this.emitApprovalChange(entry);
   }
 }

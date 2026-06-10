@@ -14,6 +14,7 @@ import {
 import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
@@ -27,6 +28,17 @@ const KIND_NAMES = {
  * once everything is terminal, switch to a generic "done" form so the pill
  * still invites reopening the dialog to inspect final state.
  */
+/**
+ * True if any background agent has a tool call parked awaiting user
+ * approval (permission bubbling). Drives the pill's "needs approval"
+ * marker so the user is nudged to open the dialog and answer.
+ */
+export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) => e.kind === 'agent' && (e.pendingApprovals?.length ?? 0) > 0,
+  );
+}
+
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
 
@@ -112,11 +124,15 @@ export const BackgroundTasksPill: React.FC = () => {
   if (entries.length === 0) return null;
 
   const label = getPillLabel(entries);
+  const needsApproval = hasPendingApproval(entries);
 
   return (
     <>
       <Text color={theme.text.secondary}> · </Text>
       <Text inverse={pillFocused}>{label}</Text>
+      {needsApproval && (
+        <Text color={theme.status.warning}>{` ⚠ ${t('needs approval')}`}</Text>
+      )}
     </>
   );
 };

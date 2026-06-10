@@ -11,17 +11,25 @@ import { useBackgroundTaskView, entryId } from './useBackgroundTaskView.js';
 
 interface FakeRegistry {
   setStatusChangeCallback: ReturnType<typeof vi.fn>;
-  /** Test helper — invokes the currently-set callback. */
+  setApprovalChangeCallback: ReturnType<typeof vi.fn>;
+  /** Test helper — invokes the currently-set status callback. */
   fire: () => void;
+  /** Test helper — invokes the currently-set approval callback. */
+  fireApproval: () => void;
 }
 
 function makeFakeRegistry(): FakeRegistry {
   let cb: (() => void) | undefined;
+  let approvalCb: (() => void) | undefined;
   return {
     setStatusChangeCallback: vi.fn((next: (() => void) | undefined) => {
       cb = next;
     }),
+    setApprovalChangeCallback: vi.fn((next: (() => void) | undefined) => {
+      approvalCb = next;
+    }),
     fire: () => cb?.(),
+    fireApproval: () => approvalCb?.(),
   };
 }
 

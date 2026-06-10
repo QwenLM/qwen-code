@@ -45,6 +45,7 @@ import type {
   AgentTaskRegistration,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import type {
   PromptConfig,
   RunConfig,
@@ -559,9 +560,18 @@ export class BackgroundAgentResumeService {
           this.config,
           resolvedApprovalMode as ApprovalMode,
         );
+      // Mirror the launch path's permission-bubbling gate (agent.ts): an
+      // agent whose definition uses `approvalMode: bubble` surfaces
+      // confirmations to the parent UI instead of auto-denying, in
+      // interactive sessions. Without this, a resumed agent of the SAME
+      // definition would silently auto-deny calls the fresh launch bubbles.
+      const shouldBubble = Boolean(
+        target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
+          this.config.isInteractive(),
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bgConfig = Object.create(agentConfig) as any;
-      bgConfig.getShouldAvoidPermissionPrompts = () => true;
+      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -751,6 +761,12 @@ export class BackgroundAgentResumeService {
       bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
       bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
+      // Bridge permission prompts to the parent's Background tasks UI when
+      // bubbling is enabled — same wiring as the launch path in agent.ts.
+      const cleanupApprovalBridge = shouldBubble
+        ? registry.bridgeApprovalEvents(meta.agentId, bgEmitter)
+        : undefined;
+
       const runBody = async () => {
         try {
           await subagent.execute(contextState, bgAbortController.signal);
@@ -828,6 +844,7 @@ export class BackgroundAgentResumeService {
         } finally {
           bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
           bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+          cleanupApprovalBridge?.();
           cleanupOwnedMonitorNotifications?.();
           cleanupJsonl?.();
           // Release the per-subagent ToolRegistry the resumed agent's

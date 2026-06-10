@@ -842,12 +842,10 @@ export default {
     '请提供指令。用法：/fork <指令>',
   'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
-  'Cannot fork before the first conversation turn.':
-    '首次对话轮次前无法分支。',
+  'Cannot fork before the first conversation turn.': '首次对话轮次前无法分支。',
   'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
     '/fork 命令需要启用 fork 功能开关。设置 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以启用。',
-  'The agent tool is unavailable; cannot fork.':
-    'Agent 工具不可用；无法分支。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；无法分支。',
   'Failed to launch fork: {{error}}': '启动分支失败：{{error}}',
   'the background agent could not be started.': '后台智能体无法启动。',
   'User launched a background fork via /fork: {{directive}}':
@@ -1802,6 +1800,9 @@ export default {
   'Background tasks': '后台任务',
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
+  'needs approval': '待审批',
+  'Background agent needs approval': '后台 agent 等待审批',
+  'Approve or deny the request above': '请批准或拒绝上方的请求',
   Running: '运行中',
   Paused: '已暂停',
   Completed: '已完成',
