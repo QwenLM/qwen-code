@@ -310,6 +310,7 @@ describe('Session', () => {
       getFileHistoryService: vi.fn().mockReturnValue({
         makeSnapshot: vi.fn().mockResolvedValue(undefined),
         getSnapshots: vi.fn().mockReturnValue([]),
+        restoreFromSnapshots: vi.fn(),
         rewind: vi.fn(),
       }),
     } as unknown as Config;
