@@ -1064,6 +1064,7 @@ export class GeminiClient {
       // genuinely new skills/commands are announced thereafter (avoids
       // re-injecting the full listing on resume / post-compaction).
       this.announcedSkillReminderKeys = new Set();
+      this.everAnnouncedSkillReminderKeys = new Set();
       this.skillRemindersInitialized = false;
       history = await getInitialChatHistory(this.config, extraHistory);
       const systemInstruction = this.getMainSessionSystemInstruction();
