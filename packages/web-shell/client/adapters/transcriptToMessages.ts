@@ -416,6 +416,29 @@ function appendToolCallMessage(
   blockId: string,
   toolCall: DaemonMessageToolCall,
 ): void {
+  // Native CLI groups every tool call of one scheduler batch into a single
+  // bordered tool_group (mapToDisplay in useReactToolScheduler). The daemon
+  // transcript carries no batch marker, so the replay-stable equivalent is
+  // adjacency: a tool block arriving while a tool_group is still the latest
+  // visible message joins that group instead of opening a new box.
+  //
+  // Sub-agent calls stay in their own single-tool groups — MessageList's
+  // groupParallelAgents relies on that shape to render consecutive agent
+  // launches as ParallelAgentsGroup.
+  //
+  // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
+  // bare block id without the `tg-` prefix and never absorb real tool calls.
+  const last = messages[messages.length - 1];
+  if (
+    last &&
+    last.role === 'tool_group' &&
+    last.id.startsWith('tg-') &&
+    !isSubAgentToolCall(toolCall) &&
+    !last.tools.some(isSubAgentToolCall)
+  ) {
+    last.tools.push(toolCall);
+    return;
+  }
   messages.push({
     id: `tg-${blockId}`,
     role: 'tool_group',
