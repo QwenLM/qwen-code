@@ -454,6 +454,9 @@ function createComponents(deferMermaid?: boolean): Components {
   };
 }
 
+const COMPONENTS_DEFAULT = createComponents();
+const COMPONENTS_DEFER_MERMAID = createComponents(true);
+
 export const Markdown = memo(function Markdown({
   content,
   source,
@@ -468,7 +471,9 @@ export const Markdown = memo(function Markdown({
     source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
-  const components = createComponents(deferMermaid);
+  const components = deferMermaid
+    ? COMPONENTS_DEFER_MERMAID
+    : COMPONENTS_DEFAULT;
   const renderedComponents = sourceMarkdown?.components
     ? { ...components, ...sourceMarkdown.components }
     : components;
