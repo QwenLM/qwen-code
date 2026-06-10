@@ -19,6 +19,35 @@
   position: relative;
 }
 
+.settingsButton {
+  /* Sits in the bar's 2ch left-padding gutter (plus a few px of the footer
+     margin) so the mode label keeps its input-text alignment — the gear takes
+     no flex space. The gutter alone (~15.6px) is narrower than the button, so
+     the extra -6px buys a visible gap between the icon and the mode label
+     instead of the two touching. font: inherit so the -2ch resolves against
+     the same font as the bar's 2ch padding; the 2px padding is hit area, free
+     since we're out of flow. */
+  position: absolute;
+  left: calc(-2ch - 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--text-dimmed);
+  cursor: pointer;
+}
+
+.settingsButton:hover,
+.settingsButton:focus-visible {
+  color: var(--text-primary);
+}
+
 .modeButton {
   display: inline-flex;
   align-items: center;

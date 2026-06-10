@@ -2176,12 +2176,14 @@ export function App({
                       ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
-                  // The approval-mode and model pickers are reachable by mouse
-                  // from the status bar, so they reveal themselves when opened
-                  // while the user is scrolled up; the agents/memory panels
-                  // keep the user's scroll position.
+                  // The approval-mode/model pickers and the settings panel are
+                  // reachable by mouse from the status bar, so they reveal
+                  // themselves when opened while the user is scrolled up; the
+                  // agents/memory panels keep the user's scroll position.
                   autoScrollTailIntoView={
-                    approvalModeInlineOpen || modelInlineMode !== null
+                    approvalModeInlineOpen ||
+                    modelInlineMode !== null ||
+                    settingsInlineOpen
                   }
                 />
 
@@ -2255,6 +2257,7 @@ export function App({
                     setModelInlineMode((v) => (v ? null : 'main'))
                   }
                   onShowContext={() => showContextUsage('/context', false)}
+                  onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
                 />
               ))}
 
