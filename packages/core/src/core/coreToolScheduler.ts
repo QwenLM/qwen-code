@@ -117,7 +117,11 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import {
+  formatTruncatedContent,
+  truncateContentInMemory,
+  truncateToolOutput,
+} from '../utils/truncation.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
@@ -674,6 +678,108 @@ export function convertToFunctionResponse(
   return [
     createFunctionResponsePart(callId, toolName, 'Tool execution succeeded.'),
   ];
+}
+
+const NON_TEXT_PART_KEYS = [
+  'inlineData',
+  'fileData',
+  'functionCall',
+  'functionResponse',
+  'executableCode',
+  'codeExecutionResult',
+] as const;
+
+function getTruncatableTextContent(content: PartListUnion): string | undefined {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  const parts = toParts(content);
+  if (parts.length === 0) {
+    return '';
+  }
+
+  const textParts: string[] = [];
+  for (const part of parts) {
+    if (
+      typeof part.text === 'string' &&
+      !NON_TEXT_PART_KEYS.some((key) => key in part)
+    ) {
+      textParts.push(part.text);
+      continue;
+    }
+    return undefined;
+  }
+
+  return textParts.join('\n');
+}
+
+async function truncateModelFacingToolContent(
+  config: Config,
+  toolName: string,
+  callId: string,
+  content: PartListUnion,
+  limits?: { threshold: number; lines: number },
+): Promise<{
+  content: PartListUnion;
+  outputFile?: string;
+  wasTruncated: boolean;
+}> {
+  const textContent = getTruncatableTextContent(content);
+  if (textContent === undefined) {
+    debugLogger.debug(
+      `Skipping model-facing tool output truncation for non-text content from ${toolName}.`,
+    );
+    return { content, wasTruncated: false };
+  }
+
+  try {
+    const result = await truncateToolOutput(config, toolName, textContent, {
+      ...limits,
+      callId,
+    });
+    if (result.content === textContent) {
+      return { content, wasTruncated: false };
+    }
+    return {
+      content: result.content,
+      outputFile: result.outputFile,
+      wasTruncated: true,
+    };
+  } catch (error) {
+    const threshold =
+      limits?.threshold ?? config.getTruncateToolOutputThreshold();
+    const lines = limits?.lines ?? config.getTruncateToolOutputLines();
+    const truncatedContent = truncateContentInMemory(
+      textContent,
+      threshold,
+      lines,
+    );
+    if (truncatedContent === textContent) {
+      return { content, wasTruncated: false };
+    }
+
+    debugLogger.warn(
+      `Tool output truncation failed for ${toolName}; using in-memory fallback: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return {
+      content: formatTruncatedContent(truncatedContent, { saveFailed: true }),
+      wasTruncated: true,
+    };
+  }
+}
+
+function appendOutputFileNotice(
+  resultDisplay: ToolResultDisplay | undefined,
+  outputFile: string,
+): ToolResultDisplay {
+  const notice = `Output too long and was saved to: ${outputFile}`;
+  if (typeof resultDisplay === 'string') {
+    return resultDisplay + (resultDisplay ? '\n' : '') + notice;
+  }
+  return resultDisplay ?? notice;
 }
 
 function toParts(input: PartListUnion): Part[] {
@@ -3090,8 +3196,7 @@ export class CoreToolScheduler {
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
         let resultDisplay = toolResult.returnDisplay;
-        const contentLength =
-          typeof content === 'string' ? content.length : undefined;
+        const contentLength = getTruncatableTextContent(content)?.length;
         let postToolUseAdditionalContext: string | undefined;
         let appendedAdditionalContext = false;
         let toolOutputAlreadyTruncated = false;
@@ -3165,19 +3270,21 @@ export class CoreToolScheduler {
           }
         }
 
-        if (typeof content === 'string') {
-          const truncated = await truncateToolOutput(
+        {
+          const truncated = await truncateModelFacingToolContent(
             this.config,
             toolName,
+            callId,
             content,
           );
-          content = truncated.content;
-          if (truncated.outputFile) {
+          if (truncated.wasTruncated) {
+            content = truncated.content;
             toolOutputAlreadyTruncated = true;
-            if (typeof resultDisplay === 'string') {
-              resultDisplay +=
-                (resultDisplay ? '\n' : '') +
-                `Output too long and was saved to: ${truncated.outputFile}`;
+            if (truncated.outputFile) {
+              resultDisplay = appendOutputFileNotice(
+                resultDisplay,
+                truncated.outputFile,
+              );
             }
           }
         }
@@ -3286,17 +3393,21 @@ export class CoreToolScheduler {
               content.length > combinedThreshold ||
               content.split('\n').length > combinedLines;
             if (shouldTruncateCombinedContent) {
-              const truncated = await truncateToolOutput(
+              const truncated = await truncateModelFacingToolContent(
                 this.config,
                 toolName,
+                callId,
                 content,
                 { threshold: combinedThreshold, lines: combinedLines },
               );
-              content = truncated.content;
-              if (truncated.outputFile && typeof resultDisplay === 'string') {
-                resultDisplay +=
-                  (resultDisplay ? '\n' : '') +
-                  `Output too long and was saved to: ${truncated.outputFile}`;
+              if (truncated.wasTruncated) {
+                content = truncated.content;
+                if (truncated.outputFile) {
+                  resultDisplay = appendOutputFileNotice(
+                    resultDisplay,
+                    truncated.outputFile,
+                  );
+                }
               }
             }
           }

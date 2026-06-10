@@ -8963,6 +8963,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
       mockConfig,
       largeToolName,
       largeOutput,
+      { callId: 'large-1' },
     );
     expect(truncateSpy).toHaveBeenCalledTimes(1);
     expect(output).toBe(
@@ -9075,7 +9076,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
       mockConfig,
       largeToolName,
       `${rawOutput}\n\n${hookContext}`,
-      { threshold: 200, lines: 20 },
+      { threshold: 200, lines: 20, callId: 'combined-1' },
     ]);
     expect(completedCall.response.resultDisplay).toBe(
       'large output completed\nOutput too long and was saved to: /tmp/combined.output',
@@ -9193,6 +9194,137 @@ describe('CoreToolScheduler model-facing output truncation', () => {
     expect(truncateSpy).toHaveBeenCalledTimes(1);
     expect(output).toBe(`${rawTruncatedContent}\n\n${hookContext}`);
     expect(completedCall.response.resultDisplay).toBe(structuredDisplay);
+  });
+
+  it('truncates large text-only Part output before it enters history', async () => {
+    const largeTextPartOutput: Part[] = [{ text: 'A'.repeat(5000) }];
+    const truncateSpy = vi
+      .spyOn(truncation, 'truncateToolOutput')
+      .mockResolvedValue({
+        content: 'Tool output was too large and has been truncated.\npart-body',
+        outputFile: '/tmp/largeTextPart.output',
+      });
+    const { scheduler, onAllToolCallsComplete, mockConfig } =
+      createOutputScheduler(largeTextPartOutput);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'text-part-1',
+          name: largeToolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-text-part-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = getCompletedSuccessCall(onAllToolCallsComplete);
+    const output = extractFunctionResponseOutput(
+      completedCall.response.responseParts,
+    );
+
+    expect(truncateSpy).toHaveBeenCalledWith(
+      mockConfig,
+      largeToolName,
+      'A'.repeat(5000),
+      { callId: 'text-part-1' },
+    );
+    expect(output).toBe(
+      'Tool output was too large and has been truncated.\npart-body',
+    );
+    expect(completedCall.response.contentLength).toBe(5000);
+    expect(completedCall.response.resultDisplay).toBe(
+      'large output completed\nOutput too long and was saved to: /tmp/largeTextPart.output',
+    );
+  });
+
+  it('uses an in-memory fallback when truncation persistence fails unexpectedly', async () => {
+    const largeOutput = 'A'.repeat(5000);
+    vi.spyOn(truncation, 'truncateToolOutput').mockRejectedValue(
+      new Error('unexpected write failure'),
+    );
+    const { scheduler, onAllToolCallsComplete } =
+      createOutputScheduler(largeOutput);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'fallback-1',
+          name: largeToolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-fallback-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = getCompletedSuccessCall(onAllToolCallsComplete);
+    const output = extractFunctionResponseOutput(
+      completedCall.response.responseParts,
+    );
+
+    expect(output).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toContain('[Note: Could not save full output to file]');
+    expect(output).toContain('... [CONTENT TRUNCATED] ...');
+    expect(output).not.toContain('A'.repeat(1000));
+  });
+
+  it('uses the split combined-output budget for in-memory fallback after hook context', async () => {
+    const rawOutput = 'A'.repeat(90);
+    const hookContext = 'H'.repeat(500);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const truncateSpy = vi
+      .spyOn(truncation, 'truncateToolOutput')
+      .mockResolvedValueOnce({ content: rawOutput })
+      .mockRejectedValueOnce(new Error('combined write failure'));
+    const { scheduler, onAllToolCallsComplete } = createOutputScheduler(
+      rawOutput,
+      { messageBus, disableHooks: false },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'combined-fallback-1',
+          name: largeToolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-combined-fallback-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = getCompletedSuccessCall(onAllToolCallsComplete);
+    const output = extractFunctionResponseOutput(
+      completedCall.response.responseParts,
+    );
+
+    expect(truncateSpy.mock.calls[1][3]).toEqual({
+      threshold: 200,
+      lines: 20,
+      callId: 'combined-fallback-1',
+    });
+    expect(output).toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toContain('[Note: Could not save full output to file]');
+    expect(output).not.toContain('H'.repeat(200));
   });
 
   it('leaves non-string Part output on the existing Part[] path', async () => {

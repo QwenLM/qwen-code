@@ -595,10 +595,14 @@ export class QwenLogger {
         tool_name: event.tool_name,
       },
       snapshots: JSON.stringify({
+        call_id: event.call_id,
         original_content_length: event.original_content_length,
         truncated_content_length: event.truncated_content_length,
         threshold: event.threshold,
         lines: event.lines,
+        output_file_saved: event.output_file_saved,
+        save_error_code: event.save_error_code,
+        save_error_message: event.save_error_message,
       }),
     });
 

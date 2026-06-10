@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { truncateAndSaveToFile } from './truncation.js';
+import {
+  formatTruncatedContent,
+  sanitizeTelemetryErrorMessage,
+  truncateAndSaveToFile,
+  truncateContentInMemory,
+} from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -245,8 +250,13 @@ describe('truncateAndSaveToFile', () => {
     );
 
     expect(result.outputFile).toBeUndefined();
+    expect(result.saveErrorCode).toBe('Error');
+    expect(result.saveErrorMessage).toBe('File write failed');
     expect(result.content).toContain(
       '[Note: Could not save full output to file]',
+    );
+    expect(result.content).toContain(
+      'Tool output was too large and has been truncated',
     );
     expect(mockWriteFile).toHaveBeenCalled();
   });
@@ -289,9 +299,9 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('The full output has been saved to:');
+    expect(result.content).toContain('The full tool output has been saved to:');
     expect(result.content).toContain(
-      'To read the complete output, use the read_file tool with the absolute file path above',
+      'To read the complete tool output, use the read_file tool with the absolute file path above',
     );
     expect(result.content).toContain(
       'The truncated output below shows the beginning and end of the content',
@@ -315,5 +325,91 @@ describe('truncateAndSaveToFile', () => {
 
     const expectedPath = path.join(projectTempDir, 'passwd.output');
     expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
+  });
+
+  it('should sanitize Windows-invalid characters from file names', async () => {
+    const content = 'a'.repeat(200_000);
+    const fileName = 'Bash:context|capture';
+    const projectTempDir = '/tmp/safe_dir';
+
+    mockWriteFile.mockResolvedValue(undefined);
+
+    await truncateAndSaveToFile(
+      content,
+      fileName,
+      projectTempDir,
+      THRESHOLD,
+      TRUNCATE_LINES,
+    );
+
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      path.join(projectTempDir, 'Bash_context_capture.output'),
+      content,
+    );
+  });
+
+  it('formats custom content labels consistently', async () => {
+    const content = 'a'.repeat(200_000);
+    const projectTempDir = '/tmp';
+
+    mockWriteFile.mockResolvedValue(undefined);
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'custom-label',
+      projectTempDir,
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'Combined tool output',
+    );
+
+    expect(result.content).toContain(
+      'Combined tool output was too large and has been truncated',
+    );
+    expect(result.content).toContain('The full combined tool output');
+  });
+});
+
+describe('truncateContentInMemory', () => {
+  it('returns content unchanged below both limits', () => {
+    expect(truncateContentInMemory('short', 100, 10)).toBe('short');
+  });
+
+  it('truncates without requiring file persistence', () => {
+    const content = Array.from({ length: 50 }, (_, i) => `line-${i}`).join(
+      '\n',
+    );
+
+    const result = truncateContentInMemory(content, 80, 10);
+
+    expect(result).toContain('... [CONTENT TRUNCATED] ...');
+    expect(result.length).toBeLessThan(content.length);
+  });
+});
+
+describe('formatTruncatedContent', () => {
+  it('includes a save-failure note without exposing a file path', () => {
+    const result = formatTruncatedContent('head\n...\ntail', {
+      saveFailed: true,
+    });
+
+    expect(result).toContain('[Note: Could not save full output to file]');
+    expect(result).not.toContain('saved to:');
+  });
+});
+
+describe('sanitizeTelemetryErrorMessage', () => {
+  it('redacts Windows paths with spaces', () => {
+    expect(
+      sanitizeTelemetryErrorMessage(
+        'failed to write C:\\Users\\Jiarui Li\\project temp\\tool.output',
+      ),
+    ).toBe('failed to write [path]');
+  });
+
+  it('redacts POSIX paths', () => {
+    expect(
+      sanitizeTelemetryErrorMessage('failed to write /tmp/project/tool.output'),
+    ).toBe('failed to write [path]');
   });
 });
