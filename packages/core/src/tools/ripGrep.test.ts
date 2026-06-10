@@ -767,6 +767,48 @@ describe('RipGrepTool', () => {
       expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.aiignore'));
     });
 
+    it('should strip negation patterns from non-qwen ignore files before invoking ripgrep', async () => {
+      const qwenIgnorePath = path.join(tempRootDir, '.qwenignore');
+      const agentIgnorePath = path.join(tempRootDir, '.agentignore');
+      let sanitizedAgentIgnorePath: string | undefined;
+
+      await fs.writeFile(qwenIgnorePath, '*.env\n');
+      await fs.writeFile(
+        agentIgnorePath,
+        'agent-secret.txt\n!*.env\n  !secrets/**\n\\!literal.txt\n',
+      );
+
+      (runRipgrep as Mock).mockImplementation(async (rgArgs: string[]) => {
+        const ignoreFileArgs = rgArgs.filter(
+          (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+        );
+        const nonQwenIgnoreArgs = ignoreFileArgs.filter(
+          (ignoreFilePath) => ignoreFilePath !== qwenIgnorePath,
+        );
+        expect(nonQwenIgnoreArgs).toHaveLength(1);
+        const sanitizedPath = nonQwenIgnoreArgs[0];
+        sanitizedAgentIgnorePath = sanitizedPath;
+        expect(sanitizedPath).not.toBe(agentIgnorePath);
+
+        const sanitizedContent = await fs.readFile(sanitizedPath, 'utf8');
+        expect(sanitizedContent).toContain('agent-secret.txt');
+        expect(sanitizedContent).toContain('\\!literal.txt');
+        expect(sanitizedContent).not.toContain('!*.env');
+        expect(sanitizedContent).not.toContain('!secrets/**');
+
+        return {
+          stdout: '',
+          truncated: false,
+          error: undefined,
+        };
+      });
+
+      const invocation = grepTool.build({ pattern: 'API_KEY' });
+      await invocation.execute(abortSignal);
+
+      await expect(fs.access(sanitizedAgentIgnorePath!)).rejects.toThrow();
+    });
+
     it('should pass configured custom ignore files to ripgrep', async () => {
       await fs.writeFile(
         path.join(tempRootDir, '.cursorignore'),
