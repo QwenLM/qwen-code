@@ -49,6 +49,7 @@ beforeEach(() => {
 
 async function mount(
   resolveDir: () => Promise<string | undefined>,
+  opts?: { timeoutMs?: number; now?: () => number },
 ): Promise<string> {
   const app = express();
   app.use(express.json());
@@ -56,7 +57,7 @@ async function mount(
     req.rcClient = client;
     next();
   });
-  app.get('/rc/search', createSearchRoute(resolveDir, audit));
+  app.get('/rc/search', createSearchRoute(resolveDir, audit, opts));
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
   });
@@ -129,5 +130,22 @@ describe('search route', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { hits: unknown[] };
     expect(body.hits).toEqual([]);
+  });
+
+  it('503 search_timeout when the scan exceeds the per-query budget', async () => {
+    // Inject a tiny budget + a clock that jumps past the deadline so the real
+    // scanner throws SearchTimeoutError, which the route maps to 503.
+    let calls = 0;
+    const now = () => (calls++ === 0 ? 0 : 1_000_000);
+    const url = await mount(async () => dir, { timeoutMs: 1, now });
+    const res = await fetch(`${url}/rc/search?q=oauth`);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'search_timeout',
+    );
+    // Audited as a timeout — count-free, and never the query text.
+    const a = audit.calls.find((c) => c.action === 'search_performed');
+    expect(a!.detail).toEqual({ kind: 'all', timedOut: true });
+    expect(JSON.stringify(audit.calls)).not.toContain('oauth');
   });
 });

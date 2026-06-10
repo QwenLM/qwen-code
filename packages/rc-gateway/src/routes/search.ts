@@ -6,10 +6,16 @@
 
 import type { RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
-import { searchTranscripts } from '../search/transcripts.js';
+import {
+  searchTranscripts,
+  SearchTimeoutError,
+} from '../search/transcripts.js';
 
 /** Route-facing kind values; 'tool' maps to record type tool_result downstream. */
 const VALID_KINDS = ['user', 'assistant', 'tool', 'all'] as const;
+
+/** Default per-query scan budget (spec.md: 2 s). config.toml knob deferred. */
+const SEARCH_TIMEOUT_MS = 2000;
 
 /**
  * GET /rc/search — owner-only full-text search over the workspace's on-disk
@@ -25,6 +31,7 @@ const VALID_KINDS = ['user', 'assistant', 'tool', 'all'] as const;
 export function createSearchRoute(
   resolveDir: () => Promise<string | undefined>,
   audit?: AuditRecorder,
+  opts?: { timeoutMs?: number; now?: () => number },
 ): RequestHandler {
   return async (req, res) => {
     const rawQ = req.query.q;
@@ -67,7 +74,37 @@ export function createSearchRoute(
       return;
     }
 
-    const hits = await searchTranscripts(dir, q, { kind, sessionId, limit });
+    // The scan throws SearchTimeoutError only when the (route-supplied) budget
+    // is exceeded → 503 search_timeout. The try/catch is REQUIRED here: server.ts
+    // has no global error middleware, so an uncaught async throw would hang the
+    // request. The timeout arg and this catch are added together, never split.
+    let hits;
+    try {
+      hits = await searchTranscripts(dir, q, {
+        kind,
+        sessionId,
+        limit,
+        timeoutMs: opts?.timeoutMs ?? SEARCH_TIMEOUT_MS,
+        now: opts?.now,
+      });
+    } catch (err) {
+      if (err instanceof SearchTimeoutError) {
+        void audit?.record({
+          action: 'search_performed',
+          actorTokenId: req.rcClient?.id,
+          // Privacy: kind + timeout flag only — never the query text or a count.
+          detail: { kind, timedOut: true },
+        });
+        res
+          .status(503)
+          .json({ error: 'Search timed out', code: 'search_timeout' });
+        return;
+      }
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Search failed', code: 'search_error' });
+      }
+      return;
+    }
 
     void audit?.record({
       action: 'search_performed',
