@@ -7074,7 +7074,7 @@ Other open files:
         new Set<string>(),
       );
       vi.mocked(mockConfig.getSkillManager).mockReturnValue(
-        mockSkillManager as ReturnType<Config['getSkillManager']>,
+        mockSkillManager as unknown as ReturnType<Config['getSkillManager']>,
       );
       const toolReg = mockConfig.getToolRegistry();
       vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
