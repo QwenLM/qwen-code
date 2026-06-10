@@ -36,6 +36,8 @@ export type AuditAction =
   | 'push_prefs_updated'
   | 'share_created'
   | 'share_revoked'
+  | 'share_redeemed'
+  | 'share_exhausted'
   | 'search_performed'
   | 'command_collision_workspace_wins'
   | 'slash_command_invoked'
@@ -64,6 +66,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'push_prefs_updated',
   'share_created',
   'share_revoked',
+  'share_redeemed',
+  'share_exhausted',
   'search_performed',
   'command_collision_workspace_wins',
   'slash_command_invoked',

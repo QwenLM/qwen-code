@@ -745,6 +745,50 @@ describe('gateway app', () => {
     expect(listBody.shares.some((s) => s.id === share.id)).toBe(true);
   });
 
+  it('a share token redeems via GET /rc/share/whoami (mounted before the owner gate); an owner token is 403d there', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const mint = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: 3600, maxUses: 1 }),
+    });
+    const share = (await mint.json()) as { id: string; token: string };
+
+    // The share token reaches whoami (NOT 403d by the owner gate) and redeems.
+    const who = await fetch(`${url}/rc/share/whoami`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(who.status).toBe(200);
+    const meta = (await who.json()) as {
+      sessionId: string;
+      usesRemaining: number;
+    };
+    expect(meta).toMatchObject({ sessionId: 's1', usesRemaining: 0 });
+
+    // A fresh (cookie-less) redemption is now exhausted.
+    const again = await fetch(`${url}/rc/share/whoami`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(again.status).toBe(410);
+
+    // An owner token lacks SHARE → 403 at whoami (route order + scope gate).
+    const ownerWho = await fetch(`${url}/rc/share/whoami`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(ownerWho.status).toBe(403);
+  });
+
   it('403s POST /rc/share for a non-owner token', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]); // no owner

@@ -15,7 +15,7 @@ import type { RequestHandler } from 'express';
 import { TokenStore } from '../tokenStore.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import { SHARE, SESSION_READ, APPROVE } from '../scopes.js';
-import { createShareRouter } from './share.js';
+import { createShareRouter, createShareWhoamiHandler } from './share.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -185,5 +185,163 @@ describe('/rc/share routes', () => {
       method: 'DELETE',
     });
     expect(res.status).toBe(404);
+  });
+
+  it('POST with maxUses persists a clamped value; out-of-range clamps to [1,100]', async () => {
+    const url = await mount();
+    const mk = (maxUses: unknown) =>
+      fetch(`${url}/rc/share`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: 's1', ttlSec: 3600, maxUses }),
+      });
+    await mk(5);
+    await mk(500); // clamps to 100
+    await mk(0); // clamps to 1
+    const shares = store.listShares();
+    const byMax = shares.map((s) => s.maxUses).sort((a, b) => a! - b!);
+    expect(byMax).toEqual([1, 5, 100]);
+    const created = audit.calls.find((c) => c.action === 'share_created');
+    expect(created!.detail).toMatchObject({ maxUses: 5 });
+  });
+});
+
+/** Mount the whoami redemption handler behind a stub injecting a share client. */
+async function mountWhoami(client: {
+  id: string;
+  scopes: string[];
+  sessionLockId?: string;
+}): Promise<string> {
+  const inject: RequestHandler = (req, _res, next) => {
+    req.rcClient = client;
+    next();
+  };
+  const app = express();
+  app.use(express.json());
+  app.use(inject);
+  app.get('/rc/share/whoami', createShareWhoamiHandler(store, audit));
+  const s: Server = await new Promise((resolve) => {
+    const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
+  });
+  server = s;
+  const { port } = s.address() as AddressInfo;
+  return `http://127.0.0.1:${port}`;
+}
+
+describe('GET /rc/share/whoami (redemption)', () => {
+  it('first redemption → 200 metadata, bumps a use, sets a cookie, audits share_redeemed', async () => {
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+      maxUses: 2,
+    });
+    const url = await mountWhoami({
+      id: share.id,
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      sessionLockId: 's1',
+    });
+    const res = await fetch(`${url}/rc/share/whoami`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessionId: string;
+      scope: string;
+      label: string;
+      usesRemaining: number;
+    };
+    expect(body).toMatchObject({
+      sessionId: 's1',
+      scope: 'approve',
+      label: 'guest',
+      usesRemaining: 1,
+    });
+    expect(res.headers.get('set-cookie')).toContain('rc_share_' + share.id);
+    expect(store.listShares()[0].uses).toBe(1);
+    const redeemed = audit.calls.find((c) => c.action === 'share_redeemed');
+    expect(redeemed!.detail).toMatchObject({ shareId: share.id });
+  });
+
+  it('a refresh carrying the redemption cookie does NOT bump again', async () => {
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+      maxUses: 5,
+    });
+    const url = await mountWhoami({
+      id: share.id,
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+    });
+    const first = await fetch(`${url}/rc/share/whoami`);
+    // Node fetch has NO cookie jar — forward Set-Cookie by hand or the test
+    // would pass vacuously (the cookie would never arrive on call 2).
+    const cookie = first.headers.get('set-cookie')!;
+    expect(store.listShares()[0].uses).toBe(1);
+
+    const second = await fetch(`${url}/rc/share/whoami`, {
+      headers: { Cookie: cookie },
+    });
+    expect(second.status).toBe(200);
+    // No second bump: still 1 use consumed.
+    expect(store.listShares()[0].uses).toBe(1);
+    expect(
+      audit.calls.filter((c) => c.action === 'share_redeemed'),
+    ).toHaveLength(1);
+  });
+
+  it('a fresh browser session after exhaustion → 410 share_exhausted + audit', async () => {
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+      maxUses: 1,
+    });
+    const url = await mountWhoami({
+      id: share.id,
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+    });
+    const first = await fetch(`${url}/rc/share/whoami`);
+    expect(first.status).toBe(200);
+    // A SECOND, cookie-less request models a different browser opening the link.
+    const second = await fetch(`${url}/rc/share/whoami`);
+    expect(second.status).toBe(410);
+    expect(((await second.json()) as { code: string }).code).toBe(
+      'share_exhausted',
+    );
+    expect(audit.calls.some((c) => c.action === 'share_exhausted')).toBe(true);
+
+    // The already-redeemed session keeps working (its cookie still honored).
+    const stillOk = await fetch(`${url}/rc/share/whoami`, {
+      headers: { Cookie: first.headers.get('set-cookie')! },
+    });
+    expect(stillOk.status).toBe(200);
+  });
+
+  it('an unlimited share (no maxUses) returns usesRemaining null and never exhausts', async () => {
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const url = await mountWhoami({
+      id: share.id,
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+    });
+    const res = await fetch(`${url}/rc/share/whoami`);
+    expect(res.status).toBe(200);
+    expect(
+      ((await res.json()) as { usesRemaining: number | null }).usesRemaining,
+    ).toBeNull();
   });
 });

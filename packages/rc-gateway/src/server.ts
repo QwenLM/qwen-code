@@ -14,7 +14,7 @@ import type { PairingService } from './pairing.js';
 import type { VapidStore } from './webpush/vapid.js';
 import type { PushStore } from './pushStore.js';
 import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
-import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
+import { OWNER, SESSION_READ, APPROVE, WRITE, SHARE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
@@ -27,7 +27,7 @@ import {
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './routes/tokens.js';
-import { createShareRouter } from './routes/share.js';
+import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
@@ -186,6 +186,13 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/audit',
     requireScope(OWNER, audit),
     createAuditQueryRoute(audit),
+  );
+  // Guest redemption endpoint — SHARE-scoped, mounted BEFORE the owner-gated
+  // share router so a share token reaches it (the owner router would 403 it).
+  app.get(
+    '/rc/share/whoami',
+    requireScope(SHARE, audit),
+    createShareWhoamiHandler(deps.store, audit),
   );
   app.use(
     '/rc/share',
