@@ -92,9 +92,22 @@ describe('yaml-parser', () => {
     });
 
     it('should fall back to simple parser on invalid YAML', () => {
-      const input = 'name: test\ndescription: value with unmatched "quote';
+      // Unclosed flow sequence triggers a yaml.parse error
+      const input = 'name: test\nallowedTools: [unclosed';
       const result = parse(input);
       expect(result['name']).toBe('test');
+    });
+
+    it('should not allow prototype pollution via simple parser fallback', () => {
+      // Crafted to fail yaml.parse (unclosed flow) and trigger parseSimple,
+      // where __proto__ as a nested-object key could pollute the prototype.
+      const input =
+        '__proto__:\n  polluted: true\nname: test\nbroken: [unclosed';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      const clean: Record<string, unknown> = {};
+      expect(clean['polluted']).toBeUndefined();
+      expect(Object.getPrototypeOf(result)).toBeNull();
     });
 
     it('should handle empty input gracefully', () => {
@@ -105,6 +118,31 @@ describe('yaml-parser', () => {
     it('should handle comment-only input gracefully', () => {
       const result = parse('# just a comment');
       expect(result).toEqual({});
+    });
+
+    it('should not allow prototype pollution via __proto__ key', () => {
+      const input = 'name: legit\n__proto__:\n  polluted: true';
+      const result = parse(input);
+      expect(result['name']).toBe('legit');
+      // result uses null prototype — __proto__ is a plain own property
+      expect(Object.getPrototypeOf(result)).toBeNull();
+      expect(Object.hasOwn(result, '__proto__')).toBe(true);
+    });
+
+    it('should not resolve !!timestamp explicit tags', () => {
+      const input = 'name: test\ncreated: !!timestamp 2024-01-01';
+      const result = parse(input);
+      expect(typeof result['created']).toBe('string');
+    });
+
+    it('should sanitize nested objects recursively', () => {
+      const input =
+        'name: test\nmetadata:\n  created: !!timestamp 2024-01-01\n  note: hello';
+      const result = parse(input);
+      const metadata = result['metadata'] as Record<string, unknown>;
+      expect(typeof metadata['created']).toBe('string');
+      expect(metadata['note']).toBe('hello');
+      expect(Object.getPrototypeOf(metadata)).toBeNull();
     });
   });
 

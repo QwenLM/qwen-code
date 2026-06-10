@@ -104,13 +104,17 @@ Body content here.
   });
 
   it('falls back gracefully for malformed YAML', () => {
+    // Unclosed flow mapping triggers a yaml.parse error; the simple
+    // parser ignores it and still extracts name + description.
     const markdown = `---
 name: test-skill
-description: value with unmatched "quote
+description: a test skill
+extra: {key: [nested unclosed
 ---
 Body.
 `;
     const config = parseSkillContent(markdown, testPath);
     expect(config.name).toBe('test-skill');
+    expect(config.description).toBe('a test skill');
   });
 });
