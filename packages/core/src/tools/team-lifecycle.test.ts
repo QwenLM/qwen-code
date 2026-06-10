@@ -91,6 +91,7 @@ function makeConfig(): Config {
     getTeamManager: () => teamManager,
     getSubagentManager: () => null,
     getAgentsSettings: () => ({}),
+    getSessionId: () => 'test-session-id',
     setTeamManager: vi.fn((m: TeamManager | null) => {
       teamManager = m;
     }),
