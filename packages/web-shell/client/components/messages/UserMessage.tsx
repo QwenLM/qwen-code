@@ -22,7 +22,7 @@ export const UserMessage = memo(function UserMessage({
       <span className={styles.prefix}>
         <PromptChevron />
       </span>
-      <span className={styles.body}>
+      <div className={styles.body}>
         {images && images.length > 0 && (
           <div className={styles.images}>
             {images.map((img, index) => {
@@ -42,7 +42,7 @@ export const UserMessage = memo(function UserMessage({
           </div>
         )}
         {content}
-      </span>
+      </div>
     </div>
   );
 });

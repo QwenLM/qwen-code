@@ -201,10 +201,11 @@ function applyDaemonTranscriptEvent(
           | DaemonTextTranscriptBlock
           | undefined;
         if (block && block.kind === 'user') {
-          if (!block.images) {
-            block.images = [];
-          }
-          block.images.push({ data: event.data, mimeType: event.mimeType });
+          // Use immutable update to avoid mutating a shared array reference
+          block.images = [
+            ...(block.images ?? []),
+            { data: event.data, mimeType: event.mimeType },
+          ];
         }
       }
       break;

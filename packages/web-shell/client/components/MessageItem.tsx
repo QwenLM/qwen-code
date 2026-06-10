@@ -33,13 +33,8 @@ export const MessageItem = memo(function MessageItem({
   workspaceCwd,
 }: MessageItemProps) {
   switch (message.role) {
-    case 'user': {
-      const userMsg = message as {
-        role: 'user';
-        images?: Array<{ data: string; mimeType: string }>;
-      };
-      return <UserMessage content={message.content} images={userMsg.images} />;
-    }
+    case 'user':
+      return <UserMessage content={message.content} images={message.images} />;
     case 'assistant':
       return (
         <AssistantMessage
@@ -111,21 +106,11 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
-    case 'user': {
-      const prevUser = prev as {
-        role: 'user';
-        images?: Array<{ data: string; mimeType: string }>;
-      };
-      const nextUser = next as {
-        role: 'user';
-        images?: Array<{ data: string; mimeType: string }>;
-      };
+    case 'user':
       return (
-        next.role === 'user' &&
         prev.content === next.content &&
-        stableImagesEqual(prevUser.images, nextUser.images)
+        stableImagesEqual(prev.images, next.images)
       );
-    }
     case 'assistant':
       return (
         next.role === 'assistant' &&
