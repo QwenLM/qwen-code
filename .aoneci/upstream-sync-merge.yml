@@ -211,16 +211,22 @@ jobs:
           git fetch origin "$SYNC_BRANCH" 2>/dev/null || true
           if git show-ref --verify --quiet "refs/remotes/origin/$SYNC_BRANCH"; then
             if git merge-base --is-ancestor upstream/main "origin/$SYNC_BRANCH"; then
-              echo "♻️ 远端已有最新 sync 分支，直接复用"
+              echo "♻️ 远端已有同日 sync 分支，检查 fork patches 是否完整..."
               git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
-              echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
-              echo "1" > "$SKIP_PUSH_FILE"
-              echo "clean" > "$CONFLICT_STATUS_FILE"
-              echo "" > "$CONFLICT_FILES_FILE"
-              echo "$(git rev-parse HEAD)" > "$SYNC_CHECKPOINT_FILE"
-              echo "$(git rev-parse upstream/main)" > "$MERGE_BASE_FILE"
-              echo "📋 reusing sync branch | HEAD=$(git log --oneline -1 HEAD)"
-              exit 0
+              if bash "$FORK_DIR/verify-patches.sh"; then
+                echo "✅ fork patches 验证通过，复用 sync 分支"
+                echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
+                echo "1" > "$SKIP_PUSH_FILE"
+                echo "clean" > "$CONFLICT_STATUS_FILE"
+                echo "" > "$CONFLICT_FILES_FILE"
+                echo "$(git rev-parse HEAD)" > "$SYNC_CHECKPOINT_FILE"
+                echo "$(git rev-parse upstream/main)" > "$MERGE_BASE_FILE"
+                echo "📋 reusing sync branch | HEAD=$(git log --oneline -1 HEAD)"
+                exit 0
+              else
+                echo "⚠️ 远端 sync 分支 fork patches 不完整，重新构建"
+                git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
+              fi
             fi
           fi
 
@@ -339,6 +345,42 @@ jobs:
           git add -A
           git diff --cached --quiet || git commit -m "chore: sync upstream $(date +%Y-%m-%d)"
           echo "📋 clean sync ready | branch=$SYNC_BRANCH | HEAD=$(git log --oneline -1 HEAD)"
+
+      - name: '验证 fork patch 内容完整性 (gate)'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+          DINGTALK_SCRIPT_FILE="$STATE_DIR/send-dingtalk-alert.js"
+
+          SYNC_STATUS=$(cat "$CONFLICT_STATUS_FILE" 2>/dev/null || echo "skip")
+          if [ "$SYNC_STATUS" != "clean" ]; then
+            echo "📋 sync 状态为 $SYNC_STATUS，跳过 patch 内容验证"
+            exit 0
+          fi
+          if [ ! -f .fork/verify-patches.sh ]; then
+            echo "⚠️ .fork/verify-patches.sh 不存在，跳过"
+            exit 0
+          fi
+
+          echo "🔍 验证 fork patch 内容是否完整..."
+          VERIFY_RC=0
+          bash .fork/verify-patches.sh --verbose 2>&1 || VERIFY_RC=$?
+
+          if [ "$VERIFY_RC" -ne 0 ]; then
+            echo ""
+            echo "❌ fork patch 内容验证失败，部分 patch 丢失"
+            echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+            CI_DINGTALK_WEBHOOK_URL="${{secrets['CI_DINGTALK_WEBHOOK_URL']}}" \
+              CI_DINGTALK_WEBHOOK_SECRET="${{secrets['CI_DINGTALK_WEBHOOK_SECRET']}}" \
+              node "$DINGTALK_SCRIPT_FILE" \
+              --title "Upstream Sync Fork Patch 内容丢失" \
+              --content "sync 分支构建完成但 fork patch 内容验证失败，部分定制代码丢失。需要人工检查并修复。" \
+              || true
+            exit 1
+          fi
+          echo "✅ fork patch 内容验证通过"
 
       - name: '运行 fork patch verify (gate)'
         run: |
