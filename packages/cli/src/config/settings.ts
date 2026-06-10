@@ -1053,23 +1053,27 @@ export function reloadEnvironment(
     process.env[key] = value;
   }
 
-  // Update tracking sets to reflect current source ownership.
-  dotEnvSourcedKeys.clear();
-  for (const key of newDotEnvKeys.keys()) {
-    dotEnvSourcedKeys.add(key);
+  // Update tracking sets and snapshot only when the .env file was readable.
+  // A transient read failure must not wipe provenance — the stale tracking
+  // state is needed so the next successful reload can still detect deletions.
+  if (!dotEnvReadFailed) {
+    dotEnvSourcedKeys.clear();
+    for (const key of newDotEnvKeys.keys()) {
+      dotEnvSourcedKeys.add(key);
+    }
+    lastReloadSnapshot.clear();
+    for (const [key, value] of newDotEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+    for (const [key, value] of newSettingsEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
   }
+  // settings.env is always readable (from settings.json, not a file),
+  // so its tracking set is always updated.
   settingsEnvSourcedKeys.clear();
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
-  }
-
-  // Update the reload snapshot for the next deletion pass.
-  lastReloadSnapshot.clear();
-  for (const [key, value] of newDotEnvKeys) {
-    lastReloadSnapshot.set(key, value);
-  }
-  for (const [key, value] of newSettingsEnvKeys) {
-    lastReloadSnapshot.set(key, value);
   }
 
   return { updatedKeys, removedKeys };

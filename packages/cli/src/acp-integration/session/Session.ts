@@ -471,7 +471,9 @@ export class Session implements SessionContext {
       !this.pendingPrompt &&
       !this.pendingPromptCompletion &&
       !this.cronProcessing &&
-      !this.cronAbortController
+      !this.cronAbortController &&
+      !this.notificationProcessing &&
+      !this.notificationAbortController
     );
   }
 
