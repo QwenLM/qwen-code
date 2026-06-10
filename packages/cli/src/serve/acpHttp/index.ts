@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -357,7 +358,7 @@ export function mountAcpHttp(
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
     if (wss) return;
-    wss = new WebSocketServer({ noServer: true });
+    wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
 
     httpServer.on(
       'upgrade',
@@ -377,10 +378,34 @@ export function mountAcpHttp(
           return;
         }
 
-        // CSRF: reject non-loopback origins on WS upgrade.
-        const origin = req.headers['origin'];
         const fromLoopback = isLoopbackSocket(socket);
-        if (origin && !fromLoopback) {
+
+        // Host allowlist: mirror REST surface's hostAllowlist middleware
+        // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
+        // domain resolves to 127.0.0.1 and the browser sends the
+        // attacker's Host header. Match the full host:port string like
+        // the REST middleware does; extract port from the socket.
+        if (fromLoopback) {
+          const host = (req.headers['host'] ?? '').toLowerCase();
+          const localPort = (socket as { localPort?: number }).localPort;
+          const allowed = new Set([
+            `localhost:${localPort}`,
+            `127.0.0.1:${localPort}`,
+            `[::1]:${localPort}`,
+            `host.docker.internal:${localPort}`,
+          ]);
+          if (host && !allowed.has(host)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        }
+
+        // CSRF: reject cross-origin WS upgrades. Browser-initiated requests
+        // to 127.0.0.1 carry the external origin, so this check must apply
+        // to loopback too (CSWSH defence).
+        const origin = req.headers['origin'];
+        if (origin) {
           try {
             const originHost = new URL(origin).hostname;
             if (
@@ -414,7 +439,13 @@ export function mountAcpHttp(
           const credentials = authHeader
             .slice(authHeader.indexOf(' ') + 1)
             .trim();
-          if (scheme !== 'bearer' || credentials !== opts.token) {
+          const expected = Buffer.from(opts.token, 'utf8');
+          const actual = Buffer.from(credentials, 'utf8');
+          if (
+            scheme !== 'bearer' ||
+            expected.length !== actual.length ||
+            !timingSafeEqual(expected, actual)
+          ) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
             return;
