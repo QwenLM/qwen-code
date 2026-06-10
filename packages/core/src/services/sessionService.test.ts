@@ -17,6 +17,7 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
@@ -29,6 +30,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
+vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
 
 describe('SessionService', () => {
@@ -68,6 +70,7 @@ describe('SessionService', () => {
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
+    vi.mocked(readRuntimeStatus).mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -335,6 +338,41 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(0);
     });
 
+    it('should list a migrated session when runtime status matches this project', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].sessionId).toBe(sessionIdA);
+    });
+
     it('should skip files that do not match session file pattern', async () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`, // valid
@@ -404,6 +442,39 @@ describe('SessionService', () => {
       const loaded = await sessionService.loadSession(sessionIdA);
 
       expect(loaded).toBeUndefined();
+    });
+
+    it('should load a migrated session when runtime status matches this project', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([migratedRecord]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const loaded = await sessionService.loadSession(sessionIdA);
+
+      expect(loaded?.conversation.sessionId).toBe(sessionIdA);
+      expect(loaded?.conversation.projectHash).toBe('test-project-hash');
     });
 
     it('should reconstruct tree-structured history correctly', async () => {

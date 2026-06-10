@@ -20,6 +20,7 @@ import type {
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
@@ -179,6 +180,23 @@ export class SessionService {
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  private async sessionBelongsToCurrentProject(
+    sessionId: string,
+    recordCwd: string,
+  ): Promise<boolean> {
+    if (getProjectHash(recordCwd) === this.projectHash) {
+      return true;
+    }
+
+    const status = await readRuntimeStatus(
+      this.storage.getRuntimeStatusPath(sessionId),
+    );
+    return (
+      status?.sessionId === sessionId &&
+      getProjectHash(status.workDir) === this.projectHash
+    );
   }
 
   /**
@@ -529,10 +547,14 @@ export class SessionService {
       if (records.length === 0) continue;
       const firstRecord = records[0];
 
-      // Skip if not matching current project
-      // We use cwd comparison since first record doesn't have projectHash
-      const recordProjectHash = getProjectHash(firstRecord.cwd);
-      if (recordProjectHash !== this.projectHash) continue;
+      if (
+        !(await this.sessionBelongsToCurrentProject(
+          firstRecord.sessionId,
+          firstRecord.cwd,
+        ))
+      ) {
+        continue;
+      }
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -692,10 +714,13 @@ export class SessionService {
       return;
     }
 
-    // Verify this session belongs to the current project
     const firstRecord = records[0];
-    const recordProjectHash = getProjectHash(firstRecord.cwd);
-    if (recordProjectHash !== this.projectHash) {
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
       return;
     }
 
