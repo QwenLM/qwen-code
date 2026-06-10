@@ -1,0 +1,113 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @fileoverview A shared sliding-window concurrency limiter (p-limit style).
+ *
+ * Unlike the fixed-size batch loops elsewhere in the codebase, this keeps a
+ * window of at most `limit` thunks in flight and starts a queued thunk the
+ * instant a slot frees — so a single instance can be SHARED across several
+ * fan-out calls (e.g. all `parallel()` / `pipeline()` calls within one
+ * workflow run) and still hold the total in-flight count under one cap.
+ */
+
+/**
+ * Thrown (and surfaced as a rejection) when the limiter is aborted via its
+ * `AbortSignal`. Named `AbortError` so `isAbortError()` (utils/errors.ts) can
+ * classify it the same way as other cancellations in the codebase.
+ */
+function abortError(): Error {
+  // DOMException is a global in Node ≥17 and is already used elsewhere in this
+  // package for the same purpose (utils/abortController.ts). The 'AbortError'
+  // name is what isAbortError() keys off.
+  return new DOMException('Concurrency limiter aborted.', 'AbortError');
+}
+
+export interface ConcurrencyLimiter {
+  /**
+   * Schedule a single thunk. Resolves/rejects with the thunk's own
+   * settlement (rejections are propagated raw — the caller decides whether
+   * to treat them as data). At most `limit` scheduled thunks run at once,
+   * across ALL callers sharing this limiter.
+   */
+  run<T>(thunk: () => Promise<T>): Promise<T>;
+  /**
+   * Schedule a batch and resolve to a position-aligned array where a thunk
+   * that rejected becomes `null` (errors-as-data). Never rejects on a thunk
+   * error; the ONLY rejection is an abort of this limiter's signal, so an
+   * aborted run surfaces as a rejection rather than a silent array of nulls.
+   */
+  settleAll<T>(thunks: Array<() => Promise<T>>): Promise<Array<T | null>>;
+}
+
+export function createConcurrencyLimiter(
+  limit: number,
+  signal?: AbortSignal,
+): ConcurrencyLimiter {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(
+      `Concurrency limit must be a positive integer, got ${String(limit)}.`,
+    );
+  }
+
+  let active = 0;
+  type Job = {
+    thunk: () => Promise<unknown>;
+    resolve: (v: unknown) => void;
+    reject: (e: unknown) => void;
+  };
+  const queue: Job[] = [];
+
+  const pump = (): void => {
+    while (active < limit && queue.length > 0) {
+      const job = queue.shift()!;
+      // Don't start NEW work once aborted — reject the job without invoking
+      // its thunk so an aborted run can't keep spawning agents. In-flight
+      // thunks are cancelled through their own signal (the dispatch layer).
+      if (signal?.aborted) {
+        job.reject(abortError());
+        continue;
+      }
+      active++;
+      // Promise.resolve().then(thunk) so a thunk that throws synchronously is
+      // funnelled into the rejection path rather than escaping pump().
+      Promise.resolve()
+        .then(job.thunk)
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          active--;
+          pump();
+        });
+    }
+  };
+
+  const run = <T>(thunk: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
+      queue.push({
+        thunk: thunk as () => Promise<unknown>,
+        resolve: resolve as (v: unknown) => void,
+        reject,
+      });
+      pump();
+    });
+
+  const settleAll = async <T>(
+    thunks: Array<() => Promise<T>>,
+  ): Promise<Array<T | null>> => {
+    if (thunks.length === 0) return [];
+    const settled = await Promise.allSettled(thunks.map((t) => run(t)));
+    // Abort is the one condition that rejects the batch (rather than yielding
+    // a silent array of nulls), so an aborted workflow surfaces the failure.
+    if (signal?.aborted) throw abortError();
+    return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+  };
+
+  return { run, settleAll };
+}
