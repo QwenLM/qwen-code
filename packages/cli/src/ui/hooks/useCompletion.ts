@@ -65,19 +65,24 @@ export function useCompletion(): UseCompletionReturn {
     if (suggestions.length === 0) return;
 
     setActiveSuggestionIndex((prevActiveIndex) => {
+      // Calculate new active index, handling wrap-around
       const newActiveIndex =
         prevActiveIndex <= 0 ? suggestions.length - 1 : prevActiveIndex - 1;
 
+      // Adjust scroll position based on the new active index
       setVisibleStartIndex((prevVisibleStart) => {
+        // Case 1: Wrapped around to the last item
         if (
           newActiveIndex === suggestions.length - 1 &&
           suggestions.length > MAX_SUGGESTIONS_TO_SHOW
         ) {
           return Math.max(0, suggestions.length - MAX_SUGGESTIONS_TO_SHOW);
         }
+        // Case 2: Scrolled above the current visible window
         if (newActiveIndex < prevVisibleStart) {
           return newActiveIndex;
         }
+        // Otherwise, keep the current scroll position
         return prevVisibleStart;
       });
 
@@ -89,20 +94,25 @@ export function useCompletion(): UseCompletionReturn {
     if (suggestions.length === 0) return;
 
     setActiveSuggestionIndex((prevActiveIndex) => {
+      // Calculate new active index, handling wrap-around
       const newActiveIndex =
         prevActiveIndex >= suggestions.length - 1 ? 0 : prevActiveIndex + 1;
 
+      // Adjust scroll position based on the new active index
       setVisibleStartIndex((prevVisibleStart) => {
+        // Case 1: Wrapped around to the first item
         if (
           newActiveIndex === 0 &&
           suggestions.length > MAX_SUGGESTIONS_TO_SHOW
         ) {
           return 0;
         }
+        // Case 2: Scrolled below the current visible window
         const visibleEndIndex = prevVisibleStart + MAX_SUGGESTIONS_TO_SHOW;
         if (newActiveIndex >= visibleEndIndex) {
           return newActiveIndex - MAX_SUGGESTIONS_TO_SHOW + 1;
         }
+        // Otherwise, keep the current scroll position
         return prevVisibleStart;
       });
 
