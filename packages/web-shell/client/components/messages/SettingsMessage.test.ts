@@ -4,9 +4,7 @@ import { nextSettingIdx, type FlatRow } from './SettingsMessage';
 /** 'h' → category header row, 's' → setting row. */
 function rowsOf(spec: string): FlatRow[] {
   return [...spec].map((ch, i) =>
-    ch === 'h'
-      ? { type: 'header', category: `cat-${i}` }
-      : { type: 'setting' },
+    ch === 'h' ? { type: 'header', category: `cat-${i}` } : { type: 'setting' },
   );
 }
 

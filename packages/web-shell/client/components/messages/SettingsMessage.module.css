@@ -144,8 +144,8 @@
 }
 
 .detailTextScrolling {
-  animation: settings-detail-marquee var(--marquee-duration, 6s) linear
-    infinite alternate;
+  animation: settings-detail-marquee var(--marquee-duration, 6s) linear infinite
+    alternate;
 }
 
 @keyframes settings-detail-marquee {
