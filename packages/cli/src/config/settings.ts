@@ -990,7 +990,7 @@ export function reloadEnvironment(
         newDotEnvKeys.set(key, parsedEnv[key]!);
       }
     } catch {
-      // Match loadEnvironment's silent-error behavior.
+      dotEnvReadFailed = true;
     }
   }
 
@@ -1018,15 +1018,19 @@ export function reloadEnvironment(
   // Delete keys previously known (from tracking Sets OR the boot snapshot)
   // that are no longer in any source file. The snapshot covers keys that
   // ACP children inherited from the daemon without tracking.
-  const previouslyKnown = new Set([
-    ...lastReloadSnapshot.keys(),
-    ...dotEnvSourcedKeys,
-    ...settingsEnvSourcedKeys,
-  ]);
-  for (const key of previouslyKnown) {
-    if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
-      delete process.env[key];
-      removedKeys.push(key);
+  // Skip deletion entirely if the .env file became unreadable — treat as
+  // transient I/O failure rather than intentional key removal.
+  if (!dotEnvReadFailed) {
+    const previouslyKnown = new Set([
+      ...lastReloadSnapshot.keys(),
+      ...dotEnvSourcedKeys,
+      ...settingsEnvSourcedKeys,
+    ]);
+    for (const key of previouslyKnown) {
+      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+        delete process.env[key];
+        removedKeys.push(key);
+      }
     }
   }
 

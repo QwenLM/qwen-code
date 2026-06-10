@@ -147,12 +147,11 @@ export interface DaemonWorkspaceService {
 
 // -- Result types for workspace mutations --
 
-export interface EnvReloadResult {
+export type { EnvReloadResult } from '../../config/settings.js';
+
+export interface EnvReloadResponse {
   updatedKeys: string[];
   removedKeys: string[];
-}
-
-export interface EnvReloadResponse extends EnvReloadResult {
   childReloaded: boolean;
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];

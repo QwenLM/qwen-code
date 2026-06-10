@@ -769,17 +769,13 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
-      this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
-      // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
-      // Fire-and-forget follow-up suggestion generation. Best-effort UX
-      // hint — must not block the prompt response. See
-      // `#maybeEmitFollowupSuggestion` for guards and cancellation.
       this.#maybeEmitFollowupSuggestion(result);
       return result;
     } finally {
+      this.pendingPrompt = null;
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }

@@ -580,7 +580,9 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
       } catch (err) {
-        if (!(err instanceof SessionNotFoundError)) {
+        if (err instanceof SessionNotFoundError) {
+          childError = 'ACP child not running';
+        } else {
           childError = err instanceof Error ? err.message : String(err);
           writeStderrLine(
             `qwen serve: reload-env child forwarding failed: ${childError}`,
