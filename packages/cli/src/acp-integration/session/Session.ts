@@ -26,8 +26,6 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
-} from '@qwen-code/qwen-code-core';
-import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
@@ -1840,6 +1838,7 @@ export class Session implements SessionContext {
         }
 
         while (this.notificationQueue.length > 0) {
+          if (Date.now() >= deadline) break;
           const item = this.notificationQueue.shift()!;
           await this.#executeNotificationPrompt(item, pendingSend);
         }
