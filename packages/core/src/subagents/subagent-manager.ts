@@ -392,9 +392,15 @@ export class SubagentManager {
     }
 
     // Normal mode: load from project, user, and builtin levels
-    const levelsToCheck: SubagentLevel[] = options.level
-      ? [options.level]
+    // Safe mode: only builtin subagents are available
+    const defaultLevels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
       : ['project', 'user', 'builtin', 'extension'];
+    const levelsToCheck: SubagentLevel[] = options.level
+      ? this.config.isSafeMode() && options.level !== 'builtin'
+        ? ['builtin']
+        : [options.level]
+      : defaultLevels;
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.subagentsCache !== null;
@@ -492,7 +498,10 @@ export class SubagentManager {
   async refreshCache(): Promise<void> {
     const subagentsCache = new Map();
 
-    const levels: SubagentLevel[] = ['project', 'user', 'builtin', 'extension'];
+    // Safe mode: only load builtin subagents
+    const levels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
+      : ['project', 'user', 'builtin', 'extension'];
 
     for (const level of levels) {
       const levelSubagents = await this.listSubagentsAtLevel(level);

@@ -851,6 +851,12 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Safe mode: disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   * Activated via `--safe-mode` CLI flag or `QWEN_CODE_SAFE_MODE=true` env var.
+   */
+  safeMode?: boolean;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -1170,6 +1176,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
+  private readonly safeMode!: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -1353,6 +1360,10 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
+    this.safeMode =
+      params.safeMode ??
+      (process.env['QWEN_CODE_SAFE_MODE'] === 'true' ||
+        process.env['QWEN_CODE_SAFE_MODE'] === '1');
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
@@ -1458,7 +1469,9 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
-    if (!this.getBareMode()) {
+    if (this.isSafeMode()) {
+      // Safe mode: skip all extension loading
+    } else if (!this.getBareMode()) {
       await this.extensionManager.refreshCache();
     } else if (explicitExtensionNames.length > 0) {
       await this.extensionManager.refreshCache({
@@ -1661,7 +1674,7 @@ export class Config {
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.isSafeMode()) {
       await this.skillManager.refreshCache();
     } else {
       await this.skillManager.startWatching();
@@ -1683,7 +1696,7 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    if (!this.getBareMode()) {
+    if (!this.getBareMode() && !this.isSafeMode()) {
       await this.extensionManager.refreshCache();
     }
 
@@ -1699,7 +1712,8 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    const skipInlineMcpDiscovery =
+      this.getBareMode() || this.isSafeMode() || !legacyBlockingMcp;
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
@@ -1732,7 +1746,7 @@ export class Config {
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    if (skipInlineMcpDiscovery && !this.getBareMode() && !this.isSafeMode()) {
       this.startMcpDiscoveryInBackground();
     }
 
@@ -1947,6 +1961,16 @@ export class Config {
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
   ): Promise<void> {
+    // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
+    if (this.isSafeMode()) {
+      this.setUserMemory('');
+      this.setGeminiMdFileCount(0);
+      this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+        [],
+        this.getWorkingDir(),
+      );
+      return;
+    }
     const { memoryContent, fileCount, conditionalRules, projectRoot } =
       await loadServerHierarchicalMemory(
         this.getWorkingDir(),
@@ -3477,7 +3501,7 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
-    return this.disableAllHooks || this.getBareMode();
+    return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
   getStopHookBlockingCap(): number {
@@ -3485,15 +3509,19 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
-    return this.enableManagedAutoMemory && !this.getBareMode();
+    return (
+      this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
+    );
   }
 
   getManagedAutoDreamEnabled(): boolean {
-    return this.enableManagedAutoDream && !this.getBareMode();
+    return (
+      this.enableManagedAutoDream && !this.getBareMode() && !this.isSafeMode()
+    );
   }
 
   getAutoSkillEnabled(): boolean {
-    return this.enableAutoSkill && !this.getBareMode();
+    return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
   }
 
   getPreventSystemSleepEnabled(): boolean {
@@ -3642,7 +3670,9 @@ export class Config {
    * If empty, all URLs are allowed (subject to SSRF protection).
    */
   getAllowedHttpHookUrls(): string[] {
-    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
+    return this.getBareMode() || this.isSafeMode()
+      ? []
+      : this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -3788,6 +3818,14 @@ export class Config {
 
   getBareMode(): boolean {
     return this.bareMode;
+  }
+
+  /**
+   * Safe mode disables all user customizations (context files, hooks,
+   * extensions, skills, MCP servers, rules) for troubleshooting.
+   */
+  isSafeMode(): boolean {
+    return this.safeMode;
   }
 
   getTruncateToolOutputThreshold(): number {

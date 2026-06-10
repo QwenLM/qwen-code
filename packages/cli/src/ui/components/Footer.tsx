@@ -110,6 +110,12 @@ export const Footer: React.FC = () => {
       node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
     });
   }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
+    });
+  }
   if (debugMode) {
     rightItems.push({
       key: 'debug',

@@ -132,6 +132,7 @@ export interface CliArgs {
   appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
+  safeMode?: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
   telemetryTarget: string | undefined;
@@ -598,6 +599,11 @@ export async function parseArguments(): Promise<CliArgs> {
       description:
         'Minimal mode: skip implicit startup auto-discovery and only honor explicitly provided CLI inputs.',
       default: false,
+    })
+    .option('safe-mode', {
+      type: 'boolean',
+      description:
+        'Disable all customizations (context files, hooks, extensions, skills, MCP servers) for troubleshooting.',
     })
     .option('proxy', {
       type: 'string',
@@ -1361,6 +1367,11 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
+  const safeMode =
+    argv.safeMode !== undefined
+      ? argv.safeMode
+      : process.env['QWEN_CODE_SAFE_MODE'] === 'true' ||
+        process.env['QWEN_CODE_SAFE_MODE'] === '1';
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
@@ -1829,18 +1840,20 @@ export async function loadCliConfig(
         currentSettings.setValue(settingScope, key, [...currentRules, rule]);
       }
     },
-    toolDiscoveryCommand: bareMode
-      ? undefined
-      : settings.tools?.discoveryCommand,
-    toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
-    mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
-    mcpServers: bareMode
-      ? {}
-      : (() => {
-          const base = settings.mcpServers || {};
-          const cliMcpServers = parseMcpConfig(argv.mcpConfig);
-          return cliMcpServers ? { ...base, ...cliMcpServers } : base;
-        })(),
+    toolDiscoveryCommand:
+      bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
+    toolCallCommand:
+      bareMode || safeMode ? undefined : settings.tools?.callCommand,
+    mcpServerCommand:
+      bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpServers:
+      bareMode || safeMode
+        ? {}
+        : (() => {
+            const base = settings.mcpServers || {};
+            const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+            return cliMcpServers ? { ...base, ...cliMcpServers } : base;
+          })(),
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1891,9 +1904,11 @@ export async function loadCliConfig(
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
     bareMode,
-    allowedHttpHookUrls: bareMode
-      ? []
-      : (settings.security?.allowedHttpHookUrls ?? []),
+    safeMode,
+    allowedHttpHookUrls:
+      bareMode || safeMode
+        ? []
+        : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
@@ -1914,24 +1929,28 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    enableManagedAutoMemory: bareMode
-      ? false
-      : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: bareMode
-      ? false
-      : (settings.memory?.enableManagedAutoDream ?? true),
-    enableAutoSkill: bareMode
-      ? false
-      : (settings.memory?.enableAutoSkill ?? true),
+    enableManagedAutoMemory:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableManagedAutoMemory ?? true),
+    enableManagedAutoDream:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableManagedAutoDream ?? true),
+    enableAutoSkill:
+      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks: bareMode
-      ? undefined
-      : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
-    disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
-    stopHookBlockingCap: bareMode ? undefined : settings.stopHookBlockingCap,
+    userHooks:
+      bareMode || safeMode
+        ? undefined
+        : (hooksConfig?.userHooks ?? settings.hooks),
+    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
+    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    disableAllHooks:
+      bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
+    stopHookBlockingCap:
+      bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and

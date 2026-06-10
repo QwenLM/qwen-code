@@ -935,6 +935,11 @@ export async function main() {
     let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
+        ...(config.isSafeMode()
+          ? [
+              '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
+            ]
+          : []),
         ...(await getStartupWarnings()),
         ...(await getUserStartupWarnings({
           workspaceRoot: process.cwd(),
