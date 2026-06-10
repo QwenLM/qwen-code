@@ -1629,15 +1629,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     </Text>
   );
 
-  // Calculate prefix width for physical cursor positioning
-  const prefixWidth = shellModeActive
-    ? reverseSearchActive
-      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : 2 // "! " = 2 chars
-    : commandSearchActive
-      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : 2; // "> " or "* " = 2 chars
-
   return (
     <>
       {attachments.length > 0 && (
@@ -1668,7 +1659,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : placeholder
         }
         prefix={prefixNode}
-        prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}

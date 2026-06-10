@@ -122,6 +122,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openAutoImproveSourceDialog: () => void;
+  openStatsDialog: () => void;
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
@@ -759,6 +760,8 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'auto-improve-source':
                       actions.openAutoImproveSourceDialog();
+                    case 'stats':
+                      actions.openStatsDialog();
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();

@@ -557,8 +557,6 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'check session stats. Usage: /stats [model|tools]':
-    '檢查會話統計信息。用法：/stats [model|tools]',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
   'exit the cli': '退出命令行界面',
@@ -868,12 +866,10 @@ export default {
     '請提供指令。用法：/fork <指令>',
   'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
-  'Cannot fork before the first conversation turn.':
-    '首次對話輪次前無法分支。',
+  'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
   'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
     '/fork 命令需要啟用 fork 功能開關。設定 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以啟用。',
-  'The agent tool is unavailable; cannot fork.':
-    'Agent 工具不可用；無法分支。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
   'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
   'the background agent could not be started.': '背景智能體無法啟動。',
   'User launched a background fork via /fork: {{directive}}':
@@ -1172,7 +1168,7 @@ export default {
   'Time remaining:': '剩餘時間：',
   'Qwen OAuth Authentication Timeout': 'Qwen OAuth 認證超時',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
+    'OAuth token 已過期（超過 {{seconds}} 秒）。請重新選擇認證方法',
   'Press any key to return to authentication type selection.':
     '按任意鍵返回認證類型選擇',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 認證...',
@@ -1371,22 +1367,41 @@ export default {
   'Tool Time:': '工具時間：',
   'Session Stats': '會話統計',
   'Model Usage': '模型使用情況',
-  Reqs: '請求數',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
-    '提示：要查看完整的令牌明細，請運行 `/stats model`',
+    '提示：要查看完整的 token 明細，請運行 `/stats model`',
   'Model Stats For Nerds': '模型統計（技術細節）',
   'Tool Stats For Nerds': '工具統計（技術細節）',
   Metric: '指標',
   API: 'API',
+  Session: '會話',
+  Activity: '概覽',
+  Efficiency: '性能',
+  Success: '成功率',
+  Today: '今天',
+  'Token Trend': 'Token 趨勢',
+  'Cache Hit Rate': '緩存命中率',
+  'Tool Success': '工具成功率',
+  'Tool Leaderboard': '工具排行',
+  Calls: '調用次數',
+  Time: '耗時',
+  Reqs: '請求',
+  Cache: '緩存',
+  Latency: '延遲',
+  'In/Out': '輸入/輸出',
+  'Code Impact': '代碼變更',
+  'Failed to load stats. Press r to retry.': '載入統計失敗，按 r 重試。',
+  net: '淨增',
+  streak: '連續',
+  best: '最長',
   Requests: '請求數',
   Errors: '錯誤數',
   'Avg Latency': '平均延遲',
-  Tokens: '令牌',
+  Tokens: 'Token',
   Total: '總計',
   Prompt: '提示',
   Cached: '緩存',
@@ -1395,7 +1410,6 @@ export default {
   'No API calls have been made in this session.':
     '本次會話中未進行任何 API 調用',
   'Tool Name': '工具名稱',
-  Calls: '調用次數',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗時',
   'User Decision Summary': '用戶決策摘要',
@@ -1754,6 +1768,66 @@ export default {
     '後續記憶整理可能會因鎖定而略過，直到下一次會話過期清理清除此檔案。',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     '排程門控未看到本次記憶整理的時間戳；下一輪記憶整理可能會比平時更早重新觸發。',
+
+  // Stats Dashboard — Category 2 (missing from zh-TW)
+  'Activity Heatmap': '活動熱力圖',
+  Less: '少',
+  More: '多',
+  Sessions: '會話數',
+  Duration: '時長',
+  Projects: '專案統計',
+  'Loading stats...': '載入統計...',
+  '(no data)': '（暫無資料）',
+  d: '天',
+  h: '時',
+  m: '分',
+  Input: '輸入',
+  Models: '模型',
+  'All time': '所有時間',
+  'Last 7 days': '最近 7 天',
+  'Last 30 days': '最近 30 天',
+  'Show usage statistics dashboard.': '顯示使用統計面板。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API 請求',
+  'Tool Calls': '工具呼叫',
+  'Success rate': '成功率',
+  'Code Changes': '程式碼變更',
+  Tool: '工具',
+  reqs: '請求',
+  in: '輸入',
+  out: '輸出',
+
+  // statsCommand non-interactive output
+  'API requests: {{count}}': 'API 請求：{{count}}',
+  'Code changes': '程式碼變更',
+  Cost: '費用',
+  'Estimated cost: ${{cost}}': '預估費用：${{cost}}',
+  'Files: +{{added}} / -{{removed}} lines':
+    '檔案：+{{added}} / -{{removed}} 行',
+  'N/A': 'N/A',
+  Name: '名稱',
+  'No model usage data yet.': '尚無模型使用資料。',
+  'No tool usage data yet.': '尚無工具使用資料。',
+  'Prompts: {{count}}': '提示：{{count}}',
+  'Session duration: {{duration}}': '會話時長：{{duration}}',
+  'Tokens \u2014 prompt: {{prompt}}, output: {{output}}':
+    'Token — 輸入：{{prompt}}，輸出：{{output}}',
+  'Tool calls': '工具呼叫',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  cached: '快取',
+  days: '天',
+  output: '輸出',
+  prompt: '輸入',
+  '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
+    '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',

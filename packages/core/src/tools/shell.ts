@@ -4361,16 +4361,14 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPatternDetails(
-        stripShellWrapper(params.command),
-      );
+      const sleepPattern = detectBlockedSleepPatternDetails(strippedCommand);
       if (sleepPattern !== null) {
         const intentionalSleepGuidance =
           sleepPattern.intentionalSleepRejection ??
           (sleepPattern.isStandalone
             ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
               'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
-            : 'The intentional-sleep escape hatch only applies to standalone sleep commands; split follow-up commands into a separate invocation.');
+            : 'Split into two calls: first `sleep N # intentional-sleep: <reason>` (standalone), then the follow-up command.');
         return (
           `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +

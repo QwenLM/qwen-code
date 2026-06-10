@@ -189,7 +189,8 @@ export interface OpenDialogActionReturn {
     | 'auto-improve-source'
     | 'mcp'
     | 'rewind'
-    | 'diff';
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -400,6 +401,15 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

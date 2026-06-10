@@ -282,6 +282,7 @@ export interface HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -337,6 +338,7 @@ export class DefaultHookOutput implements HookOutput {
   stopReason?: string;
   suppressOutput?: boolean;
   systemMessage?: string;
+  terminalSequence?: string;
   decision?: HookDecision;
   reason?: string;
   hookSpecificOutput?: Record<string, unknown>;
@@ -346,6 +348,7 @@ export class DefaultHookOutput implements HookOutput {
     this.stopReason = data.stopReason;
     this.suppressOutput = data.suppressOutput;
     this.systemMessage = data.systemMessage;
+    this.terminalSequence = data.terminalSequence;
     this.decision = data.decision;
     this.reason = data.reason;
     this.hookSpecificOutput = data.hookSpecificOutput;

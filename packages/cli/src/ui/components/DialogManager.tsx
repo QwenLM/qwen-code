@@ -48,6 +48,7 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { AutoImproveSourceDialog } from './AutoImproveSourceDialog.js';
+import { StatsDialog } from './StatsDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { DiffDialog } from './DiffDialog.js';
@@ -465,6 +466,11 @@ export const DialogManager = ({
   }
   if (uiState.isHooksDialogOpen) {
     return <HooksManagementDialog onClose={uiActions.closeHooksDialog} />;
+  }
+  if (uiState.isStatsDialogOpen) {
+    return (
+      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+    );
   }
   if (uiState.isMcpDialogOpen) {
     return <MCPManagementDialog onClose={uiActions.closeMcpDialog} />;
