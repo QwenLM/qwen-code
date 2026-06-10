@@ -46,7 +46,10 @@ import {
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { SettingsDialog } from './components/dialogs/SettingsDialog';
+import {
+  SETTINGS_ACTIVE_EVENT,
+  SettingsMessage,
+} from './components/messages/SettingsMessage';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
   ThemeDialog,
@@ -659,7 +662,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
@@ -679,6 +682,7 @@ export function App({
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
+  const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
@@ -697,15 +701,15 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog ||
-    showSettingsDialog;
+    showToolsDialog;
   const bottomHidden =
     dialogOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
-    modelPanelActive;
+    modelPanelActive ||
+    settingsPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1400,7 +1404,8 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            setShowSettingsDialog(true);
+            store.appendLocalUserMessage(text);
+            setSettingsInlineOpen(true);
             return true;
           }
           if (cmd === 'context') {
@@ -2060,18 +2065,6 @@ export function App({
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
               )}
-              {showSettingsDialog && (
-                <SettingsDialog
-                  onClose={() => setShowSettingsDialog(false)}
-                  onSubDialog={(key) => {
-                    setShowSettingsDialog(false);
-                    if (key === 'ui.theme') setShowThemeDialog(true);
-                    else if (key === 'fastModel') setModelInlineMode('fast');
-                    else if (key === 'tools.approvalMode')
-                      setApprovalModeInlineOpen(true);
-                  }}
-                />
-              )}
             </div>
           )}
 
@@ -2096,7 +2089,8 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen ? (
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen ? (
                       <>
                         {approvalModeInlineOpen && (
                           <ApprovalModeMessage
@@ -2137,6 +2131,19 @@ export function App({
                             onClose={() => setMemoryInlineOpen(false)}
                           />
                         )}
+                        {settingsInlineOpen && (
+                          <SettingsMessage
+                            onClose={() => setSettingsInlineOpen(false)}
+                            onSubDialog={(key) => {
+                              setSettingsInlineOpen(false);
+                              if (key === 'ui.theme') setShowThemeDialog(true);
+                              else if (key === 'fastModel')
+                                setModelInlineMode('fast');
+                              else if (key === 'tools.approvalMode')
+                                setApprovalModeInlineOpen(true);
+                            }}
+                          />
+                        )}
                       </>
                     ) : undefined
                   }
@@ -2144,8 +2151,9 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen
-                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen
+                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
                   // The approval-mode and model pickers are reachable by mouse
