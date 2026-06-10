@@ -57,4 +57,21 @@ describe('buildTerminalNotification', () => {
     // BEL should NOT be wrapped in DCS passthrough
     expect(writeRaw.mock.calls[0]![0]).not.toContain('\x1bPtmux');
   });
+
+  it('writeTerminalSequence emits valid OSC sequence', () => {
+    delete process.env['TMUX'];
+    delete process.env['STY'];
+    const terminal = buildTerminalNotification(writeRaw);
+    const result = terminal.writeTerminalSequence('\x1b]9;hello\x07');
+    expect(result).toBe(true);
+    expect(writeRaw).toHaveBeenCalledTimes(1);
+    expect(writeRaw.mock.calls[0]![0]).toContain('\x1b]9;hello\x07');
+  });
+
+  it('writeTerminalSequence rejects invalid sequence', () => {
+    const terminal = buildTerminalNotification(writeRaw);
+    const result = terminal.writeTerminalSequence('plain text');
+    expect(result).toBe(false);
+    expect(writeRaw).not.toHaveBeenCalled();
+  });
 });
