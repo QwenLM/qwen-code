@@ -92,6 +92,34 @@ describe('PushStore', () => {
     expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
   });
 
+  it('setQuietHours sets a copied window, clears it, and reports missing', async () => {
+    const path = tempPath();
+    const store = await PushStore.open(path);
+    const rec = await store.add('tokA', SUB_A);
+    const input = { from: '23:00', to: '07:00', timezone: 'America/New_York' };
+
+    expect(await store.setQuietHours(rec.id, input)).toBe(true);
+    input.from = '00:00'; // mutate the caller object after the call
+    expect(store.get(rec.id)!.quietHours).toEqual({
+      from: '23:00',
+      to: '07:00',
+      timezone: 'America/New_York',
+    });
+
+    // Persists across reopen.
+    const reopened = await PushStore.open(path);
+    expect(reopened.get(rec.id)!.quietHours).toEqual({
+      from: '23:00',
+      to: '07:00',
+      timezone: 'America/New_York',
+    });
+
+    expect(await store.setQuietHours(rec.id, undefined)).toBe(true);
+    expect(store.get(rec.id)!.quietHours).toBeUndefined();
+
+    expect(await store.setQuietHours('missing', input)).toBe(false);
+  });
+
   it('persists the file at mode 0600', async () => {
     const path = tempPath();
     const store = await PushStore.open(path);

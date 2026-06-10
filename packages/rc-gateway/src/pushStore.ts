@@ -21,6 +21,12 @@ export interface PushSubscriptionRecord {
    * → receive ALL kinds (back-compat); empty array → receive NOTHING.
    */
   prefs?: string[];
+  /**
+   * Per-subscription quiet window. Raw `{from, to, timezone}` strings (the
+   * same shape the policy `parseTimeOfDay` validates); when `now` falls inside
+   * the window the notifier suppresses this subscription. Absent → never quiet.
+   */
+  quietHours?: { from: string; to: string; timezone: string };
 }
 
 interface PersistShape {
@@ -103,6 +109,31 @@ export class PushStore {
       delete rec.prefs;
     } else {
       rec.prefs = [...prefs];
+    }
+    await this.persist();
+    return true;
+  }
+
+  /**
+   * Set (or clear) a subscription's quiet window; persists. Returns false if
+   * the id is absent. `undefined` removes the field (never quiet); otherwise a
+   * fresh `{from, to, timezone}` copy of the (already-validated) strings is
+   * stored.
+   */
+  async setQuietHours(
+    id: string,
+    quietHours: { from: string; to: string; timezone: string } | undefined,
+  ): Promise<boolean> {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return false;
+    if (quietHours === undefined) {
+      delete rec.quietHours;
+    } else {
+      rec.quietHours = {
+        from: quietHours.from,
+        to: quietHours.to,
+        timezone: quietHours.timezone,
+      };
     }
     await this.persist();
     return true;
