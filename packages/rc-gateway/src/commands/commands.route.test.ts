@@ -166,6 +166,29 @@ describe('GET /rc/commands', () => {
     expect(body.commands[0].tool).toBe('shell');
     expect(body.commands[0].invocableByYou).toBe(false);
   });
+
+  it('exposes a command args declaration in the listing (null when absent)', async () => {
+    await writeFile(
+      join(workspaceDir, 'fix.md'),
+      `---\nname: fix\ndescription: fix\nscope: write\nargs:\n  - name: issue\n    required: true\n---\nbody`,
+    );
+    await writeFile(join(workspaceDir, 'plain.md'), cmd('plain'));
+    const app = express();
+    app.get(
+      '/rc/commands',
+      fakeClient([SESSION_READ, WRITE]),
+      createListCommandsRoute(commandLoader()),
+    );
+    const url = await listen(app);
+    const body = (await (await fetch(`${url}/rc/commands`)).json()) as {
+      commands: Array<{ name: string; args: unknown }>;
+    };
+    const byName = Object.fromEntries(
+      body.commands.map((c) => [c.name, c.args]),
+    );
+    expect(byName['fix']).toEqual([{ name: 'issue', required: true }]);
+    expect(byName['plain']).toBeNull();
+  });
 });
 
 describe('POST /rc/session/:id/command/:name', () => {
@@ -308,5 +331,91 @@ describe('POST /rc/session/:id/command/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'daemon_unavailable',
     );
+  });
+
+  // A capturing fake daemon so we can assert the RESOLVED prompt text (the stub
+  // daemon ignores prompt bodies) and that a 400 short-circuits before any call.
+  async function bootCapturing(
+    scopes: RcScope[],
+    audit?: AuditRecorder,
+  ): Promise<{ url: string; calls: Array<{ id: string; text: string }> }> {
+    const calls: Array<{ id: string; text: string }> = [];
+    const fakeDaemon = {
+      prompt: async (
+        id: string,
+        payload: { prompt: Array<{ type: string; text: string }> },
+      ) => {
+        calls.push({ id, text: payload.prompt.map((p) => p.text).join('') });
+        return { stopReason: 'end_turn' };
+      },
+    } as unknown as DaemonClient;
+    const app = express();
+    app.use(express.json());
+    app.post(
+      '/rc/session/:id/command/:name',
+      fakeClient(scopes),
+      requireScope(WRITE, audit),
+      enforceSessionLock(audit),
+      createInvokeCommandRoute(fakeDaemon, commandLoader(audit), audit),
+    );
+    const url = await listen(app);
+    return { url, calls };
+  }
+
+  const ARG_CMD = `---\nname: fix\ndescription: fix\nscope: write\nargs:\n  - name: issue\n    required: true\n  - name: branch\n    default: main\n---\nfix #${'${arg}'} on ${'${arg.1}'}`;
+
+  it('400s when a required declared arg is missing; daemon NOT called; audits slash_command_arg_missing', async () => {
+    await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
+    const audit = new FakeAudit();
+    const { url, calls } = await bootCapturing([SESSION_READ, WRITE], audit);
+    const res = await fetch(`${url}/rc/session/s1/command/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: [] }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'missing_required_args',
+    );
+    expect(calls).toHaveLength(0);
+    const miss = audit.entries.find(
+      (e) => e.action === 'slash_command_arg_missing',
+    );
+    expect(miss?.detail).toMatchObject({ name: 'fix', missing: ['issue'] });
+  });
+
+  it('auto-fills a declared default for an absent positional arg', async () => {
+    await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
+    const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
+    const res = await fetch(`${url}/rc/session/s1/command/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: ['123'] }), // branch omitted → default 'main'
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0].text).toBe('fix #123 on main');
+  });
+
+  it('a provided positional value overrides the declared default', async () => {
+    await writeFile(join(workspaceDir, 'fix.md'), ARG_CMD);
+    const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
+    await fetch(`${url}/rc/session/s1/command/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: ['123', 'dev'] }),
+    });
+    expect(calls[0].text).toBe('fix #123 on dev');
+  });
+
+  it('a command with no args declaration is unaffected (back-compat)', async () => {
+    await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
+    const { url, calls } = await bootCapturing([SESSION_READ, WRITE]);
+    const res = await fetch(`${url}/rc/session/s1/command/echo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: ['x', 'y'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0].text).toBe('body for echo x y');
   });
 });

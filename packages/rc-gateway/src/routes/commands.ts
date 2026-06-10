@@ -41,6 +41,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
       scope: c.scope,
       tool: c.tool ?? null,
       sessionScope: c.sessionScope,
+      args: c.args ?? null,
       source: c.source,
       invocableByYou:
         s.includes(WRITE) && s.includes(mapDeclaredScope(c.scope)) && !c.tool,
@@ -116,7 +117,41 @@ export function createInvokeCommandRoute(
       typeof body.fileContext === 'string' ? body.fileContext : undefined;
     const argc = args.length;
 
-    const text = substitute(cmd.body, { args, named, file: fileContext });
+    // Validate declared positional args: fill defaults, collect missing-required.
+    // A value is "present" when args[i] is a non-empty string.
+    const resolvedArgs = [...args];
+    const missing: string[] = [];
+    if (cmd.args) {
+      cmd.args.forEach((decl, i) => {
+        if (typeof resolvedArgs[i] === 'string' && resolvedArgs[i] !== '') {
+          return;
+        }
+        if (decl.default !== undefined) {
+          resolvedArgs[i] = decl.default;
+        } else if (decl.required) {
+          missing.push(decl.name);
+        }
+      });
+    }
+    if (missing.length > 0) {
+      void audit?.record({
+        action: 'slash_command_arg_missing',
+        actorTokenId: req.rcClient?.id,
+        target: req.params.id,
+        detail: { name: cmd.name, missing },
+      });
+      res.status(400).json({
+        error: `Missing required argument(s): ${missing.join(', ')}`,
+        code: 'missing_required_args',
+      });
+      return;
+    }
+
+    const text = substitute(cmd.body, {
+      args: resolvedArgs,
+      named,
+      file: fileContext,
+    });
 
     // Abort the (long-lived) daemon turn if the client disconnects. Listen on
     // the response, not the request — identical to the prompt route.
