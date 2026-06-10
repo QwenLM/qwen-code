@@ -9,7 +9,6 @@ import {
   clipboardHasImage,
   saveClipboardImage,
   cleanupOldClipboardImages,
-  resetLinuxClipboardTool,
   writeOsc52,
 } from './clipboardUtils.js';
 import { EventEmitter } from 'node:events';
@@ -145,10 +144,16 @@ function setupX11Env() {
 const originalPlatform = process.platform;
 
 describe('clipboardUtils', () => {
-  beforeEach(() => {
-    vi.resetModules();
+  let resetTool: () => void;
+
+  beforeEach(async () => {
+    // Dynamically import to get a fresh module instance's reset function reference
+    // (vi.resetModules() clears the module cache, so the top-level import of
+    // resetLinuxClipboardTool would point to a stale module instance)
+    const mod = await import('./clipboardUtils.js');
+    resetTool = mod.resetLinuxClipboardTool;
+    resetTool();
     vi.clearAllMocks();
-    resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
     vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
@@ -202,7 +207,7 @@ describe('clipboardUtils', () => {
 
   describe('xclip / X11 path', () => {
     beforeEach(() => {
-      resetLinuxClipboardTool();
+      resetTool();
       setupX11Env();
     });
 
@@ -263,7 +268,7 @@ describe('clipboardUtils', () => {
 
   describe('BMP-to-PNG conversion (wl-paste)', () => {
     beforeEach(() => {
-      resetLinuxClipboardTool();
+      resetTool();
     });
 
     // Note: BMP-to-PNG conversion success path requires saveFromCommand to resolve,
