@@ -61,10 +61,12 @@ import {
 } from '../followupSidechannel.js';
 import type {
   ActivePrompt,
+  AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
+  DaemonSessionNotice,
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
@@ -75,10 +77,14 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
+  DaemonNoticeCategory,
+  DaemonNoticeOperation,
+  DaemonNoticeSeverity,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
+  DaemonSessionNotice,
   DaemonSessionProviderProps,
   DaemonTodoItem,
   DaemonTodoList,
@@ -100,6 +106,17 @@ const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
+interface SessionNoticesValue {
+  notices: readonly DaemonSessionNotice[];
+  dismissNotice(id: string): void;
+  clearNotices(): void;
+}
+
+type SessionNoticeInput = Parameters<AddDaemonSessionNotice>[0];
+
+const DaemonSessionNoticesContext = createContext<
+  SessionNoticesValue | undefined
+>(undefined);
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
@@ -200,6 +217,31 @@ export function DaemonSessionProvider({
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
   });
+  const noticeIdRef = useRef(0);
+  const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
+  const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
+    const notice: DaemonSessionNotice = {
+      ...input,
+      id: input.id ?? `daemon-notice-${Date.now()}-${++noticeIdRef.current}`,
+      createdAt: input.createdAt ?? Date.now(),
+    };
+    setNotices((current) => [...current.slice(-49), notice]);
+    return notice;
+  }, []);
+  const dismissNotice = useCallback((id: string) => {
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  }, []);
+  const clearNotices = useCallback(() => {
+    setNotices([]);
+  }, []);
+  const noticesValue = useMemo<SessionNoticesValue>(
+    () => ({
+      notices,
+      dismissNotice,
+      clearNotices,
+    }),
+    [clearNotices, dismissNotice, notices],
+  );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
 
@@ -295,6 +337,9 @@ export function DaemonSessionProvider({
               return;
             }
             const previousSessionId = lastSessionIdRef.current;
+            if (previousSessionId !== nextSession.sessionId) {
+              clearNotices();
+            }
             if (
               previousSessionId !== undefined &&
               nextSession.sessionId !== previousSessionId
@@ -424,13 +469,18 @@ export function DaemonSessionProvider({
             const allUiEvents: DaemonUiEvent[] = [];
             for (const replayEvent of replayEvents) {
               try {
+                const replayUiEvents = normalizeAndFilterEvent(
+                  replayEvent,
+                  activeSession.clientId,
+                  replayOpts,
+                  setConnection,
+                  { updateConnection: false },
+                );
                 allUiEvents.push(
-                  ...normalizeAndFilterEvent(
+                  ...filterDaemonUiEventsForTranscript(
                     replayEvent,
-                    activeSession.clientId,
-                    replayOpts,
-                    setConnection,
-                    { updateConnection: false },
+                    replayUiEvents,
+                    addNotice,
                   ),
                 );
                 if (replayEvent.type === 'turn_complete') {
@@ -447,11 +497,19 @@ export function DaemonSessionProvider({
               } catch (error) {
                 const message =
                   error instanceof Error ? error.message : String(error);
-                allUiEvents.push({
-                  type: 'error',
-                  text: `Skipped malformed replay event: ${message}`,
+                addNotice({
+                  severity: 'warning',
+                  category: 'protocol',
+                  operation: 'normalize_event',
+                  code: 'daemon.replay_event_malformed',
+                  message: 'Skipped malformed replay event',
+                  debugMessage: message,
                   recoverable: true,
                 });
+                console.warn(
+                  '[DaemonSessionProvider] skipped malformed replay event:',
+                  error,
+                );
               }
             }
             if (allUiEvents.length > 0) {
@@ -494,11 +552,16 @@ export function DaemonSessionProvider({
                 publishSidechannelFollowupSuggestion(followupSuggestion);
                 continue;
               }
-              const uiEvents = normalizeAndFilterEvent(
+              const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
                 activeSession.clientId,
                 eventOptionsRef.current,
                 setConnection,
+              );
+              const uiEvents = filterDaemonUiEventsForTranscript(
+                event,
+                normalizedUiEvents,
+                addNotice,
               );
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
@@ -614,11 +677,19 @@ export function DaemonSessionProvider({
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
-              store.dispatch({
-                type: 'error',
-                text: `Skipped malformed daemon event: ${message}`,
+              addNotice({
+                severity: 'warning',
+                category: 'protocol',
+                operation: 'normalize_event',
+                code: 'daemon.event_malformed',
+                message: 'Skipped malformed daemon event',
+                debugMessage: message,
                 recoverable: true,
               });
+              console.warn(
+                '[DaemonSessionProvider] skipped malformed daemon event:',
+                error,
+              );
             }
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -627,7 +698,7 @@ export function DaemonSessionProvider({
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               setPromptStatus('idle');
-              console.warn('[DaemonSessionProvider] SSE stream ended');
+              console.debug('[DaemonSessionProvider] SSE stream ended');
               store.dispatch({
                 type: 'assistant.done',
                 reason: 'stream_ended',
@@ -735,7 +806,7 @@ export function DaemonSessionProvider({
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
-          new Error('Session load interrupted by cleanup'),
+          new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
@@ -766,6 +837,8 @@ export function DaemonSessionProvider({
     restoreSessionNonce,
     newSessionNonce,
     clientId,
+    clearNotices,
+    addNotice,
   ]);
 
   useEffect(() => {
@@ -824,6 +897,7 @@ export function DaemonSessionProvider({
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         passiveAssistantDoneTimerRef,
+        addNotice,
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
@@ -831,19 +905,21 @@ export function DaemonSessionProvider({
         setRestoreSessionNonce,
         setNewSessionNonce,
       }),
-    [store],
+    [addNotice, store],
   );
   return (
     <DaemonStoreContext.Provider value={store}>
       <DaemonConnectionContext.Provider value={connection}>
         <DaemonPromptStatusContext.Provider value={promptStatus}>
-          <DaemonWorkspaceEventSignalsContext.Provider
-            value={workspaceEventSignals}
-          >
-            <DaemonActionsContext.Provider value={actions}>
-              {children}
-            </DaemonActionsContext.Provider>
-          </DaemonWorkspaceEventSignalsContext.Provider>
+          <DaemonSessionNoticesContext.Provider value={noticesValue}>
+            <DaemonWorkspaceEventSignalsContext.Provider
+              value={workspaceEventSignals}
+            >
+              <DaemonActionsContext.Provider value={actions}>
+                {children}
+              </DaemonActionsContext.Provider>
+            </DaemonWorkspaceEventSignalsContext.Provider>
+          </DaemonSessionNoticesContext.Provider>
         </DaemonPromptStatusContext.Provider>
       </DaemonConnectionContext.Provider>
     </DaemonStoreContext.Provider>
@@ -908,7 +984,7 @@ function settleActivePromptFromTurnEvent(
 }
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
-  return event.type === 'turn_complete' || event.type === 'turn_error';
+  return event.type === 'turn_complete';
 }
 
 function normalizeAndFilterEvent(
@@ -927,6 +1003,87 @@ function normalizeAndFilterEvent(
     includeRawEvent: opts.includeRawEvent,
   });
   return isPromptLifecycleTurnEvent(event) ? [] : normalized;
+}
+
+function filterDaemonUiEventsForTranscript(
+  sourceEvent: DaemonEvent,
+  events: DaemonUiEvent[],
+  addNotice: AddDaemonSessionNotice,
+): DaemonUiEvent[] {
+  const filtered: DaemonUiEvent[] = [];
+  for (const event of events) {
+    if (event.type !== 'error') {
+      filtered.push(event);
+      continue;
+    }
+    if (sourceEvent.type === 'turn_error') {
+      filtered.push(event);
+      continue;
+    }
+    const notice = addNotice(
+      daemonErrorEventToNotice(sourceEvent, event as DaemonUiErrorEvent),
+    );
+    if (notice.category === 'protocol' || notice.category === 'connection') {
+      console.warn('[DaemonSessionProvider] daemon notice:', notice);
+    }
+  }
+  return filtered;
+}
+
+type DaemonUiErrorEvent = Extract<DaemonUiEvent, { type: 'error' }>;
+
+function daemonErrorEventToNotice(
+  sourceEvent: DaemonEvent,
+  event: DaemonUiErrorEvent,
+): SessionNoticeInput {
+  const base = {
+    message: event.text,
+    debugMessage: event.text,
+    recoverable: event.recoverable,
+  };
+
+  switch (sourceEvent.type) {
+    case 'model_switch_failed':
+      return {
+        ...base,
+        severity: 'error',
+        category: 'user_action',
+        operation: 'switch_model',
+        code: 'daemon.switch_model.failed',
+      };
+    case 'session_died':
+      return {
+        ...base,
+        severity: 'error',
+        category: 'connection',
+        operation: 'stream',
+        code: event.errorKind ?? 'daemon.session_died',
+      };
+    case 'client_evicted':
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'connection',
+        operation: 'stream',
+        code: 'daemon.client_evicted',
+      };
+    case 'stream_error':
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'connection',
+        operation: 'stream',
+        code: event.errorKind ?? 'daemon.stream_error',
+      };
+    default:
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'protocol',
+        operation: 'normalize_event',
+        code: event.code ?? 'daemon.protocol.error',
+      };
+  }
 }
 
 export function useDaemonSession(): DaemonSessionContextValue {
@@ -1025,6 +1182,20 @@ export function useDaemonConnection(): DaemonConnectionState {
     );
   }
   return connection;
+}
+
+export function useDaemonSessionNotices(): {
+  notices: readonly DaemonSessionNotice[];
+  dismissNotice(id: string): void;
+  clearNotices(): void;
+} {
+  const value = useContext(DaemonSessionNoticesContext);
+  if (!value) {
+    throw new Error(
+      'useDaemonSessionNotices must be used within DaemonSessionProvider',
+    );
+  }
+  return value;
 }
 
 function hasActiveGenerationSignal(

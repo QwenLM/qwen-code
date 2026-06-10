@@ -20,6 +20,7 @@ import {
   DaemonSessionProvider,
   useDaemonActions,
   useDaemonConnection,
+  useDaemonSessionNotices,
   useDaemonPendingPermissions,
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
@@ -28,6 +29,7 @@ import {
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
   type DaemonSessionActions,
+  type DaemonSessionNotice,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
 
@@ -45,6 +47,7 @@ interface MockSession {
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
+  shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
   context: () => Promise<{
     v: 1;
     sessionId: string;
@@ -329,13 +332,15 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
-  it('records action errors when no session is connected', async () => {
+  it('publishes action error notices when no session is connected', async () => {
     let actions: DaemonUiSessionActions | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
 
     function Harness() {
       actions = useDaemonActions();
       blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
       return null;
     }
 
@@ -348,10 +353,12 @@ describe('DaemonSessionProvider', () => {
         'Daemon session is not connected',
       );
     });
-    expect(blocks).toMatchObject([
+    expect(blocks).toEqual([]);
+    expect(notices).toMatchObject([
       {
-        kind: 'error',
-        text: 'Prompt failed: Daemon session is not connected',
+        category: 'user_action',
+        operation: 'send_prompt',
+        message: 'Prompt failed: Daemon session is not connected',
       },
     ]);
 
@@ -360,9 +367,14 @@ describe('DaemonSessionProvider', () => {
         'Daemon session is not connected',
       );
     });
-    expect(blocks).toMatchObject([
-      { text: 'Prompt failed: Daemon session is not connected' },
-      { text: 'Cancel failed: Daemon session is not connected' },
+    expect(blocks).toEqual([]);
+    expect(notices).toMatchObject([
+      { operation: 'send_prompt' },
+      {
+        category: 'user_action',
+        operation: 'cancel_prompt',
+        message: 'Cancel failed: Daemon session is not connected',
+      },
     ]);
 
     await act(async () => {
@@ -370,10 +382,15 @@ describe('DaemonSessionProvider', () => {
         'Daemon session is not connected',
       );
     });
-    expect(blocks).toMatchObject([
-      { text: 'Prompt failed: Daemon session is not connected' },
-      { text: 'Cancel failed: Daemon session is not connected' },
-      { text: 'Set model failed: Daemon session is not connected' },
+    expect(blocks).toEqual([]);
+    expect(notices).toMatchObject([
+      { operation: 'send_prompt' },
+      { operation: 'cancel_prompt' },
+      {
+        category: 'user_action',
+        operation: 'switch_model',
+        message: 'Set model failed: Daemon session is not connected',
+      },
     ]);
 
     await act(async () => {
@@ -386,11 +403,16 @@ describe('DaemonSessionProvider', () => {
         }),
       ).rejects.toThrow('Daemon session is not connected');
     });
-    expect(blocks).toMatchObject([
-      { text: 'Prompt failed: Daemon session is not connected' },
-      { text: 'Cancel failed: Daemon session is not connected' },
-      { text: 'Set model failed: Daemon session is not connected' },
-      { text: 'Permission response failed: Daemon session is not connected' },
+    expect(blocks).toEqual([]);
+    expect(notices).toMatchObject([
+      { operation: 'send_prompt' },
+      { operation: 'cancel_prompt' },
+      { operation: 'switch_model' },
+      {
+        category: 'user_action',
+        operation: 'submit_permission',
+        message: 'Permission response failed: Daemon session is not connected',
+      },
     ]);
   });
 
@@ -401,7 +423,7 @@ describe('DaemonSessionProvider', () => {
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(session);
-    let actions: DaemonUiSessionActions | undefined;
+    let actions: DaemonSessionActions | undefined;
 
     function Harness() {
       actions = useDaemonActions();
@@ -910,10 +932,12 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(session);
     let actions: DaemonUiSessionActions | undefined;
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
 
     function Harness() {
       actions = useDaemonActions();
       blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
       return null;
     }
 
@@ -942,8 +966,44 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'user', text: 'fail later' },
       { kind: 'assistant', text: 'partial', streaming: false },
-      { kind: 'error', text: 'network down' },
     ]);
+    expect(notices).toMatchObject([
+      {
+        category: 'user_action',
+        operation: 'send_prompt',
+        message: 'Prompt failed: network down',
+      },
+    ]);
+  });
+
+  it('does not insert abort errors from shell commands into the transcript', async () => {
+    const session = createMockSession({
+      events: createIdleEvents(),
+      shellCommand: vi.fn(async () => {
+        throw createAbortError();
+      }),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    await act(async () => {
+      await expect(
+        requireActions(actions).sendShellCommand('echo ok'),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    });
+    expect(blocks.some((block) => block.kind === 'error')).toBe(false);
   });
 
   it('exposes catchingUp on resume and clears it on replay_complete', async () => {
@@ -1343,6 +1403,11 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'partial replay', streaming: false },
+      {
+        kind: 'error',
+        text: 'model overloaded',
+        source: 'turn_error',
+      },
     ]);
   });
 
@@ -1923,6 +1988,36 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({ sessionId: 'session-b' });
   });
 
+  it('rejects interrupted session loads as AbortError during cleanup', async () => {
+    const session = createMockSession({ events: createIdleEvents() });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    let loadRejection!: Promise<void>;
+    await act(async () => {
+      const loadPromise = requireActions(actions).loadSession('session-b');
+      loadRejection = await expect(loadPromise).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      await flushPromises();
+    });
+
+    await loadRejection;
+    expect(blocks).toEqual([]);
+  });
+
   it('does not reconnect when event processing options change', async () => {
     const session = createMockSession({ events: createIdleEvents() });
     sdkMocks.sessions.push(session);
@@ -2253,10 +2348,12 @@ describe('DaemonSessionProvider', () => {
       sdkMocks.sessions.push(session);
       let actions: DaemonUiSessionActions | undefined;
       let blocks: readonly DaemonTranscriptBlock[] = [];
+      let notices: readonly DaemonSessionNotice[] = [];
 
       function Harness() {
         actions = useDaemonActions();
         blocks = useDaemonTranscriptBlocks();
+        notices = useDaemonSessionNotices().notices;
         return null;
       }
 
@@ -2282,7 +2379,8 @@ describe('DaemonSessionProvider', () => {
       expect((observedError as Error).message).toBe(
         expectedError.replace(/^.*?: /, ''),
       );
-      expect(blocks.at(-1)).toMatchObject({ text: expectedError });
+      expect(blocks.some((block) => block.kind === 'error')).toBe(false);
+      expect(notices.at(-1)).toMatchObject({ message: expectedError });
     } finally {
       vi.useRealTimers();
     }
@@ -2705,6 +2803,13 @@ describe('DaemonSessionProvider', () => {
           text: 'partial error replay',
           streaming: false,
         }),
+        expect.objectContaining({
+          kind: 'error',
+          text: 'model overloaded',
+          code: 'overloaded',
+          promptId: 'prompt-1',
+          source: 'turn_error',
+        }),
       ]),
     );
   });
@@ -2968,8 +3073,10 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(firstSession, reloadedSession);
 
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let notices: readonly DaemonSessionNotice[] = [];
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      notices = useDaemonSessionNotices().notices;
       return null;
     }
 
@@ -2986,12 +3093,19 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          kind: 'error',
-          text: expect.stringContaining('Skipped malformed replay event'),
-        }),
-        expect.objectContaining({
           kind: 'assistant',
           text: 'after malformed replay',
+        }),
+      ]),
+    );
+    expect(blocks.some((block) => block.kind === 'error')).toBe(false);
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: 'protocol',
+          operation: 'normalize_event',
+          code: 'daemon.replay_event_malformed',
+          message: 'Skipped malformed replay event',
         }),
       ]),
     );
@@ -3201,9 +3315,7 @@ describe('DaemonSessionProvider', () => {
   }
 });
 
-function requireActions(
-  actions: DaemonUiSessionActions | undefined,
-): DaemonUiSessionActions {
+function requireActions<T>(actions: T | undefined): T {
   if (!actions) throw new Error('actions were not initialized');
   return actions;
 }
@@ -3231,6 +3343,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
         modelId,
       })),
     heartbeat: opts.heartbeat ?? vi.fn(async () => ({ ok: true })),
+    shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),
     context:
       opts.context ??
       vi.fn(async () => ({

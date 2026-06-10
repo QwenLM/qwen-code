@@ -210,6 +210,9 @@ export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
   text: string;
   recoverable?: boolean;
+  code?: string;
+  promptId?: string;
+  source?: 'turn_error';
   /**
    * Closed-enum error category propagated from the daemon's typed-error
    * taxonomy. Lets renderers branch on `errorKind` for "retry auth" vs
@@ -728,6 +731,9 @@ export interface DaemonPermissionTranscriptBlock
 export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'status' | 'error' | 'debug';
   text: string;
+  code?: string;
+  promptId?: string;
+  source?: 'turn_error';
 }
 
 export type DaemonTranscriptBlock =

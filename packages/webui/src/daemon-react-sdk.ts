@@ -49,6 +49,9 @@ export { useDaemonConnection as useConnection } from './daemon/index.js';
 /** Current session metadata (id, model, approval mode). */
 export { useDaemonSession as useSession } from './daemon/index.js';
 
+/** Classified session notices for host-owned UI such as toast or banners. */
+export { useDaemonSessionNotices as useSessionNotices } from './daemon/index.js';
+
 /** Streaming state: `'idle' | 'thinking' | 'responding'`. */
 export { useDaemonStreamingState as useStreamingState } from './daemon/index.js';
 
@@ -145,12 +148,20 @@ export type {
   DaemonConnectionStatus,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
+  /** Classified notice category for host-owned UI routing. */
+  DaemonNoticeCategory,
+  /** Fine-grained operation associated with a session notice. */
+  DaemonNoticeOperation,
+  /** Notice severity. */
+  DaemonNoticeSeverity,
   /** Slash-command descriptor with name, description, and argument hint. */
   DaemonCommandInfo,
   /** All session-level actions: prompt, cancel, permission, model, session management. */
   DaemonSessionActions,
   /** Internal session context value (store + connection + actions). */
   DaemonSessionContextValue,
+  /** Structured session notice emitted outside the transcript. */
+  DaemonSessionNotice,
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */

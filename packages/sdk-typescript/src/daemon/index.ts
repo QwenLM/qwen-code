@@ -7,10 +7,12 @@
 export {
   DaemonClient,
   DaemonHttpError,
+  isDaemonTurnError,
   isNonBlockingAccepted,
   matchTurnEvent,
   type CreateSessionRequest,
   type DaemonClientOptions,
+  type DaemonTurnError,
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,

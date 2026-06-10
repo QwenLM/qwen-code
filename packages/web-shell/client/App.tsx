@@ -10,12 +10,15 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
@@ -23,6 +26,11 @@ import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  ToastHost,
+  type ToastTone,
+  type WebShellToast,
+} from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
@@ -115,6 +123,7 @@ export const CompactModeContext = createContext(false);
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
+const MAX_TOASTS = 4;
 const COMPACT_MODE_STORAGE_KEY = 'web-shell:compact-mode';
 
 function loadCompactMode(): boolean {
@@ -235,16 +244,32 @@ interface AlreadyDispatchedError extends Error {
   _alreadyDispatched: true;
 }
 
-function markAlreadyDispatched(error: Error): AlreadyDispatchedError {
-  return Object.assign(error, { _alreadyDispatched: true as const });
-}
-
 function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
   return (
     typeof error === 'object' &&
     error !== null &&
     (error as AlreadyDispatchedError)._alreadyDispatched === true
   );
+}
+
+function logSessionNoticesHook(notices: readonly DaemonSessionNotice[]): void {
+  if (notices.length > 0) {
+    console.info('[web-shell] useSessionNotices()', { notices });
+  }
+}
+
+function shouldToastNotice(notice: DaemonSessionNotice): boolean {
+  return (
+    notice.category === 'validation' ||
+    notice.category === 'user_action' ||
+    notice.category === 'system'
+  );
+}
+
+function toastToneFromNotice(notice: DaemonSessionNotice): ToastTone {
+  if (notice.severity === 'warning') return 'warning';
+  if (notice.severity === 'info') return 'info';
+  return 'error';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -535,7 +560,26 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
+  const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const toastIdRef = useRef(0);
+  const [toasts, setToasts] = useState<WebShellToast[]>([]);
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+  const pushToast = useCallback((tone: ToastTone, message: string) => {
+    const toast: WebShellToast = {
+      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
+      tone,
+      message,
+    };
+    setToasts((current) => {
+      const withoutDuplicate = current.filter(
+        (item) => item.tone !== tone || item.message !== message,
+      );
+      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
+    });
+  }, []);
 
   const messages = useMessages();
   const messagesRef = useRef(messages);
@@ -626,16 +670,10 @@ export function App({
       opts?: { optimisticUserMessage?: boolean },
     ) => {
       clearFollowup();
-      return sessionActions
-        .sendPrompt(text, {
-          images,
-          optimisticUserMessage: opts?.optimisticUserMessage,
-        })
-        .catch((error: unknown) => {
-          throw markAlreadyDispatched(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        });
+      return sessionActions.sendPrompt(text, {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+      });
     },
     [clearFollowup, sessionActions],
   );
@@ -717,16 +755,34 @@ export function App({
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
       if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        console.debug('[web-shell] turn error rendered in transcript', error);
+        return;
+      }
       if (isAlreadyDispatched(error)) {
-        console.error('[web-shell] error already dispatched', error);
+        console.debug('[web-shell] error already handled by notice', error);
         return;
       }
       const message = formatError(error, fallback);
       console.error('[web-shell]', message, error);
-      store.dispatch([{ type: 'error', text: message }]);
+      pushToast('error', message);
     },
-    [store],
+    [pushToast],
   );
+
+  useEffect(() => {
+    logSessionNoticesHook(notices);
+    for (const notice of notices) {
+      if (shouldToastNotice(notice)) {
+        pushToast(toastToneFromNotice(notice), notice.message);
+      } else if (notice.category === 'lifecycle') {
+        console.debug('[web-shell] daemon notice', notice);
+      } else {
+        console.warn('[web-shell] daemon notice', notice);
+      }
+      dismissNotice(notice.id);
+    }
+  }, [dismissNotice, notices, pushToast]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -773,17 +829,10 @@ export function App({
       },
       (error: unknown) => {
         if (activeSessionIdRef.current !== sessionId) return;
-        console.error('[recap] failed:', error);
-        setRecapMessage({
-          anchorAfterId,
-          anchorIndex,
-          message: {
-            id: messageId,
-            role: 'system',
-            content: formatError(error, t('recap.failed')),
-            variant: 'error',
-          },
-        });
+        setRecapMessage(null);
+        if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+          console.warn('[web-shell] unhandled recap failure', error);
+        }
       },
     );
   }, [connection.sessionId, messages, sessionActions, t]);
@@ -792,12 +841,7 @@ export function App({
     (rawQuestion: string) => {
       const question = rawQuestion.trim();
       if (!question) {
-        store.dispatch([
-          {
-            type: 'error',
-            text: t('btw.empty'),
-          },
-        ]);
+        pushToast('error', t('btw.empty'));
         return;
       }
 
@@ -833,17 +877,14 @@ export function App({
             if (activeSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
-            setBtwMessage({
-              id: messageId,
-              role: 'btw',
-              question,
-              answer: formatError(error, t('btw.failed')),
-              isPending: false,
-            });
+            setBtwMessage(null);
+            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+              console.warn('[web-shell] unhandled btw failure', error);
+            }
           },
         );
     },
-    [connection.sessionId, sessionActions, store, t],
+    [connection.sessionId, pushToast, sessionActions, t],
   );
 
   const dismissBtwMessage = useCallback(() => {
@@ -1045,7 +1086,8 @@ export function App({
 
   useEffect(() => {
     if (connection.error) {
-      onError?.(new Error(connection.error));
+      const error = new Error(connection.error);
+      onError?.(error);
     }
   }, [connection.error, onError]);
 
@@ -1149,12 +1191,7 @@ export function App({
             } else if (!themeArg) {
               setShowThemeDialog(true);
             } else {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('error.unsupportedTheme'),
-                },
-              ]);
+              pushToast('error', t('error.unsupportedTheme'));
             }
             return true;
           }
@@ -1201,9 +1238,7 @@ export function App({
                 normalizedArg,
               );
               if (!valid) {
-                store.dispatch([
-                  { type: 'error', text: t('language.invalid') },
-                ]);
+                pushToast('error', t('language.invalid'));
                 return true;
               }
               const nextLanguage = normalizeLanguage(languageArg);
@@ -1499,12 +1534,7 @@ export function App({
             }
             const displayName = renameArg.displayName;
             if (!displayName) {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('rename.empty'),
-                },
-              ]);
+              pushToast('error', t('rename.empty'));
               return true;
             }
             sessionActions
@@ -1518,15 +1548,7 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text:
-                      error instanceof Error
-                        ? error.message
-                        : 'Failed to rename session',
-                  },
-                ]);
+                reportError(error, 'Failed to rename session');
               });
             return true;
           }
@@ -1675,9 +1697,7 @@ export function App({
                       { type: 'status', text: t('bug.submitted') },
                     ]);
                   } else {
-                    store.dispatch([
-                      { type: 'error', text: t('bug.popupBlocked') },
-                    ]);
+                    pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
@@ -1717,6 +1737,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       onLanguageChange,
+      pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
@@ -1987,6 +2008,7 @@ export function App({
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
         <div className={appClassName} style={externalStyle} data-web-shell-root>
+          <ToastHost toasts={toasts} onDismiss={dismissToast} />
           {dialogOpen && (
             <div className={styles.dialogOverlay} data-keyboard-scope>
               {showResumeDialog && (
@@ -2019,12 +2041,7 @@ export function App({
                   onError={(error) => {
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('delete.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('delete.failed', { reason }));
                   }}
                   onClose={() => setShowDeleteDialog(false)}
                 />
@@ -2042,12 +2059,7 @@ export function App({
                   onError={(error) => {
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('release.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('release.failed', { reason }));
                   }}
                   onClose={() => setShowReleaseDialog(false)}
                 />
