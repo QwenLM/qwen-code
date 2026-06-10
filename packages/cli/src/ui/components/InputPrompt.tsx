@@ -515,6 +515,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     });
   }, []);
 
+  // Down from an empty composer (bottom edge, history exhausted), in visual
+  // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
+  // Arena) → stay put. Always consumes the key.
+  const descendFromComposer = useCallback((): boolean => {
+    if (bgAgentCount > 0) {
+      setLivePanelFocused(true);
+    } else if (hasAgents) {
+      setAgentTabBarFocused(true);
+    }
+    return true;
+  }, [bgAgentCount, hasAgents, setLivePanelFocused, setAgentTabBarFocused]);
+
   const handleInput = useCallback(
     (key: Key): boolean => {
       // When the Arena tab bar or background pill has focus, block
@@ -532,9 +544,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
           } else if (hasAgents) {
             // Bottom of the panel → descend to the tab bar below it
-            // (only rendered when Arena agents exist; else stay put).
+            // (only rendered when Arena agents exist).
             setLivePanelFocused(false);
             setAgentTabBarFocused(true);
+          } else {
+            // No tab bar below → release focus back to the composer instead
+            // of silently consuming the key.
+            setLivePanelFocused(false);
           }
           return true;
         }
@@ -1150,17 +1166,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Down from an empty composer, in visual top→bottom order:
-          // live agent panel (if bg sub-agents) → tab bar (if Arena) → stay.
-          if (bgAgentCount > 0) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
         // Handle arrow-up/down for history on single-line or at edges
         if (
@@ -1193,17 +1199,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           if (inputHistory.navigateDown()) {
             return true;
           }
-          // Down from an empty composer, in visual top→bottom order:
-          // live agent panel (if bg sub-agents) → tab bar (if Arena) → stay.
-          if (bgAgentCount > 0) {
-            setLivePanelFocused(true);
-            return true;
-          }
-          if (hasAgents) {
-            setAgentTabBarFocused(true);
-            return true;
-          }
-          return true;
+          return descendFromComposer();
         }
       } else {
         // Shell History Navigation
@@ -1401,6 +1397,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       livePanelFocused,
       livePanelSelectedIndex,
       bgAgentCount,
+      descendFromComposer,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,

@@ -214,6 +214,8 @@ describe('InputPrompt', () => {
       dialogMode: 'closed',
       dialogOpen: false,
       pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
     });
     mockedUseBackgroundTaskViewActions.mockReturnValue({
       setPillFocused: mockViewActions.setBgPillFocused,
@@ -4396,6 +4398,41 @@ describe('InputPrompt', () => {
 
       expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
       expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('Down at the bottom of the live agent panel returns to the composer when no tab bar exists', async () => {
+      // bg sub-agents without an Arena session: there is no tab bar below the
+      // panel, so Down at the last row releases focus back to the composer
+      // instead of silently consuming the key.
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'agent', agentId: 'bg-agent' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: true,
+        livePanelSelectedIndex: 1, // bottom row: 0 = main, 1 = the only bg agent
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
       unmount();
     });
 

@@ -56,7 +56,6 @@ export interface AgentViewState {
 }
 
 export interface AgentViewActions {
-  switchToMain(): void;
   switchToAgent(agentId: string): void;
   switchToNext(): void;
   switchToPrevious(): void;
@@ -94,7 +93,6 @@ const DEFAULT_STATE: AgentViewState = {
 const noop = () => {};
 
 const DEFAULT_ACTIONS: AgentViewActions = {
-  switchToMain: noop,
   switchToAgent: noop,
   switchToNext: noop,
   switchToPrevious: noop,
@@ -142,11 +140,6 @@ export function AgentViewProvider({
   >(() => new Map());
 
   // ── Navigation ──
-
-  const switchToMain = useCallback(() => {
-    setActiveView('main');
-    setAgentTabBarFocused(false);
-  }, []);
 
   const switchToAgent = useCallback(
     (agentId: string) => {
@@ -265,7 +258,6 @@ export function AgentViewProvider({
 
   const actions: AgentViewActions = useMemo(
     () => ({
-      switchToMain,
       switchToAgent,
       switchToNext,
       switchToPrevious,
@@ -278,7 +270,6 @@ export function AgentViewProvider({
       setAgentApprovalMode,
     }),
     [
-      switchToMain,
       switchToAgent,
       switchToNext,
       switchToPrevious,
