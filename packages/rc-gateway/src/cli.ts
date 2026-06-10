@@ -12,11 +12,7 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
-import {
-  loadRoutingConfigFile,
-  compileRouting,
-  type RoutingMatcher,
-} from './routing/rules.js';
+import { loadLayeredRoutingMatcher } from './routing/rules.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import { loadPolicyFile } from './policy/loader.js';
@@ -44,24 +40,26 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const snooze = await SnoozeStore.open(
     join(homedir(), '.qwen', 'rc', 'snooze.state'),
   );
-  // Load routing rules FAIL-OPEN: absent file → no matcher (full fan-out); a
-  // malformed file is logged and ignored (not fatal) — routing rules only
-  // suppress, so the safe default on misconfig is more notifications, never
-  // fewer. Workspace override + hot-reload are deferred.
-  let routing: RoutingMatcher | undefined;
-  let routingRuleCount = 0;
+  // Load routing rules FAIL-OPEN across two layers: the user-level
+  // ~/.qwen/rc/routing.yaml and the workspace override
+  // <workspaceCwd>/.qwen/routing.yaml (workspace rules prepended — cycle 36).
+  // A missing/malformed file at either layer is logged + ignored (routing only
+  // suppresses, so the safe default on misconfig is more notifications, never
+  // fewer). 1-daemon-1-workspace ⇒ resolve the cwd once at boot; a capabilities
+  // failure simply skips the workspace layer. Hot-reload is deferred.
+  let workspaceCwd: string | undefined;
   try {
-    const routingCfg = await loadRoutingConfigFile(
-      join(homedir(), '.qwen', 'rc', 'routing.yaml'),
-    );
-    if (routingCfg) {
-      routing = compileRouting(routingCfg);
-      routingRuleCount = routingCfg.rules.length;
-    }
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(`[routing] ignoring routing.yaml: ${(err as Error).message}`);
+    workspaceCwd = (await handle.daemon.capabilities()).workspaceCwd;
+  } catch {
+    // Daemon not reporting capabilities → no workspace override layer.
   }
+  const { matcher: routing, ruleCount: routingRuleCount } =
+    await loadLayeredRoutingMatcher(
+      join(homedir(), '.qwen', 'rc', 'routing.yaml'),
+      workspaceCwd,
+      // eslint-disable-next-line no-console
+      (msg) => console.warn(msg),
+    );
   const { app, notifier, audit } = createGatewayApp({
     daemon: handle.daemon,
     store,
