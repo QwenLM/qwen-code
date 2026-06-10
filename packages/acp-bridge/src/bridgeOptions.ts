@@ -340,4 +340,18 @@ export interface BridgeOptions {
    * so it does not prevent daemon exit.
    */
   channelIdleTimeoutMs?: number;
+  /**
+   * How often the session reaper scans for idle sessions, in
+   * milliseconds. Default: 60_000 (1 minute). `0` or `Infinity`
+   * disables the reaper entirely. The timer is `.unref()`'d.
+   */
+  sessionReapIntervalMs?: number;
+  /**
+   * A session with zero SSE subscribers and no active prompt that has
+   * not received a heartbeat for this many milliseconds is reaped.
+   * Note: `clientIds.size` is intentionally NOT checked — the reaper
+   * covers the crash path where clients never sent a detach request.
+   * Default: 1_800_000 (30 minutes). `0` or `Infinity` disables.
+   */
+  sessionIdleTimeoutMs?: number;
 }

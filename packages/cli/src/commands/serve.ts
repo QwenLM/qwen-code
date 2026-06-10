@@ -49,6 +49,8 @@ interface ServeArgs {
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
+  'session-reap-interval-ms'?: number;
+  'session-idle-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -180,6 +182,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
           '0 or unset = immediate kill (default).',
+      })
+      .option('session-reap-interval-ms', {
+        type: 'number',
+        description:
+          'Session reaper scan interval (ms). 0 = disabled. Default: 60000.',
+      })
+      .option('session-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'Idle timeout before a disconnected session is reaped (ms). ' +
+          '0 = disabled. Default: 1800000 (30 min).',
       })
       .option('rate-limit', {
         type: 'boolean',
@@ -379,6 +392,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['channel-idle-timeout-ms'] !== undefined
           ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-reap-interval-ms'] !== undefined
+          ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }
+          : {}),
+        ...(argv['session-idle-timeout-ms'] !== undefined
+          ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),
         ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),
