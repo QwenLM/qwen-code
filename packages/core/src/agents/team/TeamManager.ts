@@ -93,7 +93,7 @@ export interface TeammateSpawnConfig {
 }
 
 /** Priority levels for pending messages (lower = higher priority). */
-const enum MessagePriority {
+enum MessagePriority {
   SHUTDOWN = 0,
   LEADER = 1,
   PEER = 2,

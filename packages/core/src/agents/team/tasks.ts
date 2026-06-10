@@ -108,7 +108,14 @@ export function onTasksUpdated(listener: TaskUpdateListener): () => void {
 /** Notify all listeners that tasks have changed. */
 export function notifyTasksUpdated(teamName: string): void {
   for (const listener of listeners) {
-    listener(teamName);
+    try {
+      listener(teamName);
+    } catch (err) {
+      // One throwing listener must not starve the rest — the
+      // TeamManager listener drives auto-claim, so skipping it
+      // would silently stall the task board.
+      debug.warn(`task update listener failed: ${err}`);
+    }
   }
 }
 
@@ -742,6 +749,43 @@ async function isAgentBusy(
 // ─── Agent-level operations ─────────────────────────────────
 
 /**
+ * Atomically release one task owned by a terminating agent.
+ * Re-reads under the per-task lock and gives up when the caller's
+ * snapshot went stale: the leader may have reassigned the task to
+ * another teammate, or the dying agent's final task_update
+ * (completion) may have landed after the snapshot read. Releasing
+ * in either case would clobber the newer write — yanking the task
+ * from its new owner or resurrecting a completed task as pending.
+ * Returns true when the task was reset to pending.
+ */
+async function releaseOwnedTask(
+  teamName: string,
+  taskId: string,
+  expectedOwner: string,
+): Promise<boolean> {
+  const taskPath = getTaskPath(teamName, taskId);
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return false;
+    throw err;
+  }
+  try {
+    const raw = await fs.readFile(taskPath, 'utf-8');
+    const task = JSON.parse(raw) as SwarmTask;
+    if (task.status !== 'in_progress') return false;
+    if (task.owner !== expectedOwner) return false;
+    task.owner = undefined;
+    task.status = 'pending';
+    await atomicWriteJSON(taskPath, task);
+    return true;
+  } finally {
+    await release?.();
+  }
+}
+
+/**
  * Unassign all tasks owned by an agent (set back to pending).
  * Used when an agent crashes or is shut down.
  */
@@ -764,9 +808,7 @@ export async function unassignTeammateTasks(
   // task strands every other task on the terminated teammate, and the
   // caller's re-scan (gated on this resolving) never fires.
   const results = await Promise.allSettled(
-    owned.map((task) =>
-      updateTask(teamName, task.id, { status: 'pending', owner: null }),
-    ),
+    owned.map((task) => releaseOwnedTask(teamName, task.id, task.owner!)),
   );
   const failed = results.filter((r) => r.status === 'rejected');
   if (failed.length > 0) {
@@ -774,7 +816,13 @@ export async function unassignTeammateTasks(
       `unassignTeammateTasks: ${failed.length}/${owned.length} task(s) failed to unassign for ${agentId}`,
     );
   }
-  return results.length - failed.length;
+  const released = results.filter(
+    (r) => r.status === 'fulfilled' && r.value === true,
+  ).length;
+  if (released > 0) {
+    notifyTasksUpdated(teamName);
+  }
+  return released;
 }
 
 /**

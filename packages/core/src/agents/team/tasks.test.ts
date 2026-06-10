@@ -800,6 +800,20 @@ describe('tasks', () => {
 
       unsubscribe();
     });
+
+    it('keeps notifying remaining listeners after one throws', () => {
+      const calls: string[] = [];
+      const unsubThrowing = onTasksUpdated(() => {
+        throw new Error('boom');
+      });
+      const unsubGood = onTasksUpdated((name) => calls.push(name));
+
+      expect(() => notifyTasksUpdated('team')).not.toThrow();
+      expect(calls).toEqual(['team']);
+
+      unsubThrowing();
+      unsubGood();
+    });
   });
 
   // ─── Concurrent claims ────────────────────────────────────
