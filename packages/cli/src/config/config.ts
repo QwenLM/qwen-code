@@ -1876,7 +1876,7 @@ export async function loadCliConfig(
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    cronEnabled: settings.experimental?.cron ?? false,
+    cronEnabled: settings.experimental?.cron ?? true,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
