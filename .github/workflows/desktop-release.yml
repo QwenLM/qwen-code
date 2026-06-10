@@ -487,6 +487,17 @@ jobs:
             fi
             gh release upload "${upload_args[@]}"
           else
+            previous_tag="$(
+              gh release list \
+                --repo "$GH_REPO" \
+                --limit 100 \
+                --json tagName,isDraft,isPrerelease \
+                --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+                | grep -vxF "$RELEASE_TAG" \
+                | head -n 1 \
+                || true
+            )"
+
             create_args=(
               "$RELEASE_TAG"
               "${assets[@]}"
@@ -494,6 +505,12 @@ jobs:
               --target "$RELEASE_TARGET"
               --title "$title"
             )
+            if [ -n "$previous_tag" ]; then
+              echo "Using $previous_tag as the release notes start tag."
+              create_args+=(--notes-start-tag "$previous_tag")
+            else
+              echo "No previous published stable release found for release notes."
+            fi
             if [ "$RELEASE_DRAFT" = "true" ]; then
               create_args+=(--draft)
             fi
