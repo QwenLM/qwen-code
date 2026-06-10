@@ -13,6 +13,7 @@ import {
   beforeAll,
   afterEach,
 } from 'vitest';
+import path from 'node:path';
 import {
   DEFAULT_PRESSURE_CONFIG,
   validateMemoryPressureConfig,
@@ -1633,6 +1634,75 @@ describe('MemoryPressureMonitor', () => {
           consecutiveIneffectiveCleanups: 3,
         }),
       );
+    });
+  });
+
+  describe('global.gc() safety guards', () => {
+    it('should not include trigger_gc in soft or hard pressure tiers', () => {
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          fileReadCache: {
+            clear: vi.fn(),
+            evictNotAccessedSince: vi.fn(),
+          },
+        }),
+        {
+          ...DEFAULT_PRESSURE_CONFIG,
+          cleanupCooldownMs: 0,
+          enableExplicitGC: true,
+        },
+      );
+
+      // Soft pressure — should NOT trigger GC
+      setMemUsage(9 * 1024 * 1024 * 1024); // 9/16 = 0.5625 >= 0.5 soft
+      monitor.performCheck();
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('global.gc()'),
+      );
+
+      // Reset for next check
+      mockDebugLogger.debug.mockClear();
+
+      // Hard pressure — should NOT trigger GC
+      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65 hard
+      monitor.performCheck();
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('global.gc()'),
+      );
+    });
+
+    it('global.gc() should only be called from trigger_gc case in memoryPressureMonitor', async () => {
+      // Read the source file and verify global.gc / globalThis.gc is only
+      // actually invoked (not mentioned in comments/strings) in the trigger_gc case
+      const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+      const monitorPath = path.join(__dirname, 'memoryPressureMonitor.ts');
+      const source = realFs.readFileSync(monitorPath, 'utf8');
+
+      // Find all occurrences of global.gc or globalThis.gc that are actual
+      // calls (not in comments or template literals)
+      const gcCallRegex = /global(?:This)?\.gc\s*\(/g;
+      const matches: Array<{ line: number; text: string }> = [];
+      const lines = source.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Skip comments and lines where gc() is inside a string/template
+        if (
+          line.trimStart().startsWith('*') ||
+          line.trimStart().startsWith('/') ||
+          line.trimStart().startsWith('//')
+        )
+          continue;
+        if (line.includes('`') && line.includes('global.gc()')) continue;
+
+        if (gcCallRegex.test(line)) {
+          matches.push({ line: i + 1, text: line.trim() });
+          gcCallRegex.lastIndex = 0;
+        }
+      }
+
+      // Should have exactly 1 actual call site (inside the trigger_gc case)
+      expect(matches).toHaveLength(1);
+      expect(matches[0].text).toContain('global.gc()');
     });
   });
 });

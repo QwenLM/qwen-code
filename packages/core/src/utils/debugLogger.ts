@@ -40,7 +40,7 @@ interface TraceContext {
 
 function isDebugLogFileEnabled(): boolean {
   const value = process.env['QWEN_DEBUG_LOG_FILE'];
-  if (!value) return true;
+  if (!value) return false;
   const normalized = value.trim().toLowerCase();
   return !['0', 'false', 'off', 'no'].includes(normalized);
 }
