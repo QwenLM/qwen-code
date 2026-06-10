@@ -56,10 +56,15 @@ const WORKFLOW_PARAM_SCHEMA = {
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, { label? })`, and read `args`. ' +
-        'P1 ships sequential primitives only — `parallel()` and `pipeline()` ' +
-        'arrive in P2. Writing `Promise.all([agent(), agent()])` spawns ' +
-        'concurrent subagents that share Config and may race on file edits; ' +
-        'prefer `await agent(...)` for ordered execution. ' +
+        'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
+        'through a shared window (≤16 agents in flight per run) and resolves ' +
+        'to a position-aligned array — a thunk that throws becomes `null` at ' +
+        'its index (errors-as-data), and parallel() only rejects on abort. ' +
+        '`pipeline(items, ...stages)` runs each item through the stages ' +
+        '(staggered, no inter-stage barrier); a stage that throws or returns ' +
+        '`null` drops that item to `null`. Pass THUNKS to parallel, not eager ' +
+        'calls: `parallel([() => agent(...)])`, not `parallel([agent(...)])`. ' +
+        'At most 1000 agent() calls per run. ' +
         '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',

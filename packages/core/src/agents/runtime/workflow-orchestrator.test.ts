@@ -7,10 +7,12 @@
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import * as os from 'node:os';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
   createProductionDispatch,
+  MAX_AGENTS_PER_RUN,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 
@@ -290,5 +292,164 @@ describe('WorkflowOrchestrator failure-context preservation', () => {
     expect(wfErr.message).toContain('scripted failure');
     expect(wfErr.phases).toEqual(['plan', 'execute']);
     expect(wfErr.logs).toEqual(['starting', 'about to fail']);
+  });
+});
+
+describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
+  describe('parallel()', () => {
+    it('resolves all thunks to a position-aligned array', async () => {
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `r:${prompt}`,
+      );
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => agent("a"),
+          () => agent("b"),
+          () => agent("c"),
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['r:a', 'r:b', 'r:c']);
+    });
+
+    it('errors-as-data: a thunk that throws becomes null at its index, others unaffected', async () => {
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `r:${prompt}`,
+      );
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => agent("a"),
+          () => { throw new Error("boom"); },
+          () => agent("c"),
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['r:a', null, 'r:c']);
+    });
+
+    it('rejects on a non-function element (eager promise instead of thunk)', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        orchestrator.run({
+          script: `return await parallel([agent("a")]);`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/array of functions/);
+    });
+
+    it('caps concurrent agents within a fan-out to the shared per-run window', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return 'ok';
+      });
+      await orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: 50 }, () => () => agent("x"))
+        );`,
+        args: undefined,
+      });
+      // 50 thunks >> window, so the window fully fills: peak === cap.
+      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      expect(peak).toBe(cap);
+    });
+  });
+
+  describe('pipeline()', () => {
+    it('runs each item through the stages; first stage receives (item, item, idx)', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([10, 20],
+          (prev, item, idx) => prev + "|" + item + "|" + idx,
+          (prev) => "S2(" + prev + ")",
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['S2(10|10|0)', 'S2(20|20|1)']);
+    });
+
+    it('a stage returning null drops that item to null and skips remaining stages', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([1, 2, 3],
+          (x) => (x === 2 ? null : x),
+          (x) => x * 100,
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual([100, null, 300]);
+    });
+
+    it('a stage that throws drops that item to null (errors-as-data), others unaffected', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([1, 2, 3],
+          (x) => { if (x === 2) throw new Error("bad"); return x; },
+          (x) => x * 100,
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual([100, null, 300]);
+    });
+
+    it('rejects when a stage is not a function', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        orchestrator.run({
+          script: `return await pipeline([1, 2], "not a function");`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/stages must be functions/);
+    });
+  });
+
+  describe('1000-agent cap', () => {
+    it('the 1001st sequential agent() call throws the cap error', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      await expect(
+        orchestrator.run({
+          script: `for (let i = 0; i < ${MAX_AGENTS_PER_RUN + 1}; i++) {
+            await agent("x");
+          }
+          return "done";`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(
+        new RegExp(`${MAX_AGENTS_PER_RUN} agent\\(\\) calls per run`),
+      );
+    });
+
+    it('the cap counts agents launched via parallel() — a fan-out cannot bypass it', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      const outcome = await orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: ${MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
+        );`,
+        args: undefined,
+      });
+      const arr = outcome.result as Array<string | null>;
+      // Exactly 1000 dispatches succeed; the one over the cap becomes null.
+      expect(arr.filter((v) => v === 'ok')).toHaveLength(MAX_AGENTS_PER_RUN);
+      expect(arr.filter((v) => v === null)).toHaveLength(1);
+    });
+  });
+
+  describe('abort', () => {
+    it('parallel() rejects (not silent nulls) when the run is aborted', async () => {
+      const ac = new AbortController();
+      ac.abort();
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      await expect(
+        orchestrator.run({
+          script: `return await parallel([() => agent("a"), () => agent("b")]);`,
+          args: undefined,
+          abortOnTimeout: ac,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
   });
 });

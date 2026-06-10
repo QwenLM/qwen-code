@@ -64,6 +64,22 @@ describe('WorkflowTool', () => {
     expect(JSON.stringify(result.returnDisplay)).toMatch(/wf_[0-9a-f]{16}/);
   });
 
+  // P2 (PR #4732): parallel() runs end-to-end through the full stack
+  // (WorkflowTool → orchestrator counter+limiter+parallelImpl → sandbox
+  // in-realm revival → script return → safeStringifyResult).
+  it('execute() runs parallel() end-to-end and returns the revived array', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async (prompt) => `T:${prompt}`,
+    });
+    const invocation = tool.build({
+      script: `return await parallel([() => agent("a"), () => agent("b")]);`,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
+    expect(JSON.parse(llmText)).toEqual(['T:a', 'T:b']);
+  });
+
   // TST-C3: execute() should return an error result (not throw) when the script throws.
   it('execute() returns an error result when the script throws', async () => {
     const tool = new WorkflowTool(fakeConfig(), {

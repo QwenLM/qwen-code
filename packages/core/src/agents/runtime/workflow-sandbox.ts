@@ -510,10 +510,26 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       });
 
       // --- parallel / pipeline ---
+      // SECURITY (PR #4732 P2): the host impl resolves with a HOST-realm array.
+      // vmAsync's resolve path is verbatim (it does NOT re-wrap resolved
+      // values), so handing that host array to the script would reopen the
+      // T1/T8/T14 escape: result.constructor.constructor('return process')()
+      // walks the host Array.prototype chain to the host Function constructor.
+      // We revive the array INSIDE the vm realm with JSON.parse(JSON.stringify)
+      // -- the same mechanism that makes the args global safe (see the args
+      // revival above) -- so the value the script sees has vm-realm prototypes
+      // whose constructors can't reach host process. Agent results are JSON
+      // strings (and null slots), so the round-trip is lossless for P2.
+      function reviveInRealm(hostValue) {
+        return JSON.parse(JSON.stringify(hostValue));
+      }
       if (__b.hasParallel) {
-        globalThis.parallel = vmAsync(function (thunks) {
+        const callParallel = vmAsync(function (thunks) {
           return __b.hostParallel(thunks);
         });
+        globalThis.parallel = function parallel(thunks) {
+          return callParallel(thunks).then(reviveInRealm);
+        };
       } else {
         globalThis.parallel = function parallel() {
           return new Promise(function (_, reject) {
@@ -525,11 +541,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         };
       }
       if (__b.hasPipeline) {
-        globalThis.pipeline = vmAsync(function (items) {
+        const callPipeline = vmAsync(function (items) {
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
         });
+        globalThis.pipeline = function pipeline() {
+          return callPipeline.apply(null, arguments).then(reviveInRealm);
+        };
       } else {
         globalThis.pipeline = function pipeline() {
           return new Promise(function (_, reject) {

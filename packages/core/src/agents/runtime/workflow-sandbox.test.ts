@@ -793,6 +793,75 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toEqual([10, 20, 30]);
   });
 
+  // SECURITY (PR #4732 P2): the host parallel/pipeline impl resolves with a
+  // HOST-realm array. vmAsync's resolve path is verbatim, so without the
+  // in-realm JSON revival the RESOLVED array's prototype chain reaches the
+  // host Function constructor — `out.constructor.constructor('return process')()`
+  // would leak host process. The pre-P2 escape test only probed the *Promise*
+  // (vm-realm via vmAsync), NOT the resolved array — this is the uncovered gap.
+  // These tests FAIL against a verbatim wrapper and PASS with revival.
+  it('parallel() RESOLVED array cannot reach host process (revived in-realm)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      // host impl returns a plain HOST array on purpose.
+      parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
+    });
+    const result = await sandbox.run(`
+      const out = await parallel([async () => 1, async () => 2]);
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  it('parallel() revives NESTED objects in-realm (not just the outer array)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
+    });
+    const result = await sandbox.run(`
+      const out = await parallel([async () => ({ k: 'v' })]);
+      try {
+        const v = out[0].constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  it('pipeline() RESOLVED array cannot reach host process (revived in-realm)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      pipeline: async (items, ...stages) => {
+        const out: unknown[] = [];
+        for (let i = 0; i < items.length; i++) {
+          let cur: unknown = items[i];
+          for (const stage of stages) {
+            cur = await stage(cur, items[i], i);
+          }
+          out.push(cur);
+        }
+        return out;
+      },
+    });
+    const result = await sandbox.run(`
+      const out = await pipeline([1, 2], async (x) => x * 10);
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
   it('opts.budget overrides the throwing stub when provided', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,

@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
 import { createWorkflowSandbox } from './workflow-sandbox.js';
 import type {
@@ -14,6 +15,26 @@ import type {
 import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
+
+/**
+ * Hard ceiling on total `agent()` calls per workflow run (matches upstream
+ * `hOK = 1000`). Counts EVERY dispatch — sequential, `parallel()`, and
+ * `pipeline()` all funnel through the one wrapped dispatch — so a fan-out
+ * cannot bypass it. The 1001st call throws.
+ */
+export const MAX_AGENTS_PER_RUN = 1000;
+const MAX_AGENTS_MESSAGE = `Workflow exceeded the maximum of ${MAX_AGENTS_PER_RUN} agent() calls per run.`;
+
+/**
+ * Maximum agents in flight at once within a single run, shared across all
+ * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
+ * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
+ * produce a deadlocking limit.
+ */
+function resolveConcurrencyLimit(): number {
+  return Math.max(1, Math.min(16, os.cpus().length - 2));
+}
 
 /**
  * Bound the resource ceiling for workflow subagents so a single `agent()`
@@ -166,9 +187,36 @@ export class WorkflowOrchestrator {
     // timeout in workflow-sandbox.ts; async-loop cancellation flows
     // through dispatch's subagent.execute path.
     const runId = generateRunId();
+
+    // P2: every agent() call — sequential, parallel(), or pipeline() — funnels
+    // through this one wrapped dispatch, so a single per-run counter enforces
+    // the 1000-agent cap regardless of launch path. Increment-then-check means
+    // calls 1..1000 pass and the 1001st throws.
+    let agentCount = 0;
+    const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      agentCount += 1;
+      if (agentCount > MAX_AGENTS_PER_RUN) {
+        return Promise.reject(new Error(MAX_AGENTS_MESSAGE));
+      }
+      return this.dispatch(prompt, opts);
+    };
+
+    // P2: one shared sliding window for the whole run. parallel() and
+    // pipeline() both schedule through this limiter, so total in-flight agents
+    // stay under the cap even across concurrent fan-out calls. Abort comes from
+    // the same controller that backs the wall-clock timeout + caller signal.
+    const limiter = createConcurrencyLimiter(
+      resolveConcurrencyLimit(),
+      req.abortOnTimeout?.signal,
+    );
+    const parallelImpl = makeParallelImpl(limiter);
+    const pipelineImpl = makePipelineImpl(limiter);
+
     const sandbox = createWorkflowSandbox({
       args: req.args,
-      dispatch: this.dispatch,
+      dispatch: countedDispatch,
+      parallel: parallelImpl,
+      pipeline: pipelineImpl,
       abortOnTimeout: req.abortOnTimeout,
     });
     try {
@@ -195,6 +243,105 @@ export class WorkflowOrchestrator {
       );
     }
   }
+}
+
+/**
+ * Build the host-side `parallel(thunks)` impl.
+ *
+ * Each thunk is a vm-realm function that resolves through the workflow's
+ * counted dispatch; the shared `limiter` holds total in-flight agents under
+ * the per-run window. `settleAll` applies errors-as-data: a thunk that
+ * rejects becomes `null` at its index, and `parallel()` itself only rejects
+ * on abort. The result array is revived into the vm realm by the sandbox
+ * wrapper (JSON round-trip) — this host array never reaches the script
+ * directly.
+ */
+function makeParallelImpl(
+  limiter: ReturnType<typeof createConcurrencyLimiter>,
+): (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]> {
+  return (thunks) => {
+    if (!Array.isArray(thunks)) {
+      return Promise.reject(
+        new Error(
+          'parallel() expects an array of thunks (functions returning promises).',
+        ),
+      );
+    }
+    for (const t of thunks) {
+      if (typeof t !== 'function') {
+        return Promise.reject(
+          new Error(
+            'parallel() expects an array of functions, not values — wrap each ' +
+              'call: parallel([() => agent(...), () => agent(...)]).',
+          ),
+        );
+      }
+    }
+    return limiter.settleAll(thunks);
+  };
+}
+
+/**
+ * Build the host-side `pipeline(items, ...stages)` impl as parallel-of-chains.
+ *
+ * Each item becomes one thunk that runs the stages in sequence — staggered,
+ * with NO barrier between stages, so item A can be in stage 3 while item B is
+ * still in stage 1. All chains share the same `limiter` window. Stage
+ * callbacks receive `(prev, item, idx)`; the first stage's `prev` is the item
+ * itself. A stage that throws OR returns `null` drops that item to `null` and
+ * skips its remaining stages, leaving other items unaffected.
+ */
+function makePipelineImpl(
+  limiter: ReturnType<typeof createConcurrencyLimiter>,
+): (
+  items: unknown[],
+  ...stages: Array<
+    (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+  >
+) => Promise<unknown[]> {
+  return (items, ...stages) => {
+    if (!Array.isArray(items)) {
+      return Promise.reject(
+        new Error(
+          'pipeline() expects an array of items as its first argument.',
+        ),
+      );
+    }
+    for (const s of stages) {
+      if (typeof s !== 'function') {
+        return Promise.reject(
+          new Error(
+            'pipeline() stages must be functions: ' +
+              'pipeline(items, item => ..., result => ...).',
+          ),
+        );
+      }
+    }
+    const chains = items.map(
+      (item, idx) => () => runPipelineChain(item, idx, stages),
+    );
+    return limiter.settleAll(chains);
+  };
+}
+
+/**
+ * Run one item through every stage in order. `null` is the universal drop
+ * sentinel: a stage that returns `null` (or throws — surfaced as a rejection
+ * that `settleAll` maps to `null`) short-circuits the rest of the chain.
+ */
+async function runPipelineChain(
+  item: unknown,
+  idx: number,
+  stages: Array<
+    (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+  >,
+): Promise<unknown> {
+  let prev: unknown = item;
+  for (const stage of stages) {
+    if (prev === null) break;
+    prev = await stage(prev, item, idx);
+  }
+  return prev;
 }
 
 /**
