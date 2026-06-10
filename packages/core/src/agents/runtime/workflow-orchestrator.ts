@@ -318,10 +318,15 @@ async function settleToNullArray(
   const settled = await Promise.allSettled(
     thunks.map((t) => Promise.resolve().then(t)),
   );
-  // Use DOMException('AbortError') so this rejection is classified by
-  // isAbortError() (utils/errors.ts) the same way as the limiter's abort —
-  // a plain `new Error(...)` would not be recognised and would surface as a
-  // generic run failure rather than a clean cancellation.
+  // Use DOMException('AbortError') for consistency with the limiter's
+  // abort path so HOST-side callers seeing this rejection directly can
+  // classify it via isAbortError() (utils/errors.ts). NOTE: this name is
+  // NOT preserved across the vm boundary — vmAsync (workflow-sandbox.ts)
+  // re-throws the script-visible rejection as a fresh vm-realm `new
+  // Error(msg)`, and the orchestrator's outer catch then wraps it as
+  // WorkflowExecutionError. So isAbortError() at the WorkflowTool layer
+  // returns false either way; the DOMException is purely a host-internal
+  // consistency choice, not a script-observable one.
   if (signal?.aborted)
     throw new DOMException('Workflow run aborted.', 'AbortError');
   return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
@@ -368,9 +373,11 @@ function makeParallelImpl(
  * Each item becomes one chain that runs the stages in sequence — staggered,
  * with NO barrier between stages, so item A can be in stage 3 while item B is
  * still in stage 1. Stage callbacks receive `(prev, item, idx)`; the first
- * stage's `prev` is the item itself. A stage that throws OR returns `null`
- * drops that item to `null` and skips its remaining stages, leaving other
- * items unaffected. Concurrency is bounded at the dispatch layer.
+ * stage's `prev` is the item itself. A stage that throws, returns `null`, or
+ * returns a non-JSON-serializable value drops that item to `null` and skips
+ * its remaining stages, leaving other items unaffected. Concurrency is
+ * bounded at the dispatch layer, and the result array shares parallel()'s
+ * per-element vm-realm revival.
  */
 function makePipelineImpl(
   signal?: AbortSignal,

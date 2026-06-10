@@ -220,11 +220,16 @@ export interface SandboxOptions {
 }
 
 /**
- * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
- * for realistic workflows (typical runs finish in seconds; even a long
- * pipeline with the 1000-agent cap is bounded well under this). 30 min
- * stops 0-token hang patterns (e.g. an in-script `await new Promise(() => {})`)
- * before they waste operator hours.
+ * T23 (PR #4732 R2): default async wall-clock cap. The wall clock is a
+ * 0-token-hang backstop, NOT a precise cost cap: it bounds patterns like an
+ * in-script `await new Promise(() => {})` that the vm timeout cannot reach.
+ * For genuine cost control, use the env-overridable per-run cap
+ * (`QWEN_CODE_MAX_WORKFLOW_AGENTS`) and concurrency window
+ * (`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`). 30 minutes is set generously
+ * enough that typical workflows never see it but a hang doesn't waste
+ * operator hours; raise via `QWEN_CODE_MAX_WORKFLOW_SECONDS` for long
+ * legitimate fan-outs (1000 agents × 10-min subagent cap ÷ default
+ * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 

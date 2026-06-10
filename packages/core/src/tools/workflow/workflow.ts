@@ -58,14 +58,16 @@ const WORKFLOW_PARAM_SCHEMA = {
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, { label? })`, and read `args`. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
-        'through a shared per-run window (default `min(16, cpus-2)` agents ' +
-        'in flight; override via `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`) and ' +
-        'resolves to a position-aligned array — a thunk that throws, or ' +
-        'resolves to a non-JSON-serializable value, becomes `null` at its ' +
-        'index (errors-as-data); parallel() itself rejects only on invalid ' +
+        'through a shared per-run window (default ' +
+        '`max(1, min(16, cpus-2))` agents in flight; override via ' +
+        '`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`) and resolves to a ' +
+        'position-aligned array — a thunk that throws, or resolves to a ' +
+        'non-JSON-serializable value, becomes `null` at its index ' +
+        '(errors-as-data); parallel() itself rejects only on invalid ' +
         'arguments or abort. `pipeline(items, ...stages)` runs each item ' +
         'through the stages (staggered, no inter-stage barrier); a stage ' +
-        'that throws or returns `null` drops that item to `null`. Pass ' +
+        'that throws, returns `null`, or returns a non-JSON-serializable ' +
+        'value drops that item to `null`. Pass ' +
         'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
         'not `parallel([agent(...)])`. At most 1000 agent() calls per run ' +
         '(override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`). ' +
@@ -262,10 +264,11 @@ export class WorkflowTool extends BaseDeclarativeTool<
       'Execute a workflow script that orchestrates subagents. ' +
         'Supports `phase`, `log`, sequential `agent`, and concurrent fan-out ' +
         'via `parallel(thunks)` / `pipeline(items, ...stages)` (default ' +
-        '`min(16, cpus-2)` agents in flight per run, up to 1000 agents ' +
-        'total; both env-overridable). No schema, no resume, no background ' +
-        'execution yet. Scripts run in a node:vm sandbox without access to ' +
-        'the filesystem or shell; all I/O happens through the spawned agents.',
+        '`max(1, min(16, cpus-2))` agents in flight per run, up to 1000 ' +
+        'agents total; both env-overridable). No schema, no resume, no ' +
+        'background execution yet. Scripts run in a node:vm sandbox without ' +
+        'access to the filesystem or shell; all I/O happens through the ' +
+        'spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,
