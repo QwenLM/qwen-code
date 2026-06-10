@@ -211,7 +211,7 @@ jobs:
           # Check if fork
           IS_FORK=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')
 
-          # Auto-triggered PRs (opened/synchronize) get a 1-hour delay
+          # Auto-triggered PRs (opened/synchronize) get a 30-minute delay
           # via environment protection rule to debounce rapid pushes.
           # Manual triggers skip the delay.
           if [ "$TRIGGER_TYPE" = "full" ] && [ "$EVENT_NAME" = "pull_request_target" ]; then
@@ -349,7 +349,7 @@ jobs:
       )
     # Default 90; workflow_dispatch can override via the timeout_minutes input.
     timeout-minutes: '${{ fromJSON(needs.resolve.outputs.review_timeout) }}'
-    # 1-hour wait timer (via environment protection rule) debounces
+    # 30-minute wait timer (via environment protection rule) debounces
     # rapid consecutive pushes. Empty string = no environment = no delay.
     environment: '${{ needs.resolve.outputs.review_environment }}'
     concurrency:
@@ -363,7 +363,7 @@ jobs:
     outputs:
       verdict: '${{ steps.verdict.outputs.verdict }}'
     steps:
-      # The debounce wait can be up to an hour — the PR may have been closed,
+      # The debounce wait can take a while — the PR may have been closed,
       # merged, or converted to draft in the meantime. Re-check before
       # spending a runner slot on it (port of the old delay job's re-check).
       - name: 'Re-check PR state after debounce'
