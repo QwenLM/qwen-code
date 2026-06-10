@@ -2450,8 +2450,7 @@ export const useGeminiStream = (
         }
 
         for (const toolCall of restorableToolCalls) {
-          const filePath = (toolCall.request.args['file_path'] ??
-            toolCall.request.args['notebook_path']) as string;
+          const filePath = (toolCall.request.args['file_path'] ?? toolCall.request.args['notebook_path']) as string;
           if (!filePath) {
             onDebugMessage(
               `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
@@ -2502,7 +2501,14 @@ export const useGeminiStream = (
       }
     };
     saveRestorableToolCalls();
-  }, [toolCalls, config, onDebugMessage, history, geminiClient, storage]);
+  }, [
+    toolCalls,
+    config,
+    onDebugMessage,
+    history,
+    geminiClient,
+    storage,
+  ]);
 
   // ─── Unified notification queue (cron + background agents) ──────
   const notificationQueueRef = useRef<

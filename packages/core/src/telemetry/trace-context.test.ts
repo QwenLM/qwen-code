@@ -41,7 +41,11 @@ vi.mock('./session-context.js', () => ({
   getSessionContext: vi.fn().mockReturnValue(undefined),
 }));
 
-function mockSpan(traceId: string, spanId: string, traceFlags: number): Span {
+function mockSpan(
+  traceId: string,
+  spanId: string,
+  traceFlags: number,
+): Span {
   return {
     spanContext: () => ({ traceId, spanId, traceFlags }),
   } as unknown as Span;
@@ -105,7 +109,11 @@ describe('trace-context', () => {
       vi.mocked(getSessionContext).mockReturnValue(sessionCtx);
       vi.mocked(trace.getSpan).mockImplementation((ctx) =>
         ctx === sessionCtx
-          ? mockSpan('cccccccccccccccccccccccccccccccc', 'dddddddddddddddd', 1)
+          ? mockSpan(
+              'cccccccccccccccccccccccccccccccc',
+              'dddddddddddddddd',
+              1,
+            )
           : undefined,
       );
 
@@ -162,7 +170,11 @@ describe('trace-context', () => {
       vi.mocked(getSessionContext).mockReturnValue(sessionCtx);
       vi.mocked(trace.getSpan).mockImplementation((ctx) =>
         ctx === sessionCtx
-          ? mockSpan('cccccccccccccccccccccccccccccccc', 'dddddddddddddddd', 1)
+          ? mockSpan(
+              'cccccccccccccccccccccccccccccccc',
+              'dddddddddddddddd',
+              1,
+            )
           : undefined,
       );
 

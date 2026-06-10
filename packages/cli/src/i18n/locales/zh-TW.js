@@ -762,10 +762,12 @@ export default {
     '請提供指令。用法：/fork <指令>',
   'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
-  'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
+  'Cannot fork before the first conversation turn.':
+    '首次對話輪次前無法分支。',
   'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
     '/fork 命令需要啟用 fork 功能開關。設定 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以啟用。',
-  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
+  'The agent tool is unavailable; cannot fork.':
+    'Agent 工具不可用；無法分支。',
   'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
   'the background agent could not be started.': '背景智能體無法啟動。',
   'User launched a background fork via /fork: {{directive}}':

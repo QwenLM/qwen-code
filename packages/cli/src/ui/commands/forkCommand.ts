@@ -175,12 +175,9 @@ export const forkCommand: SlashCommand = {
         role: 'user',
         parts: [
           {
-            text: t(
-              'User launched a background fork via /fork: {{directive}}',
-              {
-                directive,
-              },
-            ),
+            text: t('User launched a background fork via /fork: {{directive}}', {
+              directive,
+            }),
           },
         ],
       });

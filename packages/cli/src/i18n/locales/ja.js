@@ -595,7 +595,8 @@ export default {
     '/fork コマンドには fork フィーチャーゲートが必要です。有効にするには QWEN_CODE_ENABLE_FORK_SUBAGENT=1 を設定してください。',
   'The agent tool is unavailable; cannot fork.':
     'エージェントツールを利用できないため、フォークできません。',
-  'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
+  'Failed to launch fork: {{error}}':
+    'フォークの起動に失敗しました: {{error}}',
   'User launched a background fork via /fork: {{directive}}':
     'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
