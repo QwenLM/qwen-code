@@ -221,13 +221,26 @@ export class GeminiClient {
   // snapshot instead of re-announcing — mirrors Claude Code's
   // suppressNextSkillListing / "don't re-inject on compact".
   private announcedSkillReminderKeys = new Set<string>();
-  private everAnnouncedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
 
-  private resetSkillReminderDedup(): void {
-    this.announcedSkillReminderKeys = new Set();
-    this.everAnnouncedSkillReminderKeys = new Set();
-    this.skillRemindersInitialized = false;
+  private static skillEntryKey(e: AvailableSkillEntry): string {
+    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+  }
+
+  /**
+   * Seeds skill-reminder dedup from the entries actually rendered into the
+   * startup snapshot. Mirrors `rememberAnnouncedDeferredTools`: the dedup is
+   * seeded from what the model actually SAW, not from whatever happens to be
+   * current at the first drain (which may include late-registered MCP
+   * prompts/commands the snapshot never listed).
+   */
+  private seedSkillReminderDedupFromSnapshot(
+    snapshotEntries: AvailableSkillEntry[],
+  ): void {
+    this.announcedSkillReminderKeys = new Set(
+      snapshotEntries.map(GeminiClient.skillEntryKey),
+    );
+    this.skillRemindersInitialized = true;
   }
 
   /**
@@ -717,8 +730,10 @@ export class GeminiClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
-    this.resetSkillReminderDedup();
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
     );
@@ -749,8 +764,10 @@ export class GeminiClient {
       return;
     }
 
-    this.resetSkillReminderDedup();
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
     }
@@ -912,9 +929,7 @@ export class GeminiClient {
       return;
     }
 
-    const keyOf = (e: AvailableSkillEntry) =>
-      e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
-    const currentKeys = new Set(entries.map(keyOf));
+    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
 
     // Prune announced keys no longer present so a later re-enable / reconnect
     // re-announces (mirrors the MCP added-tools prune above).
@@ -924,39 +939,30 @@ export class GeminiClient {
       }
     }
 
-    // First drain after a (re)built prelude: the snapshot already showed these.
+    // Safety net: if seedSkillReminderDedupFromSnapshot was never called (e.g.
+    // edge-case construction path), fall back to seeding from current entries.
+    // Normally seedSkillReminderDedupFromSnapshot sets this in startChat/rebuild.
     if (!this.skillRemindersInitialized) {
       this.skillRemindersInitialized = true;
       for (const key of currentKeys) {
         this.announcedSkillReminderKeys.add(key);
-        this.everAnnouncedSkillReminderKeys.add(key);
       }
       return;
     }
 
-    // Conditional path-activations are announced inline on the tool result by
-    // coreToolScheduler; suppress the drain announcement only on the skill's
-    // FIRST appearance (the inline announcement already covers it). If a skill
-    // was previously announced, then pruned (user-disabled), and re-enabled, it
-    // must be re-announced — the model needs to learn it's available again.
-    const activatedConditional = skillManager.getActivatedSkillNames();
-
+    // Announce every genuinely new skill/command. A conditional path-activation
+    // may also have been announced inline on the tool result by
+    // coreToolScheduler — the duplicate is harmless (the model sees it twice in
+    // the same turn), while the omission from suppressing based on the shared
+    // SkillManager.getActivatedSkillNames() was permanent when a subagent
+    // activated the skill instead of this session's own scheduler.
     const newEntries: AvailableSkillEntry[] = [];
     for (const entry of entries) {
-      const key = keyOf(entry);
+      const key = GeminiClient.skillEntryKey(entry);
       if (this.announcedSkillReminderKeys.has(key)) {
         continue;
       }
-      const wasKnownBefore = this.everAnnouncedSkillReminderKeys.has(key);
       this.announcedSkillReminderKeys.add(key);
-      this.everAnnouncedSkillReminderKeys.add(key);
-      if (
-        entry.level !== undefined &&
-        activatedConditional.has(entry.name) &&
-        !wasKnownBefore
-      ) {
-        continue;
-      }
       newEntries.push(entry);
     }
 
@@ -1060,13 +1066,12 @@ export class GeminiClient {
       }
       const deferredTools = this.resolveDeferredToolsForReminder();
       this.rememberAnnouncedDeferredTools(deferredTools);
-      // The startup prelude rebuilt below carries a fresh <available_skills>
-      // snapshot, so reset the per-turn skill-reminder dedup: the first drain
-      // after this re-seeds from that snapshot and emits nothing, and only
-      // genuinely new skills/commands are announced thereafter (avoids
-      // re-injecting the full listing on resume / post-compaction).
-      this.resetSkillReminderDedup();
-      history = await getInitialChatHistory(this.config, extraHistory);
+      let snapshotEntries: AvailableSkillEntry[];
+      [history, snapshotEntries] = await getInitialChatHistory(
+        this.config,
+        extraHistory,
+      );
+      this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(

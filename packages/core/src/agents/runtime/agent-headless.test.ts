@@ -83,11 +83,14 @@ vi.mock('../../utils/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
-    },
-    ...(extraHistory ?? []),
+    [
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
+      },
+      ...(extraHistory ?? []),
+    ],
+    [],
   ]),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
@@ -464,7 +467,7 @@ describe('subagent.ts', () => {
         const history = callArgs[2];
         expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
           includeDeferredToolsReminder: false,
-          includeAvailableSkillsReminder: false,
+          includeAvailableSkillsReminder: true,
         });
         expect(history).toEqual([
           {

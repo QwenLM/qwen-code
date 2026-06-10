@@ -575,10 +575,12 @@ export class BackgroundAgentResumeService {
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
         : [
-            ...(await getInitialChatHistory(bgConfig as Config, undefined, {
-              includeDeferredToolsReminder: false,
-              includeAvailableSkillsReminder: false,
-            })),
+            ...(
+              await getInitialChatHistory(bgConfig as Config, undefined, {
+                includeDeferredToolsReminder: false,
+                includeAvailableSkillsReminder: false,
+              })
+            )[0],
             ...recovery.history,
           ];
       const promptMessages = [...operation.continuationMessages];

@@ -370,11 +370,12 @@ export class AgentCore {
     const hasInitialMessages =
       !!this.promptConfig.initialMessages &&
       this.promptConfig.initialMessages.length > 0;
-    const envHistory = hasInitialMessages
-      ? []
+    const hasSkillTool = this.willHaveSkillTool();
+    const [envHistory] = hasInitialMessages
+      ? [[]]
       : await getInitialChatHistory(this.runtimeContext, undefined, {
           includeDeferredToolsReminder: false,
-          includeAvailableSkillsReminder: false,
+          includeAvailableSkillsReminder: hasSkillTool,
         });
 
     const startHistory = [
@@ -425,6 +426,25 @@ export class AgentCore {
   }
 
   // ─── Tool Preparation ─────────────────────────────────────
+
+  /**
+   * Returns true if this agent's effective tool surface will include the Skill
+   * tool. Used before `prepareTools()` to decide whether to inject the
+   * `<available_skills>` snapshot.
+   */
+  private willHaveSkillTool(): boolean {
+    if (!this.toolConfig) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    const asStrings = this.toolConfig.tools.filter(
+      (t): t is string => typeof t === 'string',
+    );
+    const hasWildcard = asStrings.includes('*');
+    if (hasWildcard || asStrings.length === 0) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    return asStrings.includes(ToolNames.SKILL);
+  }
 
   /**
    * Prepares the list of tools available to this agent.

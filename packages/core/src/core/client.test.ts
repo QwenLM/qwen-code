@@ -175,15 +175,18 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
       .fn()
       .mockResolvedValue([{ text: 'Mocked env context' }]),
     getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-      {
-        role: 'user',
-        parts: [
-          {
-            text: '<system-reminder>\nMocked env context\n</system-reminder>',
-          },
-        ],
-      },
-      ...(extraHistory ?? []),
+      [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
+        },
+        ...(extraHistory ?? []),
+      ],
+      [],
     ]),
     buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
       tools.length === 0
@@ -1030,7 +1033,7 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[], []]);
 
       await client.refreshStartupContextReminder();
 
@@ -1068,7 +1071,10 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([newPrelude]);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [newPrelude],
+        [],
+      ]);
 
       await client.refreshStartupContextReminder();
 
@@ -7081,16 +7087,9 @@ Other open files:
         name === ToolNames.SKILL ? ({} as any) : undefined,
       );
       priv().chat = mockChat;
-      mockChat.addHistory.mockClear();
-    });
-
-    afterEach(() => {
       priv().announcedSkillReminderKeys = new Set();
-      priv().everAnnouncedSkillReminderKeys = new Set();
       priv().skillRemindersInitialized = false;
-      mockSkillManager.getActivatedSkillNames.mockReturnValue(
-        new Set<string>(),
-      );
+      mockChat.addHistory.mockClear();
     });
 
     it('first drain seeds announced set and emits nothing', async () => {
@@ -7182,7 +7181,7 @@ Other open files:
       expect(addedContent.parts[0].text).toContain('skill-a');
     });
 
-    it('conditional path-activation is skipped on first appearance (not double-announced)', async () => {
+    it('path-activated skill is announced by drain (no suppression based on shared activation set)', async () => {
       mockSkillManager.getActivatedSkillNames.mockReturnValue(
         new Set(['skill-a']),
       );
@@ -7196,7 +7195,9 @@ Other open files:
       });
       await drain();
 
-      // Second drain: skill-a appears (was path-activated and announced inline by coreToolScheduler)
+      // Second drain: skill-a appears (may also have been announced inline by
+      // coreToolScheduler — the duplicate is harmless, while suppression based
+      // on the shared activation set was broken for subagent activations)
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7205,15 +7206,12 @@ Other open files:
       });
       await drain();
 
-      // Should NOT emit because skill-a was path-activated (announced inline)
-      expect(mockChat.addHistory).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
     });
 
     it('path-activated skill re-announces after disable/re-enable', async () => {
-      mockSkillManager.getActivatedSkillNames.mockReturnValue(
-        new Set(['skill-a']),
-      );
-
       // First drain: seed with skill-a
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
@@ -7223,16 +7221,7 @@ Other open files:
       });
       await drain();
 
-      // Second drain: skill-a still present, was path-activated — skip
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: makeEntries(['skill-a']),
-      });
-      await drain();
-
-      // Third drain: skill-a removed (user disabled)
+      // Second drain: skill-a removed (user disabled)
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7241,7 +7230,7 @@ Other open files:
       });
       await drain();
 
-      // Fourth drain: skill-a re-added (user re-enabled) — SHOULD re-announce
+      // Third drain: skill-a re-added (user re-enabled) — SHOULD re-announce
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7359,26 +7348,26 @@ Other open files:
       expect(addedContent.parts[0].text).toContain('cmd-a');
     });
 
-    it('resetSkillReminderDedup clears all dedup state', async () => {
-      // Seed the dedup state via drain
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: makeEntries(['skill-a', 'skill-b']),
-      });
-      await drain();
+    it('seedSkillReminderDedupFromSnapshot seeds from provided entries', async () => {
+      const entries = makeEntries(['skill-a', 'skill-b']);
+
+      priv().seedSkillReminderDedupFromSnapshot(entries);
 
       expect(priv().skillRemindersInitialized).toBe(true);
       expect(priv().announcedSkillReminderKeys.size).toBe(2);
-      expect(priv().everAnnouncedSkillReminderKeys.size).toBe(2);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-a')).toBe(true);
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-b')).toBe(true);
+    });
 
-      // Reset via helper
-      priv().resetSkillReminderDedup();
+    it('seedSkillReminderDedupFromSnapshot with empty entries resets state', () => {
+      // Seed with some data first
+      priv().announcedSkillReminderKeys = new Set(['skill:old']);
+      priv().skillRemindersInitialized = false;
 
-      expect(priv().skillRemindersInitialized).toBe(false);
+      priv().seedSkillReminderDedupFromSnapshot([]);
+
+      expect(priv().skillRemindersInitialized).toBe(true);
       expect(priv().announcedSkillReminderKeys.size).toBe(0);
-      expect(priv().everAnnouncedSkillReminderKeys.size).toBe(0);
     });
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });
