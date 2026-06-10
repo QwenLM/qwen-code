@@ -484,7 +484,7 @@ jobs:
     needs:
       - publish
       - release_metadata
-    if: ${{ inputs.dry_run == false && inputs.draft == false }}
+    if: ${{ inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false }}
     permissions:
       contents: write
       pull-requests: write
