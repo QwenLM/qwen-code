@@ -44,7 +44,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
@@ -162,8 +161,11 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot } from '../memory/paths.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  readAutoMemoryIndex,
+  readUserAutoMemoryIndex,
+} from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -728,7 +730,6 @@ export interface ConfigParameters {
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
-  checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
@@ -758,6 +759,7 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   forkSubagentEnabled?: boolean;
+  workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -1116,10 +1118,8 @@ export class Config {
     enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
-  private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -1145,6 +1145,7 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
+  private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1308,7 +1309,6 @@ export class Config {
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
-    this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
       params.fileCheckpointingEnabled ??
       (!params.sdkMode && (params.interactive ?? false));
@@ -1330,6 +1330,7 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -1454,9 +1455,6 @@ export class Config {
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
-    if (this.getCheckpointingEnabled()) {
-      await this.getGitService();
-    }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
@@ -1967,14 +1965,28 @@ export class Config {
         },
       );
     if (this.getManagedAutoMemoryEnabled()) {
-      const managedAutoMemoryIndex = await readAutoMemoryIndex(
-        this.getProjectRoot(),
-      );
+      // User-level read is best-effort — an EACCES on
+      // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
+      // section out of the system prompt. Project-level read still bubbles
+      // (its failure is a real config-load problem).
+      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
+        readAutoMemoryIndex(this.getProjectRoot()),
+        readUserAutoMemoryIndex().catch(() => null),
+      ]);
+      // Always surface the user-level section so the main assistant knows the
+      // dir exists and can route ad-hoc "remember this cross-project" saves
+      // there. When empty the prompt builder emits a "MEMORY.md is currently
+      // empty" placeholder — the same shape the per-project layer has used
+      // since day one — so the cost is one extra index header.
       this.setUserMemory(
         this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
+          {
+            memoryDir: getUserAutoMemoryRoot(),
+            indexContent: userAutoMemoryIndex,
+          },
         ),
       );
     } else {
@@ -3309,6 +3321,19 @@ export class Config {
     if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
     return this.forkSubagentEnabled;
   }
+
+  isWorkflowsEnabled(): boolean {
+    // Workflows are experimental and opt-in: enabled via settings or env var
+    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+    return this.workflowsEnabled;
+  }
+
+  setWorkflowsEnabled(enabled: boolean): void {
+    this.workflowsEnabled = enabled;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -3364,10 +3389,6 @@ export class Config {
     // - Environment variables
     // - CLI arguments
     return [];
-  }
-
-  getCheckpointingEnabled(): boolean {
-    return this.checkpointing;
   }
 
   getFileCheckpointingEnabled(): boolean {
@@ -3787,14 +3808,6 @@ export class Config {
 
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
-  }
-
-  async getGitService(): Promise<GitService> {
-    if (!this.gitService) {
-      this.gitService = new GitService(this.targetDir, this.storage);
-      await this.gitService.initialize();
-    }
-    return this.gitService;
   }
 
   /**
@@ -4240,6 +4253,14 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+    }
+
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
       });
     }
 

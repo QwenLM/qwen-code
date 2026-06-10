@@ -453,26 +453,6 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
-      checkpointing: {
-        type: 'object',
-        label: 'Checkpointing',
-        category: 'General',
-        requiresRestart: true,
-        default: {},
-        description: 'Session checkpointing settings.',
-        showInDialog: false,
-        properties: {
-          enabled: {
-            type: 'boolean',
-            label: 'Enable Checkpointing',
-            category: 'General',
-            requiresRestart: true,
-            default: false,
-            description: 'Enable session checkpointing for recovery',
-            showInDialog: false,
-          },
-        },
-      },
       debugKeystrokeLogging: {
         type: 'boolean',
         label: 'Debug Keystroke Logging',
@@ -1101,7 +1081,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         propagateTraceContext: {
           description:
-            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
           type: 'boolean',
           default: false,
         },

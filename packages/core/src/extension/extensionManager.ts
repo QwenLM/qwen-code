@@ -125,6 +125,7 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  description?: string;
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
