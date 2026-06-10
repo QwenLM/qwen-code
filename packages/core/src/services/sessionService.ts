@@ -1311,6 +1311,8 @@ export function replayUiTelemetryFromConversation(
 ): void {
   if (sessionId) {
     uiTelemetryService.resetSession(sessionId);
+    uiTelemetryService.setLastPromptTokenCount(0);
+    uiTelemetryService.setLastCachedContentTokenCount(0);
   } else {
     uiTelemetryService.reset();
   }
@@ -1374,7 +1376,9 @@ export async function computeUniqueBranchTitle(
   sessionService: SessionService,
 ): Promise<string> {
   const maxSuffixLen = ' (Branch 1234567890123)'.length;
-  const trimmed = baseName.trim().slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
+  const trimmed = baseName
+    .trim()
+    .slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
   const taken = new Set(
     (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
       (t) => t.toLowerCase().trim(),
