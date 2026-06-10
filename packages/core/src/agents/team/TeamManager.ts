@@ -607,7 +607,16 @@ export class TeamManager {
   private async readLeaderInboxOrQuarantine(): Promise<MailboxMessage[]> {
     const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
     try {
-      return await readInbox(this.teamFile.name, LEADER_NAME);
+      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
+      // A writer can quarantine and recreate a corrupt leader inbox
+      // behind this reader (writeMessage's readInboxRaw does so under
+      // its own per-file lock). If the file shrank below the high-water
+      // mark, restart from 0 — re-surfacing a message beats silently
+      // skipping new ones until the offset is overtaken.
+      if (inbox.length < this.lastInboxOffset) {
+        this.lastInboxOffset = 0;
+      }
+      return inbox;
     } catch (err) {
       // readInbox already maps the legitimate "no inbox yet" case
       // (ENOENT) to []; it only throws on real corruption (parse error)
@@ -1450,12 +1459,6 @@ export class TeamManager {
    * call and runs claims concurrently.
    */
   private async scanIdleAgentsForTasks(): Promise<void> {
-    // Pre-fetch pending tasks once instead of per-agent.
-    const pending = await listTasks(this.teamFile.name, {
-      status: 'pending',
-    });
-    if (pending.length === 0) return;
-
     const idleMembers = this.teamFile.members.filter((member) => {
       const agent = this.getAgentFromBackend(member.agentId);
       if (!agent) return false;
@@ -1468,6 +1471,16 @@ export class TeamManager {
       const queue = this.pendingMessages.get(member.agentId) ?? [];
       return queue.length === 0;
     });
+    // Check idleness before touching the task board: this runs on
+    // every task update, and when everyone is busy the pending-task
+    // read below would scan the whole tasks directory for nothing.
+    if (idleMembers.length === 0) return;
+
+    // Pre-fetch pending tasks once instead of per-agent.
+    const pending = await listTasks(this.teamFile.name, {
+      status: 'pending',
+    });
+    if (pending.length === 0) return;
 
     await Promise.all(
       idleMembers.map((member) =>

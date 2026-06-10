@@ -259,6 +259,11 @@ export async function updateTask(
     const task = JSON.parse(raw) as SwarmTask;
 
     if (opts?.callerName !== undefined) {
+      // WARNING: any new mutating field added to `updates` MUST also be
+      // listed here, or non-owner teammates can silently mutate it.
+      // `metadata` and `activeForm` are intentionally NOT listed: they
+      // are advisory annotations that teammates may set on each other's
+      // tasks (e.g. cross-agent progress notes), not coordination state.
       const restrictsOwnership =
         updates.status !== undefined ||
         updates.owner !== undefined ||

@@ -209,26 +209,36 @@ describe('mailbox', () => {
 
   // ─── Corrupt inbox handling ────────────────────────────────
 
-  it('writeMessage refuses to overwrite a corrupt inbox', async () => {
-    // Regression: a previous implementation silently treated any
-    // read or parse failure as an empty inbox, so a partially-
-    // written or corrupt JSON file was clobbered by the next
-    // writeMessage with `[<single new message>]` — losing every
-    // queued message that was already on disk.
+  it('writeMessage quarantines a corrupt inbox and keeps delivering', async () => {
+    // A corrupt inbox used to fail every subsequent writeMessage /
+    // consumeUnread on the same file — the teammate could never
+    // receive another message, including shutdown requests. The fix
+    // mirrors the leader path: the corrupt file is renamed to
+    // `.corrupt-{ts}` (preserved for forensics, never clobbered)
+    // and delivery continues on a fresh inbox.
     await writeMessage('team', 'worker', makeMessage({ text: 'preserved-1' }));
-    await writeMessage('team', 'worker', makeMessage({ text: 'preserved-2' }));
 
     // Truncate the file mid-array to simulate a kill during write.
     const inboxPath = getInboxPath('team', 'worker');
     await fs.writeFile(inboxPath, '[ {"from":"leader","te', 'utf-8');
 
-    await expect(
-      writeMessage('team', 'worker', makeMessage({ text: 'new' })),
-    ).rejects.toThrow();
+    await writeMessage('team', 'worker', makeMessage({ text: 'new' }));
 
-    // The corrupt file is left intact — not overwritten with [new].
-    const raw = await fs.readFile(inboxPath, 'utf-8');
+    // The corrupt content survives in the quarantine file.
+    const dir = path.dirname(inboxPath);
+    const entries = await fs.readdir(dir);
+    const quarantined = entries.find((e) =>
+      e.startsWith('worker.json.corrupt-'),
+    );
+    expect(quarantined).toBeDefined();
+    const raw = await fs.readFile(path.join(dir, quarantined!), 'utf-8');
     expect(raw).toBe('[ {"from":"leader","te');
+
+    // The fresh inbox carries the new message and stays usable.
+    const messages = await readInbox('team', 'worker');
+    expect(messages.map((m) => m.text)).toEqual(['new']);
+    const consumed = await consumeUnread('team', 'worker');
+    expect(consumed.map((m) => m.text)).toEqual(['new']);
   });
 
   // ─── Concurrent writes ────────────────────────────────────

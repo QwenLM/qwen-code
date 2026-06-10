@@ -297,11 +297,15 @@ async function ensureInboxFile(inboxPath: string): Promise<void> {
 /**
  * Read inbox without locking (caller must hold lock or accept races).
  *
- * Returns [] only when the inbox file is missing — that's a
- * legitimate empty mailbox. For any other failure (parse error, I/O
- * error) propagate the error so the caller can surface it instead
- * of the next `writeMessage` overwriting a corrupt-but-recoverable
- * file with a single new message.
+ * Returns [] when the inbox file is missing — that's a legitimate
+ * empty mailbox. A corrupt inbox (parse failure, unreadable file) is
+ * quarantined to `.corrupt-{ts}` and treated as empty, mirroring the
+ * leader path in `readLeaderInboxOrQuarantine`: without this, every
+ * future `writeMessage` / `consumeUnread` for the teammate re-throws
+ * on the same corrupt file, and the teammate can never receive
+ * another message — including shutdown requests. Only if the
+ * quarantine rename itself fails do we propagate the original error,
+ * so a corrupt-but-recoverable file is never silently overwritten.
  */
 async function readInboxRaw(inboxPath: string): Promise<MailboxMessage[]> {
   try {
@@ -310,9 +314,17 @@ async function readInboxRaw(inboxPath: string): Promise<MailboxMessage[]> {
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return [];
     const errMsg = err instanceof Error ? err.message : String(err);
-    debug.warn(`Failed to read inbox at ${inboxPath}: ${errMsg}`);
-    throw err instanceof Error
-      ? err
-      : new Error(`Failed to read inbox at ${inboxPath}: ${errMsg}`);
+    debug.warn(`Quarantining corrupt inbox at ${inboxPath}: ${errMsg}`);
+    try {
+      await fs.rename(inboxPath, `${inboxPath}.corrupt-${Date.now()}`);
+    } catch (renameErr) {
+      const renameMsg =
+        renameErr instanceof Error ? renameErr.message : String(renameErr);
+      debug.warn(`Failed to quarantine ${inboxPath}: ${renameMsg}`);
+      throw err instanceof Error
+        ? err
+        : new Error(`Failed to read inbox at ${inboxPath}: ${errMsg}`);
+    }
+    return [];
   }
 }
