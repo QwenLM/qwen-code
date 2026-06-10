@@ -1196,17 +1196,17 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}file/read`: {
+          const p = String(params['path'] ?? '');
+          if (!p) {
+            if (id !== undefined)
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`path` required'));
+            return;
+          }
           if (!this.fsFactory) {
             if (id !== undefined)
               conn.sendConn(
                 error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
               );
-            return;
-          }
-          const p = String(params['path'] ?? '');
-          if (!p) {
-            if (id !== undefined)
-              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`path` required'));
             return;
           }
           const fs = this.fsFactory.forRequest({
@@ -1320,18 +1320,18 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}file/glob`: {
-          if (!this.fsFactory) {
-            if (id !== undefined)
-              conn.sendConn(
-                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
-              );
-            return;
-          }
           const pattern = String(params['pattern'] ?? '');
           if (!pattern) {
             if (id !== undefined)
               conn.sendConn(
                 error(id, RPC.INVALID_PARAMS, '`pattern` required'),
+              );
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
               );
             return;
           }
@@ -1360,13 +1360,6 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}file/write`: {
-          if (!this.fsFactory) {
-            if (id !== undefined)
-              conn.sendConn(
-                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
-              );
-            return;
-          }
           const p = String(params['path'] ?? '');
           if (!p) {
             if (id !== undefined)
@@ -1377,6 +1370,13 @@ export class AcpDispatcher {
             if (id !== undefined)
               conn.sendConn(
                 error(id, RPC.INVALID_PARAMS, '`content` must be string'),
+              );
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
               );
             return;
           }
@@ -1401,13 +1401,6 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}file/edit`: {
-          if (!this.fsFactory) {
-            if (id !== undefined)
-              conn.sendConn(
-                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
-              );
-            return;
-          }
           const p = String(params['path'] ?? '');
           if (!p) {
             if (id !== undefined)
@@ -1425,6 +1418,13 @@ export class AcpDispatcher {
                   RPC.INVALID_PARAMS,
                   '`oldText` and `newText` must be strings',
                 ),
+              );
+            return;
+          }
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
               );
             return;
           }

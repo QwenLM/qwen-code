@@ -1548,8 +1548,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   describe('session extension methods', () => {
     it('_qwen/session/recap returns recap', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1557,16 +1563,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/recap',
         params: { sessionId: 'sess-1' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', recap: 'test recap' },
       });
     });
 
     it('_qwen/session/btw validates question length', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1574,14 +1586,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/btw',
         params: { sessionId: 'sess-1', question: '' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
     });
 
     it('_qwen/session/btw returns answer', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1589,16 +1607,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/btw',
         params: { sessionId: 'sess-1', question: 'what?' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
         result: { answer: 're: what?' },
       });
     });
 
     it('_qwen/session/shell rejects empty command', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1606,14 +1630,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command: '' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
     });
 
     it('_qwen/session/shell returns result', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1621,16 +1651,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command: 'ls' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
         result: { exitCode: 0, output: '$ ls' },
       });
     });
 
     it('_qwen/session/detach succeeds', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1638,15 +1674,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/detach',
         params: { sessionId: 'sess-1' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({ result: { ok: true } });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { ok: true } });
       expect(bridge.detached.length).toBeGreaterThan(0);
     });
 
     it('_qwen/session/context_usage returns usage', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1654,16 +1696,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/context_usage',
         params: { sessionId: 'sess-1' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', used: 100 },
       });
     });
 
     it('_qwen/session/tasks returns tasks', async () => {
       const connId = await initialize();
-      await newSession(connId);
       const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1671,8 +1719,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/tasks',
         params: { sessionId: 'sess-1' },
       });
-      const frames = await takeFrames(await streamRes, 1);
-      expect(frames[0]).toMatchObject({
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
       });
     });
