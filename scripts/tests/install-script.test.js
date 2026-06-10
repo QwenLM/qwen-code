@@ -2206,7 +2206,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         expect(output).toContain('installed successfully, to start:');
         expect(output).toContain('0.0.0-smoke');
         expect(output).toContain('cd <project>');
-        expect(output).toContain('qwenlm.github.io/qwen-code');
+        expect(output).toContain('github.com/QwenLM/qwen-code');
         expect(output).not.toContain('rm -rf');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
