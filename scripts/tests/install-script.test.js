@@ -2610,14 +2610,55 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           installRoot,
           home,
           'standalone',
-          // Minimal PATH keeps PRE_INSTALL_QWENS empty even when the host
-          // machine has a real qwen installed somewhere.
+          // Minimal PATH keeps the fresh install dir off the invoking
+          // shell's PATH so the reload hint is always printed. The shadow
+          // warning is NOT asserted on either way: PRE_INSTALL_QWENS also
+          // scans well-known absolute paths (/usr/local/bin etc.), so its
+          // output depends on the host machine.
           { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
         ).toString();
 
         expect(output).toContain('source ~/.bashrc');
         expect(output).toContain('Load new PATH');
-        expect(output).not.toContain('may shadow the new install');
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'points the reload hint at ~/.bash_profile when it is the rc file written',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const bashProfile = path.join(home, '.bash_profile');
+
+        // Default macOS bash setup: ~/.bash_profile exists, ~/.bashrc does
+        // not, so maybe_update_shell_path falls back to ~/.bash_profile.
+        mkdirSync(home, { recursive: true });
+        writeFileSync(bashProfile, '# existing profile\n');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(readFileSync(bashProfile, 'utf8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        // An ANSI reset sits between "in" and the rc name, so match the
+        // success message and the reload hint on the rc name alone.
+        expect(output).toContain('source ~/.bash_profile');
+        expect(output).not.toContain('~/.bashrc');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);

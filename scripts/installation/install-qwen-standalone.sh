@@ -560,6 +560,7 @@ maybe_update_shell_path() {
         current_tail=$(tail -n 3 "${rc_file}" 2>/dev/null || true)
         if [[ "${current_tail}" == "${begin_marker}"$'\n'"${export_line}"$'\n'"${end_marker}" ]]; then
             PATH_UPDATE_APPLIED=1
+            PATH_UPDATE_RC_FILE="${rc_file}"
             return 0
         fi
     fi
@@ -576,6 +577,7 @@ maybe_update_shell_path() {
     }
 
     PATH_UPDATE_APPLIED=1
+    PATH_UPDATE_RC_FILE="${rc_file}"
 }
 
 github_base_url_for_version() {
@@ -1479,6 +1481,7 @@ print_final_instructions() {
 
     if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
         PATH_UPDATE_APPLIED=0
+        PATH_UPDATE_RC_FILE=""
         maybe_update_shell_path "${install_bin_dir}"
     fi
 
@@ -1489,12 +1492,13 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
-    local rc_name=""
-    case "${SHELL:-}" in
-        */zsh)  rc_name="~/.zshrc" ;;
-        */bash) rc_name="~/.bashrc" ;;
-        */fish) rc_name="~/.config/fish/config.fish" ;;
-    esac
+    # Display the rc file maybe_update_shell_path actually wrote to (e.g. bash
+    # may fall back to ~/.bash_profile), so the success message and the reload
+    # hint can never point at a different file than the one that was modified.
+    local rc_name="${PATH_UPDATE_RC_FILE:-}"
+    if [[ -n "${rc_name}" && -n "${HOME:-}" && "${rc_name}" == "${HOME}"/* ]]; then
+        rc_name="~${rc_name#"${HOME}"}"
+    fi
     if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" && -n "${rc_name}" ]]; then
         echo -e "${MUTED}Successfully added${NC} qwen ${MUTED}to \$PATH in${NC} ${rc_name}"
     fi
