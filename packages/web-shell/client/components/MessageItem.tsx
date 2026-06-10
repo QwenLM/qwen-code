@@ -108,6 +108,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   switch (prev.role) {
     case 'user':
       return (
+        next.role === 'user' &&
         prev.content === next.content &&
         stableImagesEqual(prev.images, next.images)
       );
