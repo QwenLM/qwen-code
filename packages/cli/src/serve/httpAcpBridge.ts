@@ -749,27 +749,32 @@ class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
-   * method is recognized today — `qwen/notify/session/mcp-budget-event`
-   * — translating the McpClientManager's budget-event payload into a
-   * session-scoped SSE frame. Unknown methods, unknown event kinds,
-   * and missing sessionIds are dropped silently for forward-compat
-   * (a future child can add new notification methods without breaking
-   * this handler; an older daemon can ignore them cleanly).
-   *
-   * Codex review fix #1: when the sessionId IS present but the
-   * `byId`-resolvable entry is not yet registered (the child fired
-   * the event during its own `newSession` handler, before
-   * `connection.newSession` returned to `doSpawn`), buffer the frame
-   * and replay it on `drainEarlyEvents`.
+   * Handle child→bridge ACP `extNotification` calls and translate them into
+   * session-scoped SSE frames.
    */
   async extNotification(
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
-    if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
+
+    if (method === 'qwen/notify/session/terminal-sequence') {
+      const { v: _v2, sessionId: _sid2, ...tsRest } = params;
+      void _v2;
+      void _sid2;
+      const terminalSequence = tsRest['terminalSequence'];
+      if (
+        typeof terminalSequence !== 'string' ||
+        terminalSequence.length === 0
+      ) {
+        return;
+      }
+      this.publishExtNotification(sessionId, 'terminal_sequence', tsRest);
+      return;
+    }
+
+    if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const kind = params['kind'];
     const type =
       kind === 'budget_warning'
@@ -787,10 +792,18 @@ class BridgeClient implements Client {
     void _v;
     void _sid;
     void _kind;
+    this.publishExtNotification(sessionId, type, rest);
+  }
+
+  private publishExtNotification(
+    sessionId: string,
+    type: string,
+    data: Record<string, unknown>,
+  ): void {
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
-      data: rest,
+      data,
       ...(entry?.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),

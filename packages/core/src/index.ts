@@ -119,6 +119,10 @@ export type {
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export type {
+  WorkflowTool,
+  WorkflowParams,
+} from './tools/workflow/workflow.js';
+export type {
   TodoWriteTool,
   TodoItem,
   TodoWriteParams,
@@ -167,6 +171,7 @@ export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './services/toolUseSummary.js';
+export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================

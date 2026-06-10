@@ -139,6 +139,24 @@ type AutoCompressionSendResult =
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// The drain is served from an in-memory queue, so a conforming client answers
+// near-instantly (or rejects with -32601). No response within this window
+// means the client silently drops unknown methods; without a deadline the
+// await would wedge the prompt turn forever.
+const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Latch the drain off only after this many consecutive timeouts: one slow
+// answer must not permanently disable mid-turn messages for a
+// conforming-but-busy client, while a client that never answers stops
+// costing a stall per tool batch after a few batches.
+const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+
+class MidTurnDrainTimeoutError extends Error {
+  constructor() {
+    super(
+      `mid-turn queue drain got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+}
 
 interface BackgroundNotificationQueueItem {
   displayText: string;
@@ -373,6 +391,7 @@ export class Session implements SessionContext {
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
+  private midTurnDrainTimeoutStrikes = 0;
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1512,13 +1531,25 @@ export class Session implements SessionContext {
   async #drainMidTurnUserMessages(): Promise<Part[]> {
     if (this.midTurnDrainUnavailable) return [];
 
+    let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
-      const response = await this.client.extMethod(
-        MID_TURN_QUEUE_DRAIN_METHOD,
-        {
-          sessionId: this.sessionId,
-        },
-      );
+      drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: this.sessionId,
+      });
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new MidTurnDrainTimeoutError()),
+          MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+        );
+      });
+      let response: Awaited<typeof drainPromise>;
+      try {
+        response = await Promise.race([drainPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+      this.midTurnDrainTimeoutStrikes = 0;
       // A client may legally resolve with `result: null` (passed through
       // unwrapped by the ACP SDK); guard the object access so that doesn't
       // throw a TypeError and get misclassified as a transient drain error.
@@ -1557,8 +1588,24 @@ export class Session implements SessionContext {
         error && typeof error === 'object' && 'code' in error
           ? (error as { code?: unknown }).code
           : undefined;
+      const isTimeout = error instanceof MidTurnDrainTimeoutError;
+      if (isTimeout) {
+        this.midTurnDrainTimeoutStrikes += 1;
+        // The lost race leaves the request pending; if the client settles it
+        // later, a rejection must not surface as an unhandled rejection.
+        drainPromise?.catch(() => {});
+      }
+      // Repeated timeouts are also permanent: a conforming client answers
+      // (or rejects with -32601) immediately, so sustained silence means the
+      // client drops unknown methods and would stall every subsequent tool
+      // batch the same way. A single timeout is treated as transient so one
+      // slow answer doesn't disable the drain for the whole session.
       const isPermanentError =
-        errorCode === -32601 || /method not found/i.test(errorMessage);
+        errorCode === -32601 ||
+        /method not found/i.test(errorMessage) ||
+        (isTimeout &&
+          this.midTurnDrainTimeoutStrikes >=
+            MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES);
 
       if (isPermanentError) {
         this.midTurnDrainUnavailable = true;
@@ -2716,7 +2763,7 @@ export class Session implements SessionContext {
           );
 
           if (hooksEnabled && messageBus) {
-            void fireNotificationHook(
+            this.fireNotificationHookWithTerminalSequence(
               messageBus,
               `Qwen Code needs your permission to use ${fc.name}`,
               NotificationType.PermissionPrompt,
@@ -3295,5 +3342,37 @@ export class Session implements SessionContext {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
     }
+  }
+
+  /**
+   * Fire a notification hook and forward any terminalSequence to the ACP
+   * client as an extNotification. Fire-and-forget — errors are logged at
+   * debug level.
+   */
+  private fireNotificationHookWithTerminalSequence(
+    messageBus: MessageBus,
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): void {
+    void fireNotificationHook(messageBus, message, notificationType, title)
+      .then((hookResult) => {
+        if (!hookResult.terminalSequence) return;
+        return this.client.extNotification(
+          'qwen/notify/session/terminal-sequence',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence: hookResult.terminalSequence,
+          },
+        );
+      })
+      .catch((err: unknown) => {
+        debugLogger.debug(
+          `ACP terminalSequence notification dropped ` +
+            `(session=${this.sessionId}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 }
