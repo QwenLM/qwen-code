@@ -7,8 +7,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-// Note: yaml package would need to be added as a dependency
-// For now, we'll use a simple YAML parser implementation
 import {
   parse as parseYaml,
   stringify as stringifyYaml,

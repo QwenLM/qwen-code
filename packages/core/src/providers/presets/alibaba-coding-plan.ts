@@ -32,6 +32,7 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
     enableThinking: true,
     modalities: { image: true, video: true },
   },
+  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   {
     id: 'kimi-k2.5',

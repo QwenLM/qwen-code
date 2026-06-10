@@ -195,16 +195,15 @@ describe('ShellTool', () => {
       expect(error).toBeNull();
     });
 
-    it('should not suggest the intentional sleep comment for sleep chains', async () => {
+    it('should guide model to split and use intentional-sleep for sleep chains', async () => {
       const error = shellTool.validateToolParams({
         command: 'sleep 5 && echo ok',
         is_background: false,
       });
 
-      expect(error).toContain(
-        'intentional-sleep escape hatch only applies to standalone sleep commands',
-      );
-      expect(error).not.toContain('# intentional-sleep:');
+      expect(error).toContain('Split into two calls');
+      expect(error).toContain('intentional-sleep:');
+      expect(error).toContain('reason');
     });
 
     it('should throw an error for a relative directory path', async () => {
