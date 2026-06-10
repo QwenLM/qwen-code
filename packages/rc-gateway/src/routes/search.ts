@@ -70,7 +70,9 @@ export function createSearchRoute(
 
     const dir = await resolveDir();
     if (!dir) {
-      res.status(200).json({ hits: [] });
+      // No workspace → empty result, but keep the 200 body shape uniform with
+      // the scanned path (every 200 carries hits + truncated + elapsedMs).
+      res.status(200).json({ hits: [], truncated: false, elapsedMs: 0 });
       return;
     }
 

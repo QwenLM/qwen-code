@@ -124,12 +124,17 @@ describe('search route', () => {
     expect(((await res.json()) as { code: string }).code).toBe('invalid_kind');
   });
 
-  it('200 {hits:[]} when there is no workspace (resolveDir → undefined)', async () => {
+  it('200 {hits:[],truncated:false,elapsedMs:0} when there is no workspace (resolveDir → undefined)', async () => {
     const url = await mount(async () => undefined);
     const res = await fetch(`${url}/rc/search?q=oauth`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { hits: unknown[] };
-    expect(body.hits).toEqual([]);
+    const body = (await res.json()) as {
+      hits: unknown[];
+      truncated: boolean;
+      elapsedMs: number;
+    };
+    // Uniform 200 shape with the scanned path (cycle 37).
+    expect(body).toEqual({ hits: [], truncated: false, elapsedMs: 0 });
   });
 
   it('503 search_timeout when the scan exceeds the per-query budget', async () => {
@@ -182,7 +187,8 @@ describe('search route', () => {
   });
 
   it('truncated:true when matches exceed the limit (cycle 37)', async () => {
-    // Three matching records, limit=2 → 2 hits returned + truncated.
+    // Three more matching records (+ the beforeEach fixture = 4 matches),
+    // limit=2 → 2 hits returned + truncated.
     const recs = [0, 1, 2].map((i) => ({
       uuid: `m${i}`,
       sessionId: 'sess-1',
