@@ -262,6 +262,10 @@ describe('clipboardUtils', () => {
   // ─── BMP-to-PNG conversion tests ──────────────────────────────
 
   describe('BMP-to-PNG conversion (wl-paste)', () => {
+    beforeEach(() => {
+      resetLinuxClipboardTool();
+    });
+
     // Note: BMP-to-PNG conversion success path requires saveFromCommand to resolve,
     // which is blocked by the createWriteStream mocking issue.
     // The "prefer PNG over BMP" test below verifies the correct branching logic,
