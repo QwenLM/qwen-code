@@ -177,12 +177,11 @@ Note: `entry.createdAt` is typed as `string` (ISO 8601), not a number.
 
 **Rationale for each guard:**
 
-| Guard                 | Why                                                                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| No active prompt      | A headless / autonomous prompt (e.g. CLI pipe, cron job) may be running with no SSE subscriber. Reaping it would kill work. |
-| No SSE subscribers    | A connected client is actively listening. Even if it hasn't sent a heartbeat, the SSE connection itself proves liveness.    |
-| No registered clients | A client that registered its `clientId` but hasn't yet opened SSE is still considered "present".                            |
-| Idle duration         | Grace period so briefly-disconnected clients can reconnect without losing their session.                                    |
+| Guard              | Why                                                                                                                         |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| No active prompt   | A headless / autonomous prompt (e.g. CLI pipe, cron job) may be running with no SSE subscriber. Reaping it would kill work. |
+| No SSE subscribers | A connected client is actively listening. Even if it hasn't sent a heartbeat, the SSE connection itself proves liveness.    |
+| Idle duration      | Grace period so briefly-disconnected clients can reconnect without losing their session.                                    |
 
 ### 4.3 Reap action
 
