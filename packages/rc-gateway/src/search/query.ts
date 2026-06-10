@@ -41,12 +41,18 @@ type Token = { type: 'word' | 'phrase'; text: string };
  * next `"` or end-of-input (an unclosed quote → phrase-to-end, never an error);
  * otherwise a run of non-whitespace, non-`"` characters is a word.
  */
+const WS = /\s/;
+
 function tokenize(q: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   while (i < q.length) {
     const ch = q[i];
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+    // Skip whitespace using the SAME predicate the word-scanner stops on — a
+    // mismatch (e.g. skip on a literal space-set but stop on /\s/) leaves a
+    // char that is neither skipped nor consumed, so `j` never advances and the
+    // loop spins forever on an interior NBSP/\v/\f/Unicode space.
+    if (WS.test(ch)) {
       i++;
       continue;
     }
@@ -62,7 +68,7 @@ function tokenize(q: string): Token[] {
     }
     // A word: run up to the next whitespace or quote.
     let j = i;
-    while (j < q.length && !/\s/.test(q[j]) && q[j] !== '"') j++;
+    while (j < q.length && !WS.test(q[j]) && q[j] !== '"') j++;
     tokens.push({ type: 'word', text: q.slice(i, j) });
     i = j;
   }
@@ -143,13 +149,29 @@ export function parseQuery(q: string): QueryPlan {
   return { orGroups: groups, seed };
 }
 
+/**
+ * Compiled prefix regexes, cached per term object. A plan's term objects persist
+ * for the whole `searchTranscripts` scan, so the regex is built once (not once
+ * per record). Keyed by a WeakMap so the `QueryTerm` data shape stays plain.
+ */
+const prefixRegexes = new WeakMap<QueryTerm, RegExp>();
+
+function prefixRegex(t: QueryTerm): RegExp {
+  let re = prefixRegexes.get(t);
+  if (re === undefined) {
+    // Word-boundary prefix: a token starting with the stem. The stem is escaped
+    // and followed by no quantifier → a linear, ReDoS-safe literal match.
+    re = new RegExp('\\b' + escapeRegExp(t.value));
+    prefixRegexes.set(t, re);
+  }
+  return re;
+}
+
 /** Does a single term match the (already lowercased) haystack? */
 function termMatch(t: QueryTerm, hayLower: string): boolean {
   let hit: boolean;
   if (t.kind === 'prefix') {
-    // Word-boundary prefix: a token starting with the stem. The stem is escaped
-    // and followed by no quantifier → a linear, ReDoS-safe literal match.
-    hit = new RegExp('\\b' + escapeRegExp(t.value)).test(hayLower);
+    hit = prefixRegex(t).test(hayLower);
   } else {
     // plain and phrase are both substring matches.
     hit = hayLower.includes(t.value);

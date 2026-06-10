@@ -106,6 +106,20 @@ describe('parseQuery', () => {
     expect(parseQuery('-a b').seed).toBe('b');
     expect(parseQuery('NOT a NOT b').seed).toBe('');
   });
+
+  it('treats interior exotic/Unicode whitespace as a separator (no infinite loop)', () => {
+    // Regression: the tokenizer once skipped only [ \t\n\r] but stopped words on
+    // /\s/, so an interior NBSP/\v/\f/Unicode space wedged the event loop. A
+    // hang would blow the per-test timeout; reaching the assertion proves it.
+    for (const ws of ['\u00a0', '\v', '\f', '\u2003']) {
+      expect(parseQuery(`a${ws}b`).orGroups).toEqual([
+        [
+          { kind: 'plain', value: 'a', negated: false },
+          { kind: 'plain', value: 'b', negated: false },
+        ],
+      ]);
+    }
+  });
 });
 
 describe('matchesQuery', () => {
