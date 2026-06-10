@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { TeamCreateTool } from './team-create.js';
 
 vi.mock('../config/storage.js', () => {
@@ -37,6 +38,7 @@ function makeConfig(overrides?: {
     getTeamManager: () => overrides?.teamManager ?? null,
     getSubagentManager: () => null,
     getAgentsSettings: () => ({}),
+    getSessionId: () => 'test-session-id',
     setTeamManager: vi.fn(),
     setTeamContext: vi.fn(),
   } as unknown as import('../config/config.js').Config;
@@ -117,6 +119,63 @@ describe('TeamCreateTool', () => {
     const teamFile = JSON.parse(raw);
     expect(teamFile.name).toBe('file-team');
     expect(teamFile.leadAgentId).toContain('leader');
+    // Owner identity is what lets a later team_create distinguish a
+    // live owner from a stranded leftover.
+    expect(teamFile.leadPid).toBe(process.pid);
+    expect(teamFile.leadSessionId).toBe('test-session-id');
+  });
+
+  it('reclaims a team stranded by a dead session', async () => {
+    // Simulate a prior session that exited without team_delete: its
+    // team file is on disk and its recorded lead process is gone.
+    const child = spawnSync(process.execPath, ['-e', '']);
+    const teamDir = path.join(tmpDir, 'teams', 'stranded');
+    await fs.mkdir(teamDir, { recursive: true });
+    await fs.writeFile(
+      path.join(teamDir, 'config.json'),
+      JSON.stringify({
+        name: 'stranded',
+        createdAt: 0,
+        leadAgentId: 'leader@stranded',
+        leadPid: child.pid,
+        members: [],
+      }),
+      'utf-8',
+    );
+
+    const tool = new TeamCreateTool(makeConfig());
+    const result = await tool
+      .build({ team_name: 'stranded' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('created');
+  });
+
+  it('refuses a name owned by a live session', async () => {
+    const teamDir = path.join(tmpDir, 'teams', 'occupied');
+    await fs.mkdir(teamDir, { recursive: true });
+    await fs.writeFile(
+      path.join(teamDir, 'config.json'),
+      JSON.stringify({
+        name: 'occupied',
+        createdAt: 0,
+        leadAgentId: 'leader@occupied',
+        // The test runner's parent is alive for the test's duration
+        // and is not this process.
+        leadPid: process.ppid,
+        members: [],
+      }),
+      'utf-8',
+    );
+
+    const tool = new TeamCreateTool(makeConfig());
+    const result = await tool
+      .build({ team_name: 'occupied' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('live');
   });
 
   it('returns TeamResultDisplay', async () => {

@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TeamFile, TeamMember } from './types.js';
 import {
@@ -21,6 +22,7 @@ import {
   readTeamFile,
   writeTeamFile,
   deleteTeamDirs,
+  tryReclaimStaleTeam,
   getTeamDir,
   getTeamFilePath,
   getInboxesDir,
@@ -333,6 +335,54 @@ describe('file I/O', () => {
 
     it('does not throw for missing directories', async () => {
       await expect(deleteTeamDirs('nonexistent')).resolves.not.toThrow();
+    });
+  });
+
+  describe('tryReclaimStaleTeam', () => {
+    /** PID of a process that has already exited. */
+    function deadPid(): number {
+      const child = spawnSync(process.execPath, ['-e', '']);
+      return child.pid!;
+    }
+
+    it('reclaims a team whose lead process is dead', async () => {
+      await writeTeamFile('stale', makeTeamFile({ leadPid: deadPid() }));
+
+      await expect(tryReclaimStaleTeam('stale')).resolves.toBe(true);
+      expect(await readTeamFile('stale')).toBeUndefined();
+    });
+
+    it('reclaims a team owned by this process', async () => {
+      // The caller can only be creating a new team because it no
+      // longer holds a manager for the old one — its own leftover
+      // is stale by definition.
+      await writeTeamFile('own', makeTeamFile({ leadPid: process.pid }));
+
+      await expect(tryReclaimStaleTeam('own')).resolves.toBe(true);
+      expect(await readTeamFile('own')).toBeUndefined();
+    });
+
+    it('does not reclaim a team whose lead process is alive', async () => {
+      // The test runner's parent process is alive for the duration.
+      await writeTeamFile('live', makeTeamFile({ leadPid: process.ppid }));
+
+      await expect(tryReclaimStaleTeam('live')).resolves.toBe(false);
+      expect(await readTeamFile('live')).toBeDefined();
+    });
+
+    it('does not reclaim a pre-leadPid team file', async () => {
+      await writeTeamFile('legacy', makeTeamFile());
+
+      await expect(tryReclaimStaleTeam('legacy')).resolves.toBe(false);
+      expect(await readTeamFile('legacy')).toBeDefined();
+    });
+
+    it('cleans up when the team file is already gone', async () => {
+      const tasksDir = getTasksDir('ghost');
+      await fs.mkdir(tasksDir, { recursive: true });
+
+      await expect(tryReclaimStaleTeam('ghost')).resolves.toBe(true);
+      await expect(fs.access(tasksDir)).rejects.toThrow();
     });
   });
 });

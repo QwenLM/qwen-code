@@ -31,6 +31,13 @@ export interface TeamFile {
   leadAgentId: string;
   /** Leader's session UUID (for discovery). */
   leadSessionId?: string;
+  /**
+   * PID of the leader's process. Used by `team_create` to detect a
+   * stale team: nothing deletes team dirs on normal exit (only an
+   * explicit `team_delete` does), so without a liveness check the
+   * `wx`-exclusive create would permanently wedge the name.
+   */
+  leadPid?: number;
   /** Phase 2: pane IDs hidden from UI. */
   hiddenPaneIds?: string[];
   /** Paths pre-approved for teammate tool use. */

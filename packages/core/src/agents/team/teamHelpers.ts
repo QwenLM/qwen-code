@@ -271,6 +271,59 @@ export async function createTeamFile(
 }
 
 /**
+ * Returns true when the given PID belongs to a live process.
+ * EPERM means the process exists but is owned by another user —
+ * treat as alive.
+ */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return isNodeError(err) && err.code === 'EPERM';
+  }
+}
+
+/**
+ * Reclaim a stale team so its name can be reused.
+ *
+ * Nothing deletes team dirs on normal session exit (only an explicit
+ * `team_delete` does), so `team_create`'s `wx`-exclusive create would
+ * otherwise wedge the name forever after a Ctrl+C, a completed
+ * headless run, or a crash. A team is stale when its recorded
+ * `leadPid` is no longer running — or IS this process (the caller can
+ * only be creating a new team because it no longer has a manager for
+ * the old one). Returns true after deleting the stale team's dirs.
+ *
+ * Conservative on ambiguity: an unreadable/corrupt team file or a
+ * pre-`leadPid` file can't prove its owner is gone, so it is left
+ * for manual recovery.
+ */
+export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
+  let existing: TeamFile | undefined;
+  try {
+    existing = await readTeamFile(teamName);
+  } catch {
+    return false;
+  }
+  if (!existing) {
+    // config.json vanished between the caller's EEXIST and this read —
+    // a concurrent team_delete finished the job. The dirs may still
+    // hold leftovers; clear them so the retried create starts clean.
+    await deleteTeamDirs(teamName);
+    return true;
+  }
+  if (typeof existing.leadPid !== 'number' || existing.leadPid <= 0) {
+    return false;
+  }
+  if (existing.leadPid !== process.pid && isPidAlive(existing.leadPid)) {
+    return false;
+  }
+  await deleteTeamDirs(teamName);
+  return true;
+}
+
+/**
  * Delete an entire team directory and its associated task
  * directory. Silently ignores missing directories.
  */
