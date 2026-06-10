@@ -11,6 +11,30 @@ import { SESSION_READ, WRITE, APPROVE, type RcScope } from '../scopes.js';
 import type { CommandLoader, CommandScope } from '../commands/loader.js';
 import { substitute } from '../commands/parse.js';
 
+/**
+ * True when an `If-None-Match` request header matches `revision` (a hex digest).
+ * Lean per design D5: split on `,`, trim each candidate, strip an optional `W/`
+ * weak-validator prefix and surrounding double-quotes, then compare to the hex.
+ * `If-None-Match: *` is intentionally NOT honored (a polling cache never sends
+ * it). An array-valued header (duplicate header — not expected here) is joined.
+ */
+export function ifNoneMatchSatisfied(
+  header: string | string[] | undefined,
+  revision: string,
+): boolean {
+  if (header === undefined) return false;
+  const raw = Array.isArray(header) ? header.join(',') : header;
+  for (const part of raw.split(',')) {
+    let tag = part.trim();
+    if (tag.startsWith('W/')) tag = tag.slice(2).trim();
+    if (tag.length >= 2 && tag.startsWith('"') && tag.endsWith('"')) {
+      tag = tag.slice(1, -1);
+    }
+    if (tag.length > 0 && tag === revision) return true;
+  }
+  return false;
+}
+
 /** Map a command's declared scope to the gateway RcScope used for gating. */
 export function mapDeclaredScope(scope: CommandScope): RcScope {
   switch (scope) {
