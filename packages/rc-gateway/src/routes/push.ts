@@ -146,8 +146,13 @@ export function createPushRouter(
         quietHours?: unknown;
       };
 
-      let touched = false;
-
+      // Validate BOTH fields up front, then apply — the request is
+      // all-or-nothing. A mixed PATCH whose second field is malformed must NOT
+      // have already persisted the first field (a partial commit could
+      // silently narrow prefs while returning 400 → a missed-prompt-class
+      // false suppression the user never knowingly committed).
+      let applyPrefs = false;
+      let nextPrefs: string[] | undefined;
       if ('prefs' in body) {
         const { prefs } = body;
         const isValid =
@@ -159,18 +164,15 @@ export function createPushRouter(
             .json({ error: 'Invalid prefs', code: 'invalid_prefs' });
           return;
         }
-        await store.setPrefs(
-          rec.id,
-          Array.isArray(prefs) ? (prefs as string[]) : undefined,
-        );
-        touched = true;
+        nextPrefs = Array.isArray(prefs) ? (prefs as string[]) : undefined;
+        applyPrefs = true;
       }
 
+      let applyQuiet = false;
+      let nextQuiet: { from: string; to: string; timezone: string } | undefined;
       if ('quietHours' in body) {
         const { quietHours } = body;
-        if (quietHours === null) {
-          await store.setQuietHours(rec.id, undefined);
-        } else {
+        if (quietHours !== null) {
           const parsed = parseTimeOfDay(quietHours);
           if (!parsed) {
             res.status(400).json({
@@ -184,16 +186,15 @@ export function createPushRouter(
             to: string;
             timezone: string;
           };
-          await store.setQuietHours(rec.id, {
-            from: qh.from,
-            to: qh.to,
-            timezone: qh.timezone,
-          });
+          nextQuiet = { from: qh.from, to: qh.to, timezone: qh.timezone };
         }
-        touched = true;
+        applyQuiet = true;
       }
 
-      if (touched) {
+      if (applyPrefs) await store.setPrefs(rec.id, nextPrefs);
+      if (applyQuiet) await store.setQuietHours(rec.id, nextQuiet);
+
+      if (applyPrefs || applyQuiet) {
         void audit?.record({
           action: 'push_prefs_updated',
           actorTokenId: req.rcClient!.id,

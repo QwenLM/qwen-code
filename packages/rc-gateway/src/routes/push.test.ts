@@ -367,6 +367,30 @@ describe('push routes', () => {
     expect(store.get(rec.id)!.quietHours).toBeUndefined();
   });
 
+  it('mixed PATCH with valid prefs + malformed quietHours -> 400 and prefs are NOT partially committed', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setPrefs(rec.id, ['task.completed']); // pre-existing prefs
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prefs: ['permission.required'],
+        quietHours: { from: 'nope', to: '07:00', timezone: 'UTC' },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe('invalid_quiet_hours');
+    // The whole request is rejected: prefs must be untouched (not narrowed).
+    expect(store.get(rec.id)!.prefs).toEqual(['task.completed']);
+    expect(store.get(rec.id)!.quietHours).toBeUndefined();
+    // A rejected request emits no update audit.
+    expect(audit.calls.some((c) => c.action === 'push_prefs_updated')).toBe(
+      false,
+    );
+  });
+
   it('PATCH another tokens id as non-owner with a quietHours body -> 404 (existence hidden before validation)', async () => {
     const url = await mount();
     const rec = await store.add('tokB', VALID_SUB);
