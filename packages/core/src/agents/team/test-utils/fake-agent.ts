@@ -57,6 +57,9 @@ export class FakeAgent {
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private readonly emitter = new AgentEventEmitter();
   private readonly receivedMessages: string[] = [];
+  private readonly pendingQueue: string[] = [];
+  private processing = false;
+  private drained = false;
   private script: FakeAgentScript;
   private error: string | undefined;
   private lastRoundError: string | undefined;
@@ -144,7 +147,25 @@ export class FakeAgent {
     };
   }
 
+  /**
+   * Mirrors AgentInteractive's queue semantics: a message that arrives
+   * while a round is in flight is queued and processed when the round
+   * settles — it must NOT spin up a concurrent inline round. Messages
+   * after abort()/shutdown() are silently dropped (drained queue), and
+   * a terminal agent is never resurrected via setStatus(RUNNING).
+   */
   enqueueMessage(message: string): void {
+    if (this.drained || isTerminalStatus(this.status)) return;
+    this.pendingQueue.push(message);
+    if (!this.processing) {
+      this.processNext();
+    }
+  }
+
+  private processNext(): void {
+    const message = this.pendingQueue.shift();
+    if (message === undefined) return;
+    this.processing = true;
     this.receivedMessages.push(message);
     this.flushMessageWaiters();
 
@@ -153,21 +174,33 @@ export class FakeAgent {
     if (this.script.onMessage) {
       const result = this.script.onMessage(message, this);
       if (result === 'stay_running') {
-        // Test controls when to go idle via goIdle().
+        // Test controls when to go idle via goIdle(); `processing`
+        // stays armed so queued messages wait for it, like the real
+        // run loop mid-round.
         return;
       }
       if (result instanceof Promise) {
-        void result.then(() => {
-          if (this.status === AgentStatus.RUNNING) {
-            this.setStatus(AgentStatus.IDLE);
-          }
-        });
+        void result.then(() => this.settleAfterRound());
         return;
       }
     }
 
-    // Default: go IDLE immediately — unless the script
-    // already moved to a different state (e.g. COMPLETED).
+    this.settleAfterRound();
+  }
+
+  /**
+   * Mirrors the real run loop's drain-then-settle order: queued
+   * messages are processed before the agent settles to IDLE. A
+   * terminal status (abort, or a script that moved to COMPLETED)
+   * stops the drain — the real loop never resurrects.
+   */
+  private settleAfterRound(): void {
+    this.processing = false;
+    if (this.drained || isTerminalStatus(this.status)) return;
+    if (this.pendingQueue.length > 0) {
+      this.processNext();
+      return;
+    }
     if (this.status === AgentStatus.RUNNING) {
       this.setStatus(AgentStatus.IDLE);
     }
@@ -179,10 +212,15 @@ export class FakeAgent {
   }
 
   abort(): void {
-    this.setStatus(AgentStatus.CANCELLED);
+    this.drained = true;
+    this.pendingQueue.length = 0;
+    if (!isTerminalStatus(this.status)) {
+      this.setStatus(AgentStatus.CANCELLED);
+    }
   }
 
   async shutdown(): Promise<void> {
+    this.drained = true;
     if (!isTerminalStatus(this.status)) {
       this.setStatus(AgentStatus.COMPLETED);
     }
@@ -217,10 +255,14 @@ export class FakeAgent {
     }
   }
 
-  /** Manually go idle (RUNNING → IDLE). */
+  /**
+   * Manually end the current round (RUNNING → IDLE). Messages queued
+   * while the round was held open are processed first, mirroring the
+   * real run loop.
+   */
   goIdle(): void {
     if (this.status === AgentStatus.RUNNING) {
-      this.setStatus(AgentStatus.IDLE);
+      this.settleAfterRound();
     }
   }
 
