@@ -54,6 +54,7 @@ export function WebShellWithProviders({
 export const StandaloneWebShell = WebShellWithProviders;
 
 export type { WebShellProps } from './App';
+export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
   CommandDisplayCategory,

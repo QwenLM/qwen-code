@@ -272,8 +272,32 @@ export function DaemonSessionProvider({
 
       while (!disposed && !abort.signal.aborted) {
         try {
+          // ── SSE Reconnection Strategy ────────────────────────────────
+          //
+          // Two reconnection paths depending on whether `session` survived
+          // the previous iteration's error handler:
+          //
+          // PATH A — Incremental (session preserved, retriable errors):
+          //   `session` is non-null → skip this entire `if (!session)` block
+          //   → go straight to `activeSession.events()` which sends
+          //   `Last-Event-ID` → daemon serves only missed events →
+          //   store.dispatch() appends to existing blocks. No reset, no
+          //   load(), minimal re-render.
+          //
+          // PATH B — Full reload (session cleared, terminal/auth errors,
+          //   ring eviction):
+          //   `session` is null → enter this block → DaemonSessionClient
+          //   .load() fetches compactedReplay + liveJournal → deferred
+          //   store.reset() + store.dispatch(replayEvents) rebuilds the
+          //   full transcript in a single synchronous batch.
+          //
+          // The `needsStoreReset` flag defers store.reset() to avoid an
+          // intermediate empty-blocks state that causes virtualizer
+          // removeChild errors (see replay injection section below).
+          // ─────────────────────────────────────────────────────────────
           let isSameSessionReconnect = false;
           let shouldInjectReplaySnapshot = false;
+          let needsStoreReset = false;
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -347,13 +371,19 @@ export function DaemonSessionProvider({
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
             }
+            // Defer store.reset() until right before replay dispatch
+            // (after the await below) so that reset + dispatch share a
+            // single queueMicrotask notification. Without deferral, the
+            // microtask fires during the await and React sees an
+            // intermediate empty-blocks state, which causes removeChild
+            // errors in the virtualizer.
             if (
               previousSessionId !== undefined &&
               nextSession.sessionId !== previousSessionId
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              store.reset();
+              needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
                 nextSession.replaySnapshot.compactedReplay.length +
@@ -361,7 +391,7 @@ export function DaemonSessionProvider({
               if (replaySnapshotEventCount > 0) {
                 setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.reset();
+                needsStoreReset = true;
               } else {
                 store.dispatch({
                   type: 'assistant.done',
@@ -466,8 +496,20 @@ export function DaemonSessionProvider({
           // Feed replay snapshot (compacted history + live journal) into
           // the store before starting the SSE loop. The SSE stream begins
           // from lastEventId, so only post-snapshot events are delivered.
+          //
+          // The deferred store.reset() runs here — in the same synchronous
+          // block as store.dispatch() — so the queueMicrotask notification
+          // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          if (
+            needsStoreReset &&
+            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
+          ) {
+            // Reset needed but no replay data (e.g. fresh session) — reset
+            // immediately since there is no dispatch to batch with.
+            store.reset();
+          }
           if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
             const replayOpts = {
               ...eventOptionsRef.current,
@@ -518,6 +560,9 @@ export function DaemonSessionProvider({
                   error,
                 );
               }
+            }
+            if (needsStoreReset) {
+              store.reset();
             }
             if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -651,6 +696,14 @@ export function DaemonSessionProvider({
                   () => setPromptStatus('idle'),
                 );
               }
+              // ── state_resync_required handling ──────────────────────
+              // Two sub-cases:
+              //   epoch_reset — daemon restarted but ring is intact; reset
+              //     store + rewind lastEventId so subsequent events rebuild
+              //     the transcript from the ring on this same SSE stream.
+              //   ring_evicted — too many events accumulated while we were
+              //     disconnected; the ring lost earlier events, so we must
+              //     break out and do a full session load (PATH B).
               if (event.type === 'state_resync_required') {
                 const reason =
                   typeof event.data === 'object' && event.data !== null
@@ -722,16 +775,13 @@ export function DaemonSessionProvider({
           const message =
             error instanceof Error ? error.message : String(error);
           const failedSessionId = session?.sessionId;
-          if (
-            failedSessionId &&
-            (isAuthFailureHttpError(error) || isTerminalSessionHttpError(error))
-          ) {
+          const isAuthFailure = isAuthFailureHttpError(error);
+          const isTerminal = isTerminalSessionHttpError(error);
+          if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
-          session = undefined;
-          sessionRef.current = undefined;
           clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
           setPromptStatus('idle');
           const pendingLoad = pendingSessionLoadRef.current;
@@ -744,27 +794,36 @@ export function DaemonSessionProvider({
             clearTimeout(pendingLoad.timeout);
             pendingLoad.reject(error);
           }
-          // Auth failures (401 / 403) must NOT retry even when
-          // `autoReconnect: true`. Retrying with the same invalid token
-          // loops forever — the daemon keeps returning 401, each cycle
-          // risks transcript wipes via the sessionId-change branch above,
-          // and the user sees no actionable error state.
-          // Surface as a terminal 'error' connection state regardless of
-          // the autoReconnect setting; the user must update credentials.
-          if (isAuthFailureHttpError(error)) {
-            setConnection({
-              status: 'error',
-              error: message,
-            });
-            return;
-          }
-          if (isTerminalSessionHttpError(error)) {
+          if (isAuthFailure || isTerminal) {
+            // Auth failures (401/403) and terminal session errors (404/410)
+            // must clear the session — the server-side state is gone or
+            // inaccessible, so delta resume is impossible.
+            session = undefined;
+            sessionRef.current = undefined;
+            if (isAuthFailure) {
+              setConnection({ status: 'error', error: message });
+              return;
+            }
             reconnectSessionId = undefined;
             if (restoreSessionId) {
               setRestoreSessionId(undefined);
             }
+          } else {
+            // Retriable error (network failure, timeout, etc.) — preserve
+            // the session so the next iteration skips the full load() and
+            // goes straight to events(). DaemonSessionClient tracks
+            // lastSeenEventId internally; the next SSE subscription sends
+            // Last-Event-ID and the daemon serves only delta events.
+            // The transcript store is NOT reset — new events append to
+            // existing blocks, avoiding a full re-render.
+            console.debug(
+              '[DaemonSessionProvider] retriable SSE error, preserving session for delta resume (sessionId=%s)',
+              session?.sessionId,
+            );
           }
           if (!autoReconnect) {
+            session = undefined;
+            sessionRef.current = undefined;
             setConnection({
               status: 'error',
               error: message,

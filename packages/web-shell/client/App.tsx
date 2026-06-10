@@ -211,6 +211,8 @@ export interface WebShellProps {
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
+  /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
+  onToast?: (tone: ToastTone, message: string) => void;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -542,6 +544,7 @@ export function App({
   compactThinking = false,
   virtualScrollThreshold,
   markdown,
+  onToast,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -565,12 +568,18 @@ export function App({
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
   const toastIdRef = useRef(0);
   const [toasts, setToasts] = useState<WebShellToast[]>([]);
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
   const pushToast = useCallback((tone: ToastTone, message: string) => {
+    if (onToastRef.current) {
+      onToastRef.current(tone, message);
+      return;
+    }
     const toast: WebShellToast = {
       id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
       tone,
@@ -2005,7 +2014,7 @@ export function App({
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
         <div className={appClassName} style={externalStyle} data-web-shell-root>
-          <ToastHost toasts={toasts} onDismiss={dismissToast} />
+          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
           {dialogOpen && (
             <div className={styles.dialogOverlay} data-keyboard-scope>
               {showResumeDialog && (
