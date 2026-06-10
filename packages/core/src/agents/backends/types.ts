@@ -130,6 +130,12 @@ export interface TeamAgentHandle {
   getEventEmitter(): AgentEventEmitter | undefined;
   enqueueMessage(msg: string): void;
   abort(): void;
+  /**
+   * Last fatal error, when the agent failed to start or run.
+   * Optional: both AgentInteractive and FakeAgent provide it; future
+   * handles may not.
+   */
+  getError?(): string | undefined;
 }
 
 /**

@@ -37,6 +37,27 @@ function setMockDir(dir: string): void {
   ).__setMockGlobalDir(dir);
 }
 
+// ─── Helpers ──────────────────────────────────────────────────
+
+/**
+ * Assert a delivered message is a well-formed `team_message` envelope
+ * from the expected sender with the expected body. The nonce is random
+ * per delivery, so tests match structure rather than exact strings.
+ */
+function expectTeamMessage(
+  received: string | undefined,
+  from: string,
+  text: string,
+): void {
+  expect(received).toBeDefined();
+  const match = received!.match(
+    /^<team_message_([0-9a-f]+) from="([^"]+)">\n([\s\S]*)\n<\/team_message_\1>\n/,
+  );
+  expect(match, `not a team_message envelope: ${received}`).not.toBeNull();
+  expect(match![2]).toBe(from);
+  expect(match![3]).toBe(text);
+}
+
 // ─── Tests ────────────────────────────────────────────────────
 
 describe('TeamCoordinationHarness', () => {
@@ -67,9 +88,12 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.sendMessage('worker', 'do the thing', 'leader');
 
       await h.waitForMessages('worker', 1);
-      expect(worker.getReceivedMessages()).toEqual([
-        '[Message from leader]: do the thing',
-      ]);
+      expect(worker.getReceivedMessages()).toHaveLength(1);
+      expectTeamMessage(
+        worker.getReceivedMessages()[0],
+        'leader',
+        'do the thing',
+      );
     });
 
     it('sends message to busy agent (queued, delivered on idle)', async () => {
@@ -84,17 +108,15 @@ describe('TeamCoordinationHarness', () => {
 
       // Second message should queue.
       await h.teamManager.sendMessage('worker', 'second', 'leader');
-      expect(worker.getReceivedMessages()).toEqual([
-        '[Message from leader]: first',
-      ]);
+      expect(worker.getReceivedMessages()).toHaveLength(1);
+      expectTeamMessage(worker.getReceivedMessages()[0], 'leader', 'first');
 
       // Go idle → queued message delivered.
       worker.goIdle();
       await h.waitForMessages('worker', 2);
-      expect(worker.getReceivedMessages()).toEqual([
-        '[Message from leader]: first',
-        '[Message from leader]: second',
-      ]);
+      expect(worker.getReceivedMessages()).toHaveLength(2);
+      expectTeamMessage(worker.getReceivedMessages()[0], 'leader', 'first');
+      expectTeamMessage(worker.getReceivedMessages()[1], 'leader', 'second');
     });
 
     it('throws for unknown teammate', async () => {
@@ -147,9 +169,9 @@ describe('TeamCoordinationHarness', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Worker only has the original message.
-      expect(h.getAgent('worker').getReceivedMessages()).toEqual([
-        '[Message from leader]: work',
-      ]);
+      const workerMsgs = h.getAgent('worker').getReceivedMessages();
+      expect(workerMsgs).toHaveLength(1);
+      expectTeamMessage(workerMsgs[0], 'leader', 'work');
     });
   });
 
@@ -201,8 +223,10 @@ describe('TeamCoordinationHarness', () => {
       // Go idle → leader message delivered first.
       worker.goIdle();
       await h.waitForMessages('worker', 2);
-      expect(worker.getReceivedMessages()[1]).toBe(
-        '[Message from leader]: leader msg',
+      expectTeamMessage(
+        worker.getReceivedMessages()[1],
+        'leader',
+        'leader msg',
       );
     });
   });
@@ -237,6 +261,39 @@ describe('TeamCoordinationHarness', () => {
       expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
     });
 
+    it('shutdown_rejected clears the pending flag and disarms the abort', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still mid-task',
+        'target',
+      );
+
+      // Disarmed: a later message that merely mentions the approve
+      // phrase must not abort the teammate.
+      await h.teamManager.sendMessage(
+        'leader',
+        'I will send shutdown_approved once the task is done.',
+        'target',
+      );
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+
+      // Re-included in auto-claim: a new task reaches the teammate
+      // (scanIdleAgentsForTasks skips members with a shutdown pending).
+      await createTask(h.teamName, {
+        subject: 'After rejection',
+        description: 'Should be claimable again',
+      });
+      await h.waitForMessages('target', 2);
+      const msgs = target.getReceivedMessages();
+      expect(msgs[msgs.length - 1]).toContain('After rejection');
+    });
+
     it('shutdown_approved from a non-requested teammate is ignored', async () => {
       // Regression: the prior implementation set a sticky
       // `_shutdownRequested` flag and then aborted any teammate
@@ -263,6 +320,32 @@ describe('TeamCoordinationHarness', () => {
     });
   });
 
+  // ─── 4b. Spawn failure ────────────────────────────────────
+
+  describe('spawn failure', () => {
+    it('surfaces a teammate that fails during start and rolls back', async () => {
+      const h = await createHarness();
+
+      await expect(
+        h.spawnTeammate('broken', {
+          onStart: (agent) => {
+            agent.setError('model auth failed');
+            agent.setStatus(AgentStatus.FAILED);
+          },
+        }),
+      ).rejects.toThrow(/failed to start.*model auth failed/);
+
+      // Rolled back: no roster entry, and sends are refused instead
+      // of being accepted into a queue that can never flush.
+      expect(
+        h.teamManager.getTeamFile().members.map((m) => m.name),
+      ).not.toContain('broken');
+      await expect(
+        h.teamManager.sendMessage('broken', 'hello', 'leader'),
+      ).rejects.toThrow('not found');
+    });
+  });
+
   // ─── 5. Broadcast ─────────────────────────────────────────
 
   describe('broadcast', () => {
@@ -274,9 +357,12 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.broadcast('status update', 'worker-1');
 
       await h.waitForMessages('worker-2', 1);
-      expect(w2.getReceivedMessages()).toEqual([
-        '[Message from worker-1]: status update',
-      ]);
+      expect(w2.getReceivedMessages()).toHaveLength(1);
+      expectTeamMessage(
+        w2.getReceivedMessages()[0],
+        'worker-1',
+        'status update',
+      );
       expect(w1.getReceivedMessages()).toEqual([]);
     });
 
@@ -291,13 +377,11 @@ describe('TeamCoordinationHarness', () => {
       await h.waitForMessages('w1', 1);
       await h.waitForMessages('w3', 1);
 
-      expect(w1.getReceivedMessages()).toEqual([
-        '[Message from w2]: hello all',
-      ]);
+      expect(w1.getReceivedMessages()).toHaveLength(1);
+      expectTeamMessage(w1.getReceivedMessages()[0], 'w2', 'hello all');
       expect(w2.getReceivedMessages()).toEqual([]);
-      expect(w3.getReceivedMessages()).toEqual([
-        '[Message from w2]: hello all',
-      ]);
+      expect(w3.getReceivedMessages()).toHaveLength(1);
+      expectTeamMessage(w3.getReceivedMessages()[0], 'w2', 'hello all');
     });
   });
 
