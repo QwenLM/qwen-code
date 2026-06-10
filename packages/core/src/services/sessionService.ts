@@ -1311,8 +1311,6 @@ export function replayUiTelemetryFromConversation(
 ): void {
   if (sessionId) {
     uiTelemetryService.resetSession(sessionId);
-    uiTelemetryService.setLastPromptTokenCount(0);
-    uiTelemetryService.setLastCachedContentTokenCount(0);
   } else {
     uiTelemetryService.reset();
   }

@@ -199,6 +199,8 @@ export class UiTelemetryService extends EventEmitter {
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
+    this.#sessionMetrics.clear();
+    this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
     this.emit('update', {
@@ -241,10 +243,7 @@ export class UiTelemetryService extends EventEmitter {
     metrics: SessionMetrics,
     event: ApiResponseEvent,
   ): void {
-    const modelMetrics = this.#getOrCreateModelMetrics(
-      metrics,
-      event.model,
-    );
+    const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
@@ -262,14 +261,8 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  #accumulateApiError(
-    metrics: SessionMetrics,
-    event: ApiErrorEvent,
-  ): void {
-    const modelMetrics = this.#getOrCreateModelMetrics(
-      metrics,
-      event.model,
-    );
+  #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {
+    const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
@@ -282,10 +275,7 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  #accumulateToolCall(
-    metrics: SessionMetrics,
-    event: ToolCallEvent,
-  ): void {
+  #accumulateToolCall(metrics: SessionMetrics, event: ToolCallEvent): void {
     const { tools, files } = metrics;
     tools.totalCalls++;
     tools.totalDurationMs += event.duration_ms;
