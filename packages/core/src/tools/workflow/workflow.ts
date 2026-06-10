@@ -57,7 +57,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, { label? })`, and read `args`. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
-        'through a shared window (≤16 agents in flight per run) and resolves ' +
+        'through a shared per-run window (16 agents in flight by default) and resolves ' +
         'to a position-aligned array — a thunk that throws becomes `null` at ' +
         'its index (errors-as-data), and parallel() only rejects on abort. ' +
         '`pipeline(items, ...stages)` runs each item through the stages ' +
@@ -257,8 +257,8 @@ export class WorkflowTool extends BaseDeclarativeTool<
       ToolDisplayNames.WORKFLOW,
       'Execute a workflow script that orchestrates subagents. ' +
         'Supports `phase`, `log`, sequential `agent`, and concurrent fan-out ' +
-        'via `parallel(thunks)` / `pipeline(items, ...stages)` (≤16 agents in ' +
-        'flight per run, ≤1000 agents total). No schema, no resume, no ' +
+        'via `parallel(thunks)` / `pipeline(items, ...stages)` (16 agents in ' +
+        'flight per run by default, up to 1000 agents total). No schema, no resume, no ' +
         'background execution yet. Scripts run in a node:vm sandbox without ' +
         'access to the filesystem or shell; all I/O happens through the ' +
         'spawned agents.',

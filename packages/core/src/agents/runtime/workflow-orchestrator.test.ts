@@ -555,6 +555,56 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
     }, 10_000);
   });
 
+  describe('nested fan-out (shared-window re-entrancy)', () => {
+    // F1 (P2 review round 1): the concurrency limiter throttles AGENT
+    // DISPATCHES, not orchestration thunks. `pipeline([items], item =>
+    // parallel([...]))` is a canonical pattern (it's in the upstream
+    // /deep-research workflow). If the limiter sat at the thunk level, the
+    // outer pipeline chains would each hold a slot while awaiting an inner
+    // parallel(), and on a low concurrency limit every slot is held by a
+    // stalled outer thunk → the inner agent() calls can never acquire a slot
+    // → unrecoverable deadlock (silent hang until the 30-min wall clock).
+    // Forcing the window to 1 makes the worst case deterministic.
+    it('a parallel() inside a pipeline() stage does not deadlock at concurrency=1', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async (p) => `r:${p}`);
+        const outcome = await orchestrator.run({
+          script: `return await pipeline([0, 1, 2],
+            (prev, item) => parallel([() => agent("a" + item)]),
+          );`,
+          args: undefined,
+        });
+        expect(outcome.result).toEqual([['r:a0'], ['r:a1'], ['r:a2']]);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = prev;
+      }
+    }, 15_000);
+
+    it('parallel() of parallel() does not deadlock at concurrency=1', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async (p) => `r:${p}`);
+        const outcome = await orchestrator.run({
+          script: `return await parallel([
+            () => parallel([() => agent("x")]),
+            () => parallel([() => agent("y")]),
+          ]);`,
+          args: undefined,
+        });
+        expect(outcome.result).toEqual([['r:x'], ['r:y']]);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = prev;
+      }
+    }, 15_000);
+  });
+
   describe('env-overridable caps', () => {
     it('resolveMaxAgentsPerRun defaults to 1000 and honors a valid override', () => {
       expect(resolveMaxAgentsPerRun({})).toBe(DEFAULT_MAX_AGENTS_PER_RUN);

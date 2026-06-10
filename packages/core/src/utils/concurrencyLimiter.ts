@@ -9,9 +9,9 @@
  *
  * Unlike the fixed-size batch loops elsewhere in the codebase, this keeps a
  * window of at most `limit` thunks in flight and starts a queued thunk the
- * instant a slot frees — so a single instance can be SHARED across several
- * fan-out calls (e.g. all `parallel()` / `pipeline()` calls within one
- * workflow run) and still hold the total in-flight count under one cap.
+ * instant a slot frees — so a single instance can be SHARED across many
+ * callers (e.g. every agent() dispatch within one workflow run) and still
+ * hold the total in-flight count under one cap.
  */
 
 /**
@@ -34,13 +34,6 @@ export interface ConcurrencyLimiter {
    * across ALL callers sharing this limiter.
    */
   run<T>(thunk: () => Promise<T>): Promise<T>;
-  /**
-   * Schedule a batch and resolve to a position-aligned array where a thunk
-   * that rejected becomes `null` (errors-as-data). Never rejects on a thunk
-   * error; the ONLY rejection is an abort of this limiter's signal, so an
-   * aborted run surfaces as a rejection rather than a silent array of nulls.
-   */
-  settleAll<T>(thunks: Array<() => Promise<T>>): Promise<Array<T | null>>;
 }
 
 export function createConcurrencyLimiter(
@@ -98,16 +91,5 @@ export function createConcurrencyLimiter(
       pump();
     });
 
-  const settleAll = async <T>(
-    thunks: Array<() => Promise<T>>,
-  ): Promise<Array<T | null>> => {
-    if (thunks.length === 0) return [];
-    const settled = await Promise.allSettled(thunks.map((t) => run(t)));
-    // Abort is the one condition that rejects the batch (rather than yielding
-    // a silent array of nulls), so an aborted workflow surfaces the failure.
-    if (signal?.aborted) throw abortError();
-    return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
-  };
-
-  return { run, settleAll };
+  return { run };
 }

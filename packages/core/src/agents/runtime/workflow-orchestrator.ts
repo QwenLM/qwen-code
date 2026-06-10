@@ -233,11 +233,24 @@ export class WorkflowOrchestrator {
     // through dispatch's subagent.execute path.
     const runId = generateRunId();
 
-    // P2: every agent() call — sequential, parallel(), or pipeline() — funnels
-    // through this one wrapped dispatch, so a single per-run counter enforces
-    // the agent cap regardless of launch path. Increment-then-check means
-    // calls 1..max pass and the (max+1)th throws.
     const maxAgents = resolveMaxAgentsPerRun();
+    const signal = req.abortOnTimeout?.signal;
+
+    // P2: the concurrency window throttles AGENT DISPATCHES, not orchestration
+    // thunks. parallel()/pipeline() compose promises freely; only the leaf
+    // agent() calls acquire a slot. This gives the correct "N agents in flight
+    // per run" semantics AND avoids a re-entrancy deadlock (F1, P2 review): if
+    // the window sat at the thunk level, a nested parallel()/pipeline() — e.g.
+    // a pipeline stage that fans out, the canonical /deep-research shape —
+    // would hold every slot while awaiting inner work that can never acquire
+    // one. One shared limiter per run keeps total in-flight agents under the
+    // cap across all fan-out calls.
+    const limiter = createConcurrencyLimiter(resolveConcurrencyLimit(), signal);
+
+    // Every agent() call — sequential, parallel(), or pipeline() — funnels
+    // through this one wrapped dispatch: the counter enforces the per-run agent
+    // cap regardless of launch path (increment-then-check: calls 1..max pass,
+    // the (max+1)th throws), and limiter.run enforces the concurrency window.
     let agentCount = 0;
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
       agentCount += 1;
@@ -248,19 +261,11 @@ export class WorkflowOrchestrator {
           ),
         );
       }
-      return this.dispatch(prompt, opts);
+      return limiter.run(() => this.dispatch(prompt, opts));
     };
 
-    // P2: one shared sliding window for the whole run. parallel() and
-    // pipeline() both schedule through this limiter, so total in-flight agents
-    // stay under the cap even across concurrent fan-out calls. Abort comes from
-    // the same controller that backs the wall-clock timeout + caller signal.
-    const limiter = createConcurrencyLimiter(
-      resolveConcurrencyLimit(),
-      req.abortOnTimeout?.signal,
-    );
-    const parallelImpl = makeParallelImpl(limiter);
-    const pipelineImpl = makePipelineImpl(limiter);
+    const parallelImpl = makeParallelImpl(signal);
+    const pipelineImpl = makePipelineImpl(signal);
 
     const sandbox = createWorkflowSandbox({
       args: req.args,
@@ -296,18 +301,36 @@ export class WorkflowOrchestrator {
 }
 
 /**
- * Build the host-side `parallel(thunks)` impl.
- *
- * Each thunk is a vm-realm function that resolves through the workflow's
- * counted dispatch; the shared `limiter` holds total in-flight agents under
- * the per-run window. `settleAll` applies errors-as-data: a thunk that
- * rejects becomes `null` at its index, and `parallel()` itself only rejects
- * on abort. The result array is revived into the vm realm by the sandbox
- * wrapper (JSON round-trip) — this host array never reaches the script
- * directly.
+ * Settle a batch of thunks into a position-aligned `Array<T|null>` —
+ * errors-as-data: a thunk that rejects (including an over-cap dispatch or a
+ * stage error) becomes `null` at its index, never collapsing the batch.
+ * `Promise.resolve().then(t)` funnels a synchronously-throwing thunk into the
+ * rejection path. The ONE thing that rejects the whole batch is an abort, so
+ * an aborted run surfaces a rejection rather than a silent array of nulls.
+ * Concurrency is bounded at the dispatch layer (limiter.run in countedDispatch),
+ * not here — so nesting a parallel()/pipeline() inside a thunk cannot deadlock.
+ */
+async function settleToNullArray(
+  thunks: Array<() => Promise<unknown>>,
+  signal?: AbortSignal,
+): Promise<unknown[]> {
+  const settled = await Promise.allSettled(
+    thunks.map((t) => Promise.resolve().then(t)),
+  );
+  if (signal?.aborted) throw new Error('Workflow run aborted.');
+  return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+}
+
+/**
+ * Build the host-side `parallel(thunks)` impl. Each thunk is a vm-realm
+ * function whose agent() calls throttle through the per-run concurrency window
+ * at the dispatch layer. A thunk that rejects becomes `null` at its index
+ * (errors-as-data); `parallel()` itself only rejects on abort. The result
+ * array is revived into the vm realm by the sandbox wrapper (JSON round-trip)
+ * — this host array never reaches the script directly.
  */
 function makeParallelImpl(
-  limiter: ReturnType<typeof createConcurrencyLimiter>,
+  signal?: AbortSignal,
 ): (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]> {
   return (thunks) => {
     if (!Array.isArray(thunks)) {
@@ -327,22 +350,22 @@ function makeParallelImpl(
         );
       }
     }
-    return limiter.settleAll(thunks);
+    return settleToNullArray(thunks, signal);
   };
 }
 
 /**
  * Build the host-side `pipeline(items, ...stages)` impl as parallel-of-chains.
  *
- * Each item becomes one thunk that runs the stages in sequence — staggered,
+ * Each item becomes one chain that runs the stages in sequence — staggered,
  * with NO barrier between stages, so item A can be in stage 3 while item B is
- * still in stage 1. All chains share the same `limiter` window. Stage
- * callbacks receive `(prev, item, idx)`; the first stage's `prev` is the item
- * itself. A stage that throws OR returns `null` drops that item to `null` and
- * skips its remaining stages, leaving other items unaffected.
+ * still in stage 1. Stage callbacks receive `(prev, item, idx)`; the first
+ * stage's `prev` is the item itself. A stage that throws OR returns `null`
+ * drops that item to `null` and skips its remaining stages, leaving other
+ * items unaffected. Concurrency is bounded at the dispatch layer.
  */
 function makePipelineImpl(
-  limiter: ReturnType<typeof createConcurrencyLimiter>,
+  signal?: AbortSignal,
 ): (
   items: unknown[],
   ...stages: Array<
@@ -370,14 +393,14 @@ function makePipelineImpl(
     const chains = items.map(
       (item, idx) => () => runPipelineChain(item, idx, stages),
     );
-    return limiter.settleAll(chains);
+    return settleToNullArray(chains, signal);
   };
 }
 
 /**
  * Run one item through every stage in order. `null` is the universal drop
  * sentinel: a stage that returns `null` (or throws — surfaced as a rejection
- * that `settleAll` maps to `null`) short-circuits the rest of the chain.
+ * that the batch maps to `null`) short-circuits the rest of the chain.
  */
 async function runPipelineChain(
   item: unknown,
