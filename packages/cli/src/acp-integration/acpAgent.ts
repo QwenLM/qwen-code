@@ -5546,19 +5546,12 @@ class QwenAgent implements Agent {
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
                 const cfg = s.getConfig();
-                try {
-                  const sessionPath = cfg.getOutputLanguageFilePath();
-                  if (sessionPath && sessionPath !== writtenPath) {
-                    updateOutputLanguageFile(settingValue, sessionPath);
-                  }
-                  if (!sessionPath) {
-                    writeOutputLanguageAndRegisterPath(settingValue, cfg);
-                  }
-                } catch (err) {
-                  debugLogger.warn(
-                    'Failed to write output-language.md for session:',
-                    err,
-                  );
+                const sessionPath = cfg.getOutputLanguageFilePath();
+                if (sessionPath && sessionPath !== writtenPath) {
+                  updateOutputLanguageFile(settingValue, sessionPath);
+                }
+                if (!sessionPath) {
+                  cfg.setOutputLanguageFilePath(getOutputLanguageFilePath());
                 }
                 await cfg.refreshHierarchicalMemory();
                 await cfg.getGeminiClient()?.refreshSystemInstruction();
