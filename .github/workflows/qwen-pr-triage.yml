@@ -30,16 +30,18 @@ env:
   # Each input line is one JSON message; `fromjson?` skips any non-JSON line.
   STREAM_JSON_FMT: |-
     (fromjson?) as $m
-    | if $m.type=="assistant" then ($m.message.content[]?
-        | if .type=="text" and (.text|length>0) then "💬 " + (.text|gsub("\n";" ")|.[0:200])
-          elif .type=="tool_use" then "▶ " + .name + "  " + ((.input//{})|tostring|.[0:160])
-          else empty end)
-      elif $m.type=="user" then (($m.message.content)
-        | if type=="array" then (.[]? | select(.type=="tool_result")
-            | "  ↳ " + (if .is_error then "ERROR " else "" end) + ((.content//""|tostring)|gsub("\n";" ")|.[0:140]))
-          else empty end)
-      elif $m.type=="result" then "■ " + $m.subtype + (if $m.result then ": " + ($m.result|tostring|gsub("\n";" ")|.[0:300]) else "" end)
-      else empty end
+    | try (
+        if $m.type=="assistant" then ($m.message.content[]?
+          | if .type=="text" and ((.text|length)>0) then "💬 " + (.text|gsub("\n";" ")|.[0:200])
+            elif .type=="tool_use" then "▶ " + (.name // "tool") + "  " + ((.input//{})|tostring|.[0:160])
+            else empty end)
+        elif $m.type=="user" then (($m.message.content)
+          | if type=="array" then (.[]? | select(.type=="tool_result")
+              | "  ↳ " + (if .is_error then "ERROR " else "" end) + ((.content//""|tostring)|gsub("\n";" ")|.[0:140]))
+            else empty end)
+        elif $m.type=="result" then "■ " + ($m.subtype // "done") + (if $m.result then ": " + ($m.result|tostring|gsub("\n";" ")|.[0:300]) else "" end)
+        else empty end
+      ) catch empty
 
 jobs:
   # ─── Resolve PR number and determine trigger type ───────────────────
@@ -161,10 +163,19 @@ jobs:
             exit 1
           fi
 
+          # Self-hosted runner: /tmp persists across runs, so a stale verdict
+          # from a previous PR could be read by the capture step if this run's
+          # skill fails to write one. Clear it before the run.
+          rm -f /tmp/triage-results/product-decision.json
+
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
+
+          # Readable log formatter; fall back to raw passthrough if jq is absent.
+          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
           timeout --kill-after=10s 12m qwen \
@@ -174,7 +185,7 @@ jobs:
             --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee /tmp/product-decision-raw.jsonl \
-            | jq -Rr "$STREAM_JSON_FMT"
+            | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
@@ -262,6 +273,10 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
+          # Readable log formatter; fall back to raw passthrough if jq is absent.
+          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
+
           set +e
           timeout --kill-after=10s 85m qwen \
             --auth-type openai \
@@ -270,7 +285,7 @@ jobs:
             --prompt "/review ${REVIEW_URL} --comment" \
             --output-format stream-json \
             | tee /tmp/review-raw.jsonl \
-            | jq -Rr "$STREAM_JSON_FMT"
+            | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
@@ -346,6 +361,10 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
+          # Readable log formatter; fall back to raw passthrough if jq is absent.
+          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
+
           # Run tmux testing — output goes to a file for artifact upload
           mkdir -p /tmp/tmux-results
           set +e
@@ -356,7 +375,7 @@ jobs:
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee /tmp/tmux-results/output.jsonl \
-            | jq -Rr "$STREAM_JSON_FMT"
+            | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
