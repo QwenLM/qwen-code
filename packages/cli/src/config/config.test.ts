@@ -2501,13 +2501,13 @@ describe('loadCliConfig chatCompression', () => {
     const settings: Settings = {
       model: {
         chatCompression: {
-          contextPercentageThreshold: 0.5,
+          maxRecentFilesToRetain: 7,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
-      contextPercentageThreshold: 0.5,
+      maxRecentFilesToRetain: 7,
     });
   });
 
