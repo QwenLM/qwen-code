@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: 'boolean'
+      timeout_minutes:
+        description: 'Review timeout in minutes (default 90)'
+        required: false
+        default: 90
+        type: 'number'
 
 permissions:
   contents: 'read'
@@ -126,10 +131,14 @@ jobs:
       is_fork: '${{ steps.resolve.outputs.is_fork }}'
       should_run: '${{ steps.resolve.outputs.should_run }}'
       review_environment: '${{ steps.resolve.outputs.review_environment }}'
+      review_timeout: '${{ steps.resolve.outputs.review_timeout }}'
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
         (github.event_name == 'pull_request_target' &&
-         github.event.pull_request.draft == false) ||
+         github.event.pull_request.draft == false &&
+         (github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR')) ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
          github.event.issue.pull_request &&
@@ -159,6 +168,7 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           INPUT_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
           INPUT_SKIP_PRODUCT: '${{ github.event.inputs.skip_product_decision }}'
+          INPUT_TIMEOUT: '${{ github.event.inputs.timeout_minutes }}'
           PR_TARGET_NUMBER: '${{ github.event.pull_request.number }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
@@ -207,12 +217,22 @@ jobs:
             REVIEW_ENV=""
           fi
 
+          # Review timeout: workflow_dispatch may override (min 10, so the
+          # inner qwen timeout of N-5 minutes stays sane); default 90.
+          REVIEW_TIMEOUT=90
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] \
+            && [[ "$INPUT_TIMEOUT" =~ ^[0-9]+$ ]] \
+            && [ "$INPUT_TIMEOUT" -ge 10 ]; then
+            REVIEW_TIMEOUT="$INPUT_TIMEOUT"
+          fi
+
           {
             echo "pr_number=$PR_NUMBER"
             echo "trigger_type=$TRIGGER_TYPE"
             echo "is_fork=$IS_FORK"
             echo "should_run=true"
             echo "review_environment=$REVIEW_ENV"
+            echo "review_timeout=$REVIEW_TIMEOUT"
           } >> "$GITHUB_OUTPUT"
 
   # ─── Stage 1: Product Decision ─────────────────────────────────────
@@ -324,7 +344,8 @@ jobs:
          needs.product-decision.outputs.verdict == 'pass') ||
         needs.resolve.outputs.trigger_type == 'review_only'
       )
-    timeout-minutes: 90
+    # Default 90; workflow_dispatch can override via the timeout_minutes input.
+    timeout-minutes: '${{ fromJSON(needs.resolve.outputs.review_timeout) }}'
     # 1-hour wait timer (via environment protection rule) debounces
     # rapid consecutive pushes. Empty string = no environment = no delay.
     environment: '${{ needs.resolve.outputs.review_environment }}'
@@ -378,10 +399,14 @@ jobs:
           # limit reverse audit rounds, reduce timeout pressure
           QWEN_REVIEW_SKIP_DETERMINISTIC: '1'
           QWEN_REVIEW_MAX_REVERSE_ROUNDS: '1'
+          REVIEW_TIMEOUT_MIN: '${{ needs.resolve.outputs.review_timeout }}'
         run: |
           set -euo pipefail
           REPO="${GITHUB_REPOSITORY}"
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+          # Leave a 5-minute buffer under the job timeout for the
+          # surrounding steps (checkout, verdict check).
+          INNER_TIMEOUT_MIN=$((REVIEW_TIMEOUT_MIN - 5))
 
           if ! command -v qwen >/dev/null 2>&1; then
             echo "::error::qwen CLI not found on runner"
@@ -398,7 +423,7 @@ jobs:
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
-          timeout --kill-after=10s 85m qwen \
+          timeout --kill-after=10s "${INNER_TIMEOUT_MIN}m" qwen \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
@@ -410,7 +435,7 @@ jobs:
           set -e
 
           if [ "$EXIT_CODE" -eq 124 ]; then
-            echo "::warning::Review timed out after 85 minutes"
+            echo "::warning::Review timed out after ${INNER_TIMEOUT_MIN} minutes"
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Review exited with code $EXIT_CODE"
           fi
