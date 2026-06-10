@@ -12,15 +12,27 @@ import { matchesAny } from '../policy/glob.js';
  * The match clause of a routing rule. Both fields are optional; an absent field
  * does not constrain (AND semantics across present fields).
  *
- * This slice honors only `kind` + `sessionTag`; later cycles add
+ * This slice honors `kind` + `sessionTag` (event-global) and `scopeIn` +
+ * `tokenIdsIn` (per-subscription, cycle 33); later cycles add
  * `policy.decisionSource`/`originatingClientScope`/`subActor`/`mentionPatterns`/
- * `urgencyAtLeast` (see the design's deferred list).
+ * `urgencyAtLeast`/`deviceTagsIn` (see the design's deferred list).
  */
 export interface RoutingRuleMatch {
   /** Event kind: a single kind (equality) or a list (membership). */
   kind?: string | string[];
   /** Glob(s) matched against the session name (via the ReDoS-safe globMatch). */
   sessionTag?: string | string[];
+  /**
+   * Per-subscription (cycle 33): the subscription's owning-token scope(s). A
+   * rule matches a subscription when its token holds AT LEAST ONE listed scope.
+   * Exact string membership (scopes are a closed enum) — NOT a glob.
+   */
+  scopeIn?: string | string[];
+  /**
+   * Per-subscription (cycle 33): the subscription's owning-token id(s). Matches
+   * when `subscription.tokenId` is one of the listed ids (exact membership).
+   */
+  tokenIdsIn?: string | string[];
 }
 
 /**
@@ -47,13 +59,35 @@ export class RoutingError extends Error {
   }
 }
 
-/** A compiled, pure decision over the event-global fields the notifier has. */
+/**
+ * A subscription as seen by the per-subscription routing pass: its owning-token
+ * id and that token's resolved scopes (already in hand in the notifier loop).
+ */
+export interface RoutingSubscription {
+  tokenId: string;
+  scopes: readonly string[];
+}
+
+/** A compiled, pure decision over the fields the notifier has. */
 export interface RoutingMatcher {
   /**
-   * The id of the first `drop` rule matching this event, or `null` when no drop
-   * rule matches. An unnamed matching rule reports `'<unnamed>'`.
+   * The id of the first EVENT-GLOBAL `drop` rule matching this event, or `null`
+   * when none matches. An unnamed matching rule reports `'<unnamed>'`. Rules
+   * carrying a per-subscription field (`scopeIn`/`tokenIdsIn`) are EXCLUDED here
+   * by construction — they can never suppress the whole fan-out.
    */
   firstDrop(ev: { kind: string; sessionName?: string }): string | null;
+  /**
+   * The id of the first PER-SUBSCRIPTION `drop` rule matching this (event,
+   * subscription) pair, or `null`. Only rules carrying `scopeIn`/`tokenIdsIn`
+   * participate; any event-global fields (`kind`/`sessionTag`) on such a rule
+   * must also match (AND). Optional so a matcher predating this method still
+   * satisfies the interface (the notifier calls it with `?.`).
+   */
+  firstDropForSubscription?(
+    ev: { kind: string; sessionName?: string },
+    sub: RoutingSubscription,
+  ): string | null;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -68,7 +102,7 @@ function isStringOrStringArray(v: unknown): v is string | string[] {
   );
 }
 
-const MATCH_HONORED = new Set(['kind', 'sessionTag']);
+const MATCH_HONORED = new Set(['kind', 'sessionTag', 'scopeIn', 'tokenIdsIn']);
 const ROUTE_HONORED = new Set(['drop']);
 
 let warnedDeferred = false;
@@ -124,6 +158,22 @@ export function loadRoutingConfig(text: string): RoutingConfig {
       }
       match.sessionTag = matchRaw['sessionTag'];
     }
+    if (matchRaw['scopeIn'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['scopeIn'])) {
+        throw new RoutingError(
+          `rule[${i}].match.scopeIn must be a string or string list`,
+        );
+      }
+      match.scopeIn = matchRaw['scopeIn'];
+    }
+    if (matchRaw['tokenIdsIn'] !== undefined) {
+      if (!isStringOrStringArray(matchRaw['tokenIdsIn'])) {
+        throw new RoutingError(
+          `rule[${i}].match.tokenIdsIn must be a string or string list`,
+        );
+      }
+      match.tokenIdsIn = matchRaw['tokenIdsIn'];
+    }
 
     const route: { drop?: boolean } = {};
     if (routeRaw['drop'] !== undefined) {
@@ -152,8 +202,8 @@ export function loadRoutingConfig(text: string): RoutingConfig {
     // eslint-disable-next-line no-console
     console.warn(
       `[routing] ignoring not-yet-supported rule field(s): ` +
-        `${[...unhonored].sort().join(', ')} (only kind/sessionTag + route.drop ` +
-        `are honored this version)`,
+        `${[...unhonored].sort().join(', ')} (only match.kind/sessionTag/scopeIn/` +
+        `tokenIdsIn + route.drop are honored this version)`,
     );
   }
 
@@ -200,15 +250,48 @@ function matchSessionTag(
 }
 
 /**
+ * A present `scopeIn` requires the subscription's token to hold AT LEAST ONE
+ * listed scope (exact membership; an empty list matches nobody — see D5).
+ */
+function matchScopeIn(
+  spec: string | string[] | undefined,
+  scopes: readonly string[],
+): boolean {
+  if (spec === undefined) return true;
+  const wanted = Array.isArray(spec) ? spec : [spec];
+  return scopes.some((s) => wanted.includes(s));
+}
+
+/** A present `tokenIdsIn` requires exact membership of the subscription's token id. */
+function matchTokenIdsIn(
+  spec: string | string[] | undefined,
+  tokenId: string,
+): boolean {
+  if (spec === undefined) return true;
+  return Array.isArray(spec) ? spec.includes(tokenId) : spec === tokenId;
+}
+
+/** A rule targets specific subscriptions iff it carries scopeIn or tokenIdsIn. */
+function hasPerSubMatch(r: RoutingRule): boolean {
+  return r.match.scopeIn !== undefined || r.match.tokenIdsIn !== undefined;
+}
+
+/**
  * Compile a config into a {@link RoutingMatcher}. Only `route.drop === true`
  * rules participate; rules are evaluated in document order and the first match
- * wins.
+ * wins. Drop rules are PARTITIONED: those with no per-subscription field
+ * participate in the event-global {@link RoutingMatcher.firstDrop} pass; those
+ * carrying `scopeIn`/`tokenIdsIn` participate ONLY in the per-subscription
+ * {@link RoutingMatcher.firstDropForSubscription} pass — so a per-subscription
+ * rule can never suppress the whole fan-out.
  */
 export function compileRouting(config: RoutingConfig): RoutingMatcher {
   const dropRules = config.rules.filter((r) => r.route.drop === true);
+  const globalDropRules = dropRules.filter((r) => !hasPerSubMatch(r));
+  const perSubDropRules = dropRules.filter(hasPerSubMatch);
   return {
     firstDrop(ev) {
-      for (const r of dropRules) {
+      for (const r of globalDropRules) {
         if (
           matchKind(r.match.kind, ev.kind) &&
           matchSessionTag(r.match.sessionTag, ev.sessionName)
@@ -216,6 +299,19 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
           // `||` not `??`: a non-null return signals "matched", and the notifier
           // gates on truthiness — an empty-string id (`id: ""`) must still
           // suppress, reported under the '<unnamed>' label.
+          return r.id || '<unnamed>';
+        }
+      }
+      return null;
+    },
+    firstDropForSubscription(ev, sub) {
+      for (const r of perSubDropRules) {
+        if (
+          matchKind(r.match.kind, ev.kind) &&
+          matchSessionTag(r.match.sessionTag, ev.sessionName) &&
+          matchScopeIn(r.match.scopeIn, sub.scopes) &&
+          matchTokenIdsIn(r.match.tokenIdsIn, sub.tokenId)
+        ) {
           return r.id || '<unnamed>';
         }
       }

@@ -13,6 +13,7 @@ import {
   loadRoutingConfigFile,
   compileRouting,
   RoutingError,
+  type RoutingSubscription,
 } from './rules.js';
 
 describe('loadRoutingConfig', () => {
@@ -105,6 +106,31 @@ rules:
       ),
     ).toThrow(RoutingError);
   });
+
+  it('keeps scopeIn/tokenIdsIn as string and as string-list', () => {
+    const cfg = loadRoutingConfig(`
+rules:
+  - match:
+      scopeIn: share
+      tokenIdsIn: [t1, t2]
+    route: { drop: true }
+`);
+    expect(cfg.rules[0].match.scopeIn).toBe('share');
+    expect(cfg.rules[0].match.tokenIdsIn).toEqual(['t1', 't2']);
+  });
+
+  it('malformed scopeIn/tokenIdsIn → RoutingError', () => {
+    expect(() =>
+      loadRoutingConfig(
+        'rules:\n  - match: { scopeIn: 7 }\n    route: { drop: true }',
+      ),
+    ).toThrow(RoutingError);
+    expect(() =>
+      loadRoutingConfig(
+        'rules:\n  - match: { tokenIdsIn: [a, 7] }\n    route: { drop: true }',
+      ),
+    ).toThrow(RoutingError);
+  });
 });
 
 describe('loadRoutingConfig deferred-field warning (fresh module per case)', () => {
@@ -119,7 +145,9 @@ rules:
   - match: { sessionTag: "*x*" }
     route: { drop: true }
 `);
-    fresh('rules:\n  - match: { scopeIn: [owner] }\n    route: { drop: true }');
+    fresh(
+      'rules:\n  - match: { originatingClientScope: owner }\n    route: { drop: true }',
+    );
     expect(spy).toHaveBeenCalledTimes(1);
     const msg = spy.mock.calls[0][0] as string;
     expect(msg).toContain('route.urgency');
@@ -256,5 +284,119 @@ rules:
     route: { urgency: high }
 `);
     expect(m.firstDrop({ kind: 'task.completed' })).toBeNull();
+  });
+});
+
+describe('compileRouting / firstDropForSubscription (cycle 33)', () => {
+  const matcher = (yaml: string) => compileRouting(loadRoutingConfig(yaml));
+  const sub = (
+    tokenId: string,
+    scopes: readonly string[],
+  ): RoutingSubscription => ({ tokenId, scopes });
+  const PERM = { kind: 'permission.required' as const };
+
+  it('scopeIn drops a sub whose token holds a listed scope, not one without', () => {
+    const m = matcher(`
+rules:
+  - id: mute-guests
+    match: { scopeIn: [share] }
+    route: { drop: true }
+`);
+    expect(
+      m.firstDropForSubscription?.(PERM, sub('g', ['session:read', 'share'])),
+    ).toBe('mute-guests');
+    expect(
+      m.firstDropForSubscription?.(PERM, sub('a', ['session:read', 'approve'])),
+    ).toBeNull();
+  });
+
+  it('tokenIdsIn drops only the listed token ids', () => {
+    const m = matcher(`
+rules:
+  - id: mute-devices
+    match: { tokenIdsIn: [t1] }
+    route: { drop: true }
+`);
+    expect(m.firstDropForSubscription?.(PERM, sub('t1', ['approve']))).toBe(
+      'mute-devices',
+    );
+    expect(
+      m.firstDropForSubscription?.(PERM, sub('t2', ['approve'])),
+    ).toBeNull();
+  });
+
+  it('AND across kind + scopeIn (both must match)', () => {
+    const m = matcher(`
+rules:
+  - id: r
+    match: { kind: permission.required, scopeIn: [share] }
+    route: { drop: true }
+`);
+    // share but wrong kind → no drop
+    expect(
+      m.firstDropForSubscription?.(
+        { kind: 'task.completed' },
+        sub('g', ['share']),
+      ),
+    ).toBeNull();
+    // right kind but no share → no drop
+    expect(
+      m.firstDropForSubscription?.(PERM, sub('a', ['approve'])),
+    ).toBeNull();
+    // both → drop
+    expect(m.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBe('r');
+  });
+
+  it('empty scopeIn / tokenIdsIn drops nobody (D5)', () => {
+    const ms = matcher(`
+rules:
+  - id: r
+    match: { scopeIn: [] }
+    route: { drop: true }
+`);
+    expect(ms.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBeNull();
+    const mt = matcher(`
+rules:
+  - id: r
+    match: { tokenIdsIn: [] }
+    route: { drop: true }
+`);
+    expect(mt.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBeNull();
+  });
+
+  it('first matching per-sub drop wins; unnamed → <unnamed>', () => {
+    const m = matcher(`
+rules:
+  - match: { scopeIn: [share] }
+    route: { drop: true }
+  - id: second
+    match: { scopeIn: [share] }
+    route: { drop: true }
+`);
+    expect(m.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBe(
+      '<unnamed>',
+    );
+  });
+
+  it('SAFETY: a per-sub rule never suppresses the whole fan-out (firstDrop=null)', () => {
+    const m = matcher(`
+rules:
+  - id: mute-guests
+    match: { kind: permission.required, scopeIn: [share] }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'permission.required' })).toBeNull();
+  });
+
+  it('a pure event-global rule is NOT applied per-subscription', () => {
+    const m = matcher(`
+rules:
+  - id: global
+    match: { kind: permission.required }
+    route: { drop: true }
+`);
+    // It lives in the global pass only.
+    expect(m.firstDrop({ kind: 'permission.required' })).toBe('global');
+    expect(m.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBeNull();
   });
 });
