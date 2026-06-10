@@ -900,6 +900,73 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('attaches shell output to the running execute tool in a merged group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash', 'running', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      toolBlock('t2', 'tc-read', 'completed', 2, { toolName: 'Read' }),
+      shellBlock('sh1', 'bash output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash',
+      rawOutput: 'bash output',
+    });
+    expect(tools?.[1]?.rawOutput).toBeUndefined();
+  });
+
+  it('attaches shell output to the most recent running execute tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash-1', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+        rawOutput: 'first output',
+      }),
+      toolBlock('t2', 'tc-bash-2', 'running', 2, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      shellBlock('sh1', 'second output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash-1',
+      rawOutput: 'first output',
+    });
+    expect(tools?.[1]).toMatchObject({
+      callId: 'tc-bash-2',
+      rawOutput: 'second output',
+    });
+  });
+
+  it('falls back to the last execute tool when every status is terminal', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      toolBlock('t2', 'tc-read', 'completed', 2, { toolName: 'Read' }),
+      shellBlock('sh1', 'replayed output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash',
+      rawOutput: 'replayed output',
+    });
+    expect(tools?.[1]?.rawOutput).toBeUndefined();
+  });
+
   it('merges thought across interleaved tool blocks but splits content after tools', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'thinking part 1', 1),
