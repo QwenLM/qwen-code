@@ -22,7 +22,7 @@
     "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
   },
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=\"--expose-gc\" node scripts/start.js",
+    "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
@@ -91,10 +91,11 @@
     "@types/react-dom": "^19.2.0"
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen": "scripts/cli-entry.js"
   },
   "files": [
     "dist/",
+    "scripts/cli-entry.js",
     "README.md",
     "LICENSE"
   ],

@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useHistory } from './useHistoryManager.js';
+import { useHistory, UI_COMPACT_CLEARED_MESSAGE } from './useHistoryManager.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
 import { ToolCallStatus } from '../types.js';
@@ -314,7 +314,7 @@ describe('useHistoryManager', () => {
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
-      expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       // Last 20 (newest) should be untouched
       const recentTool = (
         result.current.history[24] as unknown as HistoryItemToolGroup
@@ -360,7 +360,7 @@ describe('useHistoryManager', () => {
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
-      expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
     });
 
     it('should return same reference for empty history', () => {
@@ -410,7 +410,7 @@ describe('useHistoryManager', () => {
         const tool = (
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools[0];
-        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+        expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
       // Last 20 (newest) should be untouched
       for (let i = 10; i < 30; i++) {
@@ -488,7 +488,7 @@ describe('useHistoryManager', () => {
       for (let i = 0; i < 10; i++) {
         const tool = (remainingToolGroups[i] as unknown as HistoryItemToolGroup)
           .tools[0];
-        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+        expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
 
       // Last 20 tool_groups should be untouched
@@ -569,7 +569,7 @@ describe('useHistoryManager', () => {
         const tool = (
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools[0];
-        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+        expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
 
       // Last 20 (newest) should be untouched
@@ -577,9 +577,7 @@ describe('useHistoryManager', () => {
         const tool = (
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools[0];
-        expect(tool.resultDisplay).not.toBe(
-          '[Old tool result content cleared]',
-        );
+        expect(tool.resultDisplay).not.toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
     });
 
@@ -665,7 +663,7 @@ describe('useHistoryManager', () => {
                   callId: String(i),
                   name: 'read_file',
                   description: '',
-                  resultDisplay: '[Old tool result content cleared]',
+                  resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
@@ -709,7 +707,7 @@ describe('useHistoryManager', () => {
         const tool = (
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools[0];
-        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+        expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
 
       // Fresh items should remain untouched
@@ -742,7 +740,7 @@ describe('useHistoryManager', () => {
                   callId: String(i),
                   name: 'read_file',
                   description: '',
-                  resultDisplay: '[Old tool result content cleared]',
+                  resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
@@ -786,7 +784,7 @@ describe('useHistoryManager', () => {
                   callId: `${i}-b`,
                   name: 'edit',
                   description: '',
-                  resultDisplay: '[Old tool result content cleared]',
+                  resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   status: ToolCallStatus.Success,
                   confirmationDetails: undefined,
                 },
@@ -808,12 +806,8 @@ describe('useHistoryManager', () => {
         const tools = (
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools;
-        expect(tools[0].resultDisplay).toBe(
-          '[Old tool result content cleared]',
-        );
-        expect(tools[1].resultDisplay).toBe(
-          '[Old tool result content cleared]',
-        );
+        expect(tools[0].resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
+        expect(tools[1].resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
 
       // Last 20 should be untouched
@@ -822,9 +816,7 @@ describe('useHistoryManager', () => {
           result.current.history[i] as unknown as HistoryItemToolGroup
         ).tools;
         expect(tools[0].resultDisplay).toBe(`content-${i}`);
-        expect(tools[1].resultDisplay).toBe(
-          '[Old tool result content cleared]',
-        );
+        expect(tools[1].resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
       }
     });
   });

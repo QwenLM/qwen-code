@@ -311,7 +311,6 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_SOFT',
   'QWEN_MEMORY_PRESSURE_HARD',
   'QWEN_MEMORY_PRESSURE_CRITICAL',
-  'QWEN_MEMORY_ENABLE_GC',
 ];
 
 vi.mock('../core/baseLlmClient.js');
@@ -590,8 +589,7 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it('enables explicit GC when requested by env', async () => {
-      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+    it('explicit GC is enabled by default', async () => {
       const globalWithGc = global as typeof global & { gc?: () => void };
       const originalGc = globalWithGc.gc;
       const gcSpy = vi.fn();
@@ -3551,8 +3549,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -3599,8 +3598,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,
