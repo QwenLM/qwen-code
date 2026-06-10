@@ -45,6 +45,56 @@ env:
       ) catch empty
 
 jobs:
+  # ─── Ack: immediate "queued" feedback for explicit comment triggers ──
+  # Restores the old qwen-code-pr-review.yml acknowledgement: when a
+  # maintainer comments `@qwen-code /triage` or `/review`, reply right away
+  # so they know the request was accepted (the pipeline itself may sit in
+  # the debounce queue). KEEP THE IF IN SYNC with resolve's comment branch.
+  ack-request:
+    if: >-
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.issue.state == 'open' &&
+      (startsWith(github.event.comment.body, '@qwen-code /triage') ||
+       startsWith(github.event.comment.body, '@qwen-code /review')) &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    concurrency:
+      group: 'qwen-pr-triage-ack-${{ github.event.issue.number }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Post queued acknowledgement'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.issue.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          ACK_BODY="<!-- qwen-review-ack -->_Qwen triage request accepted. Queued in [workflow run](${RUN_URL})._"
+          EXISTING_ACK_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
+          if [ -n "$EXISTING_ACK_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
+              -f body="$ACK_BODY" > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$ACK_BODY"
+          fi
+
   # ─── Resolve PR number and determine trigger type ───────────────────
   resolve:
     runs-on: 'ubuntu-latest'
