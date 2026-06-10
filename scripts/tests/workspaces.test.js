@@ -45,6 +45,32 @@ describe('workspace helpers', () => {
     ]);
   });
 
+  it('normalizes Windows-style workspace patterns', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-workspaces-'));
+    tempDirs.push(root);
+
+    for (const packagePath of [
+      'packages/cli/package.json',
+      'packages/core/package.json',
+      'packages/desktop/package.json',
+      'packages/channels/base/package.json',
+    ]) {
+      writeFile(root, packagePath, '{}\n');
+    }
+
+    expect(
+      getWorkspacePackageJsonPaths(root, [
+        'packages\\*',
+        'packages\\channels\\base',
+        '!packages\\desktop',
+      ]),
+    ).toEqual([
+      'packages/channels/base/package.json',
+      'packages/cli/package.json',
+      'packages/core/package.json',
+    ]);
+  });
+
   function writeFile(root, relativePath, content) {
     const filePath = path.join(root, relativePath);
     mkdirSync(path.dirname(filePath), { recursive: true });
