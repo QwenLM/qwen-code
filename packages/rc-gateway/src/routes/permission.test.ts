@@ -15,7 +15,7 @@ import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { TokenStore } from '../tokenStore.js';
 import { bearerResolve, requireScope } from '../auth.js';
-import { APPROVE, SESSION_READ } from '../scopes.js';
+import { APPROVE, SESSION_READ, SHARE } from '../scopes.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { createPermissionVoteRoute } from './permission.js';
 
@@ -90,6 +90,37 @@ describe('permission vote route', () => {
     const voted = audit.calls.find((c) => c.action === 'permission_voted');
     expect(voted).toBeDefined();
     expect(voted!.detail).toMatchObject({ requestId: 'req-1', accepted: true });
+  });
+
+  it('tags the permission_voted row with shareId+shareLabel for a guest', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      label: 'review for Sam',
+      sessionLockId: 'sess-1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const url = await mount(daemon);
+    await postVote(url, share.token, {
+      outcome: 'selected',
+      optionId: 'allow',
+    });
+    const voted = audit.calls.find((c) => c.action === 'permission_voted');
+    expect(voted!.shareId).toBe(share.id);
+    expect(voted!.shareLabel).toBe('review for Sam');
+  });
+
+  it('leaves shareId/shareLabel unset for a normal (non-share) token', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const { token } = await store.issue([APPROVE], 'owner');
+    const url = await mount(daemon);
+    await postVote(url, token, { outcome: 'selected', optionId: 'allow' });
+    const voted = audit.calls.find((c) => c.action === 'permission_voted');
+    expect(voted!.shareId).toBeUndefined();
+    expect(voted!.shareLabel).toBeUndefined();
   });
 
   it('accepts a cancelled vote (200)', async () => {

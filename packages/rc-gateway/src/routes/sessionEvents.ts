@@ -23,6 +23,8 @@ export function createSessionEventsRoute(
   return async (req, res) => {
     const sessionId = req.params.id;
     const actorTokenId = req.rcClient?.id;
+    const shareId = req.rcClient?.shareId;
+    const shareLabel = req.rcClient?.shareLabel;
     const lastEventIdRaw = req.headers['last-event-id'];
     const lastEventId =
       typeof lastEventIdRaw === 'string' && lastEventIdRaw.length > 0
@@ -51,6 +53,8 @@ export function createSessionEventsRoute(
         action: 'session_attached',
         actorTokenId,
         target: sessionId,
+        shareId,
+        shareLabel,
       });
       if (!first.done) writeFrame(res, first.value);
       for await (const ev of iterator) {
@@ -75,6 +79,8 @@ export function createSessionEventsRoute(
           action: 'session_detached',
           actorTokenId,
           target: sessionId,
+          shareId,
+          shareLabel,
         });
       }
     }

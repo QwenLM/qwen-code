@@ -13,6 +13,12 @@ import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionEventsRoute } from './sessionEvents.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import { TokenStore } from '../tokenStore.js';
+import { bearerResolve } from '../auth.js';
+import { SHARE, SESSION_READ } from '../scopes.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -147,6 +153,52 @@ describe('session-events proxy', () => {
     // Both entries carry the session id (target) per the spec.
     for (const c of audit.calls) {
       expect(c.target).toBe('sess-1');
+    }
+  });
+
+  it('tags attach/detach rows with shareId+shareLabel for a guest', async () => {
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const store = await TokenStore.open(
+      join(mkdtempSync(join(tmpdir(), 'rc-se-')), 'tokens.json'),
+    );
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'review for Sam',
+      sessionLockId: 'sess-1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const app = express();
+    app.use(bearerResolve(store, audit));
+    app.get(
+      '/rc/session/:id/events',
+      createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
+    );
+    const server: Server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    gateway = server;
+    const { port } = server.address() as AddressInfo;
+    const res = await fetch(
+      `http://127.0.0.1:${port}/rc/session/sess-1/events`,
+      {
+        headers: { Authorization: `Bearer ${share.token}` },
+      },
+    );
+    await res.text();
+    const deadline = Date.now() + 2000;
+    while (
+      !audit.calls.some((c) => c.action === 'session_detached') &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    for (const action of ['session_attached', 'session_detached']) {
+      const row = audit.calls.find((c) => c.action === action);
+      expect(row!.shareId).toBe(share.id);
+      expect(row!.shareLabel).toBe('review for Sam');
     }
   });
 });

@@ -24,6 +24,13 @@ export function bearerResolve(
       return;
     }
     req.rcClient = resolved;
+    // A share token (the only kind with a session lock) gets its id + label
+    // surfaced so guest-action routes can stamp audit rows with the share's
+    // identity at action time. Normal tokens never get these fields.
+    if (resolved.sessionLockId !== undefined) {
+      req.rcClient.shareId = resolved.id;
+      req.rcClient.shareLabel = resolved.shareLabel;
+    }
     next();
   };
 }

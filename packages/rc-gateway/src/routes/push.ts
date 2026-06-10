@@ -66,6 +66,8 @@ export function createPushRouter(
     void audit?.record({
       action: 'push_subscribed',
       actorTokenId: req.rcClient!.id,
+      shareId: req.rcClient?.shareId,
+      shareLabel: req.rcClient?.shareLabel,
       detail: { subscriptionId: rec.id },
     });
     res.status(201).json({ id: rec.id });
@@ -114,6 +116,8 @@ export function createPushRouter(
     void audit?.record({
       action: 'push_unsubscribed',
       actorTokenId: req.rcClient!.id,
+      shareId: req.rcClient?.shareId,
+      shareLabel: req.rcClient?.shareLabel,
       detail: { subscriptionId: rec.id },
     });
     res.status(204).end();
@@ -198,6 +202,8 @@ export function createPushRouter(
         void audit?.record({
           action: 'push_prefs_updated',
           actorTokenId: req.rcClient!.id,
+          shareId: req.rcClient?.shareId,
+          shareLabel: req.rcClient?.shareLabel,
           detail: { subscriptionId: rec.id },
         });
       }

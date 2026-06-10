@@ -62,6 +62,8 @@ export function createPermissionVoteRoute(
       action: 'permission_voted',
       actorTokenId: req.rcClient?.id,
       target: sessionId,
+      shareId: req.rcClient?.shareId,
+      shareLabel: req.rcClient?.shareLabel,
       detail: { requestId, outcome: body.outcome, accepted },
     });
 

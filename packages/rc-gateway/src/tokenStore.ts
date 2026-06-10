@@ -180,11 +180,16 @@ export class TokenStore {
    * Resolve a raw `Authorization` header value to identity + scopes. An expired
    * share token (`expiresAt !== undefined && now >= expiresAt`) is treated as no
    * match (→ null → 401). On match, the record's `sessionLockId` is returned so
-   * `enforceSessionLock` can confine a share token to its one session.
+   * `enforceSessionLock` can confine a share token to its one session, and —
+   * for a share token only — its `label` as `shareLabel` so callers can stamp
+   * audit rows with the human-readable share name at action time.
    */
-  resolve(
-    authHeader: string,
-  ): { id: string; scopes: RcScope[]; sessionLockId?: string } | null {
+  resolve(authHeader: string): {
+    id: string;
+    scopes: RcScope[];
+    sessionLockId?: string;
+    shareLabel?: string;
+  } | null {
     const cred = parseBearer(authHeader);
     if (!cred) return null;
     const candidate = Buffer.from(sha256Hex(cred), 'hex');
@@ -202,6 +207,9 @@ export class TokenStore {
           id: rec.id,
           scopes: [...rec.scopes],
           sessionLockId: rec.sessionLockId,
+          // Share tokens (those with a session lock) carry their label so the
+          // guest's audit rows can be tagged before the token expires.
+          shareLabel: rec.sessionLockId !== undefined ? rec.label : undefined,
         };
       }
     }

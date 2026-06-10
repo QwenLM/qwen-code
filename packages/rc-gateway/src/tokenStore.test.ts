@@ -157,7 +157,24 @@ describe('TokenStore', () => {
       id: share.id,
       scopes: [SHARE, SESSION_READ, APPROVE],
       sessionLockId: 's1',
+      shareLabel: 'guest',
     });
+  });
+
+  it('resolve surfaces shareLabel for a share, never for a normal token', async () => {
+    const store = await TokenStore.open(path);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'review for Sam',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    expect(store.resolve(`Bearer ${share.token}`)?.shareLabel).toBe(
+      'review for Sam',
+    );
+    const normal = await store.issue([SESSION_READ], 'phone');
+    expect(store.resolve(`Bearer ${normal.token}`)?.shareLabel).toBeUndefined();
   });
 
   it('resolve of an expired share returns null (strict >= at expiresAt)', async () => {
