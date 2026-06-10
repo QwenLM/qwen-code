@@ -97,6 +97,11 @@ export function ModelMessage({
   const { t } = useI18n();
   const panelIdRef = useRef(`model-${Math.random().toString(36).slice(2)}`);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
   const isFastMode = mode === 'fast';
   const [selectedIdx, setSelectedIdx] = useState(() => {
     const idx = availableModels.findIndex((m) => m.id === currentModel);
@@ -116,6 +121,33 @@ export function ModelMessage({
     emitActive(true);
     return () => emitActive(false);
   }, [emitActive]);
+
+  // Close when the user presses outside the panel. The panel is rendered
+  // inline (no modal backdrop), so we listen on the document. The press that
+  // opened the panel (e.g. the status-bar model button, which stops
+  // propagation on mousedown/touchstart) has finished propagating by the time
+  // this effect runs, so it cannot self-close. Touch is covered too.
+  useEffect(() => {
+    const onPointerOutside = (event: Event) => {
+      // Only the primary (left) mouse button dismisses. Middle-click on
+      // Linux/X11 pastes, and right-click opens a context menu — neither should
+      // close the panel out from under the user. (Touch events have no button.)
+      if (event instanceof MouseEvent && event.button !== 0) return;
+      // If another handler already consumed the press, leave the panel alone.
+      if (event.defaultPrevented) return;
+      const panel = panelRef.current;
+      const target = event.target;
+      if (panel && target instanceof Node && !panel.contains(target)) {
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('mousedown', onPointerOutside);
+    window.addEventListener('touchstart', onPointerOutside);
+    return () => {
+      window.removeEventListener('mousedown', onPointerOutside);
+      window.removeEventListener('touchstart', onPointerOutside);
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedIdx >= availableModels.length && availableModels.length > 0) {
@@ -176,14 +208,19 @@ export function ModelMessage({
   );
 
   return (
-    <div className={styles.panel}>
+    <div ref={panelRef} className={styles.panel}>
       <div className={styles.header}>
         <span className={styles.title}>
           {isFastMode ? t('model.setFast') : t('model.select')}
         </span>
       </div>
 
-      <div className={styles.list} ref={listRef}>
+      <div
+        className={styles.list}
+        ref={listRef}
+        role="listbox"
+        aria-label={isFastMode ? t('model.setFast') : t('model.select')}
+      >
         {availableModels.length === 0 ? (
           <div className={styles.empty}>{t('model.none')}</div>
         ) : null}
@@ -193,14 +230,18 @@ export function ModelMessage({
           return (
             <div
               key={getModelKey(model)}
+              role="option"
+              aria-selected={selected}
               className={`${styles.row} ${selected ? styles.selected : ''}`}
               onClick={() => {
                 onSelect(model.id);
                 onClose();
               }}
-              // Intentionally do not select on hover. The inline /model panel
-              // is keyboard-first; hover-driven selection can fight arrow-key
-              // navigation when the mouse is resting over an older row.
+              // Hover feedback is pure CSS (.row:hover) and deliberately does
+              // NOT move the selection: arrow keys own the pointer + accent
+              // label + detail panel, the mouse only adds a background
+              // highlight. This keeps mouse and keyboard from fighting when the
+              // list scrolls under a resting cursor.
             >
               <span className={styles.pointer}>{selected ? '›' : ' '}</span>
               <span className={styles.number}>{index + 1}.</span>

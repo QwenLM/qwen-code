@@ -44,6 +44,11 @@
   cursor: pointer;
 }
 
+.row:hover {
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+}
+
 .selected .label {
   color: var(--accent-color);
 }

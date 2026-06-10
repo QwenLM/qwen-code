@@ -27,9 +27,15 @@ interface StatusBarProps {
   escapeHint?: boolean;
   /** Open the approval-mode picker so the mode can be chosen with the mouse. */
   onSelectMode: () => void;
+  /** Open the model picker so the model can be chosen with the mouse. */
+  onSelectModel: () => void;
 }
 
-export function StatusBar({ escapeHint, onSelectMode }: StatusBarProps) {
+export function StatusBar({
+  escapeHint,
+  onSelectMode,
+  onSelectModel,
+}: StatusBarProps) {
   const connection = useConnection();
   const connected = connection.status === 'connected';
   const currentModel = connection.currentModel ?? '';
@@ -78,7 +84,23 @@ export function StatusBar({ escapeHint, onSelectMode }: StatusBarProps) {
             {t('status.disconnected')}
           </span>
         )}
-        {currentModel && <span className={styles.model}>{currentModel}</span>}
+        {currentModel && (
+          // Mirrors the mode indicator on the left: the model label is a
+          // button that opens the existing model picker. stopPropagation on
+          // mousedown/touchstart keeps the opening press from counting as an
+          // "outside" press for the picker's own dismiss handler.
+          <button
+            type="button"
+            className={styles.modelButton}
+            onClick={onSelectModel}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            title={t('model.select')}
+            aria-haspopup="listbox"
+          >
+            <span className={styles.model}>{currentModel}</span>
+          </button>
+        )}
         {contextWindow > 0 && tokenCount > 0 && (
           <span className={styles.context}>
             {t('status.contextUsed', { pct: pctDisplay })}
