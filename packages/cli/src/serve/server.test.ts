@@ -910,6 +910,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get lastActivityAt() {
       return null;
     },
+    get idleSinceMs() {
+      return null;
+    },
     get pendingPermissionCount() {
       return 0;
     },
@@ -5870,10 +5873,15 @@ describe('createServeApp', () => {
     it('deep=1 returns ISO timestamp and idleSinceMs when lastActivityAt is set', async () => {
       const activityTime = Date.now() - 60_000; // 1 minute ago
       const bridge = fakeBridge();
-      // Override lastActivityAt to simulate prior activity
+      // Override lastActivityAt and idleSinceMs to simulate prior activity
       Object.defineProperty(bridge, 'lastActivityAt', {
         get() {
           return activityTime;
+        },
+      });
+      Object.defineProperty(bridge, 'idleSinceMs', {
+        get() {
+          return Date.now() - activityTime;
         },
       });
       const app = createServeApp(baseOpts, undefined, { bridge });

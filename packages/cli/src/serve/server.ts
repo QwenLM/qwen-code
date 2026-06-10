@@ -1190,7 +1190,6 @@ export function createServeApp(
     }
     try {
       const lastActivity = bridge.lastActivityAt;
-      const now = Date.now();
       res.status(200).json({
         status: 'ok',
         sessions: bridge.sessionCount,
@@ -1200,7 +1199,7 @@ export function createServeApp(
         channelAlive: bridge.isChannelLive(),
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,
-        idleSinceMs: lastActivity !== null ? now - lastActivity : null,
+        idleSinceMs: bridge.idleSinceMs,
         ...(rateLimiter ? { rateLimitHits: rateLimiter.getHitCounts() } : {}),
       });
     } catch (err) {
