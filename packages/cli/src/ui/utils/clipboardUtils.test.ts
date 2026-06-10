@@ -147,6 +147,15 @@ describe('clipboardUtils', () => {
   let resetTool: () => void;
 
   beforeEach(async () => {
+    // Clean up /tmp/test directory from previous runs to ensure
+    // fs.open with O_EXCL fails consistently in saveFromCommand tests.
+    // Must use the real fs module because node:fs/promises is mocked.
+    const realFs =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    await realFs.rm('/tmp/test', { recursive: true, force: true });
+
     // Dynamically import to get a fresh module instance's reset function reference
     // (vi.resetModules() clears the module cache, so the top-level import of
     // resetLinuxClipboardTool would point to a stale module instance)
@@ -354,12 +363,9 @@ describe('clipboardUtils', () => {
 
       await saveClipboardImage('/tmp/test');
 
-      // With O_EXCL in saveFromCommand, the save path fails because
-      // mkdir is mocked and the directory doesn't exist. The list-types
-      // spawn verifies the correct format detection (both png and bmp
-      // reported). The branching decision is verified by the fact that
-      // python3 was not called in the list-types phase — the format
-      // selection only happens in saveFileWithWlPaste.
+      // O_EXCL in saveFromCommand prevents the second spawn because
+      // mkdir is mocked (directory never actually created), so fs.open
+      // fails. Only the list-types spawn fires.
       expect(spawnCalls).toHaveLength(1);
       expect(spawnCalls[0].args).toContain('--list-types');
     });
