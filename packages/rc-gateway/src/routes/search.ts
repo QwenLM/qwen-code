@@ -33,6 +33,12 @@ export function createSearchRoute(
       res.status(400).json({ error: 'Invalid query', code: 'invalid_query' });
       return;
     }
+    // Bounds parse/tree cost (the per-query scan timeout is a separate, still
+    // deferred guard). 1024 chars per the design's threat table.
+    if (q.length > 1024) {
+      res.status(400).json({ error: 'Query too long', code: 'query_too_long' });
+      return;
+    }
 
     const rawKind = req.query.kind;
     const kind = typeof rawKind === 'string' && rawKind ? rawKind : 'all';

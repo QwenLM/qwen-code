@@ -103,6 +103,19 @@ describe('search route', () => {
     expect(((await res.json()) as { code: string }).code).toBe('invalid_query');
   });
 
+  it('400 query_too_long for a q over 1024 chars; 1024 is allowed', async () => {
+    const url = await mount(async () => dir);
+    const tooLong = 'a'.repeat(1025);
+    const res = await fetch(`${url}/rc/search?q=${tooLong}`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'query_too_long',
+    );
+    // Exactly 1024 chars is accepted (does not hit the cap).
+    const ok = await fetch(`${url}/rc/search?q=${'a'.repeat(1024)}`);
+    expect(ok.status).toBe(200);
+  });
+
   it('400 invalid_kind for an unknown kind', async () => {
     const url = await mount(async () => dir);
     const res = await fetch(`${url}/rc/search?q=oauth&kind=bogus`);
