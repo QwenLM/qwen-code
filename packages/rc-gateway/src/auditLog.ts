@@ -84,6 +84,13 @@ export interface AuditEntry {
   actorTokenId?: string;
   /** Affected resource: a token id or a session id. */
   target?: string;
+  /**
+   * The share token id this action was taken under (a token id; never secret).
+   * Set on share-lifecycle rows and on actions a guest takes via a share.
+   */
+  shareId?: string;
+  /** The operator-chosen share label, denormalized so it survives token expiry. */
+  shareLabel?: string;
   /** Small extras (granted scopes, required scope, request path). No secrets. */
   detail?: Record<string, unknown>;
 }
@@ -100,6 +107,12 @@ export interface AuditQuery {
   action?: AuditAction;
   /** Exact actorTokenId match. */
   actor?: string;
+  /**
+   * Collect a share's whole lifecycle: matches a row whose top-level `shareId`,
+   * `actorTokenId` (a guest's actor id IS the share id), or `detail.shareId`
+   * (historical owner-side create/revoke rows) equals this id.
+   */
+  shareId?: string;
 }
 
 /** Write side. */
@@ -190,6 +203,14 @@ export class AuditLog implements AuditRecorder, AuditReader {
     if (q.action !== undefined) out = out.filter((r) => r.action === q.action);
     if (q.actor !== undefined)
       out = out.filter((r) => r.actorTokenId === q.actor);
+    if (q.shareId !== undefined)
+      out = out.filter(
+        (r) =>
+          r.shareId === q.shareId ||
+          r.actorTokenId === q.shareId ||
+          (typeof r.detail?.shareId === 'string' &&
+            r.detail.shareId === q.shareId),
+      );
     out.sort((a, b) => b.ts - a.ts);
     return out.slice(0, clampLimit(q.limit));
   }

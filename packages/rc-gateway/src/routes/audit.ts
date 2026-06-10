@@ -12,7 +12,7 @@ import {
   type AuditReader,
 } from '../auditLog.js';
 
-/** GET /rc/audit?limit&since&action&actor → newest-first audit records. */
+/** GET /rc/audit?limit&since&action&actor&shareId → newest-first audit records. */
 export function createAuditQueryRoute(reader: AuditReader): RequestHandler {
   return async (req, res) => {
     const q: AuditQuery = {};
@@ -34,6 +34,9 @@ export function createAuditQueryRoute(reader: AuditReader): RequestHandler {
 
     const actor = req.query.actor;
     if (typeof actor === 'string' && actor.length > 0) q.actor = actor;
+
+    const shareId = req.query.shareId;
+    if (typeof shareId === 'string' && shareId.length > 0) q.shareId = shareId;
 
     const rows = await reader.query(q);
     res.status(200).json(rows);

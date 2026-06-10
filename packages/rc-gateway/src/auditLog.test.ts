@@ -120,6 +120,38 @@ describe('AuditLog', () => {
     expect(await audit.query({ limit: 1 })).toHaveLength(1);
   });
 
+  it('shareId filter unions top-level shareId, actorTokenId, and detail.shareId', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t);
+    // top-level shareId (a future guest row)
+    await audit.record({
+      action: 'session_attached',
+      shareId: 'sh1',
+      target: 's',
+    });
+    // actorTokenId == share id (a historical guest row, no top-level shareId)
+    await audit.record({ action: 'permission_voted', actorTokenId: 'sh1' });
+    // detail.shareId (a historical owner-side create row)
+    await audit.record({
+      action: 'share_created',
+      actorTokenId: 'owner',
+      detail: { shareId: 'sh1' },
+    });
+    // unrelated rows: another share, and a non-string detail.shareId
+    await audit.record({ action: 'session_attached', shareId: 'sh2' });
+    await audit.record({ action: 'token_minted', detail: { shareId: 12345 } });
+
+    const rows = await audit.query({ shareId: 'sh1' });
+    expect(rows.map((r) => r.action).sort()).toEqual([
+      'permission_voted',
+      'session_attached',
+      'share_created',
+    ]);
+    // a numeric detail.shareId never matches (typeof guard)
+    expect(await audit.query({ shareId: '12345' })).toEqual([]);
+  });
+
   it('skips corrupt lines and returns [] for a missing log', async () => {
     const path = join(dir, 'audit.log');
     const audit = new AuditLog(path, () => 1);

@@ -77,6 +77,22 @@ describe('GET /rc/audit', () => {
     expect(rows).toHaveLength(1);
   });
 
+  it('honors the shareId filter (unions actorTokenId)', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    await audit.record({ action: 'share_created', detail: { shareId: 'sh9' } });
+    await audit.record({ action: 'permission_voted', actorTokenId: 'sh9' });
+    await audit.record({ action: 'session_attached', actorTokenId: 'other' });
+    const url = await mount();
+    const res = await fetch(`${url}/rc/audit?shareId=sh9`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    const rows = (await res.json()) as Array<{ action: string }>;
+    expect(rows.map((r) => r.action).sort()).toEqual([
+      'permission_voted',
+      'share_created',
+    ]);
+  });
+
   it('forbids a non-owner token', async () => {
     const weak = await store.issue([SESSION_READ], 'phone');
     const url = await mount();
