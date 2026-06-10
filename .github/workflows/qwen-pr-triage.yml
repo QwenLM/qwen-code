@@ -22,6 +22,25 @@ permissions:
   issues: 'write'
   pull-requests: 'write'
 
+env:
+  # jq program that renders qwen `--output-format stream-json` events into
+  # readable one-line CI log progress (tool calls + narration + final result)
+  # instead of raw JSON envelopes. Shared by the product-decision / review /
+  # tmux-testing steps via `qwen ... | tee raw.jsonl | jq -Rr "$STREAM_JSON_FMT"`.
+  # Each input line is one JSON message; `fromjson?` skips any non-JSON line.
+  STREAM_JSON_FMT: |-
+    (fromjson?) as $m
+    | if $m.type=="assistant" then ($m.message.content[]?
+        | if .type=="text" and (.text|length>0) then "💬 " + (.text|gsub("\n";" ")|.[0:200])
+          elif .type=="tool_use" then "▶ " + .name + "  " + ((.input//{})|tostring|.[0:160])
+          else empty end)
+      elif $m.type=="user" then (($m.message.content)
+        | if type=="array" then (.[]? | select(.type=="tool_result")
+            | "  ↳ " + (if .is_error then "ERROR " else "" end) + ((.content//""|tostring)|gsub("\n";" ")|.[0:140]))
+          else empty end)
+      elif $m.type=="result" then "■ " + $m.subtype + (if $m.result then ": " + ($m.result|tostring|gsub("\n";" ")|.[0:300]) else "" end)
+      else empty end
+
 jobs:
   # ─── Resolve PR number and determine trigger type ───────────────────
   resolve:
@@ -153,8 +172,10 @@ jobs:
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
             --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
-            --output-format stream-json
-          EXIT_CODE=$?
+            --output-format stream-json \
+            | tee /tmp/product-decision-raw.jsonl \
+            | jq -Rr "$STREAM_JSON_FMT"
+          EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
           if [ "$EXIT_CODE" -eq 124 ]; then
@@ -247,8 +268,10 @@ jobs:
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
             --prompt "/review ${REVIEW_URL} --comment" \
-            --output-format stream-json
-          EXIT_CODE=$?
+            --output-format stream-json \
+            | tee /tmp/review-raw.jsonl \
+            | jq -Rr "$STREAM_JSON_FMT"
+          EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
           if [ "$EXIT_CODE" -eq 124 ]; then
@@ -332,7 +355,8 @@ jobs:
             "${MODEL_ARGS[@]}" \
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
-            | tee /tmp/tmux-results/output.jsonl
+            | tee /tmp/tmux-results/output.jsonl \
+            | jq -Rr "$STREAM_JSON_FMT"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
