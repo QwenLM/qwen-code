@@ -944,6 +944,27 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+
+        // Snapshot file state before this turn (mirrors client.ts:1488).
+        try {
+          await this.config.getFileHistoryService().makeSnapshot(promptId);
+          try {
+            const latestSnapshot = this.config
+              .getFileHistoryService()
+              .getSnapshots()
+              .at(-1);
+            if (latestSnapshot) {
+              this.config
+                .getChatRecordingService()
+                ?.recordFileHistorySnapshot(latestSnapshot);
+            }
+          } catch {
+            // Recording is best-effort
+          }
+        } catch {
+          // Snapshot is best-effort
+        }
+
         const parentContext = extractDaemonTraceContext(params);
 
         return await withInteractionSpan(
