@@ -66,6 +66,15 @@ export async function runPlanApprovalGate(
   gateState.lastFindings = findings;
 
   // ── Determine decision ───────────────────────────────────────────
+
+  // Safety: agent self-reporting unavailable should never auto-approve
+  if (result.decision === 'unavailable') {
+    return {
+      kind: 'unavailable',
+      reason: 'Gate review agent reported itself as unavailable',
+    };
+  }
+
   if (findings.length === 0) {
     return { kind: 'approved' };
   }
@@ -78,6 +87,10 @@ export async function runPlanApprovalGate(
     if (questions.length > 0) {
       return { kind: 'needs_user', findings, questions };
     }
+    // needs_user without actionable questions — fall through to blocked
+    debugLogger.warn(
+      'Gate agent returned needs_user with no suggestedQuestion; treating as blocked',
+    );
   }
 
   // Check cap

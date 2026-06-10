@@ -83,6 +83,25 @@ describe('assignFindingIds', () => {
 
 // ── runPlanApprovalGate ───────────────────────────────────────────────
 
+vi.mock('./gateReviewAgents.js', () => ({
+  runGateAgent: vi.fn(),
+}));
+
+import { runGateAgent } from './gateReviewAgents.js';
+
+const mockRunGateAgent = vi.mocked(runGateAgent);
+
+function makeResult(overrides: Partial<GateAgentResult> = {}): GateAgentResult {
+  return {
+    agent: 'plan_reviewer',
+    decision: 'pass',
+    findings: [],
+    limitations: [],
+    reviewedEvidence: [],
+    ...overrides,
+  };
+}
+
 describe('runPlanApprovalGate', () => {
   let gateState: PlanGateState;
   let mockConfig: Config;
@@ -99,6 +118,7 @@ describe('runPlanApprovalGate', () => {
       getPlanGateState: vi.fn(() => gateState),
       getSubagentManager: vi.fn(),
     } as unknown as Config;
+    mockRunGateAgent.mockReset();
   });
 
   it('should return unavailable when no gate state', async () => {
@@ -108,6 +128,135 @@ describe('runPlanApprovalGate', () => {
 
     const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
     expect(decision.kind).toBe('unavailable');
+  });
+
+  it('should return approved when agent passes with no findings', async () => {
+    mockRunGateAgent.mockResolvedValue(makeResult({ decision: 'pass' }));
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('approved');
+  });
+
+  it('should return unavailable when agent reports itself as unavailable (even with empty findings)', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({ decision: 'unavailable', findings: [] }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('unavailable');
+    expect((decision as { reason: string }).reason).toContain('unavailable');
+  });
+
+  it('should return blocked when agent has P1 findings', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P1',
+            issue: 'Critical flaw',
+            rationale: 'violates request',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('blocked');
+  });
+
+  it('should return needs_user when agent returns needs_user with suggestedQuestion', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'needs_user',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P2',
+            issue: 'Ambiguous scope',
+            rationale: 'unclear',
+            suggestedQuestion: 'Do you want feature A or B?',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('needs_user');
+    expect((decision as { questions: string[] }).questions).toEqual([
+      'Do you want feature A or B?',
+    ]);
+  });
+
+  it('should fall through to blocked when needs_user has no suggestedQuestion', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'needs_user',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P2',
+            issue: 'Missing info',
+            rationale: 'no question provided',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('blocked');
+  });
+
+  it('should return cap_escalation when at cap with blocking findings', async () => {
+    gateState.reviewCount = 4; // next will be 5 (= CAPPED_REVIEW_LIMIT)
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P1',
+            issue: 'Still broken',
+            rationale: 'unresolved',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('cap_escalation');
+  });
+
+  it('should approve with non-blocking notes when at cap with only P3 findings', async () => {
+    gateState.reviewCount = 4;
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P3',
+            issue: 'Minor style',
+            rationale: 'nit',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('approved');
+    expect(
+      (decision as { nonBlockingFindings?: unknown[] }).nonBlockingFindings,
+    ).toHaveLength(1);
+  });
+
+  it('should return unavailable when agent exhausts retries', async () => {
+    mockRunGateAgent.mockRejectedValue(new Error('network error'));
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('unavailable');
+    expect((decision as { reason: string }).reason).toContain('retries');
   });
 });
 
