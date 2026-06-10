@@ -236,6 +236,9 @@ const fakeWorkspace = {
   async restartMcpServer() {
     return { ok: true };
   },
+  async reloadEnv() {
+    return { updatedKeys: [], removedKeys: [], childReloaded: false };
+  },
 } as unknown as DaemonWorkspaceService;
 
 // ── SSE client helper ────────────────────────────────────────────────

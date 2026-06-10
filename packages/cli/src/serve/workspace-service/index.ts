@@ -37,6 +37,7 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
@@ -57,6 +58,8 @@ export type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
   RestartMcpServerResult,
+  EnvReloadResult,
+  EnvReloadResponse,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -548,6 +551,58 @@ export function createDaemonWorkspaceService(
       }
 
       return result;
+    },
+
+    async reloadEnv(ctx: WorkspaceRequestContext) {
+      if (!deps.reloadDaemonEnv) {
+        throw new Error('reloadDaemonEnv not configured');
+      }
+      const result = await deps.reloadDaemonEnv(boundWorkspace);
+
+      let childReloaded = false;
+      let sessionsRefreshed: string[] | undefined;
+      let sessionsSkipped: string[] | undefined;
+      let childError: string | undefined;
+      try {
+        const childResult = await invokeWorkspaceCommand<{
+          updatedKeys: string[];
+          removedKeys: string[];
+          sessionsRefreshed: string[];
+          sessionsSkipped: string[];
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv,
+          {
+            cwd: boundWorkspace,
+          },
+          { timeoutMs: 30_000 },
+        );
+        childReloaded = true;
+        sessionsRefreshed = childResult.sessionsRefreshed;
+        sessionsSkipped = childResult.sessionsSkipped;
+      } catch (err) {
+        if (err instanceof SessionNotFoundError) {
+          childError = 'ACP child not running';
+        } else {
+          childError = err instanceof Error ? err.message : String(err);
+          writeStderrLine(
+            `qwen serve: reload-env child forwarding failed: ${childError}`,
+          );
+        }
+      }
+
+      publishWorkspaceEvent({
+        type: 'env_reloaded',
+        data: { ...result, childReloaded, sessionsRefreshed },
+        originatorClientId: ctx.originatorClientId,
+      });
+
+      return {
+        ...result,
+        childReloaded,
+        sessionsRefreshed,
+        sessionsSkipped,
+        childError,
+      };
     },
   };
 }
