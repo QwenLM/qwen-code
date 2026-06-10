@@ -72,6 +72,7 @@
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
+    "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
