@@ -268,7 +268,9 @@ function writeClipboard(text: string): void {
       child.unref();
     } else {
       // No clipboard tool available (e.g., SSH without X11/Wayland) — try OSC 52
-      writeOsc52(text);
+      if (!writeOsc52(text)) {
+        debugLogger.warn('OSC 52 clipboard write failed - no TTY available');
+      }
     }
   } catch (e) {
     debugLogger.warn('writeClipboard failed:', e);
