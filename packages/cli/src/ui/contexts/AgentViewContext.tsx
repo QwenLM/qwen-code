@@ -28,6 +28,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
+import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -292,11 +293,12 @@ export function AgentViewProvider({
     ],
   );
 
-  // ── Arena in-process bridge ──
-  // Bridge arena manager events to agent registration. The hook is kept
-  // in its own file for separation of concerns; it's called here so the
-  // provider is the single owner of agent tab lifecycle.
+  // ── In-process bridges ──
+  // Bridge arena and team manager events to agent registration. The hooks
+  // are kept in their own files for separation of concerns; they're called
+  // here so the provider is the single owner of agent tab lifecycle.
   useArenaInProcess(config ?? null, actions);
+  useTeamInProcess(config ?? null, actions);
 
   return (
     <AgentViewStateContext.Provider value={state}>

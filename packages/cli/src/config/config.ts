@@ -1877,6 +1877,7 @@ export async function loadCliConfig(
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
+    agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
