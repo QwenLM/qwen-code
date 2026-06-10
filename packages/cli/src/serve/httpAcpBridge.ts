@@ -4164,7 +4164,11 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // reviewer.
   const child = spawn(
     process.execPath,
-    [...process.execArgv, cliEntry, '--acp'],
+    [
+      ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
+      cliEntry,
+      '--acp',
+    ],
     {
       cwd: workspaceCwd,
       // Pipe stderr (was: 'inherit') so we can prefix each line with
