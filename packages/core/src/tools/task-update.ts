@@ -8,7 +8,12 @@
  * task_update tool — update an existing task's fields.
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInfoConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
@@ -23,8 +28,11 @@ import {
   deleteTask,
   assertValidTaskId,
   getTask,
+  listTasks,
   TaskOwnershipError,
 } from '../agents/team/tasks.js';
+import type { SwarmTask } from '../agents/team/types.js';
+import { truncateForConfirmation } from './task-create.js';
 
 export interface TaskUpdateParams {
   taskId: string;
@@ -36,6 +44,57 @@ export interface TaskUpdateParams {
   metadata?: Record<string, unknown>;
   addBlocks?: string[];
   addBlockedBy?: string[];
+}
+
+/**
+ * Detect whether adding the given edges to task `taskId` closes a
+ * dependency cycle. Builds the adjacency from both `blocks` and
+ * `blockedBy` (mirrored on disk, but a half-mirrored write window
+ * must not hide an edge) plus the proposed edges, then walks the
+ * "blocks" direction from `taskId`. Any new cycle necessarily passes
+ * through `taskId`, so re-reaching it proves the cycle; the returned
+ * path starts and ends at `taskId` for the error message.
+ */
+async function findDependencyCycle(
+  teamName: string,
+  taskId: string,
+  addBlocks: string[],
+  addBlockedBy: string[],
+): Promise<string[] | null> {
+  const tasks = await listTasks(teamName);
+  const adjacency = new Map<string, Set<string>>();
+  const edge = (from: string, to: string) => {
+    let set = adjacency.get(from);
+    if (!set) {
+      set = new Set();
+      adjacency.set(from, set);
+    }
+    set.add(to);
+  };
+  for (const task of tasks as SwarmTask[]) {
+    for (const id of task.blocks) edge(task.id, id);
+    for (const id of task.blockedBy) edge(id, task.id);
+  }
+  for (const id of addBlocks) edge(taskId, id);
+  for (const id of addBlockedBy) edge(id, taskId);
+
+  // Iterative DFS from taskId along "blocks" edges.
+  const path: string[] = [];
+  const visited = new Set<string>();
+  const walk = (node: string): string[] | null => {
+    path.push(node);
+    for (const next of adjacency.get(node) ?? []) {
+      if (next === taskId) return [...path, taskId];
+      if (visited.has(next)) continue;
+      visited.add(next);
+      const found = walk(next);
+      if (found) return found;
+    }
+    path.pop();
+    return null;
+  };
+  visited.add(taskId);
+  return walk(taskId);
 }
 
 class TaskUpdateInvocation extends BaseToolInvocation<
@@ -70,6 +129,39 @@ class TaskUpdateInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';
+  }
+
+  /**
+   * Surface the rewritten instruction text at approval time: an updated
+   * `description` is what a claiming teammate will execute, so the
+   * dialog must show it — getDescription()'s one-liner only carries
+   * status/owner. See task-create.ts for the same rationale.
+   */
+  override getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const lines = [this.getDescription()];
+    if (this.params.subject !== undefined) {
+      lines.push(`subject: ${this.params.subject}`);
+    }
+    if (this.params.addBlocks?.length) {
+      lines.push(`blocks: ${this.params.addBlocks.join(', ')}`);
+    }
+    if (this.params.addBlockedBy?.length) {
+      lines.push(`blocked by: ${this.params.addBlockedBy.join(', ')}`);
+    }
+    if (this.params.description !== undefined) {
+      lines.push('', truncateForConfirmation(this.params.description));
+    }
+    const details: ToolInfoConfirmationDetails = {
+      type: 'info',
+      title: 'Confirm TaskUpdate',
+      prompt: lines.join('\n'),
+      onConfirm: async () => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
+      },
+    };
+    return Promise.resolve(details);
   }
 
   async execute(): Promise<ToolResult> {
@@ -152,6 +244,26 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       return { llmContent: msg, returnDisplay: msg };
     }
 
+    // Reject self-edges. They pass the existence check below (the
+    // task plainly exists) and the reciprocal loops skip them, but
+    // the primary `updateTask` would merge `taskId` into its own
+    // `blockedBy` — and `tryAutoClaimTask` skips any task with a
+    // non-empty `blockedBy`, so the task silently becomes
+    // unclaimable forever (it can never complete to unblock itself).
+    if (
+      this.params.addBlocks?.includes(taskId) ||
+      this.params.addBlockedBy?.includes(taskId)
+    ) {
+      const msg =
+        `Cannot update task #${taskId}: a task cannot block ` +
+        `or be blocked by itself.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     // Reject dependency edges that point at tasks which don't
     // exist yet. Without this the primary `updateTask` happily
     // persists the bad id into `blocks` / `blockedBy`, while the
@@ -183,6 +295,30 @@ class TaskUpdateInvocation extends BaseToolInvocation<
           `Cannot update task #${taskId}: ` +
           `referenced task${missing.length === 1 ? '' : 's'} ` +
           `${ids} not found.`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+
+      // Reject edges that would close a dependency cycle. Every task
+      // on a cycle has a non-empty `blockedBy` that no completion can
+      // ever clear, so auto-claim skips the whole ring forever with no
+      // error surfaced anywhere. Best-effort (a concurrent task_update
+      // could race in a conflicting edge between this check and the
+      // write), but it catches the realistic case: one agent wiring up
+      // a graph one call at a time.
+      const cycle = await findDependencyCycle(
+        teamName,
+        taskId,
+        this.params.addBlocks ?? [],
+        this.params.addBlockedBy ?? [],
+      );
+      if (cycle) {
+        const msg =
+          `Cannot update task #${taskId}: this would create a ` +
+          `dependency cycle (${cycle.map((id) => `#${id}`).join(' → ')}).`;
         return {
           llmContent: msg,
           returnDisplay: msg,
@@ -370,5 +506,26 @@ export class TaskUpdateTool extends BaseDeclarativeTool<
     params: TaskUpdateParams,
   ): ToolInvocation<TaskUpdateParams, ToolResult> {
     return new TaskUpdateInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the mutating fields to the classifier. Without this the
+   * base `''` sentinel projects to `task_update({})` and the AUTO
+   * classifier rules on an empty call — the rewritten instruction
+   * text and ownership/edge changes that `'ask'` exists to inspect
+   * would be invisible to it. See task-create.ts / send-message.ts.
+   */
+  override toAutoClassifierInput(
+    params: TaskUpdateParams,
+  ): Record<string, unknown> {
+    return {
+      taskId: params.taskId,
+      status: params.status,
+      owner: params.owner,
+      subject: params.subject,
+      description: params.description,
+      addBlocks: params.addBlocks,
+      addBlockedBy: params.addBlockedBy,
+    };
   }
 }

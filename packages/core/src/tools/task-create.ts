@@ -8,7 +8,12 @@
  * task_create tool — create a new task in the team task list.
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInfoConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
@@ -21,6 +26,22 @@ export interface TaskCreateParams {
   description: string;
   activeForm?: string;
   metadata?: Record<string, unknown>;
+}
+
+/** Cap on how much of a task description the confirmation dialog shows. */
+const CONFIRMATION_DESCRIPTION_LIMIT = 2000;
+
+/**
+ * Truncate a task description for the interactive confirmation dialog.
+ * Descriptions can be up to 10KB; the dialog needs enough to judge the
+ * instruction, not the whole payload.
+ */
+export function truncateForConfirmation(text: string): string {
+  if (text.length <= CONFIRMATION_DESCRIPTION_LIMIT) return text;
+  return (
+    `${text.slice(0, CONFIRMATION_DESCRIPTION_LIMIT)}\n` +
+    `… (${text.length - CONFIRMATION_DESCRIPTION_LIMIT} more characters)`
+  );
 }
 
 class TaskCreateInvocation extends BaseToolInvocation<
@@ -48,6 +69,28 @@ class TaskCreateInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';
+  }
+
+  /**
+   * Unlike the one-line getDescription() used for transcript rendering,
+   * the confirmation prompt must show the instruction text itself: the
+   * `description` is what an idle teammate will auto-claim and execute
+   * with full tool access, so it is exactly what the human is approving.
+   */
+  override getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const details: ToolInfoConfirmationDetails = {
+      type: 'info',
+      title: 'Confirm TaskCreate',
+      prompt:
+        `Create task: ${this.params.subject}\n\n` +
+        truncateForConfirmation(this.params.description),
+      onConfirm: async () => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
+      },
+    };
+    return Promise.resolve(details);
   }
 
   async execute(): Promise<ToolResult> {
@@ -122,5 +165,21 @@ export class TaskCreateTool extends BaseDeclarativeTool<
     params: TaskCreateParams,
   ): ToolInvocation<TaskCreateParams, ToolResult> {
     return new TaskCreateInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the task content to the classifier. The base sentinel `''`
+   * projects to an empty args object, so without this override the AUTO
+   * classifier rules on `task_create({})` — the injected payload that
+   * `getDefaultPermission() === 'ask'` exists to inspect would be
+   * invisible to it. Mirrors `send_message`'s projection.
+   */
+  override toAutoClassifierInput(
+    params: TaskCreateParams,
+  ): Record<string, unknown> {
+    return {
+      subject: params.subject,
+      description: params.description,
+    };
   }
 }

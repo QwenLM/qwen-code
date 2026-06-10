@@ -175,4 +175,87 @@ describe('TaskUpdateTool', () => {
     // The completed blocker must leave b claimable, not blocked.
     expect(bReloaded?.blockedBy ?? []).toEqual([]);
   });
+
+  it('rejects a self-edge', async () => {
+    // A task blocked by itself can never be auto-claimed (non-empty
+    // blockedBy) and can never complete to unblock itself — a silent
+    // permanent deadlock if accepted.
+    const task = await createTask(TEAM, { subject: 'T', description: 'd' });
+    const invocation = tool.build({
+      taskId: task.id,
+      addBlockedBy: [task.id],
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('itself');
+
+    const { getTask } = await import('../agents/team/tasks.js');
+    const reloaded = await getTask(TEAM, task.id);
+    expect(reloaded?.blockedBy ?? []).toEqual([]);
+  });
+
+  it('rejects an edge that closes a dependency cycle', async () => {
+    const a = await createTask(TEAM, { subject: 'A', description: 'a' });
+    const b = await createTask(TEAM, { subject: 'B', description: 'b' });
+    const c = await createTask(TEAM, { subject: 'C', description: 'c' });
+
+    // a → b → c (blocks direction), then closing c → a must fail.
+    let result = await tool
+      .build({ taskId: b.id, addBlockedBy: [a.id] })
+      .execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    result = await tool
+      .build({ taskId: c.id, addBlockedBy: [b.id] })
+      .execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+
+    result = await tool
+      .build({ taskId: a.id, addBlockedBy: [c.id] })
+      .execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('cycle');
+
+    // The rejected edge must not be half-persisted.
+    const { getTask } = await import('../agents/team/tasks.js');
+    const aReloaded = await getTask(TEAM, a.id);
+    expect(aReloaded?.blockedBy ?? []).toEqual([]);
+  });
+
+  // ─── Permission surface ───────────────────────────────────
+  // Mirrors task-create: a regression back to 'allow' or the base ''
+  // classifier sentinel re-opens the instruction-rewrite path.
+
+  it("defaults to 'ask' permission", async () => {
+    const invocation = tool.build({ taskId: '1', status: 'completed' });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
+  it('projects the mutating fields to the AUTO classifier', () => {
+    const projected = tool.toAutoClassifierInput({
+      taskId: '1',
+      status: 'in_progress',
+      owner: 'worker',
+      description: 'rewritten instruction',
+    });
+    expect(projected).toMatchObject({
+      taskId: '1',
+      status: 'in_progress',
+      owner: 'worker',
+      description: 'rewritten instruction',
+    });
+  });
+
+  it('shows an updated description in the confirmation prompt', async () => {
+    const invocation = tool.build({
+      taskId: '7',
+      description: 'New instruction text the teammate will execute.',
+    });
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(details.type).toBe('info');
+    expect((details as { prompt: string }).prompt).toContain(
+      'New instruction text the teammate will execute.',
+    );
+  });
 });

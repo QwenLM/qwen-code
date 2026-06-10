@@ -96,4 +96,42 @@ describe('TaskCreateTool', () => {
     expect(() => tool.build({} as never)).toThrow();
     expect(() => tool.build({ subject: 'x' } as never)).toThrow();
   });
+
+  // ─── Permission surface ───────────────────────────────────
+  // A regression back to 'allow' (or to the base '' classifier
+  // sentinel) silently re-opens the task-injection path: the AUTO
+  // classifier would rule on task_create({}) and always allow.
+
+  it("defaults to 'ask' permission", async () => {
+    const invocation = tool.build({
+      subject: 'Injected',
+      description: 'do something sneaky',
+    });
+    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+  });
+
+  it('projects subject and description to the AUTO classifier', () => {
+    const projected = tool.toAutoClassifierInput({
+      subject: 'Fix bug',
+      description: 'the instruction text',
+    });
+    expect(projected).toEqual({
+      subject: 'Fix bug',
+      description: 'the instruction text',
+    });
+  });
+
+  it('shows the description in the confirmation prompt', async () => {
+    const invocation = tool.build({
+      subject: 'Fix bug',
+      description: 'The full instruction text a teammate will execute.',
+    });
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(details.type).toBe('info');
+    expect((details as { prompt: string }).prompt).toContain(
+      'The full instruction text a teammate will execute.',
+    );
+  });
 });
