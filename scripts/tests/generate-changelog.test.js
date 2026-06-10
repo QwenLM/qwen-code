@@ -68,15 +68,17 @@ describe('categorize', () => {
 
 describe('isNoiseEntry', () => {
   it('drops the release bot version bump', () => {
-    expect(isNoiseEntry('chore(release): v0.17.0')).toBe(true);
+    expect(isNoiseEntry(categorize('chore(release): v0.17.0'))).toBe(true);
   });
 
   it('keeps other chores (e.g. dependency bumps)', () => {
-    expect(isNoiseEntry('chore(deps): update @google/genai')).toBe(false);
+    expect(isNoiseEntry(categorize('chore(deps): update @google/genai'))).toBe(
+      false,
+    );
   });
 
   it('keeps real changes', () => {
-    expect(isNoiseEntry('feat(cli): add x')).toBe(false);
+    expect(isNoiseEntry(categorize('feat(cli): add x'))).toBe(false);
   });
 });
 
@@ -216,70 +218,18 @@ describe('formatRelease', () => {
 
 describe('selectStableReleases', () => {
   it('keeps only stable semver releases, newest first', () => {
-    const raw = [
-      {
-        tag: 'v1.2.0',
-        prerelease: false,
-        draft: false,
-        published_at: '',
-        body: '',
-      },
-      {
-        tag: 'v1.10.0',
-        prerelease: false,
-        draft: false,
-        published_at: '',
-        body: '',
-      },
-      {
-        tag: 'v1.2.0-preview.1',
-        prerelease: true,
-        draft: false,
-        published_at: '',
-        body: '',
-      },
-      {
-        tag: 'v1.3.0-nightly.20260101.abc',
-        prerelease: true,
-        draft: false,
-        published_at: '',
-        body: '',
-      },
-      {
-        tag: 'some-random-tag',
-        prerelease: false,
-        draft: false,
-        published_at: '',
-        body: '',
-      },
-      {
-        tag: 'v1.0.0',
-        prerelease: false,
-        draft: true,
-        published_at: '',
-        body: '',
-      },
-    ].map((r) => ({
-      tag: r.tag,
-      prerelease: r.prerelease,
-      draft: r.draft,
-      date: r.published_at,
-      url: '',
-      body: r.body,
-    }));
+    const stable = (tag) => ({ tag, prerelease: false, draft: false });
+    const releases = selectStableReleases([
+      stable('v1.2.0'),
+      stable('v1.10.0'),
+      { tag: 'v1.2.0-preview.1', prerelease: true, draft: false },
+      { tag: 'v1.3.0-nightly.20260101.abc', prerelease: true, draft: false },
+      stable('some-random-tag'),
+      { tag: 'v1.0.0', prerelease: false, draft: true },
+    ]);
 
-    // selectStableReleases consumes the gh-shaped objects directly.
-    const releases = selectStableReleases(
-      raw.map((r) => ({
-        tag: r.tag,
-        prerelease: r.prerelease,
-        draft: r.draft,
-        url: r.url,
-        body: r.body,
-        date: r.date,
-      })),
-    );
-
+    // Drops the preview/nightly pre-releases, the non-semver tag, and the
+    // draft; sorts the survivors newest-first (1.10.0 > 1.2.0).
     expect(releases.map((r) => r.version)).toEqual(['1.10.0', '1.2.0']);
   });
 });

@@ -37,27 +37,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 /**
- * Maps a conventional-commit type to a Keep a Changelog section. Types not
- * listed here fall through to the "Other" catch-all bucket.
+ * Keep a Changelog sections, in render order, each listing the
+ * conventional-commit types that feed it. `Other` is the catch-all for unmapped
+ * types. This is the single source of truth — `TYPE_TO_SECTION` and
+ * `SECTION_ORDER` are derived from it so the two can never drift apart.
  */
-const TYPE_TO_SECTION = {
-  feat: 'Added',
-  fix: 'Fixed',
-  perf: 'Performance',
-  refactor: 'Changed',
-  revert: 'Changed',
-  docs: 'Documentation',
-};
-
-/** Order in which sections are rendered within a single release block. */
-const SECTION_ORDER = [
-  'Added',
-  'Changed',
-  'Fixed',
-  'Performance',
-  'Documentation',
-  'Other',
+const SECTIONS = [
+  { name: 'Added', types: ['feat'] },
+  { name: 'Changed', types: ['refactor', 'revert'] },
+  { name: 'Fixed', types: ['fix'] },
+  { name: 'Performance', types: ['perf'] },
+  { name: 'Documentation', types: ['docs'] },
+  { name: 'Other', types: [] },
 ];
+
+const TYPE_TO_SECTION = Object.fromEntries(
+  SECTIONS.flatMap((section) =>
+    section.types.map((type) => [type, section.name]),
+  ),
+);
+
+const SECTION_ORDER = SECTIONS.map((section) => section.name);
 
 /** Matches a stable `vX.Y.Z` tag (no `-preview` / `-nightly` suffix). */
 const STABLE_TAG_RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
@@ -98,10 +98,10 @@ export function categorize(title) {
 
 /**
  * Pure version-bump commits the release bot makes (`chore(release): vX.Y.Z`)
- * are noise in a user-facing changelog, so they are dropped.
+ * are noise in a user-facing changelog, so they are dropped. Takes a parsed
+ * `categorize()` result so callers that already parsed the title don't re-parse.
  */
-export function isNoiseEntry(title) {
-  const { type, scope } = categorize(title);
+export function isNoiseEntry({ type, scope }) {
   return type === 'chore' && scope === 'release';
 }
 
@@ -124,8 +124,8 @@ export function parseReleaseEntries(body) {
 }
 
 /** Render a single "What's Changed" entry as a changelog list item. */
-export function formatEntry(entry) {
-  const { type, scope, description, breaking } = categorize(entry.title);
+export function formatEntry(entry, cat = categorize(entry.title)) {
+  const { type, scope, description, breaking } = cat;
   let text;
   if (TYPE_TO_SECTION[type]) {
     // Recognised type: drop the redundant leading keyword (the section heading
@@ -151,15 +151,15 @@ export function formatRelease(release) {
 
   const buckets = new Map();
   for (const entry of release.entries) {
-    if (isNoiseEntry(entry.title)) {
+    const cat = categorize(entry.title);
+    if (isNoiseEntry(cat)) {
       continue;
     }
-    const { type } = categorize(entry.title);
-    const section = TYPE_TO_SECTION[type] || 'Other';
+    const section = TYPE_TO_SECTION[cat.type] || 'Other';
     if (!buckets.has(section)) {
       buckets.set(section, []);
     }
-    buckets.get(section).push(formatEntry(entry));
+    buckets.get(section).push(formatEntry(entry, cat));
   }
 
   let rendered = false;
@@ -211,7 +211,6 @@ export function toReleaseModel(raw) {
   return {
     tag: raw.tag,
     version: match ? `${match[1]}.${match[2]}.${match[3]}` : null,
-    sortKey: match ? [+match[1], +match[2], +match[3]] : null,
     date: (raw.date || '').slice(0, 10),
     htmlUrl: raw.url || '',
     entries: parseReleaseEntries(raw.body),
@@ -225,12 +224,10 @@ export function selectStableReleases(rawReleases) {
     .map(toReleaseModel)
     .filter((release) => release.version)
     .sort((a, b) => {
-      for (let i = 0; i < 3; i += 1) {
-        if (b.sortKey[i] !== a.sortKey[i]) {
-          return b.sortKey[i] - a.sortKey[i];
-        }
-      }
-      return 0;
+      // Newest first, comparing numeric semver components.
+      const x = a.version.split('.').map(Number);
+      const y = b.version.split('.').map(Number);
+      return y[0] - x[0] || y[1] - x[1] || y[2] - x[2];
     });
 }
 
