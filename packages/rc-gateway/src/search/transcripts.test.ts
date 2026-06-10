@@ -334,4 +334,29 @@ describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
       expect(hits).toHaveLength(2);
     }
   });
+
+  it('trips the per-1024-line inner check on a single large file', async () => {
+    // Fresh dir with ONLY this file so readdir order can't let a file-loop-top
+    // check trip first: with one file the clock reads are #1 start, #2
+    // file-top (within budget), #3 the inner (every-1024-lines) check — which
+    // jumps past the deadline, exercising that specific throw site.
+    const bigDir = mkdtempSync(join(tmpdir(), 'rc-search-big-'));
+    const lines: string[] = [];
+    for (let i = 0; i < 1100; i++) {
+      lines.push(
+        JSON.stringify(
+          textRec(
+            { uuid: `u${i}`, sessionId: 'big', type: 'user' },
+            'oauth row',
+          ),
+        ),
+      );
+    }
+    writeFileSync(join(bigDir, 'big.jsonl'), lines.join('\n') + '\n');
+    let calls = 0;
+    const now = () => (calls++ < 2 ? 0 : 1_000_000);
+    await expect(
+      searchTranscripts(bigDir, 'oauth', { timeoutMs: 2000, now }),
+    ).rejects.toBeInstanceOf(SearchTimeoutError);
+  });
 });

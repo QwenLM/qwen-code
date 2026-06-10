@@ -98,6 +98,7 @@ export {
 } from './routing/rules.js';
 export {
   searchTranscripts,
+  SearchTimeoutError,
   type SearchHit,
   type SearchOptions,
 } from './search/transcripts.js';
