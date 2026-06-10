@@ -22,6 +22,10 @@ interface TokenRecord {
   sessionLockId?: string;
   /** The owner token id that minted this share. Share tokens only. */
   parentId?: string;
+  /** Max redemptions allowed; undefined = unlimited. Share tokens only. */
+  maxUses?: number;
+  /** Redemptions consumed so far. Absent on pre-cycle-26 records → read as 0. */
+  uses?: number;
 }
 
 /** Public metadata about an issued token. Never includes secret material. */
@@ -43,6 +47,12 @@ export interface ShareInfo {
   createdAt: number;
   /** Computed at read time: `expiresAt !== undefined && now >= expiresAt`. */
   expired: boolean;
+  /** Max redemptions allowed; undefined = unlimited. */
+  maxUses?: number;
+  /** Redemptions consumed so far (normalized: a missing field reads as 0). */
+  uses: number;
+  /** `maxUses === undefined ? null : maxUses - uses`. */
+  usesRemaining: number | null;
 }
 
 interface PersistShape {
@@ -111,6 +121,8 @@ export class TokenStore {
     sessionLockId: string;
     ttlSec: number;
     parentId: string;
+    /** Max redemptions; undefined = unlimited. */
+    maxUses?: number;
   }): Promise<{ id: string; token: string; expiresAt: number }> {
     const id = randomBytes(8).toString('hex');
     const token = randomBytes(32).toString('base64url');
@@ -124,9 +136,44 @@ export class TokenStore {
       expiresAt,
       sessionLockId: opts.sessionLockId,
       parentId: opts.parentId,
+      maxUses: opts.maxUses,
+      uses: 0,
     });
     await this.persist();
     return { id, token, expiresAt };
+  }
+
+  /**
+   * Consume one redemption of a share token. Atomic at the JS level: the
+   * `uses < maxUses` guard and the in-memory increment run synchronously with no
+   * `await` between them, so the single-threaded event loop cannot interleave a
+   * second concurrent `consumeUse` between check and bump (the equivalent of the
+   * design's atomic SQL `UPDATE ... WHERE uses < max_uses`). `persist()` is the
+   * only await and happens after the bump; a persist failure rejects but the
+   * in-memory count already moved — the caller (whoami) catches that and 500s.
+   *
+   * Returns `usesRemaining` post-bump (`null` when unlimited). An unlimited
+   * (`maxUses === undefined`) share always succeeds. `uses` is read with `?? 0`
+   * so a record persisted before this field existed never reads as `NaN`.
+   */
+  async consumeUse(
+    id: string,
+  ): Promise<
+    | { ok: true; usesRemaining: number | null }
+    | { ok: false; reason: 'exhausted' | 'not_found' }
+  > {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return { ok: false, reason: 'not_found' };
+    const used = rec.uses ?? 0;
+    if (rec.maxUses !== undefined && used >= rec.maxUses) {
+      return { ok: false, reason: 'exhausted' };
+    }
+    rec.uses = used + 1;
+    await this.persist();
+    return {
+      ok: true,
+      usesRemaining: rec.maxUses === undefined ? null : rec.maxUses - rec.uses,
+    };
   }
 
   /**
@@ -204,16 +251,22 @@ export class TokenStore {
     const now = this.nowFn();
     return this.records
       .filter((r) => r.sessionLockId !== undefined)
-      .map((r) => ({
-        id: r.id,
-        label: r.label,
-        scopes: [...r.scopes],
-        sessionLockId: r.sessionLockId!,
-        expiresAt: r.expiresAt,
-        parentId: r.parentId,
-        createdAt: r.createdAt,
-        expired: r.expiresAt !== undefined && now >= r.expiresAt,
-      }));
+      .map((r) => {
+        const uses = r.uses ?? 0;
+        return {
+          id: r.id,
+          label: r.label,
+          scopes: [...r.scopes],
+          sessionLockId: r.sessionLockId!,
+          expiresAt: r.expiresAt,
+          parentId: r.parentId,
+          createdAt: r.createdAt,
+          expired: r.expiresAt !== undefined && now >= r.expiresAt,
+          maxUses: r.maxUses,
+          uses,
+          usesRemaining: r.maxUses === undefined ? null : r.maxUses - uses,
+        };
+      });
   }
 
   /**

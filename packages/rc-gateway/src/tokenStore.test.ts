@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, statSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TokenStore } from './tokenStore.js';
@@ -236,5 +236,105 @@ describe('TokenStore', () => {
     expect(store.sessionLockFor(share.id)).toBe('s1');
     expect(store.sessionLockFor(normal.id)).toBeUndefined();
     expect(store.sessionLockFor('does-not-exist')).toBeUndefined();
+  });
+
+  it('issueShare stamps maxUses + uses:0; listShares surfaces usesRemaining', async () => {
+    const store = await TokenStore.open(path);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+      maxUses: 5,
+    });
+    expect(store.listShares()[0]).toMatchObject({
+      id: share.id,
+      maxUses: 5,
+      uses: 0,
+      usesRemaining: 5,
+    });
+  });
+
+  it('consumeUse bumps uses and returns usesRemaining; exhausts at maxUses', async () => {
+    const store = await TokenStore.open(path);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+      maxUses: 2,
+    });
+    expect(await store.consumeUse(share.id)).toEqual({
+      ok: true,
+      usesRemaining: 1,
+    });
+    expect(await store.consumeUse(share.id)).toEqual({
+      ok: true,
+      usesRemaining: 0,
+    });
+    // Third redemption is rejected; uses does not advance past maxUses.
+    expect(await store.consumeUse(share.id)).toEqual({
+      ok: false,
+      reason: 'exhausted',
+    });
+    expect(store.listShares()[0]).toMatchObject({ uses: 2, usesRemaining: 0 });
+  });
+
+  it('consumeUse on an unlimited share (no maxUses) always succeeds, usesRemaining null', async () => {
+    const store = await TokenStore.open(path);
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    expect(await store.consumeUse(share.id)).toEqual({
+      ok: true,
+      usesRemaining: null,
+    });
+    expect(await store.consumeUse(share.id)).toEqual({
+      ok: true,
+      usesRemaining: null,
+    });
+    expect(store.listShares()[0]).toMatchObject({
+      uses: 2,
+      maxUses: undefined,
+      usesRemaining: null,
+    });
+  });
+
+  it('consumeUse on an unknown id → not_found', async () => {
+    const store = await TokenStore.open(path);
+    expect(await store.consumeUse('nope')).toEqual({
+      ok: false,
+      reason: 'not_found',
+    });
+  });
+
+  it('a share record persisted without a uses field reads as 0 (no NaN)', async () => {
+    // Simulate a pre-cycle-26 record: write tokens.json by hand with no `uses`.
+    const path2 = freshPath();
+    const rec = {
+      id: 'sh1',
+      tokenHash: 'a'.repeat(64),
+      scopes: [SHARE, SESSION_READ],
+      label: 'old',
+      createdAt: 1,
+      expiresAt: 10_000_000_000_000,
+      sessionLockId: 's1',
+      parentId: 'owner-1',
+      maxUses: 3,
+      // NOTE: deliberately no `uses` field.
+    };
+    writeFileSync(path2, JSON.stringify({ tokens: [rec] }));
+    const store = await TokenStore.open(path2);
+    expect(store.listShares()[0]).toMatchObject({ uses: 0, usesRemaining: 3 });
+    expect(await store.consumeUse('sh1')).toEqual({
+      ok: true,
+      usesRemaining: 2,
+    });
   });
 });
