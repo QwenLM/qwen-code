@@ -4162,17 +4162,21 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // `.github/codeql/codeql-config.yml` query exclusion. Both are
   // out of scope for a code-only PR; flagging here for the human
   // reviewer.
-  const child = spawn(process.execPath, [cliEntry, '--acp'], {
-    cwd: workspaceCwd,
-    // Pipe stderr (was: 'inherit') so we can prefix each line with
-    // the spawn's pid + workspace, making per-session crash output
-    // attributable. Bare 'inherit' sends every child's stderr to
-    // the daemon's stderr verbatim and unprefixed — under any
-    // multi-session load the operator's log becomes a salad of
-    // unattributed traces.
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: childEnv,
-  });
+  const child = spawn(
+    process.execPath,
+    [...process.execArgv, cliEntry, '--acp'],
+    {
+      cwd: workspaceCwd,
+      // Pipe stderr (was: 'inherit') so we can prefix each line with
+      // the spawn's pid + workspace, making per-session crash output
+      // attributable. Bare 'inherit' sends every child's stderr to
+      // the daemon's stderr verbatim and unprefixed — under any
+      // multi-session load the operator's log becomes a salad of
+      // unattributed traces.
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: childEnv,
+    },
+  );
 
   // Forward child stderr to the daemon's stderr line-by-line, with a
   // `[serve pid=… cwd=…]` prefix on each line so operators can
