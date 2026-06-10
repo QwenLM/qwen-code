@@ -1151,7 +1151,7 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly fileCheckpointingEnabled: boolean;
+  private fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
@@ -3602,6 +3602,10 @@ export class Config {
 
   getFileCheckpointingEnabled(): boolean {
     return this.fileCheckpointingEnabled;
+  }
+
+  enableFileCheckpointing(): void {
+    this.fileCheckpointingEnabled = true;
   }
 
   getFileHistoryService(): FileHistoryService {
