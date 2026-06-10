@@ -135,8 +135,11 @@ describe('search route', () => {
   it('503 search_timeout when the scan exceeds the per-query budget', async () => {
     // Inject a tiny budget + a clock that jumps past the deadline so the real
     // scanner throws SearchTimeoutError, which the route maps to 503.
+    // The route reads the clock once for the elapsedMs start (cycle 37) before
+    // the scanner; the first TWO reads (start + scanner deadline) return 0, then
+    // the file-loop check jumps past the deadline.
     let calls = 0;
-    const now = () => (calls++ === 0 ? 0 : 1_000_000);
+    const now = () => (calls++ <= 1 ? 0 : 1_000_000);
     const url = await mount(async () => dir, { timeoutMs: 1, now });
     const res = await fetch(`${url}/rc/search?q=oauth`);
     expect(res.status).toBe(503);
@@ -147,5 +150,59 @@ describe('search route', () => {
     const a = audit.calls.find((c) => c.action === 'search_performed');
     expect(a!.detail).toEqual({ kind: 'all', timedOut: true });
     expect(JSON.stringify(audit.calls)).not.toContain('oauth');
+  });
+
+  it('200 body carries truncated:false + an integer elapsedMs >= 0 (cycle 37)', async () => {
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth+flow`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      hits: unknown[];
+      truncated: boolean;
+      elapsedMs: number;
+    };
+    expect(body.hits).toHaveLength(1);
+    expect(body.truncated).toBe(false);
+    expect(Number.isInteger(body.elapsedMs)).toBe(true);
+    expect(body.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('elapsedMs is 0 under a constant injected clock (cycle 37)', async () => {
+    // A constant clock: the scanner reads it repeatedly (deadline 2000ms out,
+    // never hit → no throw) and the route's elapsed = const - const = 0.
+    const url = await mount(async () => dir, { now: () => 5000 });
+    const res = await fetch(`${url}/rc/search?q=oauth+flow`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      elapsedMs: number;
+      truncated: boolean;
+    };
+    expect(body.elapsedMs).toBe(0);
+    expect(body.truncated).toBe(false);
+  });
+
+  it('truncated:true when matches exceed the limit (cycle 37)', async () => {
+    // Three matching records, limit=2 → 2 hits returned + truncated.
+    const recs = [0, 1, 2].map((i) => ({
+      uuid: `m${i}`,
+      sessionId: 'sess-1',
+      timestamp: `2026-06-01T00:00:0${i}.000Z`,
+      type: 'assistant',
+      cwd: '/w',
+      message: { role: 'assistant', parts: [{ text: `oauth token ${i}` }] },
+    }));
+    writeFileSync(
+      join(dir, 'many.jsonl'),
+      recs.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth&limit=2`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      hits: unknown[];
+      truncated: boolean;
+    };
+    expect(body.hits).toHaveLength(2);
+    expect(body.truncated).toBe(true);
   });
 });

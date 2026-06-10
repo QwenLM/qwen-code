@@ -7,7 +7,7 @@
 import type { RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
 import {
-  searchTranscripts,
+  searchTranscriptsDetailed,
   SearchTimeoutError,
 } from '../search/transcripts.js';
 
@@ -78,9 +78,15 @@ export function createSearchRoute(
     // is exceeded → 503 search_timeout. The try/catch is REQUIRED here: server.ts
     // has no global error middleware, so an uncaught async throw would hang the
     // request. The timeout arg and this catch are added together, never split.
-    let hits;
+    // `elapsedMs` is measured at the route (pure arithmetic over a total clock);
+    // the scanner's "clock never read unless a timeout is opted in" contract is
+    // untouched. NOTE: this same `nowMs` is the scanner's deadline clock too, so
+    // an injected constant `now` yields elapsedMs 0 (the scanner reads it).
+    const nowMs = opts?.now ?? Date.now;
+    const startedAt = nowMs();
+    let result;
     try {
-      hits = await searchTranscripts(dir, q, {
+      result = await searchTranscriptsDetailed(dir, q, {
         kind,
         sessionId,
         limit,
@@ -106,13 +112,17 @@ export function createSearchRoute(
       return;
     }
 
+    const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
+
     void audit?.record({
       action: 'search_performed',
       actorTokenId: req.rcClient?.id,
-      // Privacy: count + kind only — never the query text.
-      detail: { kind, resultCount: hits.length },
+      // Privacy: count + kind only — never the query text. timing is not audited.
+      detail: { kind, resultCount: result.hits.length },
     });
 
-    res.status(200).json({ hits });
+    res
+      .status(200)
+      .json({ hits: result.hits, truncated: result.truncated, elapsedMs });
   };
 }
