@@ -19,7 +19,10 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
+import {
+  getQwenIgnoreFileNames,
+  QwenIgnoreParser,
+} from '../utils/qwenIgnoreParser.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -31,6 +34,12 @@ interface RipgrepJsonMatch {
     lines?: { text?: string };
     line_number: number;
   };
+}
+
+interface RipgrepMatchLine {
+  rawLine: string;
+  filePath: string;
+  key: string;
 }
 
 function isRipgrepJsonMatch(value: unknown): value is RipgrepJsonMatch {
@@ -254,12 +263,6 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
-      interface RipgrepMatchLine {
-        rawLine: string;
-        filePath: string;
-        key: string;
-      }
-
       let allLines = rawOutput
         .split('\n')
         .filter((line) => line.trim())
@@ -312,6 +315,15 @@ class GrepToolInvocation extends BaseToolInvocation<
             },
           ];
         });
+
+      const filteringOptions = this.getFileFilteringOptions();
+      if (filteringOptions.respectQwenIgnore) {
+        allLines = this.filterQwenIgnoredMatches(
+          allLines,
+          searchPaths,
+          filteringOptions.customIgnoreFiles,
+        );
+      }
 
       // Deduplicate lines from potentially overlapping workspace directories.
       // ripgrep reports the same file twice when given paths like /a and /a/sub.
@@ -426,6 +438,26 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: `Error: ${errorMessage}`,
       };
     }
+  }
+
+  private filterQwenIgnoredMatches(
+    lines: RipgrepMatchLine[],
+    searchPaths: string[],
+    customIgnoreFiles?: string[],
+  ): RipgrepMatchLine[] {
+    const parsers = new Map<string, QwenIgnoreParser>();
+
+    return lines.filter((line) => {
+      const absolutePath = toAbsoluteResultPath(line.filePath, searchPaths);
+      const ignoreRoot = this.getIgnoreRootForSearchPath(absolutePath);
+      let parser = parsers.get(ignoreRoot);
+      if (parser === undefined) {
+        parser = new QwenIgnoreParser(ignoreRoot, customIgnoreFiles);
+        parsers.set(ignoreRoot, parser);
+      }
+
+      return !parser.isIgnored(absolutePath);
+    });
   }
 
   private async performRipgrepSearch(options: {
