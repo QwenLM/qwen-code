@@ -1721,8 +1721,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      // When subagent_type is omitted and fork is enabled (opt-in +
-      // interactive), use fork. Otherwise fall back to general-purpose.
+      // When subagent_type is omitted and fork is available in an interactive
+      // session, use fork. Otherwise fall back to general-purpose.
       const isFork =
         !this.params.subagent_type && isForkSubagentEnabled(this.config);
       const effectiveSubagentType =
