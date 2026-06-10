@@ -44,6 +44,75 @@ concurrency:
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
+  ack-review-request:
+    # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
+    if: |-
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.issue.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.review.body == '@qwen-code /review' ||
+         startsWith(github.event.review.body, '@qwen-code /review ') ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.review.author_association == 'OWNER' ||
+         github.event.review.author_association == 'MEMBER' ||
+         github.event.review.author_association == 'COLLABORATOR'))
+    concurrency:
+      group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Post queued acknowledgement'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          EXISTING_ACK_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
+          if [ -n "$EXISTING_ACK_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
+              -f body="$ACK_BODY" > /dev/null
+            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$ACK_BODY"
+            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   review-config:
     if: |-
       github.event_name == 'pull_request_target' &&
@@ -145,6 +214,7 @@ jobs:
     # - review_requested uses authorize-review-request and skips delay
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately for trusted PR authors
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
       always() &&
       (github.event_name == 'workflow_dispatch' ||
