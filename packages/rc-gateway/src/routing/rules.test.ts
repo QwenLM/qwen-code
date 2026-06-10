@@ -233,6 +233,18 @@ rules:
     expect(m.firstDrop({ kind: 'task.completed' })).toBe('<unnamed>');
   });
 
+  it('an explicit empty-string id still suppresses (reported as <unnamed>)', () => {
+    // Regression: `id: ""` must not make firstDrop return a falsy '' that the
+    // notifier's truthiness gate would skip — it must still suppress.
+    const m = matcher(`
+rules:
+  - id: ""
+    match: { kind: task.completed }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'task.completed' })).toBe('<unnamed>');
+  });
+
   it('a non-drop rule never suppresses', () => {
     const m = matcher(`
 rules:

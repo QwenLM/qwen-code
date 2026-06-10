@@ -126,6 +126,17 @@ routing code wired to nothing — never a half-wired fan-out.
   turn — keep the unit coverage authoritative).
 - `git diff --name-only <start>..HEAD` → only `packages/rc-gateway/` + docs.
 
+## Current live effect (a limitation to know)
+
+`buildPayload` (cycle 9) only ever emits `kind: 'permission.required'` today —
+there is no `task.completed` (or other) payload yet. So via the live `notify()`
+path the only rules with real effect are those matching `permission.required`
+or `sessionTag`-only; a `kind: task.completed` drop rule loads and unit-tests
+fine but suppresses nothing in production until a completions payload exists.
+The canonical examples lead with `task.completed` for clarity, but operators
+should know it's currently inert. (No action needed here — it resolves once the
+notifier emits more kinds.)
+
 ## Deferred (NOT in this slice)
 
 Per-subscription routing (scopeIn/tokenIdsIn/deviceTagsIn), urgency levels,

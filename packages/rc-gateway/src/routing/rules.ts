@@ -213,7 +213,10 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
           matchKind(r.match.kind, ev.kind) &&
           matchSessionTag(r.match.sessionTag, ev.sessionName)
         ) {
-          return r.id ?? '<unnamed>';
+          // `||` not `??`: a non-null return signals "matched", and the notifier
+          // gates on truthiness — an empty-string id (`id: ""`) must still
+          // suppress, reported under the '<unnamed>' label.
+          return r.id || '<unnamed>';
         }
       }
       return null;
