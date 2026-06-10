@@ -2562,6 +2562,11 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const bashrc = readScript(path.join(home, '.bashrc'));
 
         expect(output).toContain('installed successfully, to start:');
+        expect(output).toContain(
+          'Other qwen executables were found and may shadow the new install',
+        );
+        expect(output).toContain(existingQwen);
+        expect(output).toContain('source ~/.bashrc');
         expect(bashrc).toContain('# Qwen Code PATH block begin');
         expect(bashrc).toContain(
           `export PATH='${path.join(installRoot, 'bin')}':$PATH`,
@@ -2582,6 +2587,37 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           .toString()
           .trim();
         expect(resolvedQwen).toBe(installedBin);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'prints a shell reload hint when the install dir is not on PATH yet',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          // Minimal PATH keeps PRE_INSTALL_QWENS empty even when the host
+          // machine has a real qwen installed somewhere.
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(output).toContain('source ~/.bashrc');
+        expect(output).toContain('Load new PATH');
+        expect(output).not.toContain('may shadow the new install');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);

@@ -93,6 +93,11 @@ finish_progress() {
 TEMP_DIRS=()
 ACTIVE_DOWNLOAD_PID=""
 PATH_UPDATE_APPLIED=0
+# PATH as inherited from the invoking shell. The script later prepends the
+# install dir to its own PATH, but that never propagates to the parent shell
+# (a piped `curl | bash` runs in a child process), so we keep the original
+# value to decide whether the user must reload their shell rc file.
+ORIGINAL_PATH="${PATH:-}"
 
 cleanup_temp_dirs() {
     local temp_dir
@@ -1494,9 +1499,42 @@ print_final_instructions() {
         echo -e "${MUTED}Successfully added${NC} qwen ${MUTED}to \$PATH in${NC} ${rc_name}"
     fi
 
+    # The invoking shell keeps its original PATH (and possibly an older qwen
+    # resolved from it) until the rc file is reloaded. Detect both cases and
+    # tell the user exactly what to run instead of letting `qwen` silently
+    # launch a stale version.
+    local shell_reload_needed=0
+    if [[ -n "${install_bin_dir}" ]]; then
+        case ":${ORIGINAL_PATH}:" in
+            *":${install_bin_dir}:"*) ;;
+            *) shell_reload_needed=1 ;;
+        esac
+    fi
+    if [[ -n "${other_qwens}" ]]; then
+        shell_reload_needed=1
+        log_warning "Other qwen executables were found and may shadow the new install in this shell:"
+        local shadow_path
+        while IFS= read -r shadow_path; do
+            [[ -z "${shadow_path}" ]] && continue
+            printf '  %s\n' "${shadow_path}"
+        done <<< "${other_qwens}"
+    fi
+
+    local reload_cmd=""
+    if [[ "${shell_reload_needed}" == "1" ]]; then
+        if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" && -n "${rc_name}" ]]; then
+            reload_cmd="source ${rc_name}"
+        elif [[ -n "${install_bin_dir}" ]]; then
+            log_warning "Make sure ${install_bin_dir} comes first on your PATH, then open a new terminal."
+        fi
+    fi
+
     echo ""
     echo -e "${MUTED}Qwen Code ${installed_version} installed successfully, to start:${NC}"
     echo ""
+    if [[ -n "${reload_cmd}" ]]; then
+        echo -e "${reload_cmd}  ${MUTED}# Load new PATH (or open a new terminal)${NC}"
+    fi
     echo -e "cd <project>  ${MUTED}# Open directory${NC}"
     echo -e "qwen          ${MUTED}# Run command${NC}"
     echo ""
