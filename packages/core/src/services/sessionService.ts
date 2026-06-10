@@ -204,7 +204,12 @@ async function copyFileHistoryBackups(
   }
   if (entries.length === 0) return;
 
-  await fsPromises.mkdir(targetDir, { recursive: true });
+  try {
+    await fsPromises.mkdir(targetDir, { recursive: true });
+  } catch (e) {
+    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
+    return;
+  }
   await Promise.all(
     entries.map(async (name) => {
       const src = path.join(sourceDir, name);
@@ -781,8 +786,7 @@ export class SessionService {
         msg.subtype === 'file_history_snapshot' &&
         msg.systemPayload
       ) {
-        const payload =
-          msg.systemPayload as unknown as FileHistorySnapshotRecordPayload;
+        const payload = msg.systemPayload as FileHistorySnapshotRecordPayload;
         if (!Array.isArray(payload?.snapshots)) continue;
         let deserialized: FileHistorySnapshot[];
         try {

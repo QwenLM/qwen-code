@@ -1059,10 +1059,10 @@ export class Session implements SessionContext {
               }
             }
 
-            // Snapshot file state before this turn (mirrors client.ts:1488).
-            // Placed after slash-command and hook early-returns so locally
-            // handled commands (e.g. /help) don't create phantom snapshots
-            // that would desync the snapshot index from the real turn count.
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in GeminiClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
             try {
               const fileHistoryService = this.config.getFileHistoryService();
               await fileHistoryService.makeSnapshot(promptId);
