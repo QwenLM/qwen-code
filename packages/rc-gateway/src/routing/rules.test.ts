@@ -166,6 +166,19 @@ rules:
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  it('does NOT warn for now-honored scopeIn/tokenIdsIn (cycle 33)', async () => {
+    vi.resetModules();
+    const { loadRoutingConfig: fresh } = await import('./rules.js');
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fresh(`
+rules:
+  - match: { scopeIn: [share], tokenIdsIn: [t1] }
+    route: { drop: true }
+`);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
 
 describe('loadRoutingConfigFile', () => {

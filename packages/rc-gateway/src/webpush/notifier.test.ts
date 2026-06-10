@@ -15,9 +15,10 @@ import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
 import { PushNotifier } from './notifier.js';
 import type { PushPayload } from './payload.js';
-import { SESSION_READ, APPROVE } from '../scopes.js';
+import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
 import { WorkingDeviceTracker } from '../routing/workingDevice.js';
+import { compileRouting, loadRoutingConfig } from '../routing/rules.js';
 
 let tokens: TokenStore;
 let store: PushStore;
@@ -562,6 +563,67 @@ describe('PushNotifier', () => {
     expect(supp[0].target).toBe('s1');
     expect(supp[0].detail).toMatchObject({
       kind: 'permission.required',
+      reason: 'routing_rule',
+      ruleId: 'mute-guests',
+      subscriptionId: guestSub.id,
+    });
+  });
+
+  it('scopeIn:[share] drops a real share token via a compiled matcher (end-to-end)', async () => {
+    // A share issued the way routes/share.ts mints them — carrying SHARE — so
+    // scopesFor surfaces 'share' to the matcher's scopeIn check. Proves the
+    // headline "mute guest shares" path through the REAL compiled matcher.
+    const share = await tokens.issueShare({
+      scopes: [SHARE, SESSION_READ, APPROVE],
+      label: 'guest',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    const guestSub = await store.add(share.id, {
+      endpoint: 'https://push.example.com/guest',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const notifierAudit = fakeAudit();
+    const routing = compileRouting(
+      loadRoutingConfig(`
+rules:
+  - id: mute-guests
+    match: { scopeIn: [share] }
+    route: { drop: true }
+`),
+    );
+
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+      undefined,
+      routing,
+    );
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+
+    expect(sent.map((s) => s.endpoint)).toEqual([
+      'https://push.example.com/approver',
+    ]);
+    const supp = notifierAudit.calls.filter(
+      (c) => c.action === 'push_suppressed',
+    );
+    expect(supp).toHaveLength(1);
+    expect(supp[0].detail).toMatchObject({
       reason: 'routing_rule',
       ruleId: 'mute-guests',
       subscriptionId: guestSub.id,
