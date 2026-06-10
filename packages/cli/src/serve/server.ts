@@ -188,7 +188,13 @@ export interface ListWorkspaceSessionsOptions {
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
   nextCursor?: string;
-  liveMergedIds?: Set<string>;
+}
+
+export class InvalidCursorError extends Error {
+  constructor(cursor: string) {
+    super(`Invalid cursor: "${cursor}" is not a valid numeric cursor`);
+    this.name = 'InvalidCursorError';
+  }
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -200,11 +206,15 @@ export async function listWorkspaceSessionsForResponse(
     Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
     MAX_SESSION_PAGE_SIZE,
   );
-  const rawCursor = options?.cursor ? Number(options.cursor) : undefined;
-  const numericCursor =
-    rawCursor !== undefined && Number.isFinite(rawCursor)
-      ? rawCursor
-      : undefined;
+
+  let numericCursor: number | undefined;
+  if (options?.cursor) {
+    const parsed = Number(options.cursor);
+    if (!Number.isFinite(parsed)) {
+      throw new InvalidCursorError(options.cursor);
+    }
+    numericCursor = parsed;
+  }
   const isFirstPage = numericCursor === undefined;
 
   const persisted = await new SessionService(workspaceCwd).listSessions({
@@ -213,7 +223,12 @@ export async function listWorkspaceSessionsForResponse(
   });
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
+  const liveSessionIds = new Set(
+    bridge.listWorkspaceSessions(workspaceCwd).map((s) => s.sessionId),
+  );
+
   for (const item of persisted.items) {
+    if (!isFirstPage && liveSessionIds.has(item.sessionId)) continue;
     bySessionId.set(item.sessionId, {
       sessionId: item.sessionId,
       workspaceCwd: item.cwd,
@@ -225,11 +240,9 @@ export async function listWorkspaceSessionsForResponse(
     });
   }
 
-  const liveMergedIds = new Set<string>();
   if (isFirstPage) {
     for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
       const existing = bySessionId.get(live.sessionId);
-      if (!existing) liveMergedIds.add(live.sessionId);
       bySessionId.set(live.sessionId, {
         ...existing,
         ...live,
@@ -258,11 +271,7 @@ export async function listWorkspaceSessionsForResponse(
     nextCursor = String(persisted.nextCursor);
   }
 
-  return {
-    sessions,
-    nextCursor,
-    liveMergedIds: liveMergedIds.size > 0 ? liveMergedIds : undefined,
-  };
+  return { sessions, nextCursor };
 }
 
 export interface ServeAppDeps {
@@ -2046,6 +2055,13 @@ export function createServeApp(
         ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
       });
     } catch (err) {
+      if (err instanceof InvalidCursorError) {
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_cursor',
+        });
+        return;
+      }
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
           key,
