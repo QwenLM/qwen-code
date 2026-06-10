@@ -313,6 +313,32 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('disposes PTY terminal resources on natural exit', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      expect(dataDisposableStub.dispose).toHaveBeenCalled();
+      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(removeListenerSpy).toHaveBeenCalledWith(
+        'error',
+        expect.any(Function),
+      );
+      // One terminal is used for live PTY rendering, another for final replay.
+      expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
+
+      terminalDisposeSpy.mockRestore();
+    });
+
     it('should strip ANSI codes from output', async () => {
       const { result } = await simulateExecution('ls --color=auto', (pty) => {
         pty.onData.mock.calls[0][0]('a\u001b[31mred\u001b[0mword');

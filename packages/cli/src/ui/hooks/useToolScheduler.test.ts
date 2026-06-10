@@ -28,6 +28,7 @@ import type {
 import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ApprovalMode,
   MockTool,
 } from '@qwen-code/qwen-code-core';
@@ -778,5 +779,33 @@ describe('mapToDisplay', () => {
     expect(display.tools[1].renderOutputAsMarkdown).toBe(true);
     expect(display.tools[1].executionStartTime).toBe(1234567890);
     expect(display.tools[0].executionStartTime).toBeUndefined();
+  });
+
+  it('compacts large resultDisplay values before storing display history', () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+    const toolCall: ToolCall = {
+      request: { ...baseRequest, callId: 'large-output-call' },
+      status: 'success',
+      tool: baseTool,
+      invocation: baseTool.build(baseRequest.args),
+      response: {
+        ...baseResponse,
+        callId: 'large-output-call',
+        resultDisplay: longDisplay,
+      },
+    } as ToolCall;
+
+    const display = mapToDisplay(toolCall);
+    const resultDisplay = display.tools[0].resultDisplay;
+
+    expect(typeof resultDisplay).toBe('string');
+    expect((resultDisplay as string).length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(resultDisplay).toContain('head-');
+    expect(resultDisplay).toContain('-tail');
+    expect(resultDisplay).toContain('truncated from');
   });
 });

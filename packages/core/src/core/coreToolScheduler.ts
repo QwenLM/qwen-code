@@ -19,6 +19,7 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
   generateToolUseId,
   firePreToolUseHook,
@@ -798,7 +799,7 @@ const createErrorResponse = (
       },
     },
   ],
-  resultDisplay: error.message,
+  resultDisplay: compactToolResultDisplayForHistory(error.message),
   errorType,
   contentLength: error.message.length,
 });
@@ -1254,7 +1255,7 @@ export class CoreToolScheduler {
                   },
                 },
               ],
-              resultDisplay,
+              resultDisplay: compactToolResultDisplayForHistory(resultDisplay),
               error: undefined,
               errorType: undefined,
               contentLength: errorMessage.length,
@@ -3050,12 +3051,13 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
+          const compactOutput = compactToolResultDisplayForHistory(outputChunk);
           if (this.outputUpdateHandler) {
-            this.outputUpdateHandler(callId, outputChunk);
+            this.outputUpdateHandler(callId, compactOutput);
           }
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, liveOutput: outputChunk }
+              ? { ...tc, liveOutput: compactOutput }
               : tc,
           );
           this.notifyToolCallsUpdate();
@@ -3499,7 +3501,9 @@ export class CoreToolScheduler {
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
-          resultDisplay: toolResult.returnDisplay,
+          resultDisplay: compactToolResultDisplayForHistory(
+            toolResult.returnDisplay,
+          ),
           error: undefined,
           errorType: undefined,
           contentLength,

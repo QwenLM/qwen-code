@@ -22,6 +22,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
+  compactToolResultDisplayForHistory,
   createDebugLogger,
   isAnyAutoMemPath,
 } from '@qwen-code/qwen-code-core';
@@ -325,21 +326,27 @@ export function mapToDisplay(
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'error':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'cancelled':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'awaiting_approval':
@@ -353,8 +360,9 @@ export function mapToDisplay(
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay:
+            resultDisplay: compactToolResultDisplayForHistory(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
+            ),
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
             executionStartTime: (trackedCall as TrackedExecutingToolCall)
