@@ -119,9 +119,12 @@ import {
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   formatTruncatedContent,
+  sanitizeTelemetryErrorMessage,
   truncateContentInMemory,
   truncateToolOutput,
 } from '../utils/truncation.js';
+import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
@@ -766,11 +769,42 @@ async function truncateModelFacingToolContent(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+    logToolOutputTruncated(
+      config,
+      new ToolOutputTruncatedEvent('', {
+        callId,
+        toolName,
+        originalContentLength: textContent.length,
+        truncatedContentLength: truncatedContent.length,
+        threshold,
+        lines,
+        outputFileSaved: false,
+        saveErrorCode: getTruncationErrorCode(error),
+        saveErrorMessage: sanitizeTelemetryErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
+      }),
+    );
     return {
       content: formatTruncatedContent(truncatedContent, { saveFailed: true }),
       wasTruncated: true,
     };
   }
+}
+
+function getTruncationErrorCode(error: unknown): string {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof error.code === 'string'
+  ) {
+    return error.code;
+  }
+  if (error instanceof Error && error.name) {
+    return error.name;
+  }
+  return 'unknown';
 }
 
 function appendOutputFileNotice(
