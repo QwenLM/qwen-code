@@ -162,6 +162,18 @@ inert end-to-end until that page lands — same shape as cycle 25's
 fully unit-tested and headless-verified; the browser redemption flow is
 **verified-locally-only** once the bootstrap page exists.
 
+**Known limitation (cookie dedup, opus review MINOR):** the `rc_share_<id>`
+cookie only suppresses a re-bump _after_ the first response sets it. Two
+redemptions from the same browser arriving before that round-trip completes
+(parallel first-paint XHRs, or an SSE bootstrap firing concurrently) each see no
+cookie and each burn a use — so `uses` can over-count a single browser session.
+This never _exceeds_ `maxUses` (not a double-spend) and `maxUses` is a soft cap
+by design; the only call pattern that could trigger it is the deferred
+`/ui/share/<token>` bootstrap page, which doesn't exist yet. When that page
+lands, have it issue a single serial whoami before any parallel fetch, or move
+to a server-stored redemption marker, to make the "once per browser session"
+guarantee exact.
+
 ## Deferred (NOT in this slice)
 
 `/ui/share/<token>` bootstrap HTML (sessionStorage + `history.replaceState` URL
