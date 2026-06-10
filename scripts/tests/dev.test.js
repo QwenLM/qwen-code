@@ -12,6 +12,8 @@ const { spawnMock, platformMock, existsSyncMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn(() => false),
 }));
 
+const normalizePath = (filePath) => String(filePath).replaceAll('\\', '/');
+
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
@@ -40,7 +42,6 @@ describe('scripts/dev.js launcher', () => {
     process,
     'execPath',
   );
-  const normalizePath = (filePath) => String(filePath).replaceAll('\\', '/');
 
   beforeEach(() => {
     vi.resetModules();
@@ -68,15 +69,14 @@ describe('scripts/dev.js launcher', () => {
 
     await import('../dev.js?direct-node');
 
-    expect(spawnMock).toHaveBeenCalledWith(
-      'C:\\Program Files\\nodejs\\node.exe',
-      [
-        expect.stringContaining('node_modules/tsx/dist/cli.mjs'),
-        expect.stringContaining('packages/cli/index.ts'),
-        '--help',
-      ],
-      expect.objectContaining({ shell: false }),
-    );
+    const [command, args, options] = spawnMock.mock.calls[0];
+    expect(command).toBe('C:\\Program Files\\nodejs\\node.exe');
+    expect(args.map(normalizePath)).toEqual([
+      expect.stringContaining('node_modules/tsx/dist/cli.mjs'),
+      expect.stringContaining('packages/cli/index.ts'),
+      '--help',
+    ]);
+    expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
 
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {
@@ -87,10 +87,11 @@ describe('scripts/dev.js launcher', () => {
 
     await import('../dev.js?cmd-fallback');
 
-    expect(spawnMock).toHaveBeenCalledWith(
-      expect.stringContaining('tsx.cmd'),
-      [expect.stringContaining('packages/cli/index.ts')],
-      expect.objectContaining({ shell: true }),
-    );
+    const [command, args, options] = spawnMock.mock.calls[0];
+    expect(normalizePath(command)).toContain('tsx.cmd');
+    expect(args.map(normalizePath)).toEqual([
+      expect.stringContaining('packages/cli/index.ts'),
+    ]);
+    expect(options).toEqual(expect.objectContaining({ shell: true }));
   });
 });

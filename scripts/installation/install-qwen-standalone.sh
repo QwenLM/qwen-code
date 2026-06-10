@@ -1500,7 +1500,7 @@ print_final_instructions() {
     echo -e "cd <project>  ${MUTED}# Open directory${NC}"
     echo -e "qwen          ${MUTED}# Run command${NC}"
     echo ""
-    echo -e "${MUTED}For more information visit ${NC}https://qwenlm.github.io/qwen-code"
+    echo -e "${MUTED}For more information visit ${NC}https://github.com/QwenLM/qwen-code"
     echo ""
 }
 
