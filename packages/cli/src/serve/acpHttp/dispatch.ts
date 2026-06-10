@@ -676,10 +676,15 @@ export class AcpDispatcher {
         case 'session/list': {
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
+          const metaSize =
+            typeof meta?.['size'] === 'number'
+              ? (meta['size'] as number)
+              : undefined;
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             this.boundWorkspace,
-            { cursor },
+            { cursor, size: metaSize },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({

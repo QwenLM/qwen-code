@@ -188,6 +188,7 @@ export interface ListWorkspaceSessionsOptions {
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
   nextCursor?: string;
+  liveMergedIds?: Set<string>;
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -204,6 +205,7 @@ export async function listWorkspaceSessionsForResponse(
     rawCursor !== undefined && Number.isFinite(rawCursor)
       ? rawCursor
       : undefined;
+  const isFirstPage = numericCursor === undefined;
 
   const persisted = await new SessionService(workspaceCwd).listSessions({
     cursor: numericCursor,
@@ -223,9 +225,11 @@ export async function listWorkspaceSessionsForResponse(
     });
   }
 
-  if (!options?.cursor) {
+  const liveMergedIds = new Set<string>();
+  if (isFirstPage) {
     for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
       const existing = bySessionId.get(live.sessionId);
+      if (!existing) liveMergedIds.add(live.sessionId);
       bySessionId.set(live.sessionId, {
         ...existing,
         ...live,
@@ -238,16 +242,26 @@ export async function listWorkspaceSessionsForResponse(
     }
   }
 
-  const sessions = [...bySessionId.values()].sort((a, b) => {
+  const sorted = [...bySessionId.values()].sort((a, b) => {
     const aTime = Date.parse(a.updatedAt ?? a.createdAt);
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
+  const sessions = sorted.slice(0, pageSize);
+  const hasExcess = sorted.length > pageSize;
+
+  let nextCursor: string | undefined;
+  if (hasExcess) {
+    const last = sessions[sessions.length - 1];
+    nextCursor = String(Date.parse(last?.updatedAt ?? last?.createdAt));
+  } else if (persisted.nextCursor != null) {
+    nextCursor = String(persisted.nextCursor);
+  }
 
   return {
     sessions,
-    nextCursor:
-      persisted.nextCursor != null ? String(persisted.nextCursor) : undefined,
+    nextCursor,
+    liveMergedIds: liveMergedIds.size > 0 ? liveMergedIds : undefined,
   };
 }
 
@@ -2027,7 +2041,10 @@ export function createServeApp(
         cursor,
         size: Number.isFinite(size) ? size : undefined,
       });
-      res.status(200).json(result);
+      res.status(200).json({
+        sessions: result.sessions,
+        ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
+      });
     } catch (err) {
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
