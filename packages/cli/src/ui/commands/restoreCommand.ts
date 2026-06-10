@@ -20,7 +20,7 @@ async function restoreAction(
   args: string,
 ): Promise<void | SlashCommandActionReturn> {
   const { services, ui } = context;
-  const { config, git: gitService } = services;
+  const { config } = services;
   const { addItem, loadHistory } = ui;
 
   const checkpointDir = config?.storage.getProjectTempCheckpointsDir();
@@ -77,9 +77,58 @@ async function restoreAction(
     const data = await fs.readFile(filePath, 'utf-8');
     const toolCallData = JSON.parse(data);
 
+    if (toolCallData.commitHash && !toolCallData.promptId) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'This checkpoint uses a legacy format that is no longer supported. Please create a new checkpoint.',
+      };
+    }
+
+    if (toolCallData.promptId) {
+      if (!config) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: 'Configuration is not available.',
+        };
+      }
+      try {
+        const result = await config
+          .getFileHistoryService()
+          .rewind(toolCallData.promptId, true);
+        if (result.filesFailed.length > 0) {
+          addItem(
+            {
+              type: 'warning',
+              text: `Partially restored: ${result.filesChanged.length} file(s) reverted, ${result.filesFailed.length} file(s) failed. Aborting tool replay.`,
+            },
+            Date.now(),
+          );
+          return;
+        }
+        addItem(
+          {
+            type: 'info',
+            text: 'Restored project to the state at the start of this turn.',
+          },
+          Date.now(),
+        );
+      } catch (error) {
+        addItem(
+          {
+            type: 'warning',
+            text: `Could not restore files: ${error instanceof Error ? error.message : String(error)}`,
+          },
+          Date.now(),
+        );
+        return;
+      }
+    }
+
     if (toolCallData.history) {
       if (!loadHistory) {
-        // This should not happen
         return {
           type: 'message',
           messageType: 'error',
@@ -91,17 +140,6 @@ async function restoreAction(
 
     if (toolCallData.clientHistory) {
       await config?.getGeminiClient()?.setHistory(toolCallData.clientHistory);
-    }
-
-    if (toolCallData.commitHash) {
-      await gitService?.restoreProjectFromSnapshot(toolCallData.commitHash);
-      addItem(
-        {
-          type: 'info',
-          text: 'Restored project to the state before the tool call.',
-        },
-        Date.now(),
-      );
     }
 
     return {
@@ -139,7 +177,7 @@ async function completion(
 }
 
 export const restoreCommand = (config: Config | null): SlashCommand | null => {
-  if (!config?.getCheckpointingEnabled()) {
+  if (!config?.getFileCheckpointingEnabled()) {
     return null;
   }
 

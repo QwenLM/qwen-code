@@ -39,10 +39,26 @@ const pressKey = (overrides: Partial<Key>) => {
   });
 };
 
-const userTurn = (id: number, text: string): HistoryItem => ({
+// Two microtask yields are intentional: Ink 7 + React 19 split a render
+// pass across two ticks (one to flush state updates into the reconciler,
+// a second for the resulting effects to settle). A single Promise.resolve
+// drains only the first tick and produces flaky assertions on slow CI.
+const flush = async () => {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+};
+
+const userTurn = (
+  id: number,
+  text: string,
+  promptId?: string,
+): HistoryItem => ({
   id,
   type: 'user',
   text,
+  promptId,
 });
 
 describe('RewindSelector', () => {
@@ -77,5 +93,65 @@ describe('RewindSelector', () => {
 
     pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
     expect(lastFrame()).toContain('› #2 second prompt');
+  });
+
+  it('renders restore options with diff stats for the selected turn', async () => {
+    vi.spyOn(fileHistoryService, 'getDiffStats').mockResolvedValue({
+      filesChanged: ['src/foo.ts', 'src/bar.ts'],
+      insertions: 3,
+      deletions: 1,
+    });
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={true}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    pressKey({ name: 'return' });
+    await flush();
+
+    expect(fileHistoryService.getDiffStats).toHaveBeenCalledWith('prompt-2');
+    expect(lastFrame()).toContain('Restore code and conversation');
+    expect(lastFrame()).toContain('(+3 -1 in 2 files)');
+    expect(lastFrame()).toContain('Restore conversation only');
+    expect(lastFrame()).toContain('Restore code only');
+  });
+
+  it('returns from restore options to the pick list on Escape', async () => {
+    vi.spyOn(fileHistoryService, 'getDiffStats').mockResolvedValue({
+      filesChanged: ['src/foo.ts'],
+      insertions: 2,
+      deletions: 0,
+    });
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={true}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    pressKey({ name: 'return' });
+    await flush();
+    expect(lastFrame()).toContain('Restore conversation only');
+
+    pressKey({ name: 'escape' });
+
+    expect(lastFrame()).toContain('› #2 second prompt');
+    expect(lastFrame()).not.toContain('Restore conversation only');
   });
 });

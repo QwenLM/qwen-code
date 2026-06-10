@@ -168,6 +168,52 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireInstructionsLoadedEvent', () => {
+    it('should include instruction load metadata in hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireInstructionsLoadedEvent(
+        '/repo/.qwen/QWEN.local.md',
+        'local',
+        'include',
+        {
+          parentFilePath: '/repo/QWEN.md',
+        },
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        },
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        file_path: string;
+        memory_type: string;
+        load_reason: string;
+        parent_file_path?: string;
+      };
+      expect(input.file_path).toBe('/repo/.qwen/QWEN.local.md');
+      expect(input.memory_type).toBe('local');
+      expect(input.load_reason).toBe('include');
+      expect(input.parent_file_path).toBe('/repo/QWEN.md');
+    });
+  });
+
   describe('fireUserPromptExpansionEvent', () => {
     it('should execute hooks for UserPromptExpansion event', async () => {
       const mockPlan = createMockExecutionPlan([]);

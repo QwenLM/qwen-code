@@ -796,6 +796,24 @@ export default {
   'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
   'Fork the current conversation into a new session':
     'Die aktuelle Unterhaltung in eine neue Sitzung verzweigen',
+  'Spawn a background agent that inherits the full conversation':
+    'Einen Hintergrund-Agenten starten, der die gesamte Unterhaltung übernimmt',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Bitte geben Sie eine Anweisung an. Verwendung: /fork <Anweisung>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Während eine Antwort oder ein Tool-Aufruf läuft, kann kein Hintergrund-Fork erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
+  'Cannot fork before the first conversation turn.':
+    'Vor der ersten Gesprächsrunde kann kein Fork erstellt werden.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'Der Befehl /fork erfordert das Fork-Feature-Gate. Setzen Sie QWEN_CODE_ENABLE_FORK_SUBAGENT=1, um es zu aktivieren.',
+  'The agent tool is unavailable; cannot fork.':
+    'Das Agent-Tool ist nicht verfügbar; Fork kann nicht gestartet werden.',
+  'Failed to launch fork: {{error}}':
+    'Fork konnte nicht gestartet werden: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'Benutzer hat über /fork einen Hintergrund-Fork gestartet: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'In einen Hintergrund-Agenten verzweigt. Er übernimmt diese Unterhaltung und läuft ohne zu blockieren — verfolgen Sie ihn im Hintergrundaufgaben-Panel; er meldet sich nach Abschluss zurück.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Während eine Antwort oder ein Tool-Aufruf läuft, kann keine Verzweigung erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'No conversation to branch.': 'Keine Unterhaltung zum Verzweigen vorhanden.',

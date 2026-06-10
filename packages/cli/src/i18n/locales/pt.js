@@ -801,6 +801,23 @@ export default {
   'Resume a previous session': 'Retomar uma sessão anterior',
   'Fork the current conversation into a new session':
     'Ramificar a conversa atual em uma nova sessão',
+  'Spawn a background agent that inherits the full conversation':
+    'Iniciar um agente em segundo plano que herda toda a conversa',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Forneça uma diretiva. Uso: /fork <diretiva>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
+  'Cannot fork before the first conversation turn.':
+    'Não é possível criar um fork antes da primeira rodada da conversa.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'O comando /fork requer o feature gate de fork. Defina QWEN_CODE_ENABLE_FORK_SUBAGENT=1 para ativá-lo.',
+  'The agent tool is unavailable; cannot fork.':
+    'A ferramenta de agente está indisponível; não é possível criar um fork.',
+  'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'O usuário iniciou um fork em segundo plano via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Fork criado em um agente em segundo plano. Ele herda esta conversa e roda sem bloquear — acompanhe no painel de tarefas em segundo plano; ele informará quando terminar.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Não é possível ramificar enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'No conversation to branch.': 'Não há conversa para ramificar.',

@@ -74,6 +74,7 @@
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },

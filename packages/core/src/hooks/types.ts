@@ -58,6 +58,8 @@ export enum HookEventName {
   TodoCreated = 'TodoCreated',
   // TodoCompleted - When a todo item's status changes to 'completed' (Qwen Code specific)
   TodoCompleted = 'TodoCompleted',
+  // InstructionsLoaded - When an instruction or context file is loaded
+  InstructionsLoaded = 'InstructionsLoaded',
 }
 
 /**
@@ -255,6 +257,21 @@ export interface HookInput {
   cwd: string;
   hook_event_name: string;
   timestamp: string;
+}
+
+export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
+
+export type InstructionLoadReason = 'session_start' | 'include' | 'refresh';
+
+/**
+ * Input for InstructionsLoaded hook events
+ */
+export interface InstructionsLoadedInput extends HookInput {
+  file_path: string;
+  memory_type: InstructionMemoryType;
+  load_reason: InstructionLoadReason;
+  trigger_file_path?: string;
+  parent_file_path?: string;
 }
 
 /**

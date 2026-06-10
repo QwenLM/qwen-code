@@ -29,10 +29,13 @@ vi.mock('fs/promises', async (importOriginal) => {
   };
 });
 
-vi.mock('os', () => {
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
   const homedir = vi.fn(() => '/home/user');
   return {
+    ...actual,
     default: {
+      ...actual,
       homedir,
     },
     homedir,
@@ -247,7 +250,7 @@ describe('mcp add command', () => {
           .spyOn(process, 'exit')
           .mockImplementation((() => {
             throw new Error('process.exit called');
-          }) as (code?: number) => never);
+          }) as typeof process.exit);
 
         await expect(
           parser.parseAsync(`add --scope project ${serverName} ${command}`),

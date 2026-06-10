@@ -1256,7 +1256,7 @@ echo.
 echo   cd ^<project^>
 echo   qwen
 echo.
-echo For more information visit https://qwenlm.github.io/qwen-code
+echo For more information visit https://github.com/QwenLM/qwen-code
 
 if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
     REM Final PATH refresh is handled by the PowerShell entrypoint.

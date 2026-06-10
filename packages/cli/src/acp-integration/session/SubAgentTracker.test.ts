@@ -720,6 +720,10 @@ describe('SubAgentTracker', () => {
             type: 'text',
             text: 'Hello, this is a response from the model.',
           },
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+          }),
         }),
       );
     });

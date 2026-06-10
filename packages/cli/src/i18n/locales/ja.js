@@ -583,6 +583,23 @@ export default {
   'Resume a previous session': '前のセッションを再開する',
   'Fork the current conversation into a new session':
     '現在の会話を新しいセッションに分岐する',
+  'Spawn a background agent that inherits the full conversation':
+    '会話全体を引き継ぐバックグラウンドエージェントを起動する',
+  'Please provide a directive. Usage: /fork <directive>':
+    '指示を入力してください。使用法: /fork <指示>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
+  'Cannot fork before the first conversation turn.':
+    '最初の会話ターンの前にはフォークできません。',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    '/fork コマンドには fork フィーチャーゲートが必要です。有効にするには QWEN_CODE_ENABLE_FORK_SUBAGENT=1 を設定してください。',
+  'The agent tool is unavailable; cannot fork.':
+    'エージェントツールを利用できないため、フォークできません。',
+  'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'バックグラウンドエージェントにフォークしました。この会話を引き継ぎ、ブロックせずに実行されます — バックグラウンドタスクパネルで追跡でき、完了時に報告します。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '応答またはツール呼び出しの処理中は分岐できません。完了するか、保留中のツール呼び出しを解決してください。',
   'No conversation to branch.': '分岐できる会話がありません。',

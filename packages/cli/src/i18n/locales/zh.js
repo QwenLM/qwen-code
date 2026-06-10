@@ -836,6 +836,22 @@ export default {
   // ============================================================================
   'Resume a previous session': '恢复先前会话',
   'Fork the current conversation into a new session': '将当前对话分支到新会话',
+  'Spawn a background agent that inherits the full conversation':
+    '启动继承完整对话的后台智能体',
+  'Please provide a directive. Usage: /fork <directive>':
+    '请提供指令。用法：/fork <指令>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
+  'Cannot fork before the first conversation turn.': '首次对话轮次前无法分支。',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    '/fork 命令需要启用 fork 功能开关。设置 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以启用。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；无法分支。',
+  'Failed to launch fork: {{error}}': '启动分支失败：{{error}}',
+  'the background agent could not be started.': '后台智能体无法启动。',
+  'User launched a background fork via /fork: {{directive}}':
+    '用户通过 /fork 启动了后台分支：{{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    '已分支到后台智能体。它会继承此对话并以非阻塞方式运行，可在后台任务面板中跟踪；完成后会回报结果。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
   'No conversation to branch.': '没有可分支的对话。',

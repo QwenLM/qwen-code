@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryOptions,
   type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -133,7 +134,6 @@ export interface CliArgs {
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
-  checkpointing: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
   telemetryOtlpProtocol: string | undefined;
@@ -666,11 +666,6 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
-        .option('checkpointing', {
-          type: 'boolean',
-          description: 'Enables checkpointing of file edits',
-          default: false,
-        })
         .option('acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
@@ -695,8 +690,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -910,10 +905,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .deprecateOption(
           'sandbox-image',
           'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'checkpointing',
-          'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -1130,6 +1121,7 @@ export async function loadHierarchicalGeminiMemory(
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
   contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -1149,6 +1141,7 @@ export async function loadHierarchicalGeminiMemory(
     folderTrust,
     memoryImportFormat,
     contextRuleExcludes,
+    options,
   );
 }
 
@@ -1864,8 +1857,6 @@ export async function loadCliConfig(
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    checkpointing:
-      argv.checkpointing || settings.general?.checkpointing?.enabled,
     plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
@@ -1913,6 +1904,7 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
+    preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,

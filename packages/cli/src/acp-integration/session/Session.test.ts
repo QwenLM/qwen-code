@@ -15,7 +15,12 @@ import {
 } from './Session.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
+} from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type {
@@ -186,6 +191,7 @@ describe('Session', () => {
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
@@ -249,6 +255,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
@@ -380,8 +387,14 @@ describe('Session', () => {
 
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
-        { role: 'user', parts: [{ text: 'startup context' }] },
-        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
@@ -390,8 +403,45 @@ describe('Session', () => {
 
       const result = session.rewindToTurn(0);
 
-      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
+    });
+
+    it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
+      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
+      // user entry mid-history. Counting it as a real turn would land the
+      // rewind one entry early, dropping the reminder plus a turn's context.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      const result = session.rewindToTurn(1);
+
+      // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
+      // the second prompt (index 4). Counting the reminder would return 3.
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 4 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
     });
 
     it('rejects unreachable user turns', () => {
@@ -812,12 +862,22 @@ describe('Session', () => {
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
-        listSkills: vi
-          .fn()
-          .mockResolvedValue([
-            { name: 'code-review-expert' },
-            { name: 'verification-pack' },
-          ]),
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'code-review-expert',
+            description: 'Review code changes',
+            body: 'Review instructions',
+            filePath: '/skills/code-review-expert/SKILL.md',
+            level: 'user',
+          },
+          {
+            name: 'verification-pack',
+            description: 'Verify changes',
+            body: 'Verification instructions',
+            filePath: '/skills/verification-pack/SKILL.md',
+            level: 'project',
+          },
+        ]),
       });
 
       await session.sendAvailableCommandsUpdate();
@@ -844,9 +904,132 @@ describe('Session', () => {
           ],
           _meta: {
             availableSkills: ['code-review-expert', 'verification-pack'],
+            availableSkillDetails: [
+              {
+                name: 'code-review-expert',
+                description: 'Review code changes',
+                body: 'Review instructions',
+                filePath: '/skills/code-review-expert/SKILL.md',
+                level: 'user',
+                modelInvocable: true,
+              },
+              {
+                name: 'verification-pack',
+                description: 'Verify changes',
+                body: 'Verification instructions',
+                filePath: '/skills/verification-pack/SKILL.md',
+                level: 'project',
+                modelInvocable: true,
+              },
+            ],
           },
         },
       });
+    });
+
+    it('derives skill details from skill slash commands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'batch',
+          description: 'Run a batch operation',
+          kind: 'skill',
+          argumentHint: '<operation> <file-pattern>',
+          skillDetail: {
+            name: 'batch',
+            description: 'Run a batch operation',
+            body: 'Batch instructions',
+            level: 'bundled',
+          },
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'batch',
+              description: 'Run a batch operation',
+              input: { hint: '<operation> <file-pattern>' },
+              _meta: {
+                argumentHint: '<operation> <file-pattern>',
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive', 'non_interactive', 'acp'],
+                subcommands: [],
+                modelInvocable: false,
+              },
+            },
+          ],
+          _meta: {
+            availableSkills: ['batch'],
+            availableSkillDetails: [
+              {
+                name: 'batch',
+                description: 'Run a batch operation',
+                body: 'Batch instructions',
+                level: 'bundled',
+                modelInvocable: false,
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    it('derives availableSkills from skillManager and skill slash commands combined', async () => {
+      // Both sources contribute: a skillManager skill AND a bundled skill
+      // slash-command. The unconditional derivation must list both and keep
+      // availableSkills consistent with availableSkillDetails (the `??=` fix).
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'batch',
+          description: 'Run a batch operation',
+          kind: 'skill',
+          skillDetail: {
+            name: 'batch',
+            description: 'Run a batch operation',
+            body: 'Batch instructions',
+            level: 'bundled',
+          },
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'mgr-skill',
+            description: 'From the skill manager',
+            body: 'Manager instructions',
+            filePath: '/skills/mgr-skill/SKILL.md',
+            level: 'user',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const meta = (
+        vi.mocked(mockClient.sessionUpdate).mock.calls.at(-1)![0] as {
+          update: {
+            _meta: {
+              availableSkills: string[];
+              availableSkillDetails: Array<{ name: string }>;
+            };
+          };
+        }
+      ).update._meta;
+      expect(meta.availableSkills).toEqual(
+        expect.arrayContaining(['mgr-skill', 'batch']),
+      );
+      expect(meta.availableSkills).toHaveLength(2);
+      // Name list stays in lockstep with the details list.
+      expect([...meta.availableSkills].sort()).toEqual(
+        meta.availableSkillDetails.map((detail) => detail.name).sort(),
+      );
     });
 
     it('swallows errors and does not throw', async () => {
@@ -2014,6 +2197,253 @@ describe('Session', () => {
           sendMessageStream,
           1,
         );
+      });
+
+      it('injects drained mid-turn user messages with tool responses', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          messages: ['please also check tests'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'craft/drainMidTurnQueue',
+          { sessionId: 'test-session-id' },
+        );
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        const midTurnPart = {
+          text: '\n[User message received during tool execution]: please also check tests',
+        };
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([midTurnPart]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([midTurnPart], 'please also check tests');
+      });
+
+      it('latches mid-turn drain off after a permanent (-32601) error', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // The ACP SDK rejects with a raw JSON-RPC error object, not an Error.
+        mockClient.extMethod = vi
+          .fn()
+          .mockRejectedValue({ code: -32601, message: 'Method not found' });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+
+        // After the permanent error the latch trips, so the drain extMethod is
+        // attempted only on the first tool batch, not the second.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(1);
+      });
+
+      it('keeps mid-turn drain enabled after a transient error', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi
+          .fn()
+          .mockRejectedValue({ code: -32000, message: 'temporary failure' });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+
+        // A transient error must NOT latch: the drain is retried on the second
+        // tool batch.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(2);
+      });
+
+      it('wraps tool execution with the sleep inhibitor (acquire before execute, release after)', async () => {
+        const releaseSpy = vi.fn();
+        const acquireSpy = vi
+          .spyOn(core, 'acquireSleepInhibitor')
+          .mockReturnValue({ release: releaseSpy });
+        try {
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'file contents',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { path: '/tmp/test.txt' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          expect(executeSpy).toHaveBeenCalledTimes(1);
+          expect(acquireSpy).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.stringContaining('read_file'),
+          );
+          expect(releaseSpy).toHaveBeenCalledTimes(1);
+          // Ordering: acquire → execute → release.
+          expect(acquireSpy.mock.invocationCallOrder[0]).toBeLessThan(
+            executeSpy.mock.invocationCallOrder[0],
+          );
+          expect(executeSpy.mock.invocationCallOrder[0]).toBeLessThan(
+            releaseSpy.mock.invocationCallOrder[0],
+          );
+        } finally {
+          acquireSpy.mockRestore();
+        }
       });
 
       it('stops tool response follow-up before sending when the session token limit is exceeded', async () => {

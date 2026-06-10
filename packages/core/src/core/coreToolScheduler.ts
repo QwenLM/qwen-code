@@ -117,6 +117,7 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -2987,6 +2988,10 @@ export class CoreToolScheduler {
     // throws (e.g. shell setup failure) flow into the same catch as async
     // rejections — otherwise execSpan leaks unended and failure hooks
     // are skipped.
+    const sleepInhibitorHandle = acquireSleepInhibitor(
+      this.config,
+      `Qwen Code is executing tool ${canonicalName}`,
+    );
     try {
       let promise: Promise<ToolResult>;
       if (invocation instanceof ShellToolInvocation) {
@@ -3436,6 +3441,8 @@ export class CoreToolScheduler {
           TOOL_SPAN_STATUS_TOOL_EXCEPTION,
         );
       }
+    } finally {
+      sleepInhibitorHandle.release();
     }
   }
 

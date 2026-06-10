@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -464,6 +465,10 @@ export class LoadedSettings {
   }
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
+    // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+    if (key === 'model.name' && typeof value === 'string') {
+      value = stripRuntimeSnapshotPrefix(value);
+    }
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);

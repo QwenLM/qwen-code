@@ -18,7 +18,8 @@ type HookMatcherTargetKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'filePath';
 
 interface HookMatcherTarget {
   kind: HookMatcherTargetKind;
@@ -57,6 +58,9 @@ export function getHookMatcherTarget(
         kind: 'notificationType',
         target: context?.notificationType ?? '',
       };
+
+    case HookEventName.InstructionsLoaded:
+      return { kind: 'filePath', target: context?.filePath ?? '' };
 
     case HookEventName.UserPromptExpansion:
       // Unlike UserPromptSubmit, command expansions are matchable by the slash
@@ -177,6 +181,9 @@ export class HookPlanner {
       case 'notificationType':
         return this.matchesNotificationType(matcher, matcherTarget.target);
 
+      case 'filePath':
+        return this.matchesFilePath(matcher, matcherTarget.target);
+
       case 'sessionTrigger':
         return this.matchesSessionTrigger(matcher, matcherTarget.target);
 
@@ -195,6 +202,21 @@ export class HookPlanner {
     notificationType: string,
   ): boolean {
     return matcher === notificationType;
+  }
+
+  /**
+   * Match loaded instruction file path against matcher pattern.
+   */
+  private matchesFilePath(matcher: string, filePath: string): boolean {
+    try {
+      const regex = new RegExp(matcher);
+      return regex.test(filePath);
+    } catch (error) {
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for file path "${filePath}", falling back to exact match: ${error}`,
+      );
+      return matcher === filePath;
+    }
   }
 
   /**
@@ -304,4 +326,6 @@ export interface HookEventContext {
   agentType?: string;
   /** Error type for StopFailure matcher filtering (fieldToMatch: 'error') */
   error?: string;
+  /** Loaded instruction/context file path for InstructionsLoaded matcher filtering */
+  filePath?: string;
 }

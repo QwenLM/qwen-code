@@ -39,7 +39,6 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
-import { GitService } from '../services/gitService.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
@@ -49,6 +48,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -141,6 +141,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -151,6 +152,29 @@ vi.mock('../hooks/index.js', () => {
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),
+    createInstructionsLoadedCallback:
+      (
+        getHookSystem: () => {
+          fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
+        },
+      ) =>
+      async (notification: {
+        filePath: string;
+        memoryType: string;
+        loadReason: string;
+        triggerFilePath?: string;
+        parentFilePath?: string;
+      }) => {
+        await getHookSystem()?.fireInstructionsLoadedEvent?.(
+          notification.filePath,
+          notification.memoryType,
+          notification.loadReason,
+          {
+            triggerFilePath: notification.triggerFilePath,
+            parentFilePath: notification.parentFilePath,
+          },
+        );
+      },
   };
 });
 
@@ -234,12 +258,6 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
     ...actual,
     logRipgrepFallback: vi.fn(),
   };
-});
-
-vi.mock('../services/gitService.js', () => {
-  const GitServiceMock = vi.fn();
-  GitServiceMock.prototype.initialize = vi.fn();
-  return { GitService: GitServiceMock };
 });
 
 vi.mock('../skills/skill-manager.js', () => {
@@ -597,6 +615,9 @@ describe('Server Config (config.ts)', () => {
       mockMemoryRatio(0.85);
 
       config.getMemoryPressureMonitor()?.performCheck();
+      // Critical tier has 4 async steps, need enough microtask drains
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await Promise.resolve();
 
       expect(gcSpy).toHaveBeenCalledTimes(1);
@@ -763,34 +784,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
-    it('should throw an error if checkpointing is enabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: true,
-      });
-
-      await expect(config.initialize()).rejects.toThrow(gitError);
-    });
-
-    it('should not throw an error if checkpointing is disabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: false,
-      });
-
-      await expect(config.initialize()).resolves.toBeUndefined();
-    });
-
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
       });
 
       await expect(config.initialize()).resolves.toBeUndefined();
@@ -806,7 +802,6 @@ describe('Server Config (config.ts)', () => {
 
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         bareMode: true,
       });
 
@@ -830,7 +825,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
 
       // Default path passes `skipDiscovery: true` to createToolRegistry,
@@ -843,7 +838,7 @@ describe('Server Config (config.ts)', () => {
       const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
       try {
-        const config = new Config({ ...baseParams, checkpointing: false });
+        const config = new Config({ ...baseParams });
         await config.initialize();
 
         // Legacy escape hatch must call back into the synchronous discover
@@ -864,7 +859,7 @@ describe('Server Config (config.ts)', () => {
       // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
       // is called but the registry mock returns no manager, so the discovery
       // promise stays undefined and waitForMcpReady is a no-op.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
       await expect(config.waitForMcpReady()).resolves.toBeUndefined();
     });
@@ -874,7 +869,7 @@ describe('Server Config (config.ts)', () => {
       // failed to start" emission. Must be a no-op when there's nothing
       // to warn about, otherwise --prompt runs with no MCP config would
       // emit a spurious warning every time.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
 
@@ -885,7 +880,6 @@ describe('Server Config (config.ts)', () => {
       // `excludedMcpServers` (see `isMcpServerDisabled`).
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         mcpServers: { off: new MCPServerConfig() },
         excludedMcpServers: ['off'],
       } as ConfigParameters);
@@ -1383,6 +1377,21 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toBe('');
   });
 
+  it('Config constructor should enable runtime sleep prevention by default', () => {
+    const config = new Config(baseParams);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('Config constructor should store runtime sleep prevention override', () => {
+    const config = new Config({
+      ...baseParams,
+      preventSystemSleep: false,
+    });
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
     const config = new Config(baseParams);
 
@@ -1440,7 +1449,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
@@ -1468,7 +1477,49 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.[1]).toEqual([explicitDir]);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
+  });
+
+  it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
+    const config = new Config(baseParams);
+    const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    config['hookSystem'] = {
+      fireInstructionsLoadedEvent,
+    } as unknown as HookSystem;
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    const options = lastCall?.at(-1) as
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
+    expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
+
+    await options?.onInstructionsLoaded?.({
+      filePath: '/tmp/project/QWEN.md',
+      memoryType: 'project',
+      loadReason: 'include',
+      triggerFilePath: '/tmp/project/AGENTS.md',
+      parentFilePath: '/tmp/project/AGENTS.md',
+    });
+
+    expect(fireInstructionsLoadedEvent).toHaveBeenCalledWith(
+      '/tmp/project/QWEN.md',
+      'project',
+      'include',
+      {
+        triggerFilePath: '/tmp/project/AGENTS.md',
+        parentFilePath: '/tmp/project/AGENTS.md',
+      },
+    );
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {

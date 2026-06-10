@@ -32,12 +32,12 @@ import {
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
+  ToolNames,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
   logUserPrompt,
   logUserRetry,
-  GitService,
   UnauthorizedError,
   UserPromptEvent,
   UserRetryEvent,
@@ -90,6 +90,7 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
+import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -236,7 +237,12 @@ enum StreamProcessingStatus {
   Error,
 }
 
-const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const EDIT_TOOL_NAMES = new Set([
+  ToolNames.EDIT,
+  'replace', // legacy alias, may still arrive from older providers
+  ToolNames.WRITE_FILE,
+  ToolNames.NOTEBOOK_EDIT,
+]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 
 type BufferedStreamEvent =
@@ -386,12 +392,6 @@ export const useGeminiStream = (
     stats: sessionStates,
   } = useSessionStats();
   const storage = config.storage;
-  const gitService = useMemo(() => {
-    if (!config.getProjectRoot()) {
-      return;
-    }
-    return new GitService(config.getProjectRoot(), storage);
-  }, [config, storage]);
 
   const [toolCalls, scheduleToolCalls, markToolsAsSubmitted] =
     useReactToolScheduler(
@@ -940,10 +940,25 @@ export const useGeminiStream = (
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
         if (!prev) {
+          if (debugLogger.isEnabled()) {
+            debugLogger.debug(
+              `[THOUGHT_MERGE] New thought: ` +
+                `subjectLength=${incoming.subject?.length ?? 0}, ` +
+                `description length=${incoming.description?.length ?? 0}`,
+            );
+          }
           return incoming;
         }
         const subject = incoming.subject || prev.subject;
         const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[THOUGHT_MERGE] Accumulating thought: ` +
+              `prev length=${prev.description?.length ?? 0}, ` +
+              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `total length=${description.length}`,
+          );
+        }
         return { subject, description };
       });
     },
@@ -967,6 +982,15 @@ export const useGeminiStream = (
       }
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[THOUGHT_BUFFER] Buffer growing: ` +
+            `current=${currentThoughtBuffer.length}, ` +
+            `incoming=${thoughtText.length}, ` +
+            `total=${newThoughtBuffer.length}`,
+        );
+      }
 
       const pendingType = pendingHistoryItemRef.current?.type;
       const isPendingThought =
@@ -2027,7 +2051,7 @@ export const useGeminiStream = (
             call.status === 'awaiting_approval',
         );
 
-        // For AUTO_EDIT mode, only approve edit tools (replace, write_file)
+        // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
         if (newApprovalMode === ApprovalMode.AUTO_EDIT) {
           awaitingApprovalCalls = awaitingApprovalCalls.filter((call) =>
             EDIT_TOOL_NAMES.has(call.request.name),
@@ -2404,13 +2428,14 @@ export const useGeminiStream = (
 
   useEffect(() => {
     const saveRestorableToolCalls = async () => {
-      if (!config.getCheckpointingEnabled()) {
+      if (!config.getFileCheckpointingEnabled()) {
         return;
       }
       const restorableToolCalls = toolCalls.filter(
         (toolCall) =>
           EDIT_TOOL_NAMES.has(toolCall.request.name) &&
-          toolCall.status === 'awaiting_approval',
+          toolCall.status === 'awaiting_approval' &&
+          !toolCall.request.isClientInitiated,
       );
 
       if (restorableToolCalls.length > 0) {
@@ -2432,7 +2457,8 @@ export const useGeminiStream = (
         }
 
         for (const toolCall of restorableToolCalls) {
-          const filePath = toolCall.request.args['file_path'] as string;
+          const filePath = (toolCall.request.args['file_path'] ??
+            toolCall.request.args['notebook_path']) as string;
           if (!filePath) {
             onDebugMessage(
               `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
@@ -2441,35 +2467,7 @@ export const useGeminiStream = (
           }
 
           try {
-            if (!gitService) {
-              onDebugMessage(
-                `Checkpointing is enabled but Git service is not available. Failed to create snapshot for ${filePath}. Ensure Git is installed and working properly.`,
-              );
-              continue;
-            }
-
-            let commitHash: string | undefined;
-            try {
-              commitHash = await gitService.createFileSnapshot(
-                `Snapshot for ${toolCall.request.name}`,
-              );
-            } catch (error) {
-              onDebugMessage(
-                `Failed to create new snapshot: ${getErrorMessage(error)}. Attempting to use current commit.`,
-              );
-            }
-
-            if (!commitHash) {
-              commitHash = await gitService.getCurrentCommitHash();
-            }
-
-            if (!commitHash) {
-              onDebugMessage(
-                `Failed to create snapshot for ${filePath}. Checkpointing may not be working properly. Ensure Git is installed and the project directory is accessible.`,
-              );
-              continue;
-            }
-
+            const promptId = toolCall.request.prompt_id;
             const timestamp = new Date()
               .toISOString()
               .replace(/:/g, '-')
@@ -2493,7 +2491,7 @@ export const useGeminiStream = (
                     name: toolCall.request.name,
                     args: toolCall.request.args,
                   },
-                  commitHash,
+                  promptId,
                   filePath,
                 },
                 null,
@@ -2504,22 +2502,14 @@ export const useGeminiStream = (
             onDebugMessage(
               `Failed to create checkpoint for ${filePath}: ${getErrorMessage(
                 error,
-              )}. This may indicate a problem with Git or file system permissions.`,
+              )}. This may indicate a problem with file system permissions.`,
             );
           }
         }
       }
     };
     saveRestorableToolCalls();
-  }, [
-    toolCalls,
-    config,
-    onDebugMessage,
-    gitService,
-    history,
-    geminiClient,
-    storage,
-  ]);
+  }, [toolCalls, config, onDebugMessage, history, geminiClient, storage]);
 
   // ─── Unified notification queue (cron + background agents) ──────
   const notificationQueueRef = useRef<

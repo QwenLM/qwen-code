@@ -292,6 +292,59 @@ describe('ModelsConfig', () => {
     expect(gc.maxRetries).toBe(1);
   });
 
+  it.each([
+    { kind: 'cli' as const, detail: '--base-url' },
+    { kind: 'env' as const, envKey: 'OPENAI_BASE_URL' },
+    { kind: 'settings' as const, settingsPath: 'model.baseUrl' },
+  ])(
+    'should preserve $kind baseUrl during same-model auth refresh',
+    (baseUrlSource) => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'shared-base-model',
+            name: 'Shared Base Model',
+            baseUrl: 'https://provider-default.example.com/v1',
+            envKey: 'SHARED_BASE_URL_KEY',
+            generationConfig: {
+              timeout: 111,
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+        generationConfig: {
+          model: 'shared-base-model',
+          baseUrl: 'https://shared-proxy.example.com/v1',
+          apiKey: 'resolved-key',
+        },
+        generationConfigSources: {
+          model: { kind: 'settings', settingsPath: 'model.name' },
+          baseUrl: baseUrlSource,
+          apiKey: { kind: 'settings', settingsPath: 'model.apiKey' },
+        },
+      });
+
+      modelsConfig.syncAfterAuthRefresh(
+        AuthType.USE_OPENAI,
+        'shared-base-model',
+      );
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.model).toBe('shared-base-model');
+      expect(gc.baseUrl).toBe('https://shared-proxy.example.com/v1');
+      expect(gc.apiKey).toBe('resolved-key');
+      expect(gc.timeout).toBe(111);
+
+      const sources = modelsConfig.getGenerationConfigSources();
+      expect(sources['baseUrl']).toEqual(baseUrlSource);
+      expect(sources['timeout']?.kind).toBe('modelProviders');
+    },
+  );
+
   it('should preserve settings generationConfig when modelId does not exist in registry', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
