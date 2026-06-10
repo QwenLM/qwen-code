@@ -47,7 +47,7 @@ export function parse(yamlString: string): Record<string, unknown> {
       `Full YAML parser failed, falling back to simple parser: ${error}`,
     );
   }
-  return parseSimple(yamlString);
+  return stripNullValues(parseSimple(yamlString));
 }
 
 /**

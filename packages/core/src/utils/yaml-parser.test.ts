@@ -98,6 +98,16 @@ describe('yaml-parser', () => {
       expect(result['name']).toBe('test');
     });
 
+    it('should strip null values in fallback path same as main path', () => {
+      // Unclosed flow forces fallback to parseSimple; explicit null
+      // must be stripped so callers can use `!== undefined` consistently.
+      const input = 'name: test\noptional: null\nbroken: [unclosed';
+      const result = parse(input);
+      expect(result['name']).toBe('test');
+      expect(result['optional']).toBeUndefined();
+      expect('optional' in result).toBe(false);
+    });
+
     it('should not allow prototype pollution via simple parser fallback', () => {
       // Crafted to fail yaml.parse (unclosed flow) and trigger parseSimple,
       // where __proto__ as a nested-object key could pollute the prototype.
