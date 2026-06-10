@@ -339,13 +339,34 @@ jobs:
     outputs:
       verdict: '${{ steps.verdict.outputs.verdict }}'
     steps:
+      # The debounce wait can be up to an hour — the PR may have been closed,
+      # merged, or converted to draft in the meantime. Re-check before
+      # spending a runner slot on it (port of the old delay job's re-check).
+      - name: 'Re-check PR state after debounce'
+        id: 'pr_state'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        run: |
+          set -euo pipefail
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping review: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_review=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 'Checkout base branch'
+        if: steps.pr_state.outputs.should_review == 'true'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
 
       - name: 'Run review'
+        if: steps.pr_state.outputs.should_review == 'true'
         id: 'run'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
@@ -399,7 +420,15 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          SHOULD_REVIEW: '${{ steps.pr_state.outputs.should_review }}'
         run: |
+          if [ "$SHOULD_REVIEW" != "true" ]; then
+            # PR was closed/merged/drafted during the debounce wait — the
+            # review didn't run, so downstream stages must not act on it.
+            echo "verdict=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Check if the bot's latest review requested changes
           REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json latestReviews --jq '
@@ -507,6 +536,7 @@ jobs:
       (needs.product-decision.result == 'success' ||
        needs.resolve.outputs.trigger_type == 'review_only') &&
       (needs.review.result == 'success' || needs.review.result == 'skipped') &&
+      needs.review.outputs.verdict != 'skip' &&
       (needs.tmux-testing.result == 'success' || needs.tmux-testing.result == 'skipped')
     timeout-minutes: 10
     concurrency:
