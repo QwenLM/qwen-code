@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { writeOsc52 } from './clipboardUtils.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -127,16 +128,6 @@ export const copyToClipboard = async (text: string): Promise<void> => {
   // - stdout: 'inherit' since we don't need to capture the command's output on success.
   // - stderr: 'pipe' to capture error messages (e.g., "command not found") for better error handling.
   const linuxOptions: SpawnOptions = { stdio: ['pipe', 'inherit', 'pipe'] };
-
-  /** Write text to clipboard via OSC 52 escape sequence (works over SSH). */
-  const writeOsc52 = (text: string): void => {
-    const base64 = Buffer.from(text, 'utf-8').toString('base64');
-    // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
-    const sequence = `\x1b]52;c;${base64}\x07`;
-    // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
-    const stream = process.stdout.isTTY ? process.stdout : process.stderr;
-    stream.write(sequence);
-  };
 
   switch (process.platform) {
     case 'win32':

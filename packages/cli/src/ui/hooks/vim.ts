@@ -14,6 +14,7 @@ import {
 } from '../contexts/VimModeContext.js';
 import { execFile, execFileSync } from 'child_process';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
+import { writeOsc52 } from '../utils/clipboardUtils.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -163,16 +164,6 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
 // Cached Linux clipboard tool to avoid repeated probe on every call.
 let linuxReadCmd: string[] | null | undefined;
 let linuxWriteCmd: string[] | null | undefined;
-
-/** Write text to clipboard via OSC 52 escape sequence (works over SSH). */
-function writeOsc52(text: string): void {
-  const base64 = Buffer.from(text, 'utf-8').toString('base64');
-  // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
-  const sequence = `\x1b]52;c;${base64}\x07`;
-  // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
-  const stream = process.stdout.isTTY ? process.stdout : process.stderr;
-  stream.write(sequence);
-}
 
 /** Read system clipboard */
 function readClipboard(): string {

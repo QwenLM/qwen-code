@@ -10,6 +10,7 @@ import {
   saveClipboardImage,
   cleanupOldClipboardImages,
   resetLinuxClipboardTool,
+  writeOsc52,
 } from './clipboardUtils.js';
 import { EventEmitter } from 'node:events';
 
@@ -332,7 +333,7 @@ describe('clipboardUtils', () => {
             child.emit('close', 0);
           });
         } else if (callCount === 2) {
-          // wl-paste --type image/png: succeeds (png path taken)
+          // wl-paste --type image/png: attempted but O_EXCL fails (dir doesn't exist)
           spawnCalls.push({ command, args });
           process.nextTick(() => {
             child.emit('close', 0);
@@ -344,14 +345,13 @@ describe('clipboardUtils', () => {
 
       await saveClipboardImage('/tmp/test');
 
-      // With O_EXCL in saveFromCommand, the save path fails because
-      // mkdir is mocked and the directory doesn't exist. The list-types
-      // spawn verifies the correct format detection (both png and bmp
-      // reported). The branching decision is verified by the fact that
-      // python3 was not called in the list-types phase — the format
-      // selection only happens in saveFileWithWlPaste.
-      expect(spawnCalls).toHaveLength(1);
+      // Two spawn calls:
+      // 1. --list-types (detects both png and bmp)
+      // 2. --no-newline --type image/png (attempted, fails early due to O_EXCL)
+      expect(spawnCalls).toHaveLength(2);
       expect(spawnCalls[0].args).toContain('--list-types');
+      expect(spawnCalls[1].args).toContain('--type');
+      expect(spawnCalls[1].args).toContain('image/png');
     });
   });
 
@@ -576,6 +576,123 @@ describe('clipboardUtils', () => {
       mockSpawn.mockReturnValue(mockChild2);
       const result2 = await clipboardHasImage();
       expect(result2).toBe(false);
+    });
+  });
+
+  describe('writeOsc52', () => {
+    const originalStdoutIsTTY = process.stdout.isTTY;
+    const originalStderrIsTTY = process.stderr.isTTY;
+    let stdoutWriteMock: ReturnType<typeof vi.fn>;
+    let stderrWriteMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      stdoutWriteMock = vi.fn();
+      stderrWriteMock = vi.fn();
+      // Mock isTTY and write
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      process.stdout.write = stdoutWriteMock;
+      process.stderr.write = stderrWriteMock;
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: originalStderrIsTTY,
+        configurable: true,
+      });
+      vi.restoreAllMocks();
+    });
+
+    it('should write OSC 52 sequence to stdout when stdout is TTY', () => {
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stderrWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should write OSC 52 sequence to stderr when stdout is not TTY but stderr is', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stderrWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stdoutWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should return false and not write when neither stdout nor stderr is TTY', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      Object.defineProperty(process.stderr, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+
+      const result = writeOsc52('hello world');
+
+      expect(result).toBe(false);
+      expect(stdoutWriteMock).not.toHaveBeenCalled();
+      expect(stderrWriteMock).not.toHaveBeenCalled();
+    });
+
+    it('should handle special characters in text', () => {
+      const text = 'special: \n\t\r"\'\\';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+    });
+
+    it('should handle empty string', () => {
+      const text = '';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const expectedSequence = `\x1b]52;c;${expectedBase64}\x07`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+    });
+
+    it('should return false on write error', () => {
+      stdoutWriteMock.mockImplementation(() => {
+        throw new Error('write failed');
+      });
+
+      const result = writeOsc52('hello');
+
+      expect(result).toBe(false);
     });
   });
 });

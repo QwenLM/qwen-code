@@ -287,7 +287,7 @@ describe('commandUtils', () => {
         );
       });
 
-      it('should throw error when both xclip and xsel are not found', async () => {
+      it('should fall back to OSC 52 when both xclip and xsel are not found', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
@@ -322,9 +322,9 @@ describe('commandUtils', () => {
 
           return child as unknown as ReturnType<typeof spawn>;
         });
-        await expect(copyToClipboard(testText)).rejects.toThrow(
-          'Please ensure xclip or xsel is installed and configured.',
-        );
+
+        // Should not throw, should use OSC 52 fallback
+        await copyToClipboard(testText);
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
         expect(mockSpawn).toHaveBeenNthCalledWith(

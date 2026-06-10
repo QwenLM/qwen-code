@@ -15,6 +15,32 @@ const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 const PROCESS_TIMEOUT_MS = 5000;
 
+/**
+ * Write text to clipboard via OSC 52 escape sequence (works over SSH).
+ * @param text - Text to copy to clipboard
+ * @returns true if sequence was written, false if no TTY available
+ */
+export function writeOsc52(text: string): boolean {
+  try {
+    const base64 = Buffer.from(text, 'utf-8').toString('base64');
+    // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
+    const sequence = `\x1b]52;c;${base64}\x07`;
+    // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
+    const stream = process.stdout.isTTY ? process.stdout : process.stderr;
+    if (!stream.isTTY) {
+      debugLogger.warn(
+        'OSC 52 clipboard requires a TTY; stdout/stderr not connected to terminal',
+      );
+      return false;
+    }
+    stream.write(sequence);
+    return true;
+  } catch (e) {
+    debugLogger.warn('writeOsc52 failed:', e);
+    return false;
+  }
+}
+
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
 
