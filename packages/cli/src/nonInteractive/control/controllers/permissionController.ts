@@ -472,7 +472,20 @@ export class PermissionController extends BaseController {
         '[PermissionController] Teammate approval failed:',
         error,
       );
-      await event.respond(ToolConfirmationOutcome.Cancel);
+      // Best-effort: respond() can itself reject (the teammate's
+      // scheduler re-throws, or the teammate terminated mid-request).
+      // Swallow it so handleTeammateApproval never rejects out of its
+      // own error path — call sites fire-and-forget this method, and
+      // an escaped rejection here is an unhandledRejection that can
+      // take down an SDK session.
+      try {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+      } catch (cancelError) {
+        this.debugLogger.error(
+          '[PermissionController] Teammate approval cancel failed:',
+          cancelError,
+        );
+      }
     }
   }
 

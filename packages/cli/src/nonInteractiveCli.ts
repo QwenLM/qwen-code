@@ -370,11 +370,17 @@ export async function runNonInteractive(
         // Route teammate tool approvals through the session's
         // permission channel.
         if (options.controlService) {
-          // Stream-json mode: SDK handles approvals.
+          // Stream-json mode: SDK handles approvals. Catch instead of
+          // void: the handler's own error path re-issues a respond()
+          // that can reject (teammate terminated mid-request), and a
+          // voided rejection here is an unhandledRejection in an SDK
+          // session — mirror the headless listeners below.
           approvalListener = (event) => {
-            void options.controlService!.permission.handleTeammateApproval(
-              event,
-            );
+            options
+              .controlService!.permission.handleTeammateApproval(event)
+              .catch((err) => {
+                debugLogger.warn('Teammate approval handling failed:', err);
+              });
           };
         } else {
           // Headless / non-stream-json mode: there is no UI to
