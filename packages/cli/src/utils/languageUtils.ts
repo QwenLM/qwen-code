@@ -182,6 +182,29 @@ export function updateOutputLanguageFile(
 }
 
 /**
+ * Writes the output-language file to the correct (config-bound) path and,
+ * when no path was known yet (first-time creation), registers the global
+ * default on the config so subsequent reads are consistent.
+ *
+ * This encapsulates the get-path → write → register-fallback sequence
+ * that was previously duplicated across acpAgent, languageCommand, and
+ * SettingsDialog.
+ */
+export function writeOutputLanguageAndRegisterPath(
+  settingValue: string,
+  config?: {
+    getOutputLanguageFilePath(): string | undefined;
+    setOutputLanguageFilePath(p: string): void;
+  } | null,
+): void {
+  const targetPath = config?.getOutputLanguageFilePath();
+  updateOutputLanguageFile(settingValue, targetPath);
+  if (!targetPath) {
+    config?.setOutputLanguageFilePath(getOutputLanguageFilePath());
+  }
+}
+
+/**
  * Initializes the LLM output language rule file on application startup.
  *
  * @param outputLanguage - The output language setting value (e.g., 'auto', 'Chinese', etc.)

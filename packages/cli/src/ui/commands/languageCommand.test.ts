@@ -87,6 +87,8 @@ describe('languageCommand', () => {
       services: {
         config: {
           getModel: vi.fn().mockReturnValue('test-model'),
+          getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+          setOutputLanguageFilePath: vi.fn(),
         },
         settings: {
           merged: {},
@@ -461,6 +463,8 @@ describe('languageCommand', () => {
         }
       ).config = {
         getModel: vi.fn().mockReturnValue('test-model'),
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
         getGeminiClient,
       };
@@ -502,6 +506,8 @@ describe('languageCommand', () => {
         }
       ).config = {
         getModel: vi.fn().mockReturnValue('test-model'),
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
         // No getGeminiClient — refreshSystemInstruction must not be reached.
       };

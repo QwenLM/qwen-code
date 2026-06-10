@@ -232,6 +232,12 @@ export interface CapabilitiesEnvelope {
      */
     permission?: PermissionPolicy;
   };
+  /**
+   * Language codes accepted by `POST /session/:id/language`.
+   * Additive — older daemons omit this field; clients should
+   * treat absence as "unknown" rather than "none".
+   */
+  supportedLanguages?: string[];
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

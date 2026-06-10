@@ -122,6 +122,7 @@ import {
   resolveOutputLanguage,
   updateOutputLanguageFile,
   getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
 } from '../utils/languageUtils.js';
@@ -2931,16 +2932,12 @@ class QwenAgent implements Agent {
             ? OUTPUT_LANGUAGE_AUTO
             : resolved;
 
-          const targetPath = session.getConfig().getOutputLanguageFilePath();
-
           let fileWriteOk = false;
           try {
-            updateOutputLanguageFile(settingValue, targetPath);
-            if (!targetPath) {
-              session
-                .getConfig()
-                .setOutputLanguageFilePath(getOutputLanguageFilePath());
-            }
+            writeOutputLanguageAndRegisterPath(
+              settingValue,
+              session.getConfig(),
+            );
             fileWriteOk = true;
           } catch (err) {
             debugLogger.warn('Failed to write output-language.md:', err);
@@ -2959,19 +2956,26 @@ class QwenAgent implements Agent {
                 err,
               );
             }
-            const writtenPath = targetPath ?? getOutputLanguageFilePath();
+            const writtenPath =
+              session.getConfig().getOutputLanguageFilePath() ??
+              getOutputLanguageFilePath();
             const allSessions = [...this.sessions.values()];
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
                 const cfg = s.getConfig();
-                const sessionPath = cfg.getOutputLanguageFilePath();
-                if (sessionPath && sessionPath !== writtenPath) {
-                  updateOutputLanguageFile(settingValue, sessionPath);
-                }
-                if (!sessionPath) {
-                  const fallback = getOutputLanguageFilePath();
-                  updateOutputLanguageFile(settingValue, fallback);
-                  cfg.setOutputLanguageFilePath(fallback);
+                try {
+                  const sessionPath = cfg.getOutputLanguageFilePath();
+                  if (sessionPath && sessionPath !== writtenPath) {
+                    updateOutputLanguageFile(settingValue, sessionPath);
+                  }
+                  if (!sessionPath) {
+                    writeOutputLanguageAndRegisterPath(settingValue, cfg);
+                  }
+                } catch (err) {
+                  debugLogger.warn(
+                    'Failed to write output-language.md for session:',
+                    err,
+                  );
                 }
                 await cfg.refreshHierarchicalMemory();
                 await cfg.getGeminiClient()?.refreshSystemInstruction();

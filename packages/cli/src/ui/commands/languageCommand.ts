@@ -27,8 +27,7 @@ import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
   resolveOutputLanguage,
-  updateOutputLanguageFile,
-  getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath,
 } from '../../utils/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -126,13 +125,7 @@ async function setOutputLanguage(
     // Save 'auto' as-is to settings, or normalize other values
     const settingValue = isAuto ? OUTPUT_LANGUAGE_AUTO : resolved;
 
-    const targetPath = context.services.config?.getOutputLanguageFilePath?.();
-    updateOutputLanguageFile(settingValue, targetPath);
-    if (!targetPath) {
-      context.services.config?.setOutputLanguageFilePath?.(
-        getOutputLanguageFilePath(),
-      );
-    }
+    writeOutputLanguageAndRegisterPath(settingValue, context.services.config);
 
     if (context.services.settings?.setValue) {
       try {
