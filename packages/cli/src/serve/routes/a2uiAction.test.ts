@@ -1,0 +1,184 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import express from 'express';
+import request from 'supertest';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  registerA2uiActionRoutes,
+  findFromSettingsFile,
+  usableServerConfig,
+  type A2uiActionArgs,
+  type A2uiActionResult,
+  type McpServerCell,
+  type McpServerConfigLike,
+} from './a2uiAction.js';
+
+function makeApp(opts: {
+  servers?: McpServerCell[];
+  serversError?: boolean;
+  callAction?: (
+    cfg: McpServerConfigLike,
+    args: A2uiActionArgs,
+  ) => Promise<A2uiActionResult>;
+  workspace?: string;
+}) {
+  const app = express();
+  app.use(express.json());
+  const calls: A2uiActionArgs[] = [];
+  const configs: McpServerConfigLike[] = [];
+  registerA2uiActionRoutes(app, {
+    boundWorkspace: opts.workspace ?? '/nonexistent-workspace',
+    mutate: () => (_req, _res, next) => next(),
+    safeBody: (req) =>
+      req.body && typeof req.body === 'object' ? req.body : {},
+    getMcpServers: async () => {
+      if (opts.serversError) throw new Error('status unavailable');
+      return opts.servers ?? [];
+    },
+    callAction:
+      opts.callAction ??
+      (async (cfg, args) => {
+        configs.push(cfg);
+        calls.push(args);
+        return { commands: [{ version: 'v0.9' }], fallback: 'ok' };
+      }),
+  });
+  return { app, calls, configs };
+}
+
+const STDIO_SERVER: McpServerCell = {
+  name: 'a2ui-ui',
+  mcpStatus: 'connected',
+  config: { command: 'node', args: ['server.mjs'] },
+};
+
+describe('POST /session/:id/a2ui-action', () => {
+  it('rejects a missing or empty name with 400', async () => {
+    const { app } = makeApp({ servers: [STDIO_SERVER] });
+    await request(app).post('/session/s1/a2ui-action').send({}).expect(400);
+    await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: '  ' })
+      .expect(400);
+  });
+
+  it('returns 503 when no a2ui server is discoverable anywhere', async () => {
+    const { app } = makeApp({
+      servers: [{ name: 'github', config: { command: 'x' } }],
+    });
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' })
+      .expect(503);
+    expect(res.body.error).toMatch(/no a2ui MCP server/);
+  });
+
+  it('proxies to the action tool and returns its continuation', async () => {
+    const { app, calls } = makeApp({ servers: [STDIO_SERVER] });
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: ' submit ', surfaceId: 'ui_1', context: { a: 1 } })
+      .expect(200);
+    expect(res.body).toEqual({
+      commands: [{ version: 'v0.9' }],
+      fallback: 'ok',
+    });
+    expect(calls).toEqual([
+      { name: 'submit', surfaceId: 'ui_1', context: { a: 1 } },
+    ]);
+  });
+
+  it('strips a non-object/array context instead of forwarding it', async () => {
+    const { app, calls } = makeApp({ servers: [STDIO_SERVER] });
+    await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go', context: [1, 2, 3] })
+      .expect(200);
+    expect(calls[0].context).toBeUndefined();
+  });
+
+  it('prefers a connected server over a merely-listed one', async () => {
+    const disconnected: McpServerCell = {
+      name: 'a2ui-old',
+      mcpStatus: 'disconnected',
+      config: { command: 'old' },
+    };
+    const { app, configs } = makeApp({ servers: [disconnected, STDIO_SERVER] });
+    await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' })
+      .expect(200);
+    expect(configs[0]).toEqual(STDIO_SERVER.config);
+  });
+
+  it('falls back to workspace settings when daemon status is unavailable', async () => {
+    const ws = await fsp.mkdtemp(path.join(os.tmpdir(), 'a2ui-action-test-'));
+    await fsp.mkdir(path.join(ws, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(ws, '.qwen', 'settings.json'),
+      JSON.stringify({
+        mcpServers: { 'my-a2ui': { command: 'node', args: ['x.mjs'] } },
+      }),
+    );
+    try {
+      const { app, configs } = makeApp({ serversError: true, workspace: ws });
+      await request(app)
+        .post('/session/s1/a2ui-action')
+        .send({ name: 'go' })
+        .expect(200);
+      expect(configs[0]).toEqual({ command: 'node', args: ['x.mjs'] });
+    } finally {
+      await fsp.rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('maps proxy failures to a generic 502 without leaking details', async () => {
+    const errSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction: async () => {
+        throw new Error('spawn /secret/path failed');
+      },
+    });
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' })
+      .expect(502);
+    expect(res.body).toEqual({ error: 'a2ui action call failed' });
+    expect(JSON.stringify(res.body)).not.toContain('/secret/path');
+    errSpy.mockRestore();
+  });
+});
+
+describe('helpers', () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('usableServerConfig accepts stdio or streamable-http shapes only', () => {
+    expect(usableServerConfig({ command: 'node' })).toBe(true);
+    expect(usableServerConfig({ httpUrl: 'https://x/mcp' })).toBe(true);
+    expect(usableServerConfig({})).toBe(false);
+    expect(usableServerConfig(undefined)).toBe(false);
+  });
+
+  it('findFromSettingsFile returns null for a missing or unparseable file', async () => {
+    expect(await findFromSettingsFile('/definitely-missing-dir')).toBeNull();
+    const ws = await fsp.mkdtemp(path.join(os.tmpdir(), 'a2ui-action-test-'));
+    await fsp.mkdir(path.join(ws, '.qwen'), { recursive: true });
+    await fsp.writeFile(path.join(ws, '.qwen', 'settings.json'), '{not json');
+    try {
+      expect(await findFromSettingsFile(ws)).toBeNull();
+    } finally {
+      await fsp.rm(ws, { recursive: true, force: true });
+    }
+  });
+});

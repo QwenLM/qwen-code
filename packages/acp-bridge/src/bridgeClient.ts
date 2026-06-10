@@ -409,22 +409,26 @@ export class BridgeClient implements Client {
     // original tool frame so raw command JSON never reaches transcripts/SSE.
     const a2ui = extractA2uiToolUpdate(params);
     if (a2ui) {
-      events.publish({
-        type: 'session_update',
-        data: {
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: 'a2ui',
-            a2ui: {
-              surfaceId: a2ui.surfaceId,
-              callId: a2ui.callId,
-              commands: a2ui.commands,
+      // One frame per surface: tool results carrying commands for multiple
+      // surfaces are split so every consumer sees a single-surface frame.
+      for (const surface of a2ui.surfaces) {
+        events.publish({
+          type: 'session_update',
+          data: {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'a2ui',
+              a2ui: {
+                surfaceId: surface.surfaceId,
+                callId: a2ui.callId,
+                commands: surface.commands,
+              },
+              _meta: { serverTimestamp: Date.now(), source: 'a2ui-bridge' },
             },
-            _meta: { serverTimestamp: Date.now(), source: 'a2ui-bridge' },
           },
-        },
-        ...originator,
-      });
+          ...originator,
+        });
+      }
       params = a2ui.sanitizedParams;
     }
     events.publish({
@@ -1159,9 +1163,11 @@ export class BridgeClient implements Client {
  * "a2ui" is treated as a UI server, so new tools added to that server need no
  * change here); tool-name matching is the fallback for legacy frames/replays
  * where serverId is absent.
+ *
+ * Exported for unit testing.
  */
 const A2UI_TOOL_RE = /(^|__)(present_ui|present_choices|a2ui_action)$/;
-function isA2uiToolMeta(meta?: {
+export function isA2uiToolMeta(meta?: {
   toolName?: string;
   serverId?: string;
 }): boolean {
@@ -1177,8 +1183,10 @@ function isA2uiToolMeta(meta?: {
 /**
  * Extract the balanced JSON array at the start of the text; returns
  * [command array, remaining fallback text], or null when no array parses.
+ *
+ * Exported for unit testing.
  */
-function splitA2uiText(raw: string): [unknown[], string] | null {
+export function splitA2uiText(raw: string): [unknown[], string] | null {
   const s = raw.replace(/^\s+/, '');
   if (s[0] !== '[') return null;
   let depth = 0;
@@ -1213,20 +1221,39 @@ function splitA2uiText(raw: string): [unknown[], string] | null {
   }
 }
 
-interface A2uiExtraction {
-  surfaceId: string;
+/** Read the surfaceId off any of the four A2UI command kinds. */
+function surfaceIdOf(c: unknown): string | undefined {
+  const cmd = c as {
+    createSurface?: { surfaceId?: string };
+    updateComponents?: { surfaceId?: string };
+    updateDataModel?: { surfaceId?: string };
+    deleteSurface?: { surfaceId?: string };
+  };
+  return (
+    cmd?.createSurface?.surfaceId ??
+    cmd?.updateComponents?.surfaceId ??
+    cmd?.updateDataModel?.surfaceId ??
+    cmd?.deleteSurface?.surfaceId
+  );
+}
+
+export interface A2uiExtraction {
+  /** Commands grouped per surface, in first-appearance order. */
+  surfaces: Array<{ surfaceId: string; commands: unknown[] }>;
   callId: string | undefined;
-  commands: unknown[];
   /** Sanitized copy of the notification: the A2UI JSON in the tool-result text is replaced with the fallback text. */
   sanitizedParams: SessionNotification;
 }
 
 /**
  * If the notification is a `tool_call_update` from an A2UI tool whose result
- * carries an A2UI command array, extract the commands and produce a sanitized
- * notification; otherwise return null (the notification is forwarded as-is).
+ * carries an A2UI command array, extract the commands (grouped per surface)
+ * and produce a sanitized notification; otherwise return null (the
+ * notification is forwarded as-is).
+ *
+ * Exported for unit testing.
  */
-function extractA2uiToolUpdate(
+export function extractA2uiToolUpdate(
   params: SessionNotification,
 ): A2uiExtraction | null {
   const update = (params as { update?: Record<string, unknown> }).update;
@@ -1255,24 +1282,25 @@ function extractA2uiToolUpdate(
   if (!split) return null;
   const [commands, fallback] = split;
 
-  // surfaceId may arrive on any of the four command kinds (updateDataModel-only
-  // / deleteSurface-only tool results are legal too).
-  let surfaceId: string | undefined;
+  // Group commands per surface (updateDataModel-only / deleteSurface-only
+  // tool results are legal too). Commands without a surfaceId are dropped —
+  // every A2UI server->client command carries one per the spec.
+  const order: string[] = [];
+  const grouped = new Map<string, unknown[]>();
   for (const c of commands) {
-    const cmd = c as {
-      createSurface?: { surfaceId?: string };
-      updateComponents?: { surfaceId?: string };
-      updateDataModel?: { surfaceId?: string };
-      deleteSurface?: { surfaceId?: string };
-    };
-    surfaceId =
-      cmd?.createSurface?.surfaceId ??
-      cmd?.updateComponents?.surfaceId ??
-      cmd?.updateDataModel?.surfaceId ??
-      cmd?.deleteSurface?.surfaceId;
-    if (surfaceId) break;
+    const sid = surfaceIdOf(c);
+    if (!sid) continue;
+    if (!grouped.has(sid)) {
+      grouped.set(sid, []);
+      order.push(sid);
+    }
+    grouped.get(sid)!.push(c);
   }
-  if (!surfaceId) return null;
+  if (order.length === 0) return null;
+  const surfaces = order.map((sid) => ({
+    surfaceId: sid,
+    commands: grouped.get(sid)!,
+  }));
 
   // Sanitize: JSON -> fallback text. The model already received the raw text
   // inside the ACP child; what is being cleaned here is the SSE/transcript copy.
@@ -1296,12 +1324,11 @@ function extractA2uiToolUpdate(
     sanitizedUpdate['rawOutput'] = sanitizedText;
   }
   return {
-    surfaceId,
+    surfaces,
     callId:
       typeof update['toolCallId'] === 'string'
         ? update['toolCallId']
         : undefined,
-    commands,
     sanitizedParams: {
       ...(params as Record<string, unknown>),
       update: sanitizedUpdate,
