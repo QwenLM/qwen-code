@@ -77,7 +77,15 @@ export interface ClaudeAgentConfig {
 
 export type ClaudePluginSource =
   | { source: 'github'; repo: string }
-  | { source: 'url'; url: string };
+  | { source: 'url'; url: string }
+  | {
+      // A plugin that lives in a subdirectory of a git repository.
+      source: 'git-subdir';
+      url: string;
+      path: string;
+      ref?: string;
+      sha?: string;
+    };
 
 export interface ClaudeMarketplacePluginConfig extends ClaudePluginConfig {
   source: string | ClaudePluginSource;
@@ -821,6 +829,25 @@ async function resolvePluginSource(
       await cloneFromGit(installMetadata, pluginDir);
     }
     return pluginDir;
+  }
+
+  if (source.source === 'git-subdir') {
+    // The plugin lives in a subdirectory of a git repository. Clone the repo
+    // (pinned to the provided ref/sha when present) and return the subdir.
+    const installMetadata: ExtensionInstallMetadata = {
+      source: source.url,
+      type: 'git',
+      ref: source.ref || source.sha,
+      originSource: 'Claude',
+    };
+    await cloneFromGit(installMetadata, pluginDir);
+    const subDir = path.join(pluginDir, source.path);
+    if (!fs.existsSync(subDir)) {
+      throw new Error(
+        `Plugin subdirectory "${source.path}" not found in ${source.url}`,
+      );
+    }
+    return subDir;
   }
 
   throw new Error(`Unsupported plugin source type: ${JSON.stringify(source)}`);
