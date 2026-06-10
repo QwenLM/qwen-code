@@ -4187,6 +4187,7 @@ describe('Session', () => {
             'auto-denied-acp',
             'classifier_blocked',
             signal,
+            'auto-denied-acp',
           );
         });
 
@@ -4224,6 +4225,7 @@ describe('Session', () => {
             'auto-denied-acp',
             'classifier_unavailable',
             expect.any(AbortSignal),
+            'auto-denied-acp',
           );
         });
 

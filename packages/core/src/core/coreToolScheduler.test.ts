@@ -1601,6 +1601,7 @@ describe('CoreToolScheduler', () => {
       'auto-denied',
       'classifier_blocked',
       abortController.signal,
+      'auto-denied',
     );
     expect(execute).not.toHaveBeenCalled();
     const completedCalls = onAllToolCallsComplete.mock
@@ -1725,6 +1726,7 @@ describe('CoreToolScheduler', () => {
       'auto-unavailable',
       'classifier_unavailable',
       abortController.signal,
+      'auto-unavailable',
     );
     expect(execute).not.toHaveBeenCalled();
   });
@@ -4570,6 +4572,7 @@ describe('CoreToolScheduler request queueing', () => {
       'pending-protected-write',
       'classifier_blocked',
       expect.any(AbortSignal),
+      'pending-protected-write',
     );
     const statuses = onToolCallsUpdate.mock.calls
       .flatMap((call) => call[0] as ToolCall[])
