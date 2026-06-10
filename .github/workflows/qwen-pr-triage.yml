@@ -84,7 +84,7 @@ jobs:
           # Check if fork
           IS_FORK=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isCrossRepository --jq '.isCrossRepository')
 
-          # Auto-triggered PRs (opened/synchronize) get a 10-minute delay
+          # Auto-triggered PRs (opened/synchronize) get a 1-hour delay
           # via environment protection rule to debounce rapid pushes.
           # Manual triggers skip the delay.
           if [ "$TRIGGER_TYPE" = "full" ] && [ "$EVENT_NAME" = "pull_request_target" ]; then
@@ -111,7 +111,9 @@ jobs:
     concurrency:
       group: 'qwen-pr-triage-product-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
-    runs-on: 'ubuntu-latest'
+    # Self-hosted: product-decision reads local Claude Code source on the
+    # runner for product-direction reasoning (not available on GitHub-hosted).
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
@@ -120,34 +122,46 @@ jobs:
 
       - name: 'Run product-decision'
         id: 'run'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
-          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          REPOSITORY: '${{ github.repository }}'
-          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
-        with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          settings_json: |-
-            {
-              "coreTools": [
-                "run_shell_command(gh pr view)",
-                "run_shell_command(gh pr diff)",
-                "run_shell_command(gh api)",
-                "run_shell_command(gh label list)",
-                "run_shell_command(curl)",
-                "run_shell_command(mkdir)",
-                "run_shell_command(cat)",
-                "read_file",
-                "grep_search",
-                "glob"
-              ],
-              "sandbox": false,
-              "maxSessionTurns": 25
-            }
-          prompt: '/product-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+          # Local Claude Code checkout on the runner — the product-decision
+          # skill reads CHANGELOG + source signals from here for product
+          # direction reasoning. Empty if the runner var is unset (skill
+          # falls back to fetching the remote CHANGELOG).
+          CLAUDE_CODE_SRC: '${{ vars.CLAUDE_CODE_SRC_PATH }}'
+        run: |
+          set -euo pipefail
+
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+
+          set +e
+          timeout --kill-after=10s 12m qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json
+          EXIT_CODE=$?
+          set -e
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "::warning::Product decision timed out after 12 minutes"
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::warning::Product decision exited with code $EXIT_CODE"
+          fi
 
       - name: 'Read verdict from skill output'
         if: always()
@@ -179,8 +193,8 @@ jobs:
          needs.product-decision.outputs.verdict == 'pass') ||
         needs.resolve.outputs.trigger_type == 'review_only'
       )
-    timeout-minutes: 45
-    # 10-minute wait timer (via environment protection rule) debounces
+    timeout-minutes: 90
+    # 1-hour wait timer (via environment protection rule) debounces
     # rapid consecutive pushes. Empty string = no environment = no delay.
     environment: '${{ needs.resolve.outputs.review_environment }}'
     concurrency:
@@ -199,14 +213,6 @@ jobs:
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
-
-      # Cache node_modules to avoid repeated npm ci (biggest time sink)
-      - name: 'Cache node_modules'
-        uses: 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' # v4.2.3
-        with:
-          path: 'node_modules'
-          key: "review-deps-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'review-deps-'
 
       - name: 'Run review'
         id: 'run'
@@ -236,7 +242,7 @@ jobs:
           fi
 
           set +e
-          timeout --kill-after=10s 35m qwen \
+          timeout --kill-after=10s 85m qwen \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
@@ -246,7 +252,7 @@ jobs:
           set -e
 
           if [ "$EXIT_CODE" -eq 124 ]; then
-            echo "::warning::Review timed out after 35 minutes"
+            echo "::warning::Review timed out after 85 minutes"
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Review exited with code $EXIT_CODE"
           fi

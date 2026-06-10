@@ -59,13 +59,23 @@ Ask the hard questions before reading code:
 - Is it within qwen-code's core mission, or does it pull focus?
 - "Can do" ≠ "should do" — technically feasible doesn't mean we should ship it.
 
-Check CHANGELOG as a reference signal:
+Check Claude Code as a reference signal. A local checkout lives on the runner
+at `$CLAUDE_CODE_SRC` — prefer it, since it lets you grep both the CHANGELOG and
+the actual source, not just release notes:
 
 ```bash
-curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
+if [ -n "${CLAUDE_CODE_SRC:-}" ] && [ -d "$CLAUDE_CODE_SRC" ]; then
+  # CHANGELOG signal
+  grep -iC1 "<keywords>" "$CLAUDE_CODE_SRC/CHANGELOG.md"
+  # Source signal — does the area already exist / how is it shaped there?
+  grep -rinC1 "<keywords>" "$CLAUDE_CODE_SRC/src" 2>/dev/null | head -40
+else
+  # Fallback: remote CHANGELOG only (CLAUDE_CODE_SRC unset, e.g. GitHub-hosted)
+  curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
+fi
 ```
 
-- **Found** → cite version/line as supporting signal.
+- **Found** → cite version/line (or source path) as supporting signal.
 - **Not found** → not a rejection. The area may still be relevant.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
