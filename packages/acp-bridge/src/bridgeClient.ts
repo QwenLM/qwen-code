@@ -398,12 +398,39 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    const originator = entry?.activePromptOriginatorClientId
+      ? { originatorClientId: entry.activePromptOriginatorClientId }
+      : {};
+    // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
+    // the A2UI command JSON flattened by core (EmbeddedResource -> text, the
+    // application/a2ui+json mime is dropped, so detection keys off the
+    // server/tool identity). Extract the commands, publish them as a separate
+    // `sessionUpdate:'a2ui'` frame for renderer clients, and sanitize the
+    // original tool frame so raw command JSON never reaches transcripts/SSE.
+    const a2ui = extractA2uiToolUpdate(params);
+    if (a2ui) {
+      events.publish({
+        type: 'session_update',
+        data: {
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'a2ui',
+            a2ui: {
+              surfaceId: a2ui.surfaceId,
+              callId: a2ui.callId,
+              commands: a2ui.commands,
+            },
+            _meta: { serverTimestamp: Date.now(), source: 'a2ui-bridge' },
+          },
+        },
+        ...originator,
+      });
+      params = a2ui.sanitizedParams;
+    }
     events.publish({
       type: 'session_update',
       data: params,
-      ...(entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+      ...originator,
     });
   }
 
@@ -1116,4 +1143,168 @@ export class BridgeClient implements Client {
     }
     return { content };
   }
+}
+
+// ---------------------------------------------------------------------------
+// A2UI-over-MCP extraction.
+// Detection has to key off the server/tool identity rather than mime type:
+// core's transformResourceBlock flattens EmbeddedResource blocks to `{text}`
+// and drops the application/a2ui+json mimeType, so by the time the result
+// reaches the bridge it is plain text of the form
+// `<A2UI command JSON array>\n<fallback text>`.
+// ---------------------------------------------------------------------------
+
+/**
+ * A2UI tool detection: prefer `_meta.serverId` (a server whose name contains
+ * "a2ui" is treated as a UI server, so new tools added to that server need no
+ * change here); tool-name matching is the fallback for legacy frames/replays
+ * where serverId is absent.
+ */
+const A2UI_TOOL_RE = /(^|__)(present_ui|present_choices|a2ui_action)$/;
+function isA2uiToolMeta(meta?: {
+  toolName?: string;
+  serverId?: string;
+}): boolean {
+  if (!meta) return false;
+  if (
+    typeof meta.serverId === 'string' &&
+    meta.serverId.toLowerCase().includes('a2ui')
+  )
+    return true;
+  return typeof meta.toolName === 'string' && A2UI_TOOL_RE.test(meta.toolName);
+}
+
+/**
+ * Extract the balanced JSON array at the start of the text; returns
+ * [command array, remaining fallback text], or null when no array parses.
+ */
+function splitA2uiText(raw: string): [unknown[], string] | null {
+  const s = raw.replace(/^\s+/, '');
+  if (s[0] !== '[') return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let end = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '[') depth++;
+    else if (c === ']') {
+      depth--;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end < 0) return null;
+  try {
+    const arr = JSON.parse(s.slice(0, end));
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    return [arr, s.slice(end).trim()];
+  } catch {
+    return null;
+  }
+}
+
+interface A2uiExtraction {
+  surfaceId: string;
+  callId: string | undefined;
+  commands: unknown[];
+  /** Sanitized copy of the notification: the A2UI JSON in the tool-result text is replaced with the fallback text. */
+  sanitizedParams: SessionNotification;
+}
+
+/**
+ * If the notification is a `tool_call_update` from an A2UI tool whose result
+ * carries an A2UI command array, extract the commands and produce a sanitized
+ * notification; otherwise return null (the notification is forwarded as-is).
+ */
+function extractA2uiToolUpdate(
+  params: SessionNotification,
+): A2uiExtraction | null {
+  const update = (params as { update?: Record<string, unknown> }).update;
+  if (!update || update['sessionUpdate'] !== 'tool_call_update') return null;
+  const meta = update['_meta'] as
+    | { toolName?: string; serverId?: string }
+    | undefined;
+  if (!isA2uiToolMeta(meta)) return null;
+
+  // The result text lives at content[].content.text (ACP ToolCallContent
+  // wraps one level); rawOutput mirrors the same text.
+  const content = update['content'];
+  if (!Array.isArray(content)) return null;
+  let split: [unknown[], string] | null = null;
+  let hitIndex = -1;
+  for (let i = 0; i < content.length; i++) {
+    const inner = (content[i] as { content?: { text?: unknown } })?.content;
+    if (typeof inner?.text === 'string') {
+      split = splitA2uiText(inner.text);
+      if (split) {
+        hitIndex = i;
+        break;
+      }
+    }
+  }
+  if (!split) return null;
+  const [commands, fallback] = split;
+
+  // surfaceId may arrive on any of the four command kinds (updateDataModel-only
+  // / deleteSurface-only tool results are legal too).
+  let surfaceId: string | undefined;
+  for (const c of commands) {
+    const cmd = c as {
+      createSurface?: { surfaceId?: string };
+      updateComponents?: { surfaceId?: string };
+      updateDataModel?: { surfaceId?: string };
+      deleteSurface?: { surfaceId?: string };
+    };
+    surfaceId =
+      cmd?.createSurface?.surfaceId ??
+      cmd?.updateComponents?.surfaceId ??
+      cmd?.updateDataModel?.surfaceId ??
+      cmd?.deleteSurface?.surfaceId;
+    if (surfaceId) break;
+  }
+  if (!surfaceId) return null;
+
+  // Sanitize: JSON -> fallback text. The model already received the raw text
+  // inside the ACP child; what is being cleaned here is the SSE/transcript copy.
+  const sanitizedText = fallback || '[A2UI surface rendered]';
+  const sanitizedContent = content.map((block, i) =>
+    i === hitIndex
+      ? {
+          ...(block as Record<string, unknown>),
+          content: {
+            ...((block as { content?: Record<string, unknown> }).content ?? {}),
+            text: sanitizedText,
+          },
+        }
+      : block,
+  );
+  const sanitizedUpdate: Record<string, unknown> = {
+    ...update,
+    content: sanitizedContent,
+  };
+  if (typeof update['rawOutput'] === 'string') {
+    sanitizedUpdate['rawOutput'] = sanitizedText;
+  }
+  return {
+    surfaceId,
+    callId:
+      typeof update['toolCallId'] === 'string'
+        ? update['toolCallId']
+        : undefined,
+    commands,
+    sanitizedParams: {
+      ...(params as Record<string, unknown>),
+      update: sanitizedUpdate,
+    } as SessionNotification,
+  };
 }

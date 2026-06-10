@@ -110,6 +110,7 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
 import {
   createRateLimiter,
   setRateLimiter,
@@ -672,7 +673,7 @@ function resolveDaemonTelemetryRoute(
     return { route: 'POST /sessions/delete' };
   }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -1531,6 +1532,26 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+
+  // A2UI action inbound (the upstream half of A2UI-over-MCP): user
+  // interactions from web clients are proxied to the UI MCP server's
+  // standard `action` tool.
+  registerA2uiActionRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    // UI-server discovery uses the daemon's workspace MCP status, which
+    // includes servers registered at runtime.
+    getMcpServers: async (req) => {
+      const ctx = buildWorkspaceCtx(req, 'POST /session/:id/a2ui-action');
+      const status = await workspace.getWorkspaceMcpStatus(ctx);
+      return (status.servers ?? []) as Array<{
+        name: string;
+        mcpStatus?: string;
+        config?: Record<string, unknown>;
+      }>;
+    },
+  });
 
   // -- auth device-flow routes ---------------------------------------------
 
