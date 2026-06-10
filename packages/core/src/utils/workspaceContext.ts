@@ -214,8 +214,13 @@ export class WorkspaceContext {
   }
 
   applyRootDirectories(resolved: ResolvedWorkspaceDirectories): void {
-    const newDirectories = resolved.directories;
-    const newInitialDirectories = resolved.initialDirectories;
+    const newDirectories = new Set(resolved.directories);
+    const newInitialDirectories = new Set(resolved.initialDirectories);
+    for (const existing of this.directories) {
+      if (!this.initialDirectories.has(existing)) {
+        newDirectories.add(existing);
+      }
+    }
     const directoriesChanged =
       newDirectories.size !== this.directories.size ||
       ![...newDirectories].every((d) => this.directories.has(d));
