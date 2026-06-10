@@ -944,27 +944,6 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
-
-        // Snapshot file state before this turn (mirrors client.ts:1488).
-        try {
-          await this.config.getFileHistoryService().makeSnapshot(promptId);
-          try {
-            const latestSnapshot = this.config
-              .getFileHistoryService()
-              .getSnapshots()
-              .at(-1);
-            if (latestSnapshot) {
-              this.config
-                .getChatRecordingService()
-                ?.recordFileHistorySnapshot(latestSnapshot);
-            }
-          } catch (e) {
-            debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-          }
-        } catch (e) {
-          debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-        }
-
         const parentContext = extractDaemonTraceContext(params);
 
         return await withInteractionSpan(
@@ -1078,6 +1057,27 @@ export class Session implements SessionContext {
               if (additionalContext) {
                 parts = [...parts, { text: additionalContext }];
               }
+            }
+
+            // Snapshot file state before this turn (mirrors client.ts:1488).
+            // Placed after slash-command and hook early-returns so locally
+            // handled commands (e.g. /help) don't create phantom snapshots
+            // that would desync the snapshot index from the real turn count.
+            try {
+              const fileHistoryService = this.config.getFileHistoryService();
+              await fileHistoryService.makeSnapshot(promptId);
+              try {
+                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+                if (latestSnapshot) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordFileHistorySnapshot(latestSnapshot);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
