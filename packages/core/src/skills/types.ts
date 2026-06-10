@@ -233,6 +233,24 @@ export function parsePathsField(
 export const SKILL_NAME_PATTERN = /^[\p{L}\p{N}_:.-]+$/u;
 
 /**
+ * Parse the `allowedTools` field from skill frontmatter.
+ * Returns `undefined` when the field is omitted. Throws when the field is
+ * present but not an array.
+ */
+export function parseAllowedToolsField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['allowedTools'];
+  if (raw == null) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"allowedTools" must be an array');
+  }
+  return raw.map(String);
+}
+
+/**
  * Validate that a skill `name` is safe to embed into prompts and reminders
  * verbatim. Throws with a descriptive message if not — the surrounding
  * parser converts this into a `parseErrors` entry and skips the skill,
