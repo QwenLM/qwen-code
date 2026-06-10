@@ -272,6 +272,8 @@ describe('InputPrompt', () => {
       showSuggestions: false,
       visibleStartIndex: 0,
       isPerfectMatch: false,
+      dismissed: false,
+      setDismissed: vi.fn(),
       midInputGhostText: null,
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),

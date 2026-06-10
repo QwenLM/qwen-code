@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect } from 'react';
+import { useCallback, useMemo, useEffect, useRef } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -37,6 +37,8 @@ export interface UseCommandCompletionReturn {
   showSuggestions: boolean;
   isLoadingSuggestions: boolean;
   isPerfectMatch: boolean;
+  dismissed: boolean;
+  setDismissed: React.Dispatch<React.SetStateAction<boolean>>;
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
@@ -70,6 +72,7 @@ export function useCommandCompletion(
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -77,6 +80,7 @@ export function useCommandCompletion(
     setIsLoadingSuggestions,
     setIsPerfectMatch,
     setVisibleStartIndex,
+    setDismissed,
 
     resetCompletionState,
     navigateUp,
@@ -172,6 +176,15 @@ export function useCommandCompletion(
     setVisibleStartIndex(0);
   }, [suggestions, setActiveSuggestionIndex, setVisibleStartIndex]);
 
+  // Clear dismissed flag when the completion query changes (user typed more).
+  const prevQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (query !== prevQueryRef.current) {
+      setDismissed(false);
+      prevQueryRef.current = query;
+    }
+  }, [query, setDismissed]);
+
   useEffect(() => {
     if (
       completionMode === CompletionMode.IDLE ||
@@ -179,6 +192,11 @@ export function useCommandCompletion(
       !active
     ) {
       resetCompletionState();
+      return;
+    }
+    // If the user explicitly dismissed the dropdown (e.g., via Enter accept),
+    // do not re-open it until the query changes again.
+    if (dismissed) {
       return;
     }
     // Show suggestions if we are loading OR if there are results to display.
@@ -189,8 +207,10 @@ export function useCommandCompletion(
     isLoadingSuggestions,
     reverseSearchActive,
     active,
+    dismissed,
     resetCompletionState,
     setShowSuggestions,
+    setDismissed,
   ]);
 
   const handleAutocomplete = useCallback(
@@ -319,6 +339,8 @@ export function useCommandCompletion(
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
+    setDismissed,
     setActiveSuggestionIndex,
     setShowSuggestions,
     resetCompletionState,

@@ -77,6 +77,8 @@ function createCompletion(
     showSuggestions: false,
     isLoadingSuggestions: false,
     isPerfectMatch: false,
+    dismissed: false,
+    setDismissed: vi.fn(),
     setActiveSuggestionIndex: vi.fn(),
     setShowSuggestions: vi.fn(),
     resetCompletionState: vi.fn(),

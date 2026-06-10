@@ -16,12 +16,14 @@ export interface UseCompletionReturn {
   showSuggestions: boolean;
   isLoadingSuggestions: boolean;
   isPerfectMatch: boolean;
+  dismissed: boolean;
   setSuggestions: React.Dispatch<React.SetStateAction<Suggestion[]>>;
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setVisibleStartIndex: React.Dispatch<React.SetStateAction<number>>;
   setIsLoadingSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   setIsPerfectMatch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
+  setDismissed: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
@@ -36,6 +38,7 @@ export function useCompletion(): UseCompletionReturn {
   const [isLoadingSuggestions, setIsLoadingSuggestions] =
     useState<boolean>(false);
   const [isPerfectMatch, setIsPerfectMatch] = useState<boolean>(false);
+  const [dismissed, setDismissed] = useState<boolean>(false);
 
   const resetCompletionState = useCallback(() => {
     setSuggestions([]);
@@ -44,6 +47,7 @@ export function useCompletion(): UseCompletionReturn {
     setShowSuggestions(false);
     setIsLoadingSuggestions(false);
     setIsPerfectMatch(false);
+    setDismissed(true);
   }, []);
 
   const navigateUp = useCallback(() => {
@@ -111,6 +115,7 @@ export function useCompletion(): UseCompletionReturn {
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -118,6 +123,7 @@ export function useCompletion(): UseCompletionReturn {
     setVisibleStartIndex,
     setIsLoadingSuggestions,
     setIsPerfectMatch,
+    setDismissed,
 
     resetCompletionState,
     navigateUp,
