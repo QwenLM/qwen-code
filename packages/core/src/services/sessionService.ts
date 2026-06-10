@@ -166,18 +166,6 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
-/**
- * Service for managing chat sessions.
- *
- * This service handles:
- * - Listing sessions with pagination (ordered by mtime)
- * - Loading full session data for resumption
- * - Removing sessions
- *
- * Sessions are stored as JSONL files, one per session.
- * File location: ~/.qwen/tmp/<project_id>/chats/
- */
-
 async function copyFileHistoryBackups(
   sourceSessionId: string,
   targetSessionId: string,
@@ -229,6 +217,17 @@ async function copyFileHistoryBackups(
   );
 }
 
+/**
+ * Service for managing chat sessions.
+ *
+ * This service handles:
+ * - Listing sessions with pagination (ordered by mtime)
+ * - Loading full session data for resumption
+ * - Removing sessions
+ *
+ * Sessions are stored as JSONL files, one per session.
+ * File location: ~/.qwen/tmp/<project_id>/chats/
+ */
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;

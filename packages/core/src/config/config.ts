@@ -3606,6 +3606,7 @@ export class Config {
 
   enableFileCheckpointing(): void {
     this.fileCheckpointingEnabled = true;
+    this.fileHistoryService = undefined;
   }
 
   getFileHistoryService(): FileHistoryService {
