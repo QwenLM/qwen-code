@@ -118,6 +118,35 @@ function CategoryRow({
   );
 }
 
+const DETAIL_COMMAND = '/context detail';
+
+function DetailHint({
+  hint,
+  onShowDetail,
+}: {
+  hint: string;
+  onShowDetail?: () => void;
+}) {
+  // The clickable part is located by the literal command inside the
+  // translated hint, so a translation that drops it (or a missing
+  // callback) degrades to the plain text line.
+  const idx = onShowDetail ? hint.indexOf(DETAIL_COMMAND) : -1;
+  if (idx < 0) return <div className={styles.hint}>{hint}</div>;
+  return (
+    <div className={styles.hint}>
+      {hint.slice(0, idx)}
+      <button
+        type="button"
+        className={styles.detailCommand}
+        onClick={onShowDetail}
+      >
+        {DETAIL_COMMAND}
+      </button>
+      {hint.slice(idx + DETAIL_COMMAND.length)}
+    </div>
+  );
+}
+
 function DetailRow({
   name,
   tokens,
@@ -222,8 +251,11 @@ function SkillsSection({
 
 export function ContextUsageMessage({
   status,
+  onShowDetail,
 }: {
   status: DaemonSessionContextUsageStatus;
+  /** Run /context detail, exactly like typing it. */
+  onShowDetail?: () => void;
 }) {
   const { t } = useI18n();
   const { usage } = status;
@@ -387,7 +419,10 @@ export function ContextUsageMessage({
           />
         </>
       ) : (
-        <div className={styles.hint}>{t('contextUsage.detailHint')}</div>
+        <DetailHint
+          hint={t('contextUsage.detailHint')}
+          onShowDetail={onShowDetail}
+        />
       )}
     </div>
   );

@@ -1116,6 +1116,36 @@ export function App({
     handleSetMode(next);
   }, [currentMode, handleSetMode]);
 
+  // Shared by the /context slash command and the status-bar context
+  // indicator. Echoes the command as a local user message first — that also
+  // makes the transcript follow the tail (MessageList Rule 4), so the panel
+  // is revealed even when the click comes while scrolled up.
+  const showContextUsage = useCallback(
+    (commandText: string, detail: boolean) => {
+      store.appendLocalUserMessage(commandText);
+      sessionActions
+        .getContextUsage({ detail })
+        .then((result) => {
+          store.dispatch([
+            {
+              type: 'status',
+              text: serializeContextUsageMessage(result),
+            },
+          ]);
+        })
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to load context usage');
+        });
+    },
+    [store, sessionActions, reportError],
+  );
+
+  // Stable reference: this travels through the memoized MessageList →
+  // MessageItem chain, so an inline closure would defeat their memo.
+  const handleShowContextDetail = useCallback(() => {
+    showContextUsage('/context detail', true);
+  }, [showContextUsage]);
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1415,22 +1445,10 @@ export function App({
               contextArg === 'detail' ||
               contextArg === '-d'
             ) {
-              store.appendLocalUserMessage(text);
-              sessionActions
-                .getContextUsage({
-                  detail: contextArg === 'detail' || contextArg === '-d',
-                })
-                .then((result) => {
-                  store.dispatch([
-                    {
-                      type: 'status',
-                      text: serializeContextUsageMessage(result),
-                    },
-                  ]);
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load context usage');
-                });
+              showContextUsage(
+                text,
+                contextArg === 'detail' || contextArg === '-d',
+              );
               return true;
             }
           }
@@ -1718,6 +1736,7 @@ export function App({
       runVisibleRecap,
       runVisibleBtw,
       selectedLanguage,
+      showContextUsage,
       t,
       workspaceActions,
     ],
@@ -2082,6 +2101,7 @@ export function App({
                   messages={displayMessages}
                   pendingApproval={pendingApproval}
                   onConfirm={handleConfirm}
+                  onShowContextDetail={handleShowContextDetail}
                   catchingUp={connection.catchingUp}
                   workspaceCwd={connection.workspaceCwd || ''}
                   welcomeHeader={welcomeHeader}
@@ -2234,6 +2254,7 @@ export function App({
                   onSelectModel={() =>
                     setModelInlineMode((v) => (v ? null : 'main'))
                   }
+                  onShowContext={() => showContextUsage('/context', false)}
                 />
               ))}
 
