@@ -727,8 +727,10 @@ async function truncateModelFacingToolContent(
 }> {
   const textContent = getTruncatableTextContent(content);
   if (textContent === undefined) {
+    const serializedLength = safeJsonStringify(content)?.length;
     debugLogger.debug(
-      `Skipping model-facing tool output truncation for non-text content from ${toolName}.`,
+      `Skipping model-facing tool output truncation for non-text content from ${toolName}. ` +
+        `Serialized size estimate: ${serializedLength ?? 'unknown'} characters.`,
     );
     return { content, wasTruncated: false };
   }

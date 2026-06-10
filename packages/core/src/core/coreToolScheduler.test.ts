@@ -97,6 +97,7 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
+const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
@@ -105,7 +106,7 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => ({
-      debug: vi.fn(),
+      debug: debugLoggerDebugSpy,
       info: debugLoggerInfoSpy,
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
@@ -518,6 +519,7 @@ async function waitForStatus(
 describe('CoreToolScheduler', () => {
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
+    debugLoggerDebugSpy.mockClear();
     runSideQueryMock.mockReset();
   });
 
@@ -8928,6 +8930,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    debugLoggerDebugSpy.mockClear();
   });
 
   it('truncates large string output at the scheduler before it enters history', async () => {
@@ -9269,7 +9272,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
     expect(output).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(output).toContain('[Note: Could not save full output to file]');
+    expect(output).toContain('[Note: Could not save full tool output to file]');
     expect(output).toContain('... [CONTENT TRUNCATED] ...');
     expect(output).not.toContain('A'.repeat(1000));
   });
@@ -9323,7 +9326,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
     expect(output).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(output).toContain('[Note: Could not save full output to file]');
+    expect(output).toContain('[Note: Could not save full tool output to file]');
     expect(output).not.toContain('H'.repeat(200));
   });
 
@@ -9360,6 +9363,9 @@ describe('CoreToolScheduler model-facing output truncation', () => {
     ).toEqual(partOutput);
     expect(completedCall.response.contentLength).toBeUndefined();
     expect(truncateSpy).not.toHaveBeenCalled();
+    expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Serialized size estimate:'),
+    );
   });
 });
 

@@ -109,7 +109,7 @@ describe('truncateAndSaveToFile', () => {
 
     // Extract just the truncated part (after the instructions)
     const truncatedPart = result.content.split(
-      'Truncated part of the output:\n',
+      'Truncated part of the tool output:\n',
     )[1];
     // The truncated content (excluding the instructions header) should
     // be roughly within the character threshold.
@@ -164,7 +164,7 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('Truncated part of the output:');
+    expect(result.content).toContain('Truncated part of the tool output:');
     expect(result.content).toContain(expectedTruncated);
   });
 
@@ -199,7 +199,7 @@ describe('truncateAndSaveToFile', () => {
 
     // The truncated content should stay near the character threshold
     const truncatedPart = result.content.split(
-      'Truncated part of the output:\n',
+      'Truncated part of the tool output:\n',
     )[1];
     expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
   });
@@ -228,7 +228,7 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain('... [CONTENT TRUNCATED] ...');
 
     const truncatedPart = result.content.split(
-      'Truncated part of the output:\n',
+      'Truncated part of the tool output:\n',
     )[1];
     // Should stay within ~1.5x the threshold even with variable line lengths
     expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
@@ -253,7 +253,7 @@ describe('truncateAndSaveToFile', () => {
     expect(result.saveErrorCode).toBe('Error');
     expect(result.saveErrorMessage).toBe('File write failed');
     expect(result.content).toContain(
-      '[Note: Could not save full output to file]',
+      '[Note: Could not save full tool output to file]',
     );
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
@@ -304,7 +304,7 @@ describe('truncateAndSaveToFile', () => {
       'To read the complete tool output, use the read_file tool with the absolute file path above',
     );
     expect(result.content).toContain(
-      'The truncated output below shows the beginning and end of the content',
+      'The truncated tool output below shows the beginning and end of the content',
     );
   });
 
@@ -393,8 +393,25 @@ describe('formatTruncatedContent', () => {
       saveFailed: true,
     });
 
-    expect(result).toContain('[Note: Could not save full output to file]');
+    expect(result).toContain('[Note: Could not save full tool output to file]');
     expect(result).not.toContain('saved to:');
+  });
+
+  it('uses the content label throughout the truncation envelope', () => {
+    const result = formatTruncatedContent('head\n...\ntail', {
+      contentLabel: 'PostToolUse hook context',
+      outputFile: '/tmp/hook-context.output',
+    });
+
+    expect(result).toContain(
+      'PostToolUse hook context was too large and has been truncated.',
+    );
+    expect(result).toContain(
+      'The full posttooluse hook context has been saved to:',
+    );
+    expect(result).toContain('The truncated posttooluse hook context below');
+    expect(result).toContain('Truncated part of the posttooluse hook context:');
+    expect(result).not.toContain('Truncated part of the output:');
   });
 });
 

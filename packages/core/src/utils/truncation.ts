@@ -12,6 +12,9 @@ import type { Config } from '../config/config.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
+// This first-line marker is also used as a sentinel by the tool scheduler to
+// avoid re-truncating content that was already converted into a saved-output
+// envelope. Keep UX copy changes in sync with that sentinel check.
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated.';
 
@@ -111,13 +114,13 @@ export function formatTruncatedContent(
     ? `The full ${completeContentLabel} has been saved to: ${options.outputFile}
 To read the complete ${completeContentLabel}, use the ${ReadFileTool.Name} tool with the absolute file path above.`
     : options.saveFailed
-      ? '[Note: Could not save full output to file]'
+      ? `[Note: Could not save full ${completeContentLabel} to file]`
       : undefined;
 
   return `${prefix}
-${saveNotice ? `${saveNotice}\n` : ''}The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+${saveNotice ? `${saveNotice}\n` : ''}The truncated ${completeContentLabel} below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
 
-Truncated part of the output:
+Truncated part of the ${completeContentLabel}:
 ${truncatedContent}`;
 }
 
