@@ -1668,6 +1668,65 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.getPendingApprovals('bg-appr-7')).toHaveLength(0);
     });
 
+    it('auto-rejects parked approvals when the agent fails', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fail'));
+      registry.addPendingApproval('bg-appr-fail', makeApproval('c1', respond));
+
+      registry.fail('bg-appr-fail', 'boom');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fail')).toHaveLength(0);
+    });
+
+    it('auto-rejects parked approvals on finalizeCancelled', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-fc'));
+      registry.addPendingApproval('bg-appr-fc', makeApproval('c1', respond));
+
+      registry.finalizeCancelled('bg-appr-fc', 'partial');
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.getPendingApprovals('bg-appr-fc')).toHaveLength(0);
+    });
+
+    it('rejects parked approvals on reset so a session switch never strands a respond()', () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-reset'));
+      registry.addPendingApproval('bg-appr-reset', makeApproval('c1', respond));
+
+      registry.reset();
+
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(registry.get('bg-appr-reset')).toBeUndefined();
+    });
+
+    it('re-parks the approval and reports failure when respond() rejects', async () => {
+      const respond = vi.fn(async () => {
+        throw new Error('frames torn down');
+      });
+      const onChange = vi.fn();
+      registry.register(makeRegistration('bg-appr-retry'));
+      registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
+      registry.setApprovalChangeCallback(onChange);
+
+      const ok = await registry.resolvePendingApproval(
+        'bg-appr-retry',
+        'c1',
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      // respond() failed → the call is still parked in the scheduler, so the
+      // prompt must reappear (not vanish while the agent silently hangs).
+      expect(ok).toBe(false);
+      expect(registry.getPendingApprovals('bg-appr-retry')).toHaveLength(1);
+      expect(registry.getPendingApprovals('bg-appr-retry')[0].callId).toBe(
+        'c1',
+      );
+      // Two emissions: optimistic clear, then the re-park.
+      expect(onChange).toHaveBeenCalledTimes(2);
+    });
+
     it('auto-rejects parked approvals on cancel', () => {
       const respond = vi.fn(async () => {});
       registry.register(makeRegistration('bg-appr-8'));

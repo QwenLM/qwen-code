@@ -243,6 +243,16 @@ export function resolveSubagentApprovalMode(
     return approvalModeToPermissionMode(parentApprovalMode);
   }
 
+  // The subagent-only `bubble` mode is not an ApprovalMode enum member; it
+  // resolves to Default run behavior (tool calls require confirmation). The
+  // background launch path is what turns deny into surface-to-parent. Handle
+  // it explicitly rather than relying on approvalModeToPermissionMode's
+  // `default:` fall-through, so adding a real ApprovalMode.BUBBLE later can't
+  // silently change this.
+  if (agentApprovalMode === BUBBLE_APPROVAL_MODE) {
+    return PermissionMode.Default;
+  }
+
   // Agent definition's mode applies if set
   if (agentApprovalMode) {
     const resolved = approvalModeToPermissionMode(

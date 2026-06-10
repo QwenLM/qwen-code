@@ -610,6 +610,12 @@ export class BackgroundTaskRegistry {
   finalizeCancellationIfPending(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'cancelled' || entry.notified) return;
+    // Defensive: the entry is already 'cancelled', which only cancel() /
+    // finalizeCancelled() / abandon() produce, and all of those reject
+    // parked approvals — so this is normally a no-op. Kept so the
+    // one-notification-per-agent shutdown fallback can never settle an
+    // entry while a parked respond() callback is still outstanding.
+    this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
   }
@@ -684,6 +690,22 @@ export class BackgroundTaskRegistry {
         `Failed to resolve background approval for ${agentId}/${callId}:`,
         error,
       );
+      // respond() never reached the scheduler, so the tool call is still
+      // parked in awaiting_approval. Re-add the approval (if the entry is
+      // still live and the call hasn't since been re-parked) and re-emit so
+      // the prompt reappears and the user can retry — otherwise the UI would
+      // show "nothing pending" while the agent silently hangs.
+      const live = this.agents.get(agentId);
+      if (
+        live &&
+        live.isBackgrounded &&
+        live.status === 'running' &&
+        !(live.pendingApprovals ?? []).some((a) => a.callId === callId)
+      ) {
+        live.pendingApprovals = [...(live.pendingApprovals ?? []), approval];
+        this.emitApprovalChange(live);
+      }
+      return false;
     }
     return true;
   }
@@ -816,8 +838,14 @@ export class BackgroundTaskRegistry {
       | AgentTask
       | undefined;
     if (!firstEntry) return;
-    for (const agentId of this.agents.keys()) {
-      this.wakeMessageWaiters(agentId);
+    for (const entry of this.agents.values()) {
+      // Defensive: callers (session switch via /resume, /clear) gate on
+      // hasBlockingBackgroundWork() and so only reach reset() once every
+      // entry is terminal — at which point parked approvals were already
+      // rejected. Reject again here so a future caller that drops the guard
+      // can't strand a parked respond() callback (a hung agent loop).
+      this.rejectPendingApprovals(entry);
+      this.wakeMessageWaiters(entry.agentId);
     }
     this.agents.clear();
     this.emitStatusChange(firstEntry);
