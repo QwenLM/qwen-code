@@ -1097,5 +1097,50 @@ describe('UiTelemetryService', () => {
       expect(metricsB.tools.byName['Write']?.count).toBe(1);
       expect(metricsB.tools.byName['Read']?.count).toBe(1);
     });
+
+    it('resetSession should not clear global metrics (replay scenario)', () => {
+      // Simulate: session A active, session B being resumed
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.addEvent(makeApiEvent('m', 200), SESSION_B);
+
+      // Resume session B: resetSession only clears B's bucket
+      service.resetSession(SESSION_B);
+
+      // Session A untouched
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(100);
+
+      // Session B cleared
+      const metricsB = service.getMetricsForSession(SESSION_B);
+      expect(metricsB.models).toEqual({});
+
+      // Global NOT cleared (still has both sessions' original data)
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(300);
+
+      // Replay events into session B
+      service.addEvent(makeApiEvent('m', 50), SESSION_B);
+
+      // Session B has only replayed data
+      const metricsB2 = service.getMetricsForSession(SESSION_B);
+      expect(metricsB2.models['m']?.tokens.prompt).toBe(50);
+
+      // Global accumulated the replay too
+      const global2 = service.getMetrics();
+      expect(global2.models['m']?.tokens.prompt).toBe(350);
+    });
+
+    it('#closedSessions should be bounded', () => {
+      // Add more than MAX_CLOSED_SESSIONS
+      for (let i = 0; i < 1005; i++) {
+        service.addEvent(makeApiEvent('m', 1), `session-${i}`);
+        service.removeSession(`session-${i}`);
+      }
+      // Late event to oldest session should now create a new bucket
+      // (oldest was evicted from closedSessions)
+      service.addEvent(makeApiEvent('m', 99), 'session-0');
+      const metrics = service.getMetricsForSession('session-0');
+      expect(metrics.models['m']?.tokens.prompt).toBe(99);
+    });
   });
 });

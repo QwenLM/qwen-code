@@ -143,6 +143,7 @@ const createInitialMetrics = (): SessionMetrics => ({
 });
 
 export class UiTelemetryService extends EventEmitter {
+  static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
   #closedSessions: Set<string> = new Set();
@@ -214,6 +215,10 @@ export class UiTelemetryService extends EventEmitter {
   removeSession(sessionId: string): void {
     this.#sessionMetrics.delete(sessionId);
     this.#closedSessions.add(sessionId);
+    if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
+      const oldest = this.#closedSessions.values().next().value;
+      if (oldest) this.#closedSessions.delete(oldest);
+    }
   }
 
   #accumulateEvent(metrics: SessionMetrics, event: UiEvent): boolean {
