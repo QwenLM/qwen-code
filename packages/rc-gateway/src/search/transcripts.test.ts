@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { searchTranscripts } from './transcripts.js';
+import { searchTranscripts, SearchTimeoutError } from './transcripts.js';
 
 interface Rec {
   uuid: string;
@@ -287,5 +287,51 @@ describe('searchTranscripts', () => {
     const hits = await searchTranscripts(dir, 'oauth*');
     // matches 'oauthClient' (token start) but NOT 'reoauth' (mid-token).
     expect(hits.map((h) => h.eventId)).toEqual(['a']);
+  });
+});
+
+describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
+  beforeEach(() => {
+    writeJsonl('s1.jsonl', [
+      textRec({ uuid: 'a', sessionId: 's1', type: 'assistant' }, 'oauth here'),
+    ]);
+    writeJsonl('s2.jsonl', [
+      textRec({ uuid: 'b', sessionId: 's2', type: 'assistant' }, 'oauth there'),
+    ]);
+  });
+
+  it('throws SearchTimeoutError when the injected clock passes the deadline', async () => {
+    // start=0 → deadline=2000; every later read is far past it → the
+    // file-loop-top check throws before completing the scan.
+    let calls = 0;
+    const now = () => (calls++ === 0 ? 0 : 1_000_000);
+    await expect(
+      searchTranscripts(dir, 'oauth', { timeoutMs: 2000, now }),
+    ).rejects.toBeInstanceOf(SearchTimeoutError);
+  });
+
+  it('INERT: timeoutMs unset → never throws even with a huge clock', async () => {
+    // Proves commit 2 cannot throw into the still-uncatching route: with no
+    // timeoutMs there is no deadline and the clock is never consulted.
+    const now = () => 1_000_000;
+    const hits = await searchTranscripts(dir, 'oauth', { now });
+    expect(hits.map((h) => h.eventId).sort()).toEqual(['a', 'b']);
+  });
+
+  it('within budget (clock never passes the deadline) → completes normally', async () => {
+    const now = () => 0; // always 0 → never > deadline (2000)
+    const hits = await searchTranscripts(dir, 'oauth', {
+      timeoutMs: 2000,
+      now,
+    });
+    expect(hits.map((h) => h.eventId).sort()).toEqual(['a', 'b']);
+  });
+
+  it('a non-finite/zero/negative timeoutMs disables the timeout (no throw)', async () => {
+    const now = () => 1_000_000;
+    for (const timeoutMs of [Number.NaN, 0, -1, Infinity]) {
+      const hits = await searchTranscripts(dir, 'oauth', { timeoutMs, now });
+      expect(hits).toHaveLength(2);
+    }
   });
 });

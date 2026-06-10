@@ -28,6 +28,28 @@ export interface SearchOptions {
   sessionId?: string;
   /** Max hits (default 50, clamped to 1..200). */
   limit?: number;
+  /**
+   * Per-query scan-time budget in ms. When set (finite and > 0), the scan
+   * throws {@link SearchTimeoutError} once the wall clock passes the deadline.
+   * Absent / non-finite / ≤ 0 → NO deadline (the scan never throws on time —
+   * the default for every pre-cycle-34 caller). The route supplies 2000.
+   */
+  timeoutMs?: number;
+  /** Injectable clock (ms epoch), default `Date.now` — lets tests drive the deadline. */
+  now?: () => number;
+}
+
+/**
+ * Thrown by {@link searchTranscripts} ONLY when an opted-in `timeoutMs` budget
+ * is exceeded mid-scan. The search route maps it to `503 search_timeout`. It is
+ * a deliberate control-flow signal — the scanner still swallows all I/O/parse
+ * errors and never throws those.
+ */
+export class SearchTimeoutError extends Error {
+  constructor() {
+    super('search scan exceeded its time budget');
+    this.name = 'SearchTimeoutError';
+  }
 }
 
 /** Maps the route-facing kind enum to the on-disk record type. */
@@ -111,8 +133,11 @@ function snippet(text: string, term: string): string {
  * searchable text satisfies the compiled query (phrase quoting, boolean
  * `OR`/`NOT`, and `term*` prefix wildcard — see `./query.ts`; a plain
  * space-separated query is a case-insensitive AND of substrings). Returns
- * recency-sorted hits (newest first). Never throws: a missing dir, an unreadable
- * file, or a corrupt JSONL line is treated as empty/skipped.
+ * recency-sorted hits (newest first). Never throws on I/O/parse errors: a
+ * missing dir, an unreadable file, or a corrupt JSONL line is treated as
+ * empty/skipped. The ONLY throw is {@link SearchTimeoutError}, and only when an
+ * opted-in `opts.timeoutMs` budget is exceeded (the deadline bounds scan/match
+ * work, not a single file's `readFile`).
  */
 export async function searchTranscripts(
   chatsDir: string,
@@ -125,6 +150,18 @@ export async function searchTranscripts(
   const wantType =
     opts.kind && opts.kind !== 'all' ? KIND_MAP[opts.kind] : undefined;
 
+  // Scan deadline (cycle 34): active only when timeoutMs is finite and > 0, so
+  // a caller that doesn't opt in (every pre-cycle-34 caller) never throws and
+  // the clock is never read. The check fires at each file boundary and every
+  // 1024 scanned lines (bounds a single large file's inner loop too).
+  const clock = opts.now ?? Date.now;
+  const hasDeadline =
+    typeof opts.timeoutMs === 'number' &&
+    Number.isFinite(opts.timeoutMs) &&
+    opts.timeoutMs > 0;
+  const deadline = hasDeadline ? clock() + (opts.timeoutMs as number) : 0;
+  let scanned = 0;
+
   let files: string[];
   try {
     files = await readdir(chatsDir);
@@ -135,6 +172,7 @@ export async function searchTranscripts(
   const hits: SearchHit[] = [];
   for (const name of files) {
     if (!name.endsWith('.jsonl')) continue;
+    if (hasDeadline && clock() > deadline) throw new SearchTimeoutError();
     let text: string;
     try {
       text = await readFile(join(chatsDir, name), 'utf8');
@@ -142,6 +180,8 @@ export async function searchTranscripts(
       continue; // unreadable file → skip.
     }
     for (const line of text.split('\n')) {
+      if (hasDeadline && (++scanned & 1023) === 0 && clock() > deadline)
+        throw new SearchTimeoutError();
       const trimmed = line.trim();
       if (!trimmed) continue;
       let rec: TranscriptRecord;
