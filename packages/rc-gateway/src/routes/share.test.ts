@@ -204,6 +204,68 @@ describe('/rc/share routes', () => {
     const created = audit.calls.find((c) => c.action === 'share_created');
     expect(created!.detail).toMatchObject({ maxUses: 5 });
   });
+
+  // A returned expiresAt minus "now" should be ~the granted TTL; the test runs
+  // in well under a second, so a generous tolerance absorbs the elapsed ms.
+  const mintTtl = async (url: string, ttlSec: unknown): Promise<number> => {
+    const res = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', ttlSec }),
+    });
+    expect(res.status).toBe(201);
+    const { expiresAt } = (await res.json()) as { expiresAt: number };
+    return expiresAt - Date.now();
+  };
+
+  it('clamps a huge ttlSec down to 30 days (2592000s)', async () => {
+    const url = await mount();
+    const remaining = await mintTtl(url, 999_999_999);
+    expect(remaining).toBeLessThanOrEqual(2_592_000_000);
+    expect(remaining).toBeGreaterThan(2_592_000_000 - 5_000);
+    const created = audit.calls.find((c) => c.action === 'share_created');
+    expect(created!.detail).toMatchObject({ ttlSec: 2_592_000 });
+  });
+
+  it('floors a tiny positive ttlSec up to 5 minutes (300s)', async () => {
+    const url = await mount();
+    const remaining = await mintTtl(url, 5);
+    expect(remaining).toBeLessThanOrEqual(300_000);
+    expect(remaining).toBeGreaterThan(300_000 - 5_000);
+    const created = audit.calls.find((c) => c.action === 'share_created');
+    expect(created!.detail).toMatchObject({ ttlSec: 300 });
+  });
+
+  it('passes an in-range ttlSec through unchanged', async () => {
+    const url = await mount();
+    const remaining = await mintTtl(url, 3600);
+    expect(remaining).toBeLessThanOrEqual(3_600_000);
+    expect(remaining).toBeGreaterThan(3_600_000 - 5_000);
+    const created = audit.calls.find((c) => c.action === 'share_created');
+    expect(created!.detail).toMatchObject({ ttlSec: 3600 });
+  });
+
+  it('a negative ttlSec is still rejected (400, not clamped)', async () => {
+    const url = await mount();
+    const res = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: -10 }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('invalid_share');
+  });
+
+  it('a non-number ttlSec is still rejected (400, not clamped)', async () => {
+    const url = await mount();
+    const res = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1', ttlSec: '3600' }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('invalid_share');
+  });
 });
 
 /** Mount the whoami redemption handler behind a stub injecting a share client. */

@@ -21,6 +21,20 @@ function clampMaxUses(v: unknown): number | undefined {
   return Math.min(MAX_USES_MAX, Math.max(MAX_USES_MIN, Math.floor(v)));
 }
 
+/** Bounds on a share's lifetime: 5 minutes … 30 days (design threat table). */
+const TTL_MIN = 300;
+const TTL_MAX = 2592000;
+
+/**
+ * Clamp an already-validated (finite, `> 0`) `ttlSec` into `[TTL_MIN, TTL_MAX]`.
+ * Capping the max is the safe direction (the share expires earlier than an
+ * over-asking caller imagined) and is transparent (the response's `expiresAt`
+ * reflects the effective value). The 5-minute floor is a usability guard.
+ */
+function clampTtlSec(v: number): number {
+  return Math.min(TTL_MAX, Math.max(TTL_MIN, Math.floor(v)));
+}
+
 /** True when the raw `Cookie` header carries a cookie named `name`. */
 function hasCookie(header: string | undefined, name: string): boolean {
   if (!header) return false;
@@ -77,12 +91,13 @@ export function createShareRouter(
         : [SHARE, SESSION_READ];
     const label = typeof body.label === 'string' ? body.label : 'share';
     const maxUses = clampMaxUses(body.maxUses);
+    const effectiveTtl = clampTtlSec(ttlSec);
 
     const { id, token, expiresAt } = await store.issueShare({
       scopes,
       label,
       sessionLockId: sessionId,
-      ttlSec,
+      ttlSec: effectiveTtl,
       parentId: req.rcClient!.id,
       maxUses,
     });
@@ -90,7 +105,14 @@ export function createShareRouter(
       action: 'share_created',
       actorTokenId: req.rcClient?.id,
       target: id,
-      detail: { shareId: id, sessionId, scope, label, maxUses },
+      detail: {
+        shareId: id,
+        sessionId,
+        scope,
+        label,
+        maxUses,
+        ttlSec: effectiveTtl,
+      },
     });
     res.status(201).json({ id, token, url: '/ui/share/' + token, expiresAt });
   });
