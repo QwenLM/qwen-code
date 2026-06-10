@@ -6,6 +6,7 @@
 
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { parseQuery, matchesQuery } from './query.js';
 
 /** One search result: a matched transcript record. */
 export interface SearchHit {
@@ -107,17 +108,19 @@ function snippet(text: string, term: string): string {
 
 /**
  * Scan the on-disk JSONL transcripts under `chatsDir` for records whose
- * searchable text contains EVERY whitespace-separated term (case-insensitive
- * AND). Returns recency-sorted hits (newest first). Never throws: a missing
- * dir, an unreadable file, or a corrupt JSONL line is treated as empty/skipped.
+ * searchable text satisfies the compiled query (phrase quoting, boolean
+ * `OR`/`NOT`, and `term*` prefix wildcard — see `./query.ts`; a plain
+ * space-separated query is a case-insensitive AND of substrings). Returns
+ * recency-sorted hits (newest first). Never throws: a missing dir, an unreadable
+ * file, or a corrupt JSONL line is treated as empty/skipped.
  */
 export async function searchTranscripts(
   chatsDir: string,
   query: string,
   opts: SearchOptions = {},
 ): Promise<SearchHit[]> {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!terms.length) return [];
+  const plan = parseQuery(query);
+  if (plan.orGroups.length === 0) return [];
 
   const wantType =
     opts.kind && opts.kind !== 'all' ? KIND_MAP[opts.kind] : undefined;
@@ -152,14 +155,14 @@ export async function searchTranscripts(
 
       const recText = recordText(rec);
       const hay = recText.toLowerCase();
-      if (!terms.every((t) => hay.includes(t))) continue;
+      if (!matchesQuery(plan, hay)) continue;
 
       hits.push({
         sessionId: rec.sessionId ?? '',
         eventId: rec.uuid ?? '',
         kind: rec.type ?? '',
         ts: rec.timestamp ?? '',
-        snippet: snippet(recText, terms[0]),
+        snippet: snippet(recText, plan.seed),
       });
     }
   }

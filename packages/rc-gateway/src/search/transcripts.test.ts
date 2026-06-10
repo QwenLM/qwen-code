@@ -232,4 +232,60 @@ describe('searchTranscripts', () => {
     expect(snip).not.toContain('\n');
     expect(snip.toLowerCase()).toContain('needle');
   });
+
+  it('honors a quoted phrase (contiguous, not just both words)', async () => {
+    writeJsonl('s1.jsonl', [
+      textRec(
+        { uuid: 'a', sessionId: 's1', type: 'assistant' },
+        'we hit an oauth refresh error',
+      ),
+      textRec(
+        { uuid: 'b', sessionId: 's1', type: 'assistant' },
+        'oauth worked but later a refresh failed',
+      ),
+    ]);
+    const hits = await searchTranscripts(dir, '"oauth refresh"');
+    expect(hits.map((h) => h.eventId)).toEqual(['a']);
+  });
+
+  it('honors OR across groups', async () => {
+    writeJsonl('s1.jsonl', [
+      textRec({ uuid: 'a', sessionId: 's1', type: 'assistant' }, 'about cats'),
+      textRec({ uuid: 'b', sessionId: 's1', type: 'assistant' }, 'about dogs'),
+      textRec({ uuid: 'c', sessionId: 's1', type: 'assistant' }, 'about fish'),
+    ]);
+    const hits = await searchTranscripts(dir, 'cats OR dogs');
+    expect(hits.map((h) => h.eventId).sort()).toEqual(['a', 'b']);
+  });
+
+  it('honors NOT / - exclusion', async () => {
+    writeJsonl('s1.jsonl', [
+      textRec(
+        { uuid: 'a', sessionId: 's1', type: 'assistant' },
+        'an error happened',
+      ),
+      textRec(
+        { uuid: 'b', sessionId: 's1', type: 'assistant' },
+        'an error and a warning',
+      ),
+    ]);
+    const hits = await searchTranscripts(dir, 'error -warning');
+    expect(hits.map((h) => h.eventId)).toEqual(['a']);
+  });
+
+  it('honors a prefix wildcard at a word boundary', async () => {
+    writeJsonl('s1.jsonl', [
+      textRec(
+        { uuid: 'a', sessionId: 's1', type: 'assistant' },
+        'init the oauthClient now',
+      ),
+      textRec(
+        { uuid: 'b', sessionId: 's1', type: 'assistant' },
+        'this is a reoauth retry',
+      ),
+    ]);
+    const hits = await searchTranscripts(dir, 'oauth*');
+    // matches 'oauthClient' (token start) but NOT 'reoauth' (mid-token).
+    expect(hits.map((h) => h.eventId)).toEqual(['a']);
+  });
 });
