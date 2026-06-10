@@ -5433,6 +5433,45 @@ describe('createServeApp', () => {
       });
     });
 
+    it('deep=1 includes idle detection fields with no activity', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health?deep=1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        status: 'ok',
+        activePrompts: 0,
+        connectedClients: 0,
+        channelAlive: false,
+        lastActivityAt: null,
+        idleSinceMs: null,
+      });
+    });
+
+    it('deep=1 returns ISO timestamp and idleSinceMs when lastActivityAt is set', async () => {
+      const activityTime = Date.now() - 60_000; // 1 minute ago
+      const bridge = fakeBridge();
+      // Override lastActivityAt to simulate prior activity
+      Object.defineProperty(bridge, 'lastActivityAt', {
+        get() {
+          return activityTime;
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .get('/health?deep=1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.lastActivityAt).toBe(
+        new Date(activityTime).toISOString(),
+      );
+      // idleSinceMs should be roughly 60s (allow some slack for test execution)
+      expect(res.body.idleSinceMs).toBeGreaterThanOrEqual(59_000);
+      expect(res.body.idleSinceMs).toBeLessThanOrEqual(65_000);
+    });
+
     it('deep=1 returns 503 when bridge state access throws', async () => {
       // Simulate a wedged bridge by replacing the getter to throw.
       const bridge = fakeBridge();
