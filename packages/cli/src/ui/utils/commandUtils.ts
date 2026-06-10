@@ -128,6 +128,16 @@ export const copyToClipboard = async (text: string): Promise<void> => {
   // - stderr: 'pipe' to capture error messages (e.g., "command not found") for better error handling.
   const linuxOptions: SpawnOptions = { stdio: ['pipe', 'inherit', 'pipe'] };
 
+  /** Write text to clipboard via OSC 52 escape sequence (works over SSH). */
+  const writeOsc52 = (text: string): void => {
+    const base64 = Buffer.from(text, 'utf-8').toString('base64');
+    // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
+    const sequence = `\x1b]52;c;${base64}\x07`;
+    // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
+    const stream = process.stdout.isTTY ? process.stdout : process.stderr;
+    stream.write(sequence);
+  };
+
   switch (process.platform) {
     case 'win32':
       return run('cmd', ['/c', `chcp ${CodePage.UTF8} >nul && clip`]);
@@ -148,9 +158,10 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
           if (xclipNotFound && xselNotFound) {
-            throw new Error(
-              'Please ensure xclip or xsel is installed and configured.',
-            );
+            // Neither xclip nor xsel available — try OSC 52 escape sequence
+            // (works over SSH without X11 display server).
+            writeOsc52(text);
+            return;
           }
 
           let primaryMsg =

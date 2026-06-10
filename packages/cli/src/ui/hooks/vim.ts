@@ -164,6 +164,16 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
 let linuxReadCmd: string[] | null | undefined;
 let linuxWriteCmd: string[] | null | undefined;
 
+/** Write text to clipboard via OSC 52 escape sequence (works over SSH). */
+function writeOsc52(text: string): void {
+  const base64 = Buffer.from(text, 'utf-8').toString('base64');
+  // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
+  const sequence = `\x1b]52;c;${base64}\x07`;
+  // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
+  const stream = process.stdout.isTTY ? process.stdout : process.stderr;
+  stream.write(sequence);
+}
+
 /** Read system clipboard */
 function readClipboard(): string {
   try {
@@ -265,6 +275,9 @@ function writeClipboard(text: string): void {
       const child = execFile(bin, args, { timeout: 500 }, cb);
       child.stdin?.end(text);
       child.unref();
+    } else {
+      // No clipboard tool available (e.g., SSH without X11/Wayland) — try OSC 52
+      writeOsc52(text);
     }
   } catch (e) {
     debugLogger.warn('writeClipboard failed:', e);
