@@ -1472,7 +1472,7 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(baseParams);
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(baseParams.targetDir);
+    const oldStorage = new Storage(config.getTargetDir());
     const newStorage = new Storage(newDir);
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
@@ -1536,7 +1536,7 @@ describe('Server Config (config.ts)', () => {
     config.markRuntimeStatusEnabled();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
-    const oldStorage = new Storage(baseParams.targetDir);
+    const oldStorage = new Storage(config.getTargetDir());
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
