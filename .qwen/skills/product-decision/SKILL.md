@@ -142,11 +142,14 @@ EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.b
 
 ### 7. Output Verdict
 
-Write the verdict to a file so the CI workflow can read it:
+Write the verdict to a file so the CI workflow can read it. In CI the
+workflow sets `TRIAGE_RESULTS_DIR` (a per-job temp dir on the self-hosted
+runner); fall back to `/tmp/triage-results` when running locally:
 
 ```bash
-mkdir -p /tmp/triage-results
-cat > /tmp/triage-results/product-decision.json << 'VERDICT_EOF'
+RESULTS_DIR="${TRIAGE_RESULTS_DIR:-/tmp/triage-results}"
+mkdir -p "$RESULTS_DIR"
+cat > "$RESULTS_DIR/product-decision.json" << 'VERDICT_EOF'
 {
   "verdict": "pass",
   "summary": "<one-line summary of decision>",

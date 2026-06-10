@@ -26,8 +26,9 @@ env:
   # jq program that renders qwen `--output-format stream-json` events into
   # readable one-line CI log progress (tool calls + narration + final result)
   # instead of raw JSON envelopes. Shared by the product-decision / review /
-  # tmux-testing steps via `qwen ... | tee raw.jsonl | jq -Rr "$STREAM_JSON_FMT"`.
-  # Each input line is one JSON message; `fromjson?` skips any non-JSON line.
+  # tmux-testing steps via `qwen ... | tee raw.jsonl | "${FMT_CMD[@]}"`, where
+  # FMT_CMD is `jq --unbuffered -Rr "$STREAM_JSON_FMT"` (or `cat` if jq is
+  # absent). Each input line is one JSON message; `fromjson?` skips non-JSON.
   STREAM_JSON_FMT: |-
     (fromjson?) as $m
     | try (
@@ -155,6 +156,10 @@ jobs:
           # direction reasoning. Empty if the runner var is unset (skill
           # falls back to fetching the remote CHANGELOG).
           CLAUDE_CODE_SRC: '${{ vars.CLAUDE_CODE_SRC_PATH }}'
+          # runner.temp is emptied per job and is per runner instance, unlike
+          # /tmp which persists across runs and is shared between runner
+          # instances on the same host (stale or cross-PR verdicts).
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
         run: |
           set -euo pipefail
 
@@ -163,18 +168,13 @@ jobs:
             exit 1
           fi
 
-          # Self-hosted runner: /tmp persists across runs, so a stale verdict
-          # from a previous PR could be read by the capture step if this run's
-          # skill fails to write one. Clear it before the run.
-          rm -f /tmp/triage-results/product-decision.json
-
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
           # Readable log formatter; fall back to raw passthrough if jq is absent.
-          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
@@ -184,7 +184,7 @@ jobs:
             "${MODEL_ARGS[@]}" \
             --prompt "/product-decision ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
-            | tee /tmp/product-decision-raw.jsonl \
+            | tee "$RUNNER_TEMP/product-decision-raw.jsonl" \
             | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
@@ -194,14 +194,19 @@ jobs:
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Product decision exited with code $EXIT_CODE"
           fi
+          # Propagate: this stage is a gate. Without this, a timed-out or
+          # crashed run leaves the step green and the capture fallback would
+          # default the verdict to "pass", silently waving the PR through.
+          exit "$EXIT_CODE"
 
       - name: 'Read verdict from skill output'
         if: always()
         id: 'capture'
         env:
           RUN_OUTCOME: '${{ steps.run.outcome }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
         run: |
-          VERDICT_FILE="/tmp/triage-results/product-decision.json"
+          VERDICT_FILE="$TRIAGE_RESULTS_DIR/product-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
             VERDICT=$(jq -r '.verdict // "pass"' "$VERDICT_FILE")
           else
@@ -274,7 +279,7 @@ jobs:
           fi
 
           # Readable log formatter; fall back to raw passthrough if jq is absent.
-          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
           set +e
@@ -284,7 +289,7 @@ jobs:
             "${MODEL_ARGS[@]}" \
             --prompt "/review ${REVIEW_URL} --comment" \
             --output-format stream-json \
-            | tee /tmp/review-raw.jsonl \
+            | tee "$RUNNER_TEMP/review-raw.jsonl" \
             | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
@@ -362,11 +367,13 @@ jobs:
           fi
 
           # Readable log formatter; fall back to raw passthrough if jq is absent.
-          FMT_CMD=(jq -Rr "$STREAM_JSON_FMT")
+          FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
-          # Run tmux testing — output goes to a file for artifact upload
-          mkdir -p /tmp/tmux-results
+          # Run tmux testing — output goes to a file for artifact upload.
+          # runner.temp (not /tmp): per-job and per-instance, so concurrent
+          # jobs on a shared host can't cross-contaminate the artifact.
+          mkdir -p "$RUNNER_TEMP/tmux-results"
           set +e
           timeout --kill-after=10s 15m qwen \
             --auth-type openai \
@@ -374,7 +381,7 @@ jobs:
             "${MODEL_ARGS[@]}" \
             --prompt "/tmux-real-user-testing ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
-            | tee /tmp/tmux-results/output.jsonl \
+            | tee "$RUNNER_TEMP/tmux-results/output.jsonl" \
             | "${FMT_CMD[@]}"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
@@ -394,7 +401,7 @@ jobs:
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
-          path: '/tmp/tmux-results/'
+          path: '${{ runner.temp }}/tmux-results/'
           retention-days: 7
 
   # ─── Stage 3: Approval Decision ────────────────────────────────────
