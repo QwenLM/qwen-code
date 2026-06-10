@@ -346,7 +346,9 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
-    expect(script).toContain('Failed to update user PATH');
+    expect(script).toContain('Failed to update !PATH_SCOPE! PATH');
+    expect(script).toContain("$ErrorActionPreference = 'Stop'; try");
+    expect(script).toContain('catch { exit 1 }');
     expect(script).toContain('PRE_INSTALL_QWENS_LIST');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
@@ -573,6 +575,35 @@ describe('release-script-utils', () => {
     );
   });
 });
+
+const STUB_BAT_CONTENT =
+  '@echo off\r\n' +
+  'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
+  'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
+  'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
+  'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
+  'set "VERSION=latest"\r\n' +
+  'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
+  'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+  'set "ARG_KEY=%~1"\r\n' +
+  'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n';
+
+const STUB_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+  'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n';
+
+const STUB_UNINSTALL_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'is_qwen_standalone_install_dir() { return 0; }\n' +
+  'remove_shell_path_entry() { :; }\n' +
+  'QWEN_UNINSTALL_PURGE=""\n';
+
+const STUB_UNINSTALL_PS1_CONTENT =
+  'function Test-QwenStandaloneInstallDir { return $true }\n' +
+  'function Remove-PathEntryFromAllScopes { }\n' +
+  'function Remove-CurrentCmdPathShim { }\n' +
+  '$env:QWEN_UNINSTALL_PURGE = ""\n';
 
 describe('standalone release packaging', () => {
   it('defines a standalone packaging script', () => {
@@ -1049,13 +1080,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // The ps1 shim has every required behavior pattern but also contains
       // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
@@ -1070,17 +1099,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       await expect(
@@ -1106,13 +1129,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // ps1 contains the exact docstring shipped in production
       // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
@@ -1128,17 +1149,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       // Build should succeed (only resolves; throws would fail the test).
@@ -1804,7 +1819,7 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
     const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "name: 'Create GitHub Release and Tag'",
+      "- name: 'Create GitHub Release and Tag'",
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
     const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
@@ -1844,21 +1859,25 @@ describe('standalone release packaging', () => {
     );
 
     const syncStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Release Assets to Aliyun OSS'",
+      "- name: 'Sync Release Assets to Aliyun OSS'",
+    );
+    const packageHostedStepIndex = ossWorkflow.indexOf(
+      "- name: 'Package Hosted Installation Assets'",
     );
     const verifyStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Release Assets'",
+      "- name: 'Verify Aliyun OSS Release Assets'",
     );
     const publishLatestStepIndex = ossWorkflow.indexOf(
-      "name: 'Publish Aliyun OSS Latest VERSION'",
+      "- name: 'Publish Aliyun OSS Latest VERSION'",
     );
     const syncHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Hosted Installation Assets to Aliyun OSS'",
+      "- name: 'Sync Hosted Installation Assets to Aliyun OSS'",
     );
     const verifyHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Hosted Installation Assets'",
+      "- name: 'Verify Aliyun OSS Hosted Installation Assets'",
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
+    expect(packageHostedStepIndex).toBeGreaterThanOrEqual(0);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
     expect(syncHostedStepIndex).toBeGreaterThan(verifyStepIndex);
     expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
@@ -1988,7 +2007,9 @@ describe('standalone release packaging', () => {
     expect(uninstallPowerShellSource).toContain(
       'Test-QwenStandaloneInstallDir',
     );
-    expect(uninstallPowerShellSource).toContain('Remove-UserPathEntry');
+    expect(uninstallPowerShellSource).toContain(
+      'Remove-PathEntryFromAllScopes',
+    );
     expect(uninstallPowerShellSource).toContain('Remove-CurrentCmdPathShim');
     expect(uninstallPowerShellSource).toContain(
       'Remove-RecordedCurrentCmdPathShim',
@@ -2206,7 +2227,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         expect(output).toContain('installed successfully, to start:');
         expect(output).toContain('0.0.0-smoke');
         expect(output).toContain('cd <project>');
-        expect(output).toContain('qwenlm.github.io/qwen-code');
+        expect(output).toContain('github.com/QwenLM/qwen-code');
         expect(output).not.toContain('rm -rf');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });

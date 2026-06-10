@@ -25,7 +25,7 @@ function makeCtx(
         getSessionService: () => sessionService,
       } as unknown as NonNullable<CommandContext['services']['config']>);
   return {
-    services: { config, settings: {} as never, git: undefined, logger: null },
+    services: { config, settings: {} as never, logger: null },
     ui: {
       isIdleRef: { current: overrides.isIdle ?? true },
     } as unknown as CommandContext['ui'],

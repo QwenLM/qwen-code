@@ -207,7 +207,13 @@ export class SleepInhibitor {
   private stop(): void {
     const child = this.child;
     this.child = undefined;
-    if (!child || child.killed) {
+    // `child.pid` is undefined when the spawn failed (e.g. `systemd-inhibit`
+    // is absent, as in the container sandbox, which rejects with ENOENT on the
+    // next tick). Calling `kill()` on such a pidless child does not kill the
+    // intended process — it signals the caller's own process group, which
+    // inside a container delivers SIGTERM to this process and aborts the run.
+    // Only kill a child that actually started.
+    if (!child || child.killed || child.pid == null) {
       return;
     }
 

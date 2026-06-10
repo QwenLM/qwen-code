@@ -19,6 +19,11 @@
 
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
+import {
+  isShellTracePropagationEnabled,
+  getTraceContext,
+  formatTraceparent,
+} from '../telemetry/trace-context.js';
 
 export function getShellContextEnvVars(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -36,6 +41,12 @@ export function getShellContextEnvVars(): Record<string, string> {
 
   const promptId = promptIdContext.getStore();
   env['QWEN_CODE_PROMPT_ID'] = promptId ?? '';
+
+  if (isShellTracePropagationEnabled()) {
+    const ctx = getTraceContext();
+    env['TRACEPARENT'] = ctx ? formatTraceparent(ctx) : '';
+    env['TRACESTATE'] = '';
+  }
 
   return env;
 }

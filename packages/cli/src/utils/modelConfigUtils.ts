@@ -12,6 +12,7 @@ import {
   resolveModelConfig,
   type ModelConfigSourcesInput,
   type ProviderModelConfig,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
 
@@ -159,7 +160,8 @@ export function resolveCliGenerationConfig(
   if (argv.model) {
     resolvedModel = argv.model;
   } else if (settings.model?.name) {
-    resolvedModel = settings.model.name;
+    // Self-heal configs already corrupted by older builds.
+    resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
   } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
     // Only check env vars for the current auth type
     for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
@@ -212,7 +214,9 @@ export function resolveCliGenerationConfig(
       baseUrl: argv.openaiBaseUrl,
     },
     settings: {
-      model: settings.model?.name,
+      model: settings.model?.name
+        ? stripRuntimeSnapshotPrefix(settings.model.name)
+        : undefined,
       apiKey: settings.security?.auth?.apiKey,
       baseUrl: settings.security?.auth?.baseUrl,
       generationConfig: settings.model?.generationConfig as
