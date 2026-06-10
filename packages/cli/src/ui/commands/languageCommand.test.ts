@@ -442,8 +442,9 @@ describe('languageCommand', () => {
       );
       // Verify path registration on first-time creation (getOutputLanguageFilePath returned undefined)
       expect(
-        (mockContext.services.config as Record<string, unknown>)
-          .setOutputLanguageFilePath,
+        (mockContext.services.config as unknown as Record<string, unknown>)[
+          'setOutputLanguageFilePath'
+        ],
       ).toHaveBeenCalledWith(expect.any(String));
       expect(result).toEqual({
         type: 'message',
