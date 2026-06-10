@@ -59,7 +59,7 @@ export default {
   'Install Extension': '安装扩展',
   'Install for the current workspace (project scope)':
     '为当前工作区安装（项目作用域）',
-  'Install for you (user scope)': '仅为你安装（用户作用域）',
+  'Install for you (user scope)': '全局安装（用户作用域）',
   'Install {{count}} extension(s) to which scope?':
     '将 {{count}} 个扩展安装到哪个作用域？',
   Installed: '已安装',
