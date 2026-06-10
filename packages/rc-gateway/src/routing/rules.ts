@@ -5,6 +5,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { matchesAny } from '../policy/glob.js';
 
@@ -228,6 +229,74 @@ export async function loadRoutingConfigFile(
     throw err;
   }
   return loadRoutingConfig(text);
+}
+
+/**
+ * Merge two routing configs by PREPENDING the workspace rules to the user rules
+ * (design D1 / spec.md:8-10: workspace rules evaluate first; both sets active).
+ * A single {@link compileRouting} over the returned config then preserves
+ * document-order first-match across the layer boundary. Pure; returns `null`
+ * only when BOTH inputs are `null` (neither file present).
+ */
+export function mergeRoutingConfigs(
+  workspace: RoutingConfig | null,
+  user: RoutingConfig | null,
+): RoutingConfig | null {
+  if (!workspace && !user) return null;
+  const merged: RoutingConfig = {
+    rules: [...(workspace?.rules ?? []), ...(user?.rules ?? [])],
+  };
+  const version = workspace?.version ?? user?.version;
+  if (version !== undefined) merged.version = version;
+  return merged;
+}
+
+/**
+ * Load one routing file FAIL-OPEN: a missing file (ENOENT) yields `null`, and a
+ * malformed file ({@link RoutingError}) is logged via `warn` and ALSO yields
+ * `null` — routing only suppresses, so the safe default on misconfig is more
+ * notifications, never a missed prompt. Never throws.
+ */
+async function loadOneFailOpen(
+  path: string,
+  label: string,
+  warn: (msg: string) => void,
+): Promise<RoutingConfig | null> {
+  try {
+    return await loadRoutingConfigFile(path);
+  } catch (err) {
+    warn(`[routing] ignoring ${label}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Load the user-level routing file and, when a workspace cwd is given, the
+ * workspace override `<workspaceCwd>/.qwen/routing.yaml`, merge them (workspace
+ * rules PREPENDED — design D1), and compile a single {@link RoutingMatcher}.
+ *
+ * Per-file FAIL-OPEN + NEVER-THROW (design D4): each layer is loaded
+ * independently; a malformed file at either layer is logged and ignored while
+ * the other layer still applies (`compileRouting` is total). Returns
+ * `{ matcher: undefined, ruleCount: 0 }` when neither file exists. `warn`
+ * defaults to a no-op (the CLI passes a `console.warn` wrapper).
+ */
+export async function loadLayeredRoutingMatcher(
+  userPath: string,
+  workspaceCwd: string | undefined,
+  warn: (msg: string) => void = () => {},
+): Promise<{ matcher: RoutingMatcher | undefined; ruleCount: number }> {
+  const user = await loadOneFailOpen(userPath, 'routing.yaml', warn);
+  const workspace = workspaceCwd
+    ? await loadOneFailOpen(
+        join(workspaceCwd, '.qwen', 'routing.yaml'),
+        'workspace routing.yaml',
+        warn,
+      )
+    : null;
+  const merged = mergeRoutingConfigs(workspace, user);
+  if (!merged) return { matcher: undefined, ruleCount: 0 };
+  return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
 }
 
 /** A present `kind` spec matches by equality (string) or membership (list). */

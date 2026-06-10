@@ -89,6 +89,8 @@ export { createRoutingRouter } from './routes/routing.js';
 export {
   loadRoutingConfig,
   loadRoutingConfigFile,
+  loadLayeredRoutingMatcher,
+  mergeRoutingConfigs,
   compileRouting,
   RoutingError,
   type RoutingRule,
