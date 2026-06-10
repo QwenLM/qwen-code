@@ -63,7 +63,15 @@ AND …` → 2ⁿ groups) entirely — there is no group cap / overflow fallback
   quoting: `"getUser("` is a phrase → literal substring, parens and all
   (phrases are captured before paren tokenization). This is the FTS5 mental
   model and is documented as an intentional deviation from the cycle-19
-  substring behavior. All-lowercase queries WITHOUT parens are unchanged.
+  substring behavior. **The deviation applies to ANY paren-bearing query, not
+  just a trailing `(`** — e.g. `error(foo)` was a literal substring match and
+  now parses as `error AND foo` (a false-positive widening here, since both
+  substrings are still present; a query whose parenthesised sub-token does not
+  also appear standalone is where results genuinely change). All queries
+  WITHOUT parens are unchanged. The route's 1024-char cap also bounds parser
+  recursion depth (~3 frames per `(`; V8 overflows ~2124 nested parens → ~2x
+  margin) — see the note in `routes/search.ts`; do not raise it without making
+  the parser iterative or adding a depth guard.
 
 - **D5 — Query length cap is a SEPARATE, first commit, at the route.** Trimmed
   `q.length > 1024` → `400 query_too_long`. It bounds **parse/tree cost**, not

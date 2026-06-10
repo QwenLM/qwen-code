@@ -34,7 +34,11 @@ export function createSearchRoute(
       return;
     }
     // Bounds parse/tree cost (the per-query scan timeout is a separate, still
-    // deferred guard). 1024 chars per the design's threat table.
+    // deferred guard). 1024 chars per the design's threat table. NOTE: this cap
+    // ALSO bounds parser recursion depth — `parseQuery` recurses ~3 frames per
+    // `(`, and V8 overflows the stack at ~2124 nested parens, so 1024 chars
+    // keeps a ~2x safety margin. Do NOT raise this above ~2000 without first
+    // making the parser iterative or adding a depth guard in query.ts.
     if (q.length > 1024) {
       res.status(400).json({ error: 'Query too long', code: 'query_too_long' });
       return;
