@@ -30,4 +30,8 @@ const result = spawnSync(
   { stdio: 'inherit' },
 );
 
-process.exit(result.status ?? 1);
+if (result.signal) {
+  process.kill(process.pid, result.signal);
+} else {
+  process.exit(result.status ?? 1);
+}
