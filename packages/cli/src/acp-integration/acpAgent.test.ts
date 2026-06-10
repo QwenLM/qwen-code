@@ -2037,6 +2037,162 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects sessionTaskCancel with invalid params', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId: 'session-1',
+        taskId: 'task-1',
+        taskKind: 'invalid',
+      }),
+    ).rejects.toThrow('taskKind must be "agent", "shell", or "monitor"');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('cancels running shell tasks', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const requestCancel = vi.fn();
+    Object.assign(innerConfig, {
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          id: 'shell-1',
+          kind: 'shell',
+          status: 'running',
+        }),
+        requestCancel,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'shell-1',
+        taskKind: 'shell',
+      }),
+    ).resolves.toEqual({ cancelled: true, status: 'running' });
+    expect(requestCancel).toHaveBeenCalledWith('shell-1');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('cancels running monitor tasks', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const cancel = vi.fn();
+    Object.assign(innerConfig, {
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          id: 'monitor-1',
+          kind: 'monitor',
+          status: 'running',
+        }),
+        cancel,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'monitor-1',
+        taskKind: 'monitor',
+      }),
+    ).resolves.toEqual({ cancelled: true, status: 'running' });
+    expect(cancel).toHaveBeenCalledWith('monitor-1');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns not_running for stopped task cancellation', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const requestCancel = vi.fn();
+    Object.assign(innerConfig, {
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          id: 'shell-1',
+          kind: 'shell',
+          status: 'completed',
+        }),
+        requestCancel,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'shell-1',
+        taskKind: 'shell',
+      }),
+    ).resolves.toEqual({
+      cancelled: false,
+      reason: 'not_running',
+      status: 'completed',
+    });
+    expect(requestCancel).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('newSession with SSE MCP server creates MCPServerConfig with url', async () => {
     await setupSessionMocks('session-sse');
 

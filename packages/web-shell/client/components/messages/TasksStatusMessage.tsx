@@ -284,7 +284,11 @@ export function TasksStatusMessage({
       setPendingCancelId(null);
       setBusy(true);
       try {
-        await actions.cancelTask(task.id, task.kind);
+        const result = await actions.cancelTask(task.id, task.kind);
+        if (!result.cancelled) {
+          setActionError(t('tasks.alreadyStopped'));
+          return;
+        }
         const snapshot = await actions.getTasks();
         setTasks(sortTasks(snapshot.tasks));
         setActionError(null);

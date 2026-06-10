@@ -3252,9 +3252,9 @@ export class Session implements SessionContext {
                   );
                   if (approvalMode === ApprovalMode.AUTO) {
                     const before = this.config.getAutoModeDenialState();
-                    const after = recordFallbackApprove(before);
+                    const after = before;
                     debugLogger.warn(
-                      `Auto mode denial counters reset after fallback approval: ` +
+                      `Auto mode denial counters preserved after hook approval: ` +
                         `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
                     );
                     this.config.setAutoModeDenialState(after);

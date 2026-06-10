@@ -310,6 +310,11 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  cancelSessionTaskImpl?: (
+    sessionId: string,
+    taskId: string,
+    taskKind: 'agent' | 'shell' | 'monitor',
+  ) => Promise<{ cancelled: boolean }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -450,6 +455,11 @@ interface FakeBridge extends AcpSessionBridge {
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
+  cancelSessionTaskCalls: Array<{
+    sessionId: string;
+    taskId: string;
+    taskKind: 'agent' | 'shell' | 'monitor';
+  }>;
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -538,6 +548,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -709,6 +720,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const cancelSessionTaskImpl =
+    opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -839,6 +852,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
+    cancelSessionTaskCalls,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1006,6 +1020,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
+    },
+    async cancelSessionTask(sessionId, taskId, taskKind) {
+      cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
+      return cancelSessionTaskImpl(sessionId, taskId, taskKind);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -2152,6 +2170,75 @@ describe('createServeApp', () => {
       expect(commandsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
+    });
+
+    it('rejects task cancellation with invalid kind', async () => {
+      const bridge = fakeBridge();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'other' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`kind` must be "agent", "shell", or "monitor"',
+      );
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('cancels a session task through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'agent' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        { sessionId: 's-1', taskId: 'task-1', taskKind: 'agent' },
+      ]);
+    });
+
+    it('maps task cancellation bridge errors', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'shell' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 
