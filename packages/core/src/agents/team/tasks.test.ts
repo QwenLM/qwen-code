@@ -17,6 +17,7 @@ import {
   resetTaskList,
   blockTask,
   claimTask,
+  releaseOwnedTask,
   unassignTeammateTasks,
   getAgentStatuses,
   onTasksUpdated,
@@ -740,6 +741,71 @@ describe('tasks', () => {
 
       const count = await unassignTeammateTasks('team', 'worker');
       expect(count).toBe(0);
+    });
+  });
+
+  // ─── releaseOwnedTask ──────────────────────────────────────
+
+  describe('releaseOwnedTask', () => {
+    it('resets an in_progress task owned by the expected owner', async () => {
+      const task = await createTask('team', {
+        subject: 'A',
+        description: 'A',
+      });
+      await claimTask('team', task.id, 'worker');
+
+      const released = await releaseOwnedTask('team', task.id, 'worker');
+      expect(released).toBe(true);
+
+      const after = await getTask('team', task.id);
+      expect(after?.status).toBe('pending');
+      expect(after?.owner).toBeUndefined();
+    });
+
+    it('returns false when the task is no longer in_progress', async () => {
+      // Models the dying agent's final task_update (completion) landing
+      // between the caller's snapshot and the release.
+      const task = await createTask('team', {
+        subject: 'A',
+        description: 'A',
+      });
+      await claimTask('team', task.id, 'worker');
+      await updateTask('team', task.id, { status: 'completed' });
+
+      const released = await releaseOwnedTask('team', task.id, 'worker');
+      expect(released).toBe(false);
+
+      const after = await getTask('team', task.id);
+      expect(after?.status).toBe('completed');
+      expect(after?.owner).toBe('worker');
+    });
+
+    it('returns false when the task was reassigned to another owner', async () => {
+      const task = await createTask('team', {
+        subject: 'A',
+        description: 'A',
+      });
+      await claimTask('team', task.id, 'worker');
+      await updateTask('team', task.id, { owner: 'other' });
+
+      const released = await releaseOwnedTask('team', task.id, 'worker');
+      expect(released).toBe(false);
+
+      const after = await getTask('team', task.id);
+      expect(after?.status).toBe('in_progress');
+      expect(after?.owner).toBe('other');
+    });
+
+    it('returns false when the task file no longer exists', async () => {
+      const task = await createTask('team', {
+        subject: 'A',
+        description: 'A',
+      });
+      await claimTask('team', task.id, 'worker');
+      await deleteTask('team', task.id);
+
+      const released = await releaseOwnedTask('team', task.id, 'worker');
+      expect(released).toBe(false);
     });
   });
 

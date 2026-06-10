@@ -39,6 +39,13 @@ const debug = createDebugLogger('AGENTS_TEAM_TASKS');
  */
 const MAX_METADATA_BYTES = 32_768;
 
+/**
+ * Cap on concurrent task-file reads in `listTasks`. Every teammate's
+ * `task_list` triggers a full-board read; unbounded `Promise.all`
+ * over a large board risks EMFILE under fd pressure.
+ */
+const MAX_PARALLEL_TASK_READS = 16;
+
 function assertMetadataWithinLimit(
   metadata: Record<string, unknown> | undefined,
 ): void {
@@ -161,16 +168,32 @@ export async function createTask(
 
     const taskPath = path.join(dir, `${nextId}.json`);
     try {
+      // Claim the ID with an *empty* placeholder. Writing the content
+      // through the same handle would expose a partial-JSON window to
+      // concurrent readers — `listTasks` skips empty files but
+      // quarantines unparseable ones, so a half-written task would be
+      // renamed out from under us and lost. Empty placeholders are the
+      // one in-flight state `listTasks` knowingly tolerates.
       const handle = await fs.open(
         taskPath,
         fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
       );
-      await handle.writeFile(JSON.stringify(task, null, 2) + '\n', 'utf-8');
       await handle.close();
     } catch (err) {
       if (isNodeError(err) && err.code === 'EEXIST') {
         continue; // ID was taken — retry with next
       }
+      throw err;
+    }
+
+    try {
+      // Fill the placeholder via temp-file + rename: readers see either
+      // the empty placeholder (skipped) or the full task, never a prefix.
+      await atomicWriteJSON(taskPath, task);
+    } catch (err) {
+      // Release the claimed ID so a transient write failure doesn't
+      // strand an empty placeholder that occupies the ID forever.
+      await fs.unlink(taskPath).catch(() => {});
       throw err;
     }
 
@@ -262,7 +285,17 @@ export async function updateTask(
     throw err;
   }
   try {
-    const raw = await fs.readFile(taskPath, 'utf-8');
+    let raw: string;
+    try {
+      raw = await fs.readFile(taskPath, 'utf-8');
+    } catch (err) {
+      // The file can vanish after lock acquisition: `resetTaskList`
+      // and the `listTasks` quarantine rename don't take per-task
+      // locks. Mirror deleteTask's in-lock guard and report
+      // "not found" instead of leaking a raw ENOENT.
+      if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+      throw err;
+    }
     const task = JSON.parse(raw) as SwarmTask;
 
     if (opts?.callerName !== undefined) {
@@ -538,47 +571,68 @@ export async function listTasks(
   }
 
   const jsonEntries = entries.filter((e) => e.endsWith('.json'));
-  const reads = await Promise.all(
-    jsonEntries.map(async (entry) => {
-      const filePath = path.join(dir, entry);
-      try {
-        const raw = await fs.readFile(filePath, 'utf-8');
+  const reads: Array<SwarmTask | undefined> = [];
+  // Bounded fan-out: an unbounded Promise.all over every task file is
+  // itself the most likely source of transient read errors (EMFILE
+  // under fd pressure) on a large board.
+  for (let i = 0; i < jsonEntries.length; i += MAX_PARALLEL_TASK_READS) {
+    const batch = jsonEntries.slice(i, i + MAX_PARALLEL_TASK_READS);
+    const batchReads = await Promise.all(
+      batch.map(async (entry) => {
+        const filePath = path.join(dir, entry);
+        let raw: string;
+        try {
+          raw = await fs.readFile(filePath, 'utf-8');
+        } catch (err) {
+          // ENOENT is fine — the file may have been deleted between
+          // the readdir and the readFile (e.g. a concurrent
+          // `task_update(status: 'deleted')`). Any other read error
+          // (EMFILE, EIO, EACCES, ...) is an I/O failure, not evidence
+          // of corruption — skip the file this round WITHOUT
+          // quarantining, so a transient error can't destroy a healthy
+          // task. The next `listTasks` retries it.
+          if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          debug.warn(`Failed to read task file ${filePath}: ${errMsg}`);
+          return undefined;
+        }
         if (raw.trim() === '') {
           // A task file that exists but is momentarily empty is a
-          // create in flight: `createTask` claims the id with an
-          // O_CREAT|O_EXCL open and then writes the content as a
-          // second step, so a concurrent readdir+readFile can land in
-          // that sub-millisecond window. Skip it WITHOUT quarantining
-          // — the next `listTasks` (after the write lands) will see it.
+          // create in flight: `createTask` claims the id with an empty
+          // O_CREAT|O_EXCL placeholder and then fills it via rename as
+          // a second step, so a concurrent readdir+readFile can land in
+          // that window. Skip it WITHOUT quarantining — the next
+          // `listTasks` (after the rename lands) will see it.
           // Quarantining here would rename the file out from under the
           // in-progress create and lose the task entirely.
           return undefined;
         }
-        return JSON.parse(raw) as SwarmTask;
-      } catch (err) {
-        // ENOENT is fine — the file may have been deleted between
-        // the readdir and the readFile (e.g. a concurrent
-        // `task_update(status: 'deleted')`). Anything else means
-        // the file is corrupt or unreadable; quarantine it so it
-        // stops silently disappearing from `task_list` (and so the
-        // next `listTasks` call doesn't keep failing on the same
-        // file). Renamed out of the `.json` suffix so subsequent
-        // scans skip it.
-        if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-        const errMsg = err instanceof Error ? err.message : String(err);
-        debug.warn(`Quarantining corrupt task file ${filePath}: ${errMsg}`);
-        const quarantined = `${filePath}.corrupt-${Date.now()}`;
         try {
-          await fs.rename(filePath, quarantined);
-        } catch (renameErr) {
-          const renameMsg =
-            renameErr instanceof Error ? renameErr.message : String(renameErr);
-          debug.warn(`Failed to quarantine ${filePath}: ${renameMsg}`);
+          return JSON.parse(raw) as SwarmTask;
+        } catch (err) {
+          // The content itself is corrupt (parse failure on fully-read,
+          // non-empty data). Quarantine it so it stops silently
+          // disappearing from `task_list` (and so the next `listTasks`
+          // call doesn't keep failing on the same file). Renamed out of
+          // the `.json` suffix so subsequent scans skip it.
+          const errMsg = err instanceof Error ? err.message : String(err);
+          debug.warn(`Quarantining corrupt task file ${filePath}: ${errMsg}`);
+          const quarantined = `${filePath}.corrupt-${Date.now()}`;
+          try {
+            await fs.rename(filePath, quarantined);
+          } catch (renameErr) {
+            const renameMsg =
+              renameErr instanceof Error
+                ? renameErr.message
+                : String(renameErr);
+            debug.warn(`Failed to quarantine ${filePath}: ${renameMsg}`);
+          }
+          return undefined;
         }
-        return undefined;
-      }
-    }),
-  );
+      }),
+    );
+    reads.push(...batchReads);
+  }
   const tasks = reads.filter((t): t is SwarmTask => t !== undefined);
 
   // Sort by ID (numeric ascending).
@@ -706,7 +760,15 @@ export async function claimTask(
     throw err;
   }
   try {
-    const raw = await fs.readFile(taskPath, 'utf-8');
+    let raw: string;
+    try {
+      raw = await fs.readFile(taskPath, 'utf-8');
+    } catch (err) {
+      // See updateTask: the file can vanish after lock acquisition
+      // (resetTaskList / quarantine rename run without the lock).
+      if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+      throw err;
+    }
     const task = JSON.parse(raw) as SwarmTask;
 
     // Only claim pending tasks.
@@ -758,7 +820,7 @@ async function isAgentBusy(
  * from its new owner or resurrecting a completed task as pending.
  * Returns true when the task was reset to pending.
  */
-async function releaseOwnedTask(
+export async function releaseOwnedTask(
   teamName: string,
   taskId: string,
   expectedOwner: string,
@@ -772,7 +834,16 @@ async function releaseOwnedTask(
     throw err;
   }
   try {
-    const raw = await fs.readFile(taskPath, 'utf-8');
+    let raw: string;
+    try {
+      raw = await fs.readFile(taskPath, 'utf-8');
+    } catch (err) {
+      // See updateTask: the file can vanish after lock acquisition
+      // (resetTaskList / quarantine rename run without the lock).
+      // Mirror deleteTask's in-lock guard.
+      if (isNodeError(err) && err.code === 'ENOENT') return false;
+      throw err;
+    }
     const task = JSON.parse(raw) as SwarmTask;
     if (task.status !== 'in_progress') return false;
     if (task.owner !== expectedOwner) return false;
