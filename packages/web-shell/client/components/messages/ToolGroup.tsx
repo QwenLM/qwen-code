@@ -145,7 +145,13 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
 }
 
 const MAX_BASH_LINES = 5;
+const MAX_BASH_LINE_CHARS = 150;
 const MAX_READ_LINES = 25;
+
+function truncateLine(line: string, max: number): string {
+  if (line.length <= max) return line;
+  return line.slice(0, max) + ' …';
+}
 
 function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const output = useMemo(() => extractText(tool) || '', [tool]);
@@ -158,10 +164,12 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
         ? // Match CLI behavior: long shell output shows a fixed tail preview.
           [
             `... first ${hiddenLinesCount} lines hidden ...`,
-            ...lines.slice(-MAX_BASH_LINES),
+            ...lines
+              .slice(-MAX_BASH_LINES)
+              .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
           ].join('\n')
-        : output,
-    [hiddenLinesCount, isLong, lines, output],
+        : lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n'),
+    [hiddenLinesCount, isLong, lines],
   );
   const ansiSegments = useMemo(
     () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),

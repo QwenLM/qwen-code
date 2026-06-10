@@ -14,11 +14,13 @@ import styles from './AssistantMessage.module.css';
 interface AssistantMessageProps {
   content: string;
   thinking?: string;
+  isStreaming?: boolean;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   thinking,
+  isStreaming,
 }: AssistantMessageProps) {
   const compactMode = useContext(CompactModeContext);
   const { compactThinking } = useWebShellCustomization();
@@ -83,7 +85,11 @@ export const AssistantMessage = memo(function AssistantMessage({
               </div>
             ) : (
               <div className={styles.thinkingExpandedWrap}>
-                <Markdown content={thinking} source="thinking" />
+                <Markdown
+                  content={thinking}
+                  source="thinking"
+                  deferMermaid={isStreaming}
+                />
                 {compactThinking && thinkingExpanded && (
                   <button
                     className={styles.expandToggle}
@@ -104,7 +110,11 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.content}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.contentBody}>
-            <Markdown content={content} source="assistant" />
+            <Markdown
+              content={content}
+              source="assistant"
+              deferMermaid={isStreaming}
+            />
           </div>
         </div>
       )}

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../adapters/types';
-import { getDisplayItemVirtualKey, groupParallelAgents } from './MessageList';
+import {
+  getDisplayItemVirtualKey,
+  groupParallelAgents,
+  shouldUseVirtualScroll,
+  VIRTUAL_SCROLL_THRESHOLD,
+} from './MessageList';
 
 function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
   return {
@@ -170,5 +175,18 @@ describe('getDisplayItemVirtualKey', () => {
         agents: [makeAgentToolGroup('a').tools[0]],
       }),
     ).toBe('group:header');
+  });
+});
+
+describe('shouldUseVirtualScroll', () => {
+  it('enables virtual scrolling only above the default threshold', () => {
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD - 1)).toBe(false);
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD)).toBe(false);
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD + 1)).toBe(true);
+  });
+
+  it('accepts a custom threshold', () => {
+    expect(shouldUseVirtualScroll(50, 50)).toBe(false);
+    expect(shouldUseVirtualScroll(51, 50)).toBe(true);
   });
 });

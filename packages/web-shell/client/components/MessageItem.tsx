@@ -40,6 +40,7 @@ export const MessageItem = memo(function MessageItem({
         <AssistantMessage
           content={message.content}
           thinking={message.thinking}
+          isStreaming={message.isStreaming}
         />
       );
     case 'tool_group':

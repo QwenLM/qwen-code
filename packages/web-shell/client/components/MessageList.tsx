@@ -33,6 +33,7 @@ interface MessageListProps {
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
+  virtualScrollThreshold?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
@@ -206,6 +207,14 @@ const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_APPROVAL = 200;
 const ESTIMATE_TAIL = 240;
+export const VIRTUAL_SCROLL_THRESHOLD = 200;
+
+export function shouldUseVirtualScroll(
+  totalCount: number,
+  threshold = VIRTUAL_SCROLL_THRESHOLD,
+): boolean {
+  return totalCount > threshold;
+}
 
 export function MessageList({
   messages,
@@ -216,6 +225,7 @@ export function MessageList({
   workspaceCwd,
   tailContent,
   tailKey = 'tail',
+  virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
   autoScrollTailIntoView = false,
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
@@ -300,6 +310,37 @@ export function MessageList({
   const tailApprovalIndex = headerOffset + displayItems.length;
   const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
   const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
+  const useVirtualScroll = shouldUseVirtualScroll(
+    totalCount,
+    virtualScrollThreshold,
+  );
+
+  const getItemKey = useCallback(
+    (index: number) => {
+      if (hasHeader && index === HEADER_INDEX) return 'slot:header';
+      if (hasTailApproval && index === tailApprovalIndex) {
+        return pendingApproval
+          ? `slot:approval:${pendingApproval.id}`
+          : 'slot:approval';
+      }
+      if (hasTailContent && index === tailContentIndex) {
+        return `slot:tail:${tailKey}`;
+      }
+      const item = displayItems[index - headerOffset];
+      return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
+    },
+    [
+      hasHeader,
+      hasTailApproval,
+      tailApprovalIndex,
+      pendingApproval,
+      hasTailContent,
+      tailContentIndex,
+      tailKey,
+      displayItems,
+      headerOffset,
+    ],
+  );
 
   // Rule 6: skip if content doesn't overflow (no scrollbar).
   const scrollToBottom = useCallback(() => {
@@ -320,20 +361,9 @@ export function MessageList({
 
   const virtualizer = useVirtualizer({
     count: totalCount,
+    enabled: useVirtualScroll,
     getScrollElement: () => containerRef.current,
-    getItemKey: (index) => {
-      if (hasHeader && index === HEADER_INDEX) return 'slot:header';
-      if (hasTailApproval && index === tailApprovalIndex) {
-        return pendingApproval
-          ? `slot:approval:${pendingApproval.id}`
-          : 'slot:approval';
-      }
-      if (hasTailContent && index === tailContentIndex) {
-        return `slot:tail:${tailKey}`;
-      }
-      const item = displayItems[index - headerOffset];
-      return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
-    },
+    getItemKey,
     estimateSize: (index) => {
       if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
       if (hasTailApproval && index === tailApprovalIndex) {
@@ -343,6 +373,7 @@ export function MessageList({
       return ESTIMATE_MESSAGE;
     },
     overscan: 20,
+    useFlushSync: false,
     useAnimationFrameWithResizeObserver: true,
   });
 
@@ -530,34 +561,42 @@ export function MessageList({
     if (shouldFollow.current) {
       scrollToBottom();
     }
-  }, [totalVirtualSize, catchingUp, scrollToBottom]);
+  }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
   return (
     <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
-      <div
-        style={{
-          height: totalVirtualSize,
-          width: '100%',
-          position: 'relative',
-        }}
-      >
-        {virtualItems.map((virtualRow) => (
-          <div
-            key={virtualRow.key}
-            data-index={virtualRow.index}
-            ref={virtualizer.measureElement}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              transform: `translateY(${virtualRow.start}px)`,
-            }}
-          >
-            {renderVirtualItem(virtualRow.index)}
+      {useVirtualScroll ? (
+        <div
+          style={{
+            height: totalVirtualSize,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualItems.map((virtualRow) => (
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={virtualizer.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+            >
+              {renderVirtualItem(virtualRow.index)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        Array.from({ length: totalCount }, (_, index) => (
+          <div key={getItemKey(index)} data-index={index}>
+            {renderVirtualItem(index)}
           </div>
-        ))}
-      </div>
+        ))
+      )}
     </div>
   );
 }

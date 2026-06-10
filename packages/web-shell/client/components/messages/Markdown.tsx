@@ -16,6 +16,7 @@ import styles from './Markdown.module.css';
 interface MarkdownProps {
   content: string;
   source?: MarkdownContentSource;
+  deferMermaid?: boolean;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -313,9 +314,11 @@ function MermaidBlock({ code }: { code: string }) {
 function CodeBlock({
   className,
   children,
+  deferMermaid,
 }: {
   className?: string;
   children: string;
+  deferMermaid?: boolean;
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
@@ -369,7 +372,7 @@ function CodeBlock({
     );
   };
 
-  if (lang === 'mermaid') {
+  if (lang === 'mermaid' && !deferMermaid) {
     return <MermaidBlock code={code} />;
   }
 
@@ -399,49 +402,62 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-const components: Components = {
-  code({ className, children }: { className?: string; children?: ReactNode }) {
-    const isBlock =
-      className?.startsWith('language-') ||
-      (typeof children === 'string' && children.includes('\n'));
+function createComponents(deferMermaid?: boolean): Components {
+  return {
+    code({
+      className,
+      children,
+    }: {
+      className?: string;
+      children?: ReactNode;
+    }) {
+      const isBlock =
+        className?.startsWith('language-') ||
+        (typeof children === 'string' && children.includes('\n'));
 
-    if (isBlock) {
-      return <CodeBlock className={className}>{String(children)}</CodeBlock>;
-    }
-    return <InlineCode>{children}</InlineCode>;
-  },
-  pre({ children }: { children?: ReactNode }) {
-    return <>{children}</>;
-  },
-  a({ href, children }: { href?: string; children?: ReactNode }) {
-    const safeHref = isSafeHref(href) ? href : undefined;
-    return (
-      <a
-        href={safeHref}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={styles.link}
-      >
-        {children}
-      </a>
-    );
-  },
-  table({ children }: { children?: ReactNode }) {
-    return (
-      <div className={styles.tableWrapper}>
-        <table className={styles.table}>{children}</table>
-      </div>
-    );
-  },
-  img({ src, alt }: { src?: string; alt?: string }) {
-    const safeSrc = isSafeImageSrc(src) ? src : undefined;
-    return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
-  },
-};
+      if (isBlock) {
+        return (
+          <CodeBlock className={className} deferMermaid={deferMermaid}>
+            {String(children)}
+          </CodeBlock>
+        );
+      }
+      return <InlineCode>{children}</InlineCode>;
+    },
+    pre({ children }: { children?: ReactNode }) {
+      return <>{children}</>;
+    },
+    a({ href, children }: { href?: string; children?: ReactNode }) {
+      const safeHref = isSafeHref(href) ? href : undefined;
+      return (
+        <a
+          href={safeHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={styles.link}
+        >
+          {children}
+        </a>
+      );
+    },
+    table({ children }: { children?: ReactNode }) {
+      return (
+        <div className={styles.tableWrapper}>
+          <table className={styles.table}>{children}</table>
+        </div>
+      );
+    },
+    img({ src, alt }: { src?: string; alt?: string }) {
+      const safeSrc = isSafeImageSrc(src) ? src : undefined;
+      return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+    },
+  };
+}
 
 export const Markdown = memo(function Markdown({
   content,
   source,
+  deferMermaid,
 }: MarkdownProps) {
   const { markdown } = useWebShellCustomization();
 
@@ -452,6 +468,7 @@ export const Markdown = memo(function Markdown({
     source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const components = createComponents(deferMermaid);
   const renderedComponents = sourceMarkdown?.components
     ? { ...components, ...sourceMarkdown.components }
     : components;

@@ -198,6 +198,8 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
+  virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
 }
@@ -223,6 +225,10 @@ function getInitialLanguage(): WebShellLanguage {
 
 function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 interface AlreadyDispatchedError extends Error {
@@ -506,6 +512,7 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   compactThinking = false,
+  virtualScrollThreshold,
   markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -709,6 +716,7 @@ export function App({
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
       if (isAlreadyDispatched(error)) {
         console.error('[web-shell] error already dispatched', error);
         return;
@@ -2155,6 +2163,7 @@ export function App({
                   autoScrollTailIntoView={
                     approvalModeInlineOpen || modelInlineMode !== null
                   }
+                  virtualScrollThreshold={virtualScrollThreshold}
                 />
 
                 {btwMessage?.role === 'btw' && (
