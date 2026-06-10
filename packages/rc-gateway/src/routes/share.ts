@@ -105,6 +105,8 @@ export function createShareRouter(
       action: 'share_created',
       actorTokenId: req.rcClient?.id,
       target: id,
+      shareId: id,
+      shareLabel: label,
       detail: {
         shareId: id,
         sessionId,
@@ -136,6 +138,8 @@ export function createShareRouter(
       action: 'share_revoked',
       actorTokenId: req.rcClient?.id,
       target: id,
+      shareId: id,
+      shareLabel: rec.label,
       detail: { shareId: id },
     });
     res.status(204).end();
@@ -196,6 +200,8 @@ export function createShareWhoamiHandler(
             action: 'share_exhausted',
             actorTokenId: id,
             target: id,
+            shareId: id,
+            shareLabel: info.label,
             detail: { shareId: id },
           });
           res
@@ -223,6 +229,8 @@ export function createShareWhoamiHandler(
         action: 'share_redeemed',
         actorTokenId: id,
         target: id,
+        shareId: id,
+        shareLabel: info.label,
         detail: { shareId: id, usesRemaining: result.usesRemaining },
       });
       res.status(200).json(meta(result.usesRemaining));

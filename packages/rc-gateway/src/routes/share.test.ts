@@ -96,6 +96,9 @@ describe('/rc/share routes', () => {
 
     const created = audit.calls.find((c) => c.action === 'share_created');
     expect(created).toBeDefined();
+    // Top-level shareId/shareLabel for the --share-id audit filter (L4).
+    expect(created!.shareId).toBe(body.id);
+    expect(created!.shareLabel).toBe('guest');
     expect(created!.detail).toMatchObject({
       shareId: body.id,
       sessionId: 's1',
@@ -176,6 +179,8 @@ describe('/rc/share routes', () => {
     expect(store.listShares()).toHaveLength(0);
     const revoked = audit.calls.find((c) => c.action === 'share_revoked');
     expect(revoked).toBeDefined();
+    expect(revoked!.shareId).toBe(id);
+    expect(revoked!.shareLabel).toBe('share'); // default label
     expect(revoked!.detail).toMatchObject({ shareId: id });
   });
 
@@ -322,6 +327,8 @@ describe('GET /rc/share/whoami (redemption)', () => {
     expect(res.headers.get('set-cookie')).toContain('rc_share_' + share.id);
     expect(store.listShares()[0].uses).toBe(1);
     const redeemed = audit.calls.find((c) => c.action === 'share_redeemed');
+    expect(redeemed!.shareId).toBe(share.id);
+    expect(redeemed!.shareLabel).toBe('guest');
     expect(redeemed!.detail).toMatchObject({ shareId: share.id });
   });
 
@@ -378,7 +385,10 @@ describe('GET /rc/share/whoami (redemption)', () => {
     expect(((await second.json()) as { code: string }).code).toBe(
       'share_exhausted',
     );
-    expect(audit.calls.some((c) => c.action === 'share_exhausted')).toBe(true);
+    const exhausted = audit.calls.find((c) => c.action === 'share_exhausted');
+    expect(exhausted).toBeDefined();
+    expect(exhausted!.shareId).toBe(share.id);
+    expect(exhausted!.shareLabel).toBe('guest');
 
     // The already-redeemed session keeps working (its cookie still honored).
     const stillOk = await fetch(`${url}/rc/share/whoami`, {
