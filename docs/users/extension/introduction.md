@@ -163,6 +163,30 @@ qwen extensions sources remove <name>
 
 ### Publishing a Qwen marketplace
 
+#### Scaffolding
+
+Use `qwen extensions new` with `--marketplace` (alias `-m`) to scaffold a
+marketplace instead of a single extension:
+
+```bash
+# A minimal empty marketplace (just qwen-marketplace.json)
+qwen extensions new ./my-marketplace --marketplace
+
+# From a boilerplate marketplace template (includes an example extension)
+qwen extensions new ./my-marketplace default --marketplace
+```
+
+Then test it without publishing by adding the local path as a source:
+
+```bash
+qwen extensions sources add ./my-marketplace
+```
+
+(Without `--marketplace`, `qwen extensions new <path> [template]` scaffolds a
+single extension as before.)
+
+#### Manifest
+
 To turn a repository into a Qwen marketplace, add a `qwen-marketplace.json` at its root:
 
 ```json
@@ -188,7 +212,38 @@ To turn a repository into a Qwen marketplace, add a `qwen-marketplace.json` at i
 }
 ```
 
-Each entry's `source` tells the installer where the extension code lives:
+#### Top-level fields
+
+| Field         | Type                                | Required | Description                                                                                                                                 |
+| ------------- | ----------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`        | string                              | yes      | Display name of the marketplace.                                                                                                            |
+| `extensions`  | array of [entry](#entry-fields)     | yes      | The extensions this marketplace offers (may be empty).                                                                                      |
+| `description` | string                              | no       | Shown in the Sources/Discover views.                                                                                                        |
+| `version`     | string                              | no       | Marketplace version, for your own bookkeeping.                                                                                              |
+| `owner`       | `{ name?: string; email?: string }` | no       | Maintainer info.                                                                                                                            |
+| `metadata`    | `{ extensionRoot?: string }`        | no       | `extensionRoot` is a path prefix (relative to the repo root) that relative entry `source` paths resolve against. Defaults to the repo root. |
+
+#### Entry fields
+
+Each item in `extensions`:
+
+| Field         | Type                                                           | Required | Description                                                               |
+| ------------- | -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------- |
+| `name`        | string                                                         | yes      | Unique extension name within the marketplace.                             |
+| `source`      | string \| object (see [Source](#entry-source))                 | yes      | Where the extension's code lives.                                         |
+| `version`     | string                                                         | no       | Extension version shown in Discover.                                      |
+| `description` | string                                                         | no       | Short summary shown in Discover.                                          |
+| `author`      | string \| `{ name?; email?; url? }`                            | no       | Author name (string) or structured author info.                           |
+| `homepage`    | string                                                         | no       | Project/homepage URL.                                                     |
+| `category`    | string                                                         | no       | Free-form category label.                                                 |
+| `tags`        | string[]                                                       | no       | Free-form tags.                                                           |
+| `lastUpdated` | string                                                         | no       | Best-effort "last updated" label shown in Discover.                       |
+| `installs`    | number                                                         | no       | Best-effort install/download count shown in Discover.                     |
+| `components`  | `{ commands?; skills?; agents?; mcpServers? }` (string arrays) | no       | Declares what the entry will install — drives the "Will install" summary. |
+
+#### Entry `source`
+
+`source` tells the installer where the extension code lives, and may be:
 
 - A relative path inside the repo (resolved against `metadata.extensionRoot` when set; must stay within the marketplace directory — `..` and absolute paths are rejected)
 - An `http(s)://` URL string (for `git@`/`ssh://` URLs or to pin a `ref`/subdir, use the structured `git`/`github` forms below)
@@ -196,7 +251,7 @@ Each entry's `source` tells the installer where the extension code lives:
 - `{ "type": "git", "url": "...", "path?": "subdir", "ref?": "tag" }`
 - `{ "type": "npm", "package": "@scope/name" }` — scoped packages only; pin a version with `@scope/name@1.2.3`
 
-Entries may point at extensions of any supported format — Qwen-native (`qwen-extension.json`), Gemini (`gemini-extension.json`), or Claude (`.claude-plugin/plugin.json`); non-native formats are converted automatically on install. Optional entry fields like `version`, `author`, `homepage`, `category`, `tags`, and `components` enrich the Discover view.
+Entries may point at extensions of any supported format — Qwen-native (`qwen-extension.json`), Gemini (`gemini-extension.json`), or Claude (`.claude-plugin/plugin.json`); non-native formats are converted automatically on install.
 
 Install a specific entry directly with `qwen extensions install <marketplace-source>:<extension-name>`.
 

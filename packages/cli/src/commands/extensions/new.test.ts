@@ -88,4 +88,43 @@ describe('extensions new command', () => {
     expect(mockedFs.mkdir).not.toHaveBeenCalled();
     expect(mockedFs.cp).not.toHaveBeenCalled();
   });
+
+  it('should create a minimal Qwen marketplace with --marketplace and no template', async () => {
+    mockedFs.access.mockRejectedValue(new Error('ENOENT'));
+    mockedFs.mkdir.mockResolvedValue(undefined);
+    mockedFs.writeFile.mockResolvedValue(undefined);
+
+    const parser = yargs([]).command(newCommand).fail(false);
+
+    await parser.parseAsync('new /some/path --marketplace');
+
+    expect(mockedFs.mkdir).toHaveBeenCalledWith('/some/path', {
+      recursive: true,
+    });
+    expect(mockedFs.writeFile).toHaveBeenCalledWith(
+      path.normalize('/some/path/qwen-marketplace.json'),
+      expect.stringContaining('"extensions": []'),
+    );
+    expect(mockedFs.cp).not.toHaveBeenCalled();
+  });
+
+  it('should copy from the marketplace template dir with --marketplace and a template', async () => {
+    mockedFs.access.mockRejectedValue(new Error('ENOENT'));
+    mockedFs.mkdir.mockResolvedValue(undefined);
+    mockedFs.cp.mockResolvedValue(undefined);
+
+    const parser = yargs([]).command(newCommand).fail(false);
+
+    await parser.parseAsync('new /some/path context --marketplace');
+
+    expect(mockedFs.mkdir).toHaveBeenCalledWith('/some/path', {
+      recursive: true,
+    });
+    // Marketplace templates resolve under the dedicated `marketplaces/` dir.
+    expect(mockedFs.cp).toHaveBeenCalledWith(
+      expect.stringContaining(path.normalize('marketplaces/context/context')),
+      path.normalize('/some/path/context'),
+      { recursive: true },
+    );
+  });
 });

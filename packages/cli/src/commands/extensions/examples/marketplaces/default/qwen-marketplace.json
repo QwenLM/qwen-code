@@ -1,0 +1,17 @@
+{
+  "name": "my-marketplace",
+  "description": "A Qwen Code extension marketplace.",
+  "version": "1.0.0",
+  "metadata": { "extensionRoot": "extensions" },
+  "extensions": [
+    {
+      "name": "hello",
+      "version": "1.0.0",
+      "description": "An example extension bundled in this marketplace.",
+      "category": "demo",
+      "tags": ["example"],
+      "source": "./hello",
+      "components": { "commands": ["hello"] }
+    }
+  ]
+}
