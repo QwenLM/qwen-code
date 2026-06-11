@@ -6,6 +6,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
+import type { Request, Response } from 'express';
 import http from 'node:http';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -122,5 +123,53 @@ describe('GET /rc/events', () => {
     const res = await fetch(`${base}/rc/events`);
     expect(res.status).toBe(503);
     expect((await res.json()).code).toBe('too_many_streams');
+  });
+
+  it('drops frames under backpressure and emits ONE resync on drain', () => {
+    // Drive res.write() === false directly with a mock res so the
+    // dropping/dropped/resync path (the externally-triggerable-storm mitigation)
+    // is verified, not just read.
+    const bus = new OwnerEventBus();
+    const writes: string[] = [];
+    let writeOk = true;
+    let drain: (() => void) | undefined;
+    let close: (() => void) | undefined;
+    const res = {
+      writeHead() {},
+      flushHeaders() {},
+      write(s: string) {
+        writes.push(s);
+        return writeOk;
+      },
+      once(ev: string, cb: () => void) {
+        if (ev === 'drain') drain = cb;
+      },
+      end() {},
+    } as unknown as Response;
+    const req = {
+      on(ev: string, cb: () => void) {
+        if (ev === 'close') close = cb;
+      },
+      socket: { setNoDelay() {} },
+    } as unknown as Request;
+
+    createOwnerEventsRoute(bus)(req, res, () => {});
+    expect(writes).toContain(': ok\n\n');
+
+    // The frame that trips write()===false is sent; subsequent frames drop.
+    writeOk = false;
+    bus.publish({ type: 'audit', record: auditRecord('a1') });
+    bus.publish({ type: 'audit', record: auditRecord('a2') });
+    bus.publish({ type: 'audit', record: auditRecord('a3') });
+    expect(writes.filter((w) => w.startsWith('data: '))).toHaveLength(1);
+
+    // On drain, exactly one resync marker reports the dropped count (2).
+    writeOk = true;
+    drain?.();
+    const resync = writes.filter((w) => w.startsWith('event: resync'));
+    expect(resync).toHaveLength(1);
+    expect(resync[0]).toContain('"dropped":2');
+
+    close?.(); // clear the heartbeat interval
   });
 });
