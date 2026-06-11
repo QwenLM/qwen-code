@@ -1759,6 +1759,7 @@ describe('BackgroundTaskRegistry', () => {
         callId: 'c1',
         name: 'Shell',
         description: 'run c1',
+        args: {},
         confirmationDetails: {
           type: 'exec',
         } as BackgroundApproval['confirmationDetails'],
@@ -1793,6 +1794,7 @@ describe('BackgroundTaskRegistry', () => {
         callId: 'c1',
         name: 'Shell',
         description: 'run c1',
+        args: {},
         confirmationDetails: {
           type: 'exec',
         } as BackgroundApproval['confirmationDetails'],
@@ -1828,6 +1830,7 @@ describe('BackgroundTaskRegistry', () => {
         callId: 'late',
         name: 'Shell',
         description: 'run late',
+        args: {},
         confirmationDetails: {
           type: 'exec',
         } as BackgroundApproval['confirmationDetails'],
