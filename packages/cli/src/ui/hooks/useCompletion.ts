@@ -12,7 +12,7 @@ import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 export interface UseCompletionOptions {
   /** When the completion query changes, the dismissed flag is cleared
    *  (unless dismissCompletion was just called). */
-  query?: string;
+  query?: string | null;
 }
 
 export interface UseCompletionReturn {
