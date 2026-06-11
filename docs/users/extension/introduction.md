@@ -133,6 +133,34 @@ qwen extensions install /path/to/your/extension
 
 Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
 
+#### Choosing an install scope
+
+By default, an installed extension is enabled globally (user scope). Pass `--scope project` to enable it only for the current workspace:
+
+```bash
+qwen extensions install <source> --scope project
+```
+
+`--scope workspace` is accepted as an alias of `--scope project`. This matches the scope choice offered when installing from the `/extensions manage` Discover tab.
+
+### Managing marketplace sources
+
+Marketplace sources (Claude plugin marketplaces) power the Discover tab in `/extensions manage`. You can manage them from the CLI as well:
+
+```bash
+# Add a marketplace (owner/repo, git URL, https URL to marketplace.json, or local path)
+qwen extensions sources add <source>
+
+# List configured marketplaces
+qwen extensions sources list
+
+# Re-fetch a marketplace's plugin listing
+qwen extensions sources update <name>
+
+# Remove a marketplace
+qwen extensions sources remove <name>
+```
+
 ### Uninstalling an extension
 
 To uninstall, run `qwen extensions uninstall extension-name`, so, in the case of the install example:

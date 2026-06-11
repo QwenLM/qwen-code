@@ -606,6 +606,26 @@ export default {
   'Uninstall an extension': '卸載擴展',
   'No extensions installed.': '未安裝擴展。',
   'Extension "{{name}}" not found.': '未找到擴展 "{{name}}"。',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    '安裝擴展的作用域："user"（全域，預設）或 "project"（僅當前工作區）。',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    '擴展 "{{name}}" 安裝成功，並已在當前工作區啟用。',
+  'Marketplace "{{name}}" not found.': '未找到市場源 "{{name}}"。',
+  'No marketplace sources added yet.': '尚未添加任何市場源。',
+  'Adds a marketplace source (Claude format).':
+    '添加一個市場源（Claude 格式）。',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    '要添加的市場源：owner/repo（GitHub）、git 或 https URL，或本地路徑。',
+  'Removes a marketplace source.': '移除一個市場源。',
+  'The name of the marketplace to remove.': '要移除的市場源名稱。',
+  'Lists configured marketplace sources.': '列出已配置的市場源。',
+  'Re-fetches a marketplace source and its plugin listing.':
+    '重新拉取市場源及其插件列表。',
+  'The name of the marketplace to update.': '要更新的市場源名稱。',
+  'Manage marketplace sources for discovering extensions.':
+    '管理用於發現擴展的市場源。',
+  'You need at least one command before continuing.':
+    '需要至少提供一個子命令。',
   'No extensions to update.': '沒有可更新的擴展。',
   'Usage: /extensions install <source>': '用法：/extensions install <來源>',
   'Installing extension from "{{source}}"...':

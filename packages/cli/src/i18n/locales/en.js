@@ -675,6 +675,29 @@ export default {
   'Uninstall an extension': 'Uninstall an extension',
   'No extensions installed.': 'No extensions installed.',
   'Extension "{{name}}" not found.': 'Extension "{{name}}" not found.',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+  'Marketplace "{{name}}" not found.': 'Marketplace "{{name}}" not found.',
+  'No marketplace sources added yet.': 'No marketplace sources added yet.',
+  'Adds a marketplace source (Claude format).':
+    'Adds a marketplace source (Claude format).',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.',
+  'Removes a marketplace source.': 'Removes a marketplace source.',
+  'The name of the marketplace to remove.':
+    'The name of the marketplace to remove.',
+  'Lists configured marketplace sources.':
+    'Lists configured marketplace sources.',
+  'Re-fetches a marketplace source and its plugin listing.':
+    'Re-fetches a marketplace source and its plugin listing.',
+  'The name of the marketplace to update.':
+    'The name of the marketplace to update.',
+  'Manage marketplace sources for discovering extensions.':
+    'Manage marketplace sources for discovering extensions.',
+  'You need at least one command before continuing.':
+    'You need at least one command before continuing.',
   'No extensions to update.': 'No extensions to update.',
   'Usage: /extensions install <source>': 'Usage: /extensions install <source>',
   'Installing extension from "{{source}}"...':

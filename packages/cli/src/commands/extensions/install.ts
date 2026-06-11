@@ -9,11 +9,12 @@ import type { CommandModule } from 'yargs';
 import {
   ExtensionManager,
   parseInstallSource,
+  type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
@@ -28,6 +29,12 @@ interface InstallArgs {
   allowPreRelease?: boolean;
   consent?: boolean;
   registry?: string;
+  scope?: string;
+}
+
+// "workspace" is accepted as an alias of "project" to match enable/disable.
+function normalizeScope(scope: string | undefined): ExtensionScope {
+  return scope === 'project' || scope === 'workspace' ? 'project' : 'user';
 }
 
 export async function handleInstall(args: InstallArgs) {
@@ -87,10 +94,31 @@ export async function handleInstall(args: InstallArgs) {
       },
       requestConsent,
     );
+    const scope = normalizeScope(args.scope);
+    if (args.scope) {
+      extensionManager.setExtensionScope(extension.name, scope);
+      // installExtension auto-enables at the user (global) scope. For a
+      // project-scoped install, re-scope enablement to this workspace only.
+      if (scope === 'project') {
+        await extensionManager.disableExtension(
+          extension.name,
+          SettingScope.User,
+        );
+        await extensionManager.enableExtension(
+          extension.name,
+          SettingScope.Workspace,
+        );
+      }
+    }
     writeStdoutLine(
-      t('Extension "{{name}}" installed successfully and enabled.', {
-        name: extension.name,
-      }),
+      scope === 'project'
+        ? t(
+            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" installed successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
@@ -135,6 +163,13 @@ export const installCommand: CommandModule = {
         type: 'boolean',
         default: false,
       })
+      .option('scope', {
+        describe: t(
+          'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+        ),
+        type: 'string',
+        choices: ['user', 'project', 'workspace'],
+      })
       .check((argv) => {
         if (!argv.source) {
           throw new Error(t('The source argument must be provided.'));
@@ -149,6 +184,7 @@ export const installCommand: CommandModule = {
       allowPreRelease: argv['pre-release'] as boolean | undefined,
       consent: argv['consent'] as boolean | undefined,
       registry: argv['registry'] as string | undefined,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };
