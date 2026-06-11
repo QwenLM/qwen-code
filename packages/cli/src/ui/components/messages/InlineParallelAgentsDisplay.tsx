@@ -264,13 +264,7 @@ export const InlineParallelAgentsDisplay: React.FC<
   const headerLabel = `Parallel agents · ${total} · ${doneCount}/${total} done`;
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      width={contentWidth}
-      borderColor={hasLiveAgent ? theme.status.warning : theme.border.default}
-      paddingX={1}
-    >
+    <Box flexDirection="column" width={contentWidth} paddingX={1}>
       <Box>
         <Text bold color={theme.text.accent}>
           {headerLabel}
