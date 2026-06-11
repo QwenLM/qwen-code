@@ -135,7 +135,9 @@ rules:
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('warns for a rule with maxPerWindow (still deferred)', async () => {
+  it('does NOT warn for a (now-honored) maxPerWindow rule', async () => {
+    // Cycle 43: maxPerWindow is validated + honored at runtime by the quota store,
+    // so it is no longer a "deferred field" and emits no load-time warning.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { loadPolicy: load } = await import('./loader.js');
     load(`
@@ -143,10 +145,9 @@ rules:
   - match:
       tool: bash
     action: allow
-    maxPerWindow: 5
+    maxPerWindow: { count: 5, windowSec: 60 }
 `);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain('maxPerWindow');
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

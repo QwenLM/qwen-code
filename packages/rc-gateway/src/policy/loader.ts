@@ -27,8 +27,9 @@ export interface PolicyRule {
   requireScope?: string;
   reason?: string;
   priority?: number;
+  /** Per-rule rolling-window rate limit (cycle 43): at most `count` per `windowSec`. */
+  maxPerWindow?: { count: number; windowSec: number };
   // Deferred (parsed, not evaluated this cycle):
-  maxPerWindow?: unknown;
   expiresAt?: unknown;
 }
 
@@ -56,7 +57,39 @@ function isAction(v: unknown): v is PolicyAction {
   return typeof v === 'string' && (ACTIONS as readonly string[]).includes(v);
 }
 
-let warnedDeferred = false;
+/**
+ * Validate a rule's `maxPerWindow` into a typed `{ count, windowSec }`
+ * (FAIL-CLOSED — a malformed quota blocks boot, like every other policy schema
+ * error): `count` a non-negative integer, `windowSec` a positive integer. Unknown
+ * sub-keys are ignored (forward-compat).
+ */
+function parseMaxPerWindow(
+  raw: unknown,
+  i: number,
+): { count: number; windowSec: number } {
+  if (!isPlainObject(raw)) {
+    throw new PolicyError(
+      `rule[${i}].maxPerWindow must be a mapping { count, windowSec }`,
+    );
+  }
+  const count = raw['count'];
+  const windowSec = raw['windowSec'];
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+    throw new PolicyError(
+      `rule[${i}].maxPerWindow.count must be a non-negative integer`,
+    );
+  }
+  if (
+    typeof windowSec !== 'number' ||
+    !Number.isInteger(windowSec) ||
+    windowSec <= 0
+  ) {
+    throw new PolicyError(
+      `rule[${i}].maxPerWindow.windowSec must be a positive integer`,
+    );
+  }
+  return { count, windowSec };
+}
 
 /**
  * Parse and validate a policy YAML document. Throws {@link PolicyError} when
@@ -119,24 +152,14 @@ export function loadPolicy(text: string): Policy {
     }
     if (raw['reason'] !== undefined) rule.reason = String(raw['reason']);
     if (typeof raw['priority'] === 'number') rule.priority = raw['priority'];
-    // Deferred rule-level fields kept through, not evaluated.
-    if (raw['maxPerWindow'] !== undefined)
-      rule.maxPerWindow = raw['maxPerWindow'];
+    // maxPerWindow: validated into a typed { count, windowSec } (fail-closed).
+    // It is now HONORED at runtime by the enforcer's quota store (cycle 43), so it
+    // is no longer a "deferred" field. expiresAt is evaluated (cycle 22).
+    if (raw['maxPerWindow'] !== undefined) {
+      rule.maxPerWindow = parseMaxPerWindow(raw['maxPerWindow'], i);
+    }
     if (raw['expiresAt'] !== undefined) rule.expiresAt = raw['expiresAt'];
 
-    // Only maxPerWindow is still deferred (timeOfDay/expiresAt are now
-    // evaluated by the evaluator). Presence, not truthiness — a falsy-valued
-    // maxPerWindow (e.g. `maxPerWindow: 0`) is still flagged.
-    if (rule.maxPerWindow !== undefined) {
-      if (!warnedDeferred) {
-        warnedDeferred = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[policy] rule ${rule.id ?? `[${i}]`} uses an unevaluated field ` +
-            '(maxPerWindow); will downgrade to prompt',
-        );
-      }
-    }
     return rule;
   });
 

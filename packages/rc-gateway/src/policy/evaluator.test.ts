@@ -321,15 +321,17 @@ rules:
     expect(d.ruleId).toBe('bad-expiry');
   });
 
-  it('maxPerWindow remains deferred → allow still downgrades to prompt', () => {
+  it('a maxPerWindow rule with NO quota oracle still downgrades allow→prompt', () => {
     const policy = loadPolicy(`
 rules:
   - id: quota-allow
     match:
       tool: bash
     action: allow
-    maxPerWindow: 5
+    maxPerWindow: { count: 5, windowSec: 60 }
 `);
+    // evaluate() called WITHOUT a quota oracle → maxPerWindow is unevaluable →
+    // prompt (the backward-compatible default preserved for every non-enforcer caller).
     const d = evaluate(
       policy,
       { tool: 'bash', args: 'ls' },
