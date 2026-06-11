@@ -1710,6 +1710,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
