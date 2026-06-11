@@ -627,7 +627,8 @@ class Session {
     this.processingPromise = this.processPendingWork().finally(() => {
       this.processingPromise = null;
       if (
-        (this.userMessageQueue.length > 0 ||
+        (this.pendingContinueTurns > 0 ||
+          this.userMessageQueue.length > 0 ||
           this.monitorStartedQueue.length > 0 ||
           this.monitorQueue.length > 0) &&
         !this.isShuttingDown &&
