@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -18,6 +18,7 @@ import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
 import { WsStream } from './wsStream.js';
+import type { RateLimitTier } from '../rateLimit.js';
 import { RPC, error as rpcError, isRequest, parseInbound } from './jsonRpc.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
@@ -41,6 +42,8 @@ export interface MountAcpHttpOptions {
   maxConnections?: number;
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
+  /** Rate limit checker for WS messages (WS bypasses Express middleware). */
+  checkRate?: (key: string, tier: RateLimitTier) => boolean;
 }
 
 export interface AcpHttpHandle {
@@ -439,13 +442,9 @@ export function mountAcpHttp(
           const credentials = authHeader
             .slice(authHeader.indexOf(' ') + 1)
             .trim();
-          const expected = Buffer.from(opts.token, 'utf8');
-          const actual = Buffer.from(credentials, 'utf8');
-          if (
-            scheme !== 'bearer' ||
-            expected.length !== actual.length ||
-            !timingSafeEqual(expected, actual)
-          ) {
+          const expected = createHash('sha256').update(opts.token).digest();
+          const actual = createHash('sha256').update(credentials).digest();
+          if (scheme !== 'bearer' || !timingSafeEqual(expected, actual)) {
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
             return;
@@ -466,8 +465,18 @@ export function mountAcpHttp(
           initTimer.unref?.();
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let connRef: any;
+          let messageQueue = Promise.resolve();
+          const wsKey = socket.remoteAddress ?? 'ws-unknown';
 
-          ws.on('message', async (rawData: Buffer | string) => {
+          ws.on('message', (rawData: Buffer | string) => {
+            messageQueue = messageQueue
+              .then(() => handleWsMessage(rawData))
+              .catch(() => {});
+          });
+
+          async function handleWsMessage(
+            rawData: Buffer | string,
+          ): Promise<void> {
             let text: string;
             try {
               text =
@@ -620,6 +629,29 @@ export function mountAcpHttp(
               }
             }
 
+            // Rate limit: classify by method name, matching REST tiers.
+            if (opts.checkRate && isRequest(message)) {
+              const m = message.method;
+              const tier: RateLimitTier =
+                m === 'session/prompt' || m === '_qwen/session/prompt'
+                  ? 'prompt'
+                  : m.startsWith('session/') || m.startsWith('_qwen/session/')
+                    ? 'read'
+                    : 'mutation';
+              if (!opts.checkRate(wsKey, tier)) {
+                ws.send(
+                  JSON.stringify(
+                    rpcError(
+                      message.id,
+                      RPC.INTERNAL_ERROR,
+                      'Rate limit exceeded',
+                    ),
+                  ),
+                );
+                return;
+              }
+            }
+
             await dispatcher
               .handle(conn, message, undefined, fromLoopback)
               .catch((err: unknown) => {
@@ -627,7 +659,7 @@ export function mountAcpHttp(
                   `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
                 );
               });
-          });
+          }
         });
       },
     );

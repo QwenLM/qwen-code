@@ -3086,6 +3086,7 @@ export function createServeApp(
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    checkRate: rateLimiter?.checkRate,
   });
   if (acpHandle) {
     app.locals['acpHandle'] = acpHandle;

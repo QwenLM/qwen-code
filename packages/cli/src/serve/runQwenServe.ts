@@ -1148,6 +1148,21 @@ export async function runQwenServe(
                 );
               }
             }
+            // Dispose ACP handle (close WebSocketServer + send close frames).
+            const acpHandle = app.locals?.['acpHandle'] as
+              | { dispose?: () => void }
+              | undefined;
+            if (acpHandle?.dispose) {
+              try {
+                acpHandle.dispose();
+              } catch (err) {
+                daemonLog.warn(
+                  `ACP handle dispose error: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
             // Dispose rate limiter (clear GC timer + buckets).
             const rl = getRateLimiter(app);
             if (rl) {

@@ -31,6 +31,8 @@ export interface RateLimitConfig {
 
 export interface RateLimiterInstance {
   middleware: RequestHandler;
+  /** Check rate limit without Express req/res. Returns true if allowed. */
+  checkRate(key: string, tier: RateLimitTier): boolean;
   reset(): void;
   setDraining(v: boolean): void;
   dispose(): void;
@@ -315,8 +317,37 @@ export function createRateLimiter(
     }
   };
 
+  function tryConsume(key: string, tier: RateLimitTier): boolean {
+    if (draining) return true;
+    const tierConfig = config.tiers[tier];
+    const rate = rates[tier];
+    const now = Date.now();
+    let tierMap = buckets.get(key);
+    if (!tierMap) {
+      if (buckets.size >= MAX_BUCKETS) return true;
+      tierMap = new Map();
+      buckets.set(key, tierMap);
+    }
+    let bucket = tierMap.get(tier);
+    if (!bucket) {
+      bucket = { tokens: tierConfig.max, lastRefill: now };
+      tierMap.set(tier, bucket);
+    }
+    const elapsed = Math.max(0, now - bucket.lastRefill);
+    bucket.tokens = Math.min(tierConfig.max, bucket.tokens + elapsed * rate);
+    bucket.lastRefill = now;
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return true;
+    }
+    hitCounts[tier]++;
+    if (sampledLog) sampledLog.log(tier, key);
+    return false;
+  }
+
   return {
     middleware,
+    checkRate: tryConsume,
     reset() {
       buckets.clear();
       hitCounts.prompt = 0;
