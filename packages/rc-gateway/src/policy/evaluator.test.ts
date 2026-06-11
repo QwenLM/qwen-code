@@ -459,4 +459,46 @@ rules:
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(false);
   });
+
+  it("source is 'policy' when a rule matches and 'default' when none does", () => {
+    const policy = loadPolicy(`
+rules:
+  - id: allow-tests
+    match: { tool: bash, argsGlob: "npm test*" }
+    action: allow
+`);
+    expect(evaluate(policy, { tool: 'bash', args: 'npm test' }).source).toBe(
+      'policy',
+    );
+    // No rule matches → the default action, sourced as 'default'.
+    expect(evaluate(policy, { tool: 'bash', args: 'npm publish' }).source).toBe(
+      'default',
+    );
+  });
+
+  it("source is 'policy' for a matched id-less rule (which ruleId alone cannot distinguish from default)", () => {
+    const policy = loadPolicy(`
+rules:
+  - match: { tool: bash }
+    action: allow
+`);
+    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    expect(d.action).toBe('allow');
+    expect(d.ruleId).toBeUndefined(); // id-less rule
+    expect(d.source).toBe('policy'); // …yet clearly rule-sourced
+  });
+
+  it("source is 'policy' for a rule downgraded to prompt by an unevaluable condition", () => {
+    const policy = loadPolicy(`
+rules:
+  - id: quota-rule
+    match: { tool: bash }
+    action: allow
+    maxPerWindow: { count: 5, windowSec: 60 }
+`);
+    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    expect(d.action).toBe('prompt'); // downgraded (maxPerWindow still deferred)
+    expect(d.usedDeferredField).toBe(true);
+    expect(d.source).toBe('policy'); // a rule was the cause
+  });
 });

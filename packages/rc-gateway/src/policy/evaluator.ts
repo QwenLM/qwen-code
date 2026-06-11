@@ -23,6 +23,15 @@ export interface ToolCallContext {
 
 export interface PolicyDecision {
   action: PolicyAction;
+  /**
+   * What produced this decision: `'policy'` when a rule matched (including a rule
+   * downgraded to prompt), `'default'` when no rule matched and the policy default
+   * action was used. Distinguishes a matched id-less rule from the default
+   * fall-through — `ruleId` cannot, since `id` is optional. Maps to the spec's
+   * audit `decision_source` (the `'client'` value is emitted by the human-vote
+   * route, not the evaluator).
+   */
+  source: 'policy' | 'default';
   /** Undefined for the default (no rule matched). */
   ruleId?: string;
   /** Carried for prompt decisions. */
@@ -207,6 +216,7 @@ export function evaluate(
       // SAFETY: never auto-allow/deny on a constraint we could not evaluate.
       return {
         action: 'prompt',
+        source: 'policy',
         ruleId: rule.id,
         requireScope: rule.requireScope ?? policy.defaults.requireScope,
         usedDeferredField: true,
@@ -215,6 +225,7 @@ export function evaluate(
 
     return {
       action: rule.action,
+      source: 'policy',
       ruleId: rule.id,
       requireScope: rule.requireScope,
       reason: rule.reason,
@@ -224,6 +235,7 @@ export function evaluate(
 
   return {
     action: policy.defaults.action,
+    source: 'default',
     requireScope: policy.defaults.requireScope,
     usedDeferredField: false,
   };
