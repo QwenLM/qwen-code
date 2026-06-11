@@ -1405,6 +1405,21 @@ export default {
     'In dieser Sitzung wurden keine Werkzeugaufrufe gemacht.',
   'Session start time is unavailable, cannot calculate stats.':
     'Sitzungsstartzeit nicht verfügbar, Statistiken können nicht berechnet werden.',
+  Activity: 'Aktivität',
+  Efficiency: 'Effizienz',
+  Today: 'Heute',
+  'Token Trend': 'Token-Trend',
+  'Cache Hit Rate': 'Cache-Trefferquote',
+  'Tool Success': 'Tool-Erfolgsrate',
+  'Tool Leaderboard': 'Tool-Rangliste',
+  Time: 'Zeit',
+  Success: 'Erfolg',
+  Cache: 'Cache',
+  Latency: 'Latenz',
+  'Code Impact': 'Code-Änderungen',
+  net: 'netto',
+  streak: 'Serie',
+  best: 'Rekord',
 
   // ============================================================================
   // Command Format Migration
@@ -1955,16 +1970,6 @@ export default {
     'Weitere Dream-Läufe können als gesperrt übersprungen werden, bis der nächste Stale-Sweep der Sitzung die Datei bereinigt.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'Das Scheduler-Gate hat den Zeitstempel dieses Dream-Laufs nicht gesehen; der nächste Dream-Zyklus kann früher als üblich erneut starten.',
-  // === Same-as-English optimization ===
-  'Agents:': 'Agenten:',
-  Prompt: 'Eingabe',
-  'Prompts:': 'Eingaben:',
-  'Ref:': 'Referenz:',
-  'Skills:': 'Fähigkeiten:',
-  remote: 'entfernt',
-  '中国 (China)': 'China',
-  '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
-
   // === History collapse/expand commands ===
   'Set history to collapse by default when resuming a session':
     'Set history to collapse by default when resuming a session',
@@ -1983,5 +1988,50 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
-    'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+
+  // === Same-as-English optimization ===
+  'Agents:': 'Agenten:',
+  Prompt: 'Eingabe',
+  'Prompts:': 'Eingaben:',
+  'Ref:': 'Referenz:',
+  'Skills:': 'Fähigkeiten:',
+  remote: 'entfernt',
+  '中国 (China)': 'China',
+  '中国 (China) - 阿里云百炼': 'China - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Aktivitäts-Heatmap',
+  Less: 'Weniger',
+  More: 'Mehr',
+  Sessions: 'Sitzungen',
+  Duration: 'Dauer',
+  Projects: 'Projekte',
+  'Loading stats...': 'Statistiken werden geladen...',
+  '(no data)': '(keine Daten)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Eingabe',
+  Models: 'Modelle',
+  'All time': 'Gesamtzeitraum',
+  'Last 7 days': 'Letzte 7 Tage',
+  'Last 30 days': 'Letzte 30 Tage',
+  'Show usage statistics dashboard.': 'Nutzungsstatistik-Dashboard anzeigen.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-Anfragen',
+  'Tool Calls': 'Tool-Aufrufe',
+  'Success rate': 'Erfolgsrate',
+  'Code Changes': 'Code-Änderungen',
+  Tool: 'Tool',
+  reqs: 'Anfr.',
+  in: 'ein',
+  out: 'aus',
+  'In/Out': 'Ein/Aus',
 };

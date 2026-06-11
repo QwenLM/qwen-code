@@ -138,6 +138,26 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// The drain is served from an in-memory queue, so a conforming client answers
+// near-instantly (or rejects with -32601). No response within this window
+// means the client silently drops unknown methods; without a deadline the
+// await would wedge the prompt turn forever.
+const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Latch the drain off only after this many consecutive timeouts: one slow
+// answer must not permanently disable mid-turn messages for a
+// conforming-but-busy client, while a client that never answers stops
+// costing a stall per tool batch after a few batches.
+const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+
+class MidTurnDrainTimeoutError extends Error {
+  constructor() {
+    super(
+      `mid-turn queue drain got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+}
+
 interface BackgroundNotificationQueueItem {
   displayText: string;
   modelText: string;
@@ -249,6 +269,14 @@ function isUserPromptRecord(record: ChatRecord): boolean {
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
+  availableSkillDetails?: Array<{
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+    modelInvocable?: boolean;
+  }>;
 }
 
 export async function buildAvailableCommandsSnapshot(
@@ -280,19 +308,56 @@ export async function buildAvailableCommandsSnapshot(
   });
 
   let availableSkills: string[] | undefined;
+  const skillDetailsByName = new Map<
+    string,
+    NonNullable<AvailableCommandsSnapshot['availableSkillDetails']>[number]
+  >();
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
       const skills = await skillManager.listSkills();
       availableSkills = skills.map((skill) => skill.name);
+      for (const skill of skills) {
+        skillDetailsByName.set(skill.name, {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          filePath: skill.filePath,
+          level: skill.level,
+          modelInvocable: skill.disableModelInvocation !== true,
+        });
+      }
     }
   } catch (error) {
     debugLogger.error('Error loading available skills:', error);
   }
 
+  for (const command of slashCommands) {
+    if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
+      continue;
+    }
+    const existing = skillDetailsByName.get(command.skillDetail.name);
+    skillDetailsByName.set(command.skillDetail.name, {
+      ...existing,
+      ...command.skillDetail,
+      modelInvocable: command.modelInvocable === true,
+    });
+  }
+  const availableSkillDetails =
+    skillDetailsByName.size > 0
+      ? Array.from(skillDetailsByName.values())
+      : undefined;
+  // Always derive the name list from the details map so the two stay in sync.
+  // skillManager only contributes its own skills to `availableSkills`, but the
+  // slashCommands loop above also adds bundled skills to `skillDetailsByName`;
+  // a `??=` would leave bundled skills in details but missing from the name
+  // list whenever skillManager succeeded.
+  availableSkills = availableSkillDetails?.map((skill) => skill.name);
+
   return {
     availableCommands,
     ...(availableSkills !== undefined ? { availableSkills } : {}),
+    ...(availableSkillDetails !== undefined ? { availableSkillDetails } : {}),
   };
 }
 
@@ -325,6 +390,8 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
+  private midTurnDrainUnavailable = false;
+  private midTurnDrainTimeoutStrikes = 0;
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -936,7 +1003,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1182,7 +1255,13 @@ export class Session implements SessionContext {
               promptId,
               functionCalls,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
+            nextMessage = {
+              role: 'user',
+              parts: [
+                ...toolResponseParts,
+                ...(await this.#drainMidTurnUserMessages()),
+              ],
+            };
           }
         }
 
@@ -1449,6 +1528,96 @@ export class Session implements SessionContext {
     });
   }
 
+  async #drainMidTurnUserMessages(): Promise<Part[]> {
+    if (this.midTurnDrainUnavailable) return [];
+
+    let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
+    try {
+      drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: this.sessionId,
+      });
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new MidTurnDrainTimeoutError()),
+          MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+        );
+      });
+      let response: Awaited<typeof drainPromise>;
+      try {
+        response = await Promise.race([drainPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+      this.midTurnDrainTimeoutStrikes = 0;
+      // A client may legally resolve with `result: null` (passed through
+      // unwrapped by the ACP SDK); guard the object access so that doesn't
+      // throw a TypeError and get misclassified as a transient drain error.
+      const messages =
+        response &&
+        typeof response === 'object' &&
+        Array.isArray(response['messages'])
+          ? response['messages'].filter(
+              (message): message is string =>
+                typeof message === 'string' && message.trim().length > 0,
+            )
+          : [];
+
+      return messages.map((message) => {
+        const part = {
+          text: `\n[User message received during tool execution]: ${message}`,
+        };
+        this.config
+          .getChatRecordingService()
+          ?.recordMidTurnUserMessage([part], message);
+        return part;
+      });
+    } catch (error) {
+      // The ACP SDK rejects with the raw JSON-RPC error object
+      // (`{ code, message, data }`), which is not an `Error` instance, so
+      // classify on the JSON-RPC code (-32601 = "Method not found") and fall
+      // back to the message. Otherwise the one-shot latch never trips and every
+      // tool batch keeps paying a failed `extMethod` round-trip all session.
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : error && typeof error === 'object' && 'message' in error
+            ? String((error as { message?: unknown }).message)
+            : String(error);
+      const errorCode =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      const isTimeout = error instanceof MidTurnDrainTimeoutError;
+      if (isTimeout) {
+        this.midTurnDrainTimeoutStrikes += 1;
+        // The lost race leaves the request pending; if the client settles it
+        // later, a rejection must not surface as an unhandled rejection.
+        drainPromise?.catch(() => {});
+      }
+      // Repeated timeouts are also permanent: a conforming client answers
+      // (or rejects with -32601) immediately, so sustained silence means the
+      // client drops unknown methods and would stall every subsequent tool
+      // batch the same way. A single timeout is treated as transient so one
+      // slow answer doesn't disable the drain for the whole session.
+      const isPermanentError =
+        errorCode === -32601 ||
+        /method not found/i.test(errorMessage) ||
+        (isTimeout &&
+          this.midTurnDrainTimeoutStrikes >=
+            MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES);
+
+      if (isPermanentError) {
+        this.midTurnDrainUnavailable = true;
+      }
+
+      debugLogger.warn(
+        `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
+      );
+      return [];
+    }
+  }
+
   /**
    * Starts the cron scheduler if cron is enabled and jobs exist.
    * The scheduler runs in the background, pushing fired prompts into
@@ -1617,7 +1786,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
         } catch (error) {
@@ -1972,7 +2147,7 @@ export class Session implements SessionContext {
 
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      const { availableCommands, availableSkills } =
+      const { availableCommands, availableSkills, availableSkillDetails } =
         await buildAvailableCommandsSnapshot(this.config);
 
       const update: SessionUpdate = {
@@ -1982,6 +2157,7 @@ export class Session implements SessionContext {
           ? {
               _meta: {
                 availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
               },
             }
           : {}),
@@ -2587,7 +2763,7 @@ export class Session implements SessionContext {
           );
 
           if (hooksEnabled && messageBus) {
-            void fireNotificationHook(
+            this.fireNotificationHookWithTerminalSequence(
               messageBus,
               `Qwen Code needs your permission to use ${fc.name}`,
               NotificationType.PermissionPrompt,
@@ -3166,5 +3342,37 @@ export class Session implements SessionContext {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
     }
+  }
+
+  /**
+   * Fire a notification hook and forward any terminalSequence to the ACP
+   * client as an extNotification. Fire-and-forget — errors are logged at
+   * debug level.
+   */
+  private fireNotificationHookWithTerminalSequence(
+    messageBus: MessageBus,
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): void {
+    void fireNotificationHook(messageBus, message, notificationType, title)
+      .then((hookResult) => {
+        if (!hookResult.terminalSequence) return;
+        return this.client.extNotification(
+          'qwen/notify/session/terminal-sequence',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence: hookResult.terminalSequence,
+          },
+        );
+      })
+      .catch((err: unknown) => {
+        debugLogger.debug(
+          `ACP terminalSequence notification dropped ` +
+            `(session=${this.sessionId}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 }

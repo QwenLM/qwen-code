@@ -134,7 +134,6 @@ export interface CliArgs {
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
-  checkpointing: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
   telemetryOtlpProtocol: string | undefined;
@@ -667,11 +666,6 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
-        .option('checkpointing', {
-          type: 'boolean',
-          description: 'Enables checkpointing of file edits',
-          default: false,
-        })
         .option('acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
@@ -696,8 +690,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -911,10 +905,6 @@ export async function parseArguments(): Promise<CliArgs> {
         .deprecateOption(
           'sandbox-image',
           'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'checkpointing',
-          'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -1867,8 +1857,6 @@ export async function loadCliConfig(
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    checkpointing:
-      argv.checkpointing || settings.general?.checkpointing?.enabled,
     plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
@@ -1888,7 +1876,8 @@ export async function loadCliConfig(
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    cronEnabled: settings.experimental?.cron ?? false,
+    cronEnabled: settings.experimental?.cron ?? true,
+    agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,

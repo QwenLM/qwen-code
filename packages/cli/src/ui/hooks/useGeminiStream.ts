@@ -32,12 +32,12 @@ import {
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
+  ToolNames,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
   logUserPrompt,
   logUserRetry,
-  GitService,
   UnauthorizedError,
   UserPromptEvent,
   UserRetryEvent,
@@ -90,6 +90,7 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
+import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -236,7 +237,12 @@ enum StreamProcessingStatus {
   Error,
 }
 
-const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const EDIT_TOOL_NAMES = new Set([
+  ToolNames.EDIT,
+  'replace', // legacy alias, may still arrive from older providers
+  ToolNames.WRITE_FILE,
+  ToolNames.NOTEBOOK_EDIT,
+]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 
 type BufferedStreamEvent =
@@ -386,12 +392,6 @@ export const useGeminiStream = (
     stats: sessionStates,
   } = useSessionStats();
   const storage = config.storage;
-  const gitService = useMemo(() => {
-    if (!config.getProjectRoot()) {
-      return;
-    }
-    return new GitService(config.getProjectRoot(), storage);
-  }, [config, storage]);
 
   const [toolCalls, scheduleToolCalls, markToolsAsSubmitted] =
     useReactToolScheduler(
@@ -746,6 +746,20 @@ export const useGeminiStream = (
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
 
+        // Teammate envelopes are model-authored text already rendered
+        // as a `● …` notification by the teammate drain. They must NOT
+        // enter the slash/shell/@ preprocessing below: with `!` shell
+        // mode active a teammate report would be EXECUTED as a shell
+        // command, and a leading `/` or an `@path` would be
+        // reinterpreted against the leader's session. Pass the
+        // envelope straight through to the model, like Notification.
+        if (submitType === SendMessageType.Teammate) {
+          onDebugMessage(
+            `Received teammate message (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
@@ -796,9 +810,11 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        // Cron prompts are already rendered as a `● Cron: …` notification by
-        // the queue drain, so skip the user-message history item to avoid
-        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
+        // Cron prompts are already rendered as a `● …` notification by
+        // their queue drain, so skip the user-message history item to
+        // avoid a duplicate `> …` line. Preprocessing (@/slash/shell)
+        // still runs for Cron. (Teammate envelopes returned earlier
+        // and never reach this point.)
         if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
             {
@@ -935,10 +951,25 @@ export const useGeminiStream = (
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
         if (!prev) {
+          if (debugLogger.isEnabled()) {
+            debugLogger.debug(
+              `[THOUGHT_MERGE] New thought: ` +
+                `subjectLength=${incoming.subject?.length ?? 0}, ` +
+                `description length=${incoming.description?.length ?? 0}`,
+            );
+          }
           return incoming;
         }
         const subject = incoming.subject || prev.subject;
         const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        if (debugLogger.isEnabled()) {
+          debugLogger.debug(
+            `[THOUGHT_MERGE] Accumulating thought: ` +
+              `prev length=${prev.description?.length ?? 0}, ` +
+              `incoming length=${incoming.description?.length ?? 0}, ` +
+              `total length=${description.length}`,
+          );
+        }
         return { subject, description };
       });
     },
@@ -962,6 +993,15 @@ export const useGeminiStream = (
       }
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          `[THOUGHT_BUFFER] Buffer growing: ` +
+            `current=${currentThoughtBuffer.length}, ` +
+            `incoming=${thoughtText.length}, ` +
+            `total=${newThoughtBuffer.length}`,
+        );
+      }
 
       const pendingType = pendingHistoryItemRef.current?.type;
       const isPendingThought =
@@ -1766,7 +1806,8 @@ export const useGeminiStream = (
         // Check image format support for non-continuations
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
@@ -1786,7 +1827,8 @@ export const useGeminiStream = (
 
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
@@ -2020,7 +2062,7 @@ export const useGeminiStream = (
             call.status === 'awaiting_approval',
         );
 
-        // For AUTO_EDIT mode, only approve edit tools (replace, write_file)
+        // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
         if (newApprovalMode === ApprovalMode.AUTO_EDIT) {
           awaitingApprovalCalls = awaitingApprovalCalls.filter((call) =>
             EDIT_TOOL_NAMES.has(call.request.name),
@@ -2397,13 +2439,14 @@ export const useGeminiStream = (
 
   useEffect(() => {
     const saveRestorableToolCalls = async () => {
-      if (!config.getCheckpointingEnabled()) {
+      if (!config.getFileCheckpointingEnabled()) {
         return;
       }
       const restorableToolCalls = toolCalls.filter(
         (toolCall) =>
           EDIT_TOOL_NAMES.has(toolCall.request.name) &&
-          toolCall.status === 'awaiting_approval',
+          toolCall.status === 'awaiting_approval' &&
+          !toolCall.request.isClientInitiated,
       );
 
       if (restorableToolCalls.length > 0) {
@@ -2425,7 +2468,8 @@ export const useGeminiStream = (
         }
 
         for (const toolCall of restorableToolCalls) {
-          const filePath = toolCall.request.args['file_path'] as string;
+          const filePath = (toolCall.request.args['file_path'] ??
+            toolCall.request.args['notebook_path']) as string;
           if (!filePath) {
             onDebugMessage(
               `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
@@ -2434,35 +2478,7 @@ export const useGeminiStream = (
           }
 
           try {
-            if (!gitService) {
-              onDebugMessage(
-                `Checkpointing is enabled but Git service is not available. Failed to create snapshot for ${filePath}. Ensure Git is installed and working properly.`,
-              );
-              continue;
-            }
-
-            let commitHash: string | undefined;
-            try {
-              commitHash = await gitService.createFileSnapshot(
-                `Snapshot for ${toolCall.request.name}`,
-              );
-            } catch (error) {
-              onDebugMessage(
-                `Failed to create new snapshot: ${getErrorMessage(error)}. Attempting to use current commit.`,
-              );
-            }
-
-            if (!commitHash) {
-              commitHash = await gitService.getCurrentCommitHash();
-            }
-
-            if (!commitHash) {
-              onDebugMessage(
-                `Failed to create snapshot for ${filePath}. Checkpointing may not be working properly. Ensure Git is installed and the project directory is accessible.`,
-              );
-              continue;
-            }
-
+            const promptId = toolCall.request.prompt_id;
             const timestamp = new Date()
               .toISOString()
               .replace(/:/g, '-')
@@ -2486,7 +2502,7 @@ export const useGeminiStream = (
                     name: toolCall.request.name,
                     args: toolCall.request.args,
                   },
-                  commitHash,
+                  promptId,
                   filePath,
                 },
                 null,
@@ -2497,22 +2513,14 @@ export const useGeminiStream = (
             onDebugMessage(
               `Failed to create checkpoint for ${filePath}: ${getErrorMessage(
                 error,
-              )}. This may indicate a problem with Git or file system permissions.`,
+              )}. This may indicate a problem with file system permissions.`,
             );
           }
         }
       }
     };
     saveRestorableToolCalls();
-  }, [
-    toolCalls,
-    config,
-    onDebugMessage,
-    gitService,
-    history,
-    geminiClient,
-    storage,
-  ]);
+  }, [toolCalls, config, onDebugMessage, history, geminiClient, storage]);
 
   // ─── Unified notification queue (cron + background agents) ──────
   const notificationQueueRef = useRef<
@@ -2605,9 +2613,13 @@ export const useGeminiStream = (
   }, [config]);
 
   // When idle, drain the unified queue one item at a time.
+  // Skip when another submission is in flight (e.g. the teammate
+  // drain effect won this render) — the queue stays intact and
+  // the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
       const item = notificationQueueRef.current.shift()!;
@@ -2620,6 +2632,96 @@ export const useGeminiStream = (
       });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);
+
+  // ─── Teammate message integration ─────────────────────────
+  // Each entry carries the full nonce-tagged envelope (`modelText`,
+  // sent to the leader's model) and a compact `display` line (shown
+  // to the user in its place) — the same two-text split the unified
+  // notification queue uses, so teammate reports no longer dump the
+  // whole raw envelope into the conversation as a user bubble.
+  const teammateQueueRef = useRef<
+    Array<{ modelText: string; display: string }>
+  >([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
+
+  // Subscribe to TeamManager's leader message callback.
+  // Track the bound manager so we can detach the callback
+  // before a new manager replaces it (and on unmount) —
+  // otherwise a stale TeamManager could keep pushing into
+  // the active queue ref after team recreation/remount.
+  useEffect(() => {
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
+    const handleManagerChange = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      if (boundManager && boundManager !== manager) {
+        boundManager.setLeaderMessageCallback(null);
+        // Drop any messages the old team's teammates queued but that
+        // weren't drained before the swap — they belong to a team that
+        // no longer exists and must not be submitted into the new
+        // team's session. Only fires on a genuine manager swap; a React
+        // remount re-binds the same manager (boundManager is null here)
+        // and preserves the queue.
+        teammateQueueRef.current.length = 0;
+      }
+      boundManager = manager;
+      if (manager) {
+        manager.setLeaderMessageCallback(
+          (modelText: string, display: string) => {
+            teammateQueueRef.current.push({ modelText, display });
+            setTeammateTrigger((n) => n + 1);
+          },
+        );
+      }
+    };
+
+    config.onTeamManagerChange(handleManagerChange);
+
+    // Catch manager that was set before this effect ran
+    const current = config.getTeamManager();
+    if (current) {
+      handleManagerChange(current);
+    }
+
+    return () => {
+      config.onTeamManagerChange(null, handleManagerChange);
+      if (boundManager) {
+        boundManager.setLeaderMessageCallback(null);
+        boundManager = null;
+      }
+    };
+  }, [config]);
+
+  // When idle, drain teammate messages one batch at a time.
+  // Skip when another submission is in flight (e.g. the
+  // notification effect won this render and called submitQuery
+  // synchronously, flipping isSubmittingQueryRef). Without this
+  // guard the splice would drain the queue and submitQuery
+  // would early-return, permanently losing those messages.
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
+      teammateQueueRef.current.length > 0
+    ) {
+      const batch = teammateQueueRef.current.splice(0);
+      // Render one compact `● …` line per teammate report; the full
+      // envelope goes only to the model (the USER bubble is suppressed
+      // for SendMessageType.Teammate in prepareQueryForGemini).
+      for (const entry of batch) {
+        addItem(
+          { type: 'notification' as const, text: entry.display },
+          Date.now(),
+        );
+      }
+      const modelText = batch.map((e) => e.modelText).join('\n\n');
+      const display = batch.map((e) => e.display).join('; ');
+      submitQuery(modelText, SendMessageType.Teammate, undefined, {
+        notificationDisplayText: display,
+      });
+    }
+  }, [streamingState, submitQuery, teammateTrigger, addItem]);
 
   return {
     streamingState,

@@ -8,7 +8,6 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
-  GitService,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -50,7 +49,6 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
   };
   // UI state and history management
@@ -194,7 +192,8 @@ export interface OpenDialogActionReturn {
     | 'hooks'
     | 'mcp'
     | 'rewind'
-    | 'diff';
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -402,6 +401,15 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

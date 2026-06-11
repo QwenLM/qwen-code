@@ -69,12 +69,17 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentThought(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
+    const meta = {
+      ...subagentMeta,
+      ...(epochMs != null && { timestamp: epochMs }),
+    };
     await this.sendUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      ...(Object.keys(meta).length > 0 && { _meta: meta }),
     });
   }
 
@@ -87,12 +92,17 @@ export class MessageEmitter extends BaseEmitter {
   async emitAgentMessage(
     text: string,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
+    const meta = {
+      ...subagentMeta,
+      ...(epochMs != null && { timestamp: epochMs }),
+    };
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
+      ...(Object.keys(meta).length > 0 && { _meta: meta }),
     });
   }
 
@@ -139,12 +149,13 @@ export class MessageEmitter extends BaseEmitter {
     role: 'user' | 'assistant',
     isThought: boolean = false,
     timestamp?: string | number,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     if (role === 'user') {
       return this.emitUserMessage(text, timestamp);
     }
     return isThought
-      ? this.emitAgentThought(text, timestamp)
-      : this.emitAgentMessage(text, timestamp);
+      ? this.emitAgentThought(text, timestamp, subagentMeta)
+      : this.emitAgentMessage(text, timestamp, subagentMeta);
   }
 }

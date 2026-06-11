@@ -20,7 +20,6 @@ import {
   type Logger,
   type Config,
   createDebugLogger,
-  GitService,
   logSlashCommand,
   makeSlashCommandEvent,
   SlashCommandStatus,
@@ -124,6 +123,7 @@ export interface SlashCommandProcessorActions {
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openStatsDialog: () => void;
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
@@ -217,13 +217,6 @@ export const useSlashCommandProcessor = (
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
   );
-  const gitService = useMemo(() => {
-    if (!config?.getProjectRoot()) {
-      return;
-    }
-    return new GitService(config.getProjectRoot(), config.storage);
-  }, [config]);
-
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
     null,
   );
@@ -336,7 +329,6 @@ export const useSlashCommandProcessor = (
       services: {
         config,
         settings,
-        git: gitService,
         logger,
       },
       ui: {
@@ -380,7 +372,6 @@ export const useSlashCommandProcessor = (
     [
       config,
       settings,
-      gitService,
       logger,
       loadHistory,
       addItem,
@@ -501,7 +492,7 @@ export const useSlashCommandProcessor = (
                   name,
                   args,
                 },
-                services: { config, settings, git: gitService, logger: null },
+                services: { config, settings, logger: null },
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
@@ -566,7 +557,6 @@ export const useSlashCommandProcessor = (
     reloadTrigger,
     isConfigInitialized,
     settings,
-    gitService,
     resolveCommandReloads,
   ]);
 
@@ -780,6 +770,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'hooks':
                       actions.openHooksDialog();
+                      return { type: 'handled' };
+                    case 'stats':
+                      actions.openStatsDialog();
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();

@@ -23,7 +23,7 @@ import type {
 import {
   CoreToolScheduler,
   createDebugLogger,
-  isAutoMemPath,
+  isAnyAutoMemPath,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
@@ -269,7 +269,7 @@ function detectMemoryOp(
   const filePath = args?.['file_path'] as string | undefined;
   if (!filePath) return undefined;
   const resolved = path.resolve(filePath);
-  if (!isAutoMemPath(resolved, projectRoot)) return undefined;
+  if (!isAnyAutoMemPath(resolved, projectRoot)) return undefined;
   if (WRITE_TOOLS.has(toolName)) return 'write';
   if (READ_TOOLS.has(toolName)) return 'read';
   return undefined;

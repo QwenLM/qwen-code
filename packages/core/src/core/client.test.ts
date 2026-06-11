@@ -253,6 +253,42 @@ vi.mock('../telemetry/loggers.js', () => ({
   logApiRequest: vi.fn(),
 }));
 
+const { mockClientDebugLogger } = vi.hoisted(() => ({
+  mockClientDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'CLIENT'
+        ? mockClientDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
+
+vi.mock(
+  '../services/microcompaction/microcompact.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/microcompaction/microcompact.js')
+      >();
+    return {
+      ...actual,
+      microcompactHistory: vi.fn(actual.microcompactHistory),
+    };
+  },
+);
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+
 // Mock RequestTokenizer to use simple character-based estimation
 vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
   RequestTokenizer: class {
@@ -452,6 +488,7 @@ describe('Gemini Client (client.ts)', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -660,6 +697,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -1550,6 +1588,14 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
       expect(client['lastInjectedDate']).toBeUndefined();
     });
+
+    it('resets Hook microcompaction checkpoint', async () => {
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      await client.resetChat();
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
   });
 
   describe('history mutation invalidates FileReadCache', () => {
@@ -1755,6 +1801,7 @@ describe('Gemini Client (client.ts)', () => {
       mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
         tryCompress: vi.fn().mockResolvedValue({
           originalTokenCount: 0,
           newTokenCount: 0,
@@ -1789,6 +1836,25 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastApiCompletionTimestamp']).toBeNull();
+    });
+
+    it('seeds Hook microcompaction checkpoint on user turns', async () => {
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-hook-seed',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
     });
   });
 
@@ -1883,6 +1949,246 @@ describe('Gemini Client (client.ts)', () => {
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not abort the turn when microcompaction cleanup fails', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockImplementation(() => {
+        throw new Error('cache disarm failed');
+      });
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const events: ServerGeminiStreamEvent[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-error-boundary',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'response' },
+      ]);
+    });
+
+    it('microcompacts old tool results on Hook continuations', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('does not abort Hook continuations when microcompaction cleanup fails', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockImplementation(() => {
+        throw new Error('hook cache disarm failed');
+      });
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
+      mockClientDebugLogger.error.mockClear();
+
+      const events: ServerGeminiStreamEvent[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-error-boundary',
+        { type: SendMessageType.Hook },
+      );
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        { type: GeminiEventType.Content, value: 'response' },
+      ]);
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'microcompactHistory failed: hook cache disarm failed',
+        ),
+      );
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
+    });
+
+    it('skips the next Hook microcompaction after one just ran', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['lastHookMicrocompactionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const firstStream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-fire',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of firstStream) {
+        /* drain */
+      }
+
+      const checkpointAfterFire = client['lastHookMicrocompactionTimestamp'];
+      expect(setHistory).toHaveBeenCalled();
+      expect(checkpointAfterFire).toBeGreaterThan(Date.now() - 60_000);
+
+      setHistory.mockClear();
+      clear.mockClear();
+      markReadEvictedFromHistory.mockClear();
+
+      const secondStream = client.sendMessageStream(
+        [{ text: 'continue goal again' }],
+        new AbortController().signal,
+        'prompt-mc-hook-skip',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of secondStream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(
+        checkpointAfterFire,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('initializes Hook microcompaction from the last API completion timestamp', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = null;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-init',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
+        Date.now() - 60_000,
+      );
+    });
+
+    it('does not microcompact Hook continuations when the checkpoint is recent', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-recent',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('seeds Hook microcompaction checkpoint to now when no API call completed', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = null;
+      client['lastHookMicrocompactionTimestamp'] = null;
+      const before = Date.now();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue goal' }],
+        new AbortController().signal,
+        'prompt-mc-hook-no-api-completion',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
     it('falls back to a blanket clear when blanked reads cannot be linked to a path (id-less provider)', async () => {
@@ -2121,6 +2427,174 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs microcompaction on SendMessageType.Hook', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'goal continuation' }],
+        new AbortController().signal,
+        'prompt-hook-test',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction ran — history was replaced
+      expect(setHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('does not run microcompaction on SendMessageType.ToolResult', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'tool result' }],
+        new AbortController().signal,
+        'prompt-toolresult-test',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // Microcompaction did NOT run
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('runs microcompaction on SendMessageType.Cron', async () => {
+      const { markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-cron-test',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('does not reset the Hook checkpoint when Cron skips microcompaction', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now();
+      const checkpoint = Date.now() - 90 * 60_000;
+      client['lastHookMicrocompactionTimestamp'] = checkpoint;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-cron-hook-checkpoint',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client['lastHookMicrocompactionTimestamp']).toBe(checkpoint);
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not run microcompaction on SendMessageType.Retry', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        getHistoryLength: vi.fn().mockReturnValue(history.length),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
+        getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'retry' }],
+        new AbortController().signal,
+        'prompt-retry-test',
+        { type: SendMessageType.Retry },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('continues sendMessage when microcompactHistory throws', async () => {
+      mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(6);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      vi.mocked(microcompactHistory).mockImplementationOnce(() => {
+        throw new Error('compaction boom');
+      });
+      mockClientDebugLogger.error.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'cron job' }],
+        new AbortController().signal,
+        'prompt-mc-error-test',
+        { type: SendMessageType.Cron },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(mockClientDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('microcompactHistory failed: compaction boom'),
+      );
+      expect(setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -2525,6 +2999,7 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockRejectedValue(new Error('compact hook failed'));
       const debugLogger = {
+        isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
         info: vi.fn(),
         warn: vi.fn(),
@@ -3319,6 +3794,7 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
       mockTurnRunFn.mockReturnValue(
@@ -3355,6 +3831,7 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 

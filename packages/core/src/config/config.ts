@@ -25,6 +25,8 @@ import type { ShellExecutionConfig } from '../services/shellExecutionService.js'
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
+import type { TeamManager } from '../agents/team/TeamManager.js';
+import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -44,7 +46,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
@@ -162,8 +163,11 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot } from '../memory/paths.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  readAutoMemoryIndex,
+  readUserAutoMemoryIndex,
+} from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -637,6 +641,11 @@ export interface AgentsCollabSettings {
     /** Total timeout in seconds for the Arena session. No limit if unset. */
     timeoutSeconds?: number;
   };
+  /** Team-specific settings */
+  team?: {
+    /** Maximum number of teammates (default: 10). */
+    maxTeammates?: number;
+  };
 }
 
 export interface ConfigParameters {
@@ -728,7 +737,6 @@ export interface ConfigParameters {
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
-  checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
@@ -757,7 +765,9 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  agentTeamEnabled?: boolean;
   forkSubagentEnabled?: boolean;
+  workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -1116,10 +1126,8 @@ export class Config {
     enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
-  private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -1143,8 +1151,10 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly cronEnabled: boolean = false;
+  private readonly cronEnabled: boolean = true;
+  private readonly agentTeamEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
+  private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1164,6 +1174,11 @@ export class Config {
     | ((manager: ArenaManager | null) => void)
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
+  private teamManager: TeamManager | null = null;
+  private teamManagerChangeCallbacks = new Set<
+    (manager: TeamManager | null) => void
+  >();
+  private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
@@ -1308,7 +1323,6 @@ export class Config {
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
-    this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
       params.fileCheckpointingEnabled ??
       (!params.sdkMode && (params.interactive ?? false));
@@ -1328,8 +1342,10 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.cronEnabled = params.cronEnabled ?? false;
+    this.cronEnabled = params.cronEnabled ?? true;
+    this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -1454,9 +1470,6 @@ export class Config {
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
-    if (this.getCheckpointingEnabled()) {
-      await this.getGitService();
-    }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
     const explicitExtensionNames = this.getExplicitExtensionNames();
@@ -1967,14 +1980,28 @@ export class Config {
         },
       );
     if (this.getManagedAutoMemoryEnabled()) {
-      const managedAutoMemoryIndex = await readAutoMemoryIndex(
-        this.getProjectRoot(),
-      );
+      // User-level read is best-effort — an EACCES on
+      // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
+      // section out of the system prompt. Project-level read still bubbles
+      // (its failure is a real config-load problem).
+      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
+        readAutoMemoryIndex(this.getProjectRoot()),
+        readUserAutoMemoryIndex().catch(() => null),
+      ]);
+      // Always surface the user-level section so the main assistant knows the
+      // dir exists and can route ad-hoc "remember this cross-project" saves
+      // there. When empty the prompt builder emits a "MEMORY.md is currently
+      // empty" placeholder — the same shape the per-project layer has used
+      // since day one — so the cost is one extra index header.
       this.setUserMemory(
         this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
+          {
+            memoryDir: getUserAutoMemoryRoot(),
+            indexContent: userAutoMemoryIndex,
+          },
         ),
       );
     } else {
@@ -2606,6 +2633,7 @@ export class Config {
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -2922,6 +2950,57 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  // ─── Team Manager ──────────────────────────────────────────
+
+  getTeamManager(): TeamManager | null {
+    return this.teamManager;
+  }
+
+  setTeamManager(manager: TeamManager | null): void {
+    this.teamManager = manager;
+    for (const cb of this.teamManagerChangeCallbacks) {
+      cb(manager);
+    }
+  }
+
+  /**
+   * Register a callback invoked whenever the team manager changes.
+   * Pass `null` to unsubscribe a previously registered callback.
+   * Multiple subscribers are supported.
+   */
+  onTeamManagerChange(
+    cb: ((manager: TeamManager | null) => void) | null,
+    previous?: (manager: TeamManager | null) => void,
+  ): void {
+    if (previous) {
+      this.teamManagerChangeCallbacks.delete(previous);
+    }
+    if (cb) {
+      this.teamManagerChangeCallbacks.add(cb);
+    }
+  }
+
+  getTeamContext(): TeamContext | null {
+    return this.teamContext;
+  }
+
+  setTeamContext(ctx: TeamContext | null): void {
+    this.teamContext = ctx;
+  }
+
+  /**
+   * Clean up Team runtime — stops all teammates and clears state.
+   */
+  async cleanupTeamRuntime(): Promise<void> {
+    const manager = this.teamManager;
+    if (!manager) {
+      return;
+    }
+    await manager.cleanup();
+    this.setTeamManager(null);
+    this.setTeamContext(null);
   }
 
   /**
@@ -3300,15 +3379,33 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
-    // Cron is experimental and opt-in: enabled via settings or env var
-    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
+  }
+
+  isAgentTeamEnabled(): boolean {
+    // Agent team is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
+    return this.agentTeamEnabled;
   }
 
   isForkSubagentEnabled(): boolean {
     if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
     return this.forkSubagentEnabled;
   }
+
+  isWorkflowsEnabled(): boolean {
+    // Workflows are experimental and opt-in: enabled via settings or env var
+    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+    return this.workflowsEnabled;
+  }
+
+  setWorkflowsEnabled(enabled: boolean): void {
+    this.workflowsEnabled = enabled;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -3364,10 +3461,6 @@ export class Config {
     // - Environment variables
     // - CLI arguments
     return [];
-  }
-
-  getCheckpointingEnabled(): boolean {
-    return this.checkpointing;
   }
 
   getFileCheckpointingEnabled(): boolean {
@@ -3787,14 +3880,6 @@ export class Config {
 
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
-  }
-
-  async getGitService(): Promise<GitService> {
-    if (!this.gitService) {
-      this.gitService = new GitService(this.targetDir, this.storage);
-      await this.gitService.initialize();
-    }
-    return this.gitService;
   }
 
   /**
@@ -4240,6 +4325,40 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+    }
+
+    // Register team collaboration tools (experimental). The team-specific
+    // tools (team_create/team_delete/task_create/task_update/task_list)
+    // are gated on this flag.
+    if (this.isAgentTeamEnabled()) {
+      await registerLazy(ToolNames.TEAM_CREATE, async () => {
+        const { TeamCreateTool } = await import('../tools/team-create.js');
+        return new TeamCreateTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_DELETE, async () => {
+        const { TeamDeleteTool } = await import('../tools/team-delete.js');
+        return new TeamDeleteTool(this);
+      });
+      await registerLazy(ToolNames.TASK_CREATE, async () => {
+        const { TaskCreateTool } = await import('../tools/task-create.js');
+        return new TaskCreateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_UPDATE, async () => {
+        const { TaskUpdateTool } = await import('../tools/task-update.js');
+        return new TaskUpdateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_LIST, async () => {
+        const { TaskListTool } = await import('../tools/task-list.js');
+        return new TaskListTool(this);
+      });
+    }
+
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
       });
     }
 

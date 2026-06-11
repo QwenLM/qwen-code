@@ -512,8 +512,7 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
-  'check session stats. Usage: /stats [model|tools]':
-    'check session stats. Usage: /stats [model|tools]',
+  'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
@@ -2046,4 +2045,86 @@ export default {
   'Loading suggestions...': 'Loading suggestions...',
   'Show per-item context usage breakdown.':
     'Show per-item context usage breakdown.',
+
+  // ============================================================================
+  // Stats
+  // ============================================================================
+
+  // statsCommand non-interactive output
+  'Session duration: {{duration}}': 'Session duration: {{duration}}',
+  'Prompts: {{count}}': 'Prompts: {{count}}',
+  'API requests: {{count}}': 'API requests: {{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — prompt: {{prompt}}, output: {{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)',
+  'Files: +{{added}} / -{{removed}} lines':
+    'Files: +{{added}} / -{{removed}} lines',
+  prompt: 'prompt',
+  output: 'output',
+  cached: 'cached',
+  'Estimated cost: ${{cost}}': 'Estimated cost: ${{cost}}',
+  'No model usage data yet.': 'No model usage data yet.',
+  'No tool usage data yet.': 'No tool usage data yet.',
+
+  // StatsDialog
+  Models: 'Models',
+  'All time': 'All time',
+  'Last 7 days': 'Last 7 days',
+  'Last 30 days': 'Last 30 days',
+  'N/A': 'N/A',
+  Sessions: 'Sessions',
+  days: 'days',
+  Input: 'Input',
+  'Tool calls': 'Tool calls',
+  'Code changes': 'Code changes',
+  Projects: 'Projects',
+  Name: 'Name',
+  Duration: 'Duration',
+  'Activity Heatmap': 'Activity Heatmap',
+  'Loading stats...': 'Loading stats...',
+  '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
+    '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close',
+  Cost: 'Cost',
+  Less: 'Less',
+  More: 'More',
+  '(no data)': '(no data)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — labels
+  Session: 'Session',
+  Activity: 'Activity',
+  Efficiency: 'Efficiency',
+  Success: 'Success',
+  Today: 'Today',
+  'Cache Hit Rate': 'Cache Hit Rate',
+  'Tool Success': 'Tool Success',
+  'Tool Leaderboard': 'Tool Leaderboard',
+  Time: 'Time',
+  Cache: 'Cache',
+  Latency: 'Latency',
+  'Code Impact': 'Code Impact',
+  'Failed to load stats. Press r to retry.':
+    'Failed to load stats. Press r to retry.',
+  net: 'net',
+  streak: 'streak',
+  best: 'best',
+  'Token Trend': 'Token Trend',
+  'In/Out': 'In/Out',
+  'API Requests': 'API Requests',
+  'Tool Calls': 'Tool Calls',
+  'Success rate': 'Success rate',
+  'Code Changes': 'Code Changes',
+  Tool: 'Tool',
+  reqs: 'reqs',
+  in: 'in',
+  out: 'out',
 };

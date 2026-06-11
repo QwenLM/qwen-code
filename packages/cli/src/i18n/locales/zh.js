@@ -492,8 +492,7 @@ export default {
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
-  'check session stats. Usage: /stats [model|tools]':
-    '检查会话统计信息。用法：/stats [model|tools]',
+  'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
   'exit the cli': '退出命令行界面',
@@ -842,12 +841,10 @@ export default {
     '请提供指令。用法：/fork <指令>',
   'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
-  'Cannot fork before the first conversation turn.':
-    '首次对话轮次前无法分支。',
+  'Cannot fork before the first conversation turn.': '首次对话轮次前无法分支。',
   'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
     '/fork 命令需要启用 fork 功能开关。设置 QWEN_CODE_ENABLE_FORK_SUBAGENT=1 以启用。',
-  'The agent tool is unavailable; cannot fork.':
-    'Agent 工具不可用；无法分支。',
+  'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；无法分支。',
   'Failed to launch fork: {{error}}': '启动分支失败：{{error}}',
   'the background agent could not be started.': '后台智能体无法启动。',
   'User launched a background fork via /fork: {{directive}}':
@@ -1202,7 +1199,7 @@ export default {
   'Time remaining:': '剩余时间：',
   'Qwen OAuth Authentication Timeout': 'Qwen OAuth 认证超时',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
-    'OAuth 令牌已过期（超过 {{seconds}} 秒）。请重新选择认证方法',
+    'OAuth token 已过期（超过 {{seconds}} 秒）。请重新选择认证方法',
   'Press any key to return to authentication type selection.':
     '按任意键返回认证类型选择',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
@@ -1425,22 +1422,41 @@ export default {
   'Tool Time:': '工具时间：',
   'Session Stats': '会话统计',
   'Model Usage': '模型使用情况',
-  Reqs: '请求数',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
-    '提示：要查看完整的令牌明细，请运行 `/stats model`',
+    '提示：要查看完整的 token 明细，请运行 `/stats model`',
   'Model Stats For Nerds': '模型统计（技术细节）',
   'Tool Stats For Nerds': '工具统计（技术细节）',
   Metric: '指标',
   API: 'API',
+  Session: '会话',
+  Activity: '概览',
+  Efficiency: '性能',
+  Success: '成功率',
+  Today: '今天',
+  'Token Trend': 'Token 趋势',
+  'Cache Hit Rate': '缓存命中率',
+  'Tool Success': '工具成功率',
+  'Tool Leaderboard': '工具排行',
+  Calls: '调用次数',
+  Time: '耗时',
+  Reqs: '请求',
+  Cache: '缓存',
+  Latency: '延迟',
+  'In/Out': '输入/输出',
+  'Code Impact': '代码变更',
+  'Failed to load stats. Press r to retry.': '加载统计失败，按 r 重试。',
+  net: '净增',
+  streak: '连续',
+  best: '最长',
   Requests: '请求数',
   Errors: '错误数',
   'Avg Latency': '平均延迟',
-  Tokens: '令牌',
+  Tokens: 'Token',
   Total: '总计',
   Prompt: '提示',
   Cached: '缓存',
@@ -1449,7 +1465,6 @@ export default {
   'No API calls have been made in this session.':
     '本次会话中未进行任何 API 调用',
   'Tool Name': '工具名称',
-  Calls: '调用次数',
   'Success Rate': '成功率',
   'Avg Duration': '平均耗时',
   'User Decision Summary': '用户决策摘要',
@@ -1841,6 +1856,69 @@ export default {
     '后续记忆整理可能会因锁定而跳过，直到下一次会话过期清理清除此文件。',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     '调度门控未看到本次记忆整理的时间戳；下一轮记忆整理可能会比平时更早重新触发。',
+
+  // ============================================================================
+  // Stats
+  // ============================================================================
+
+  // statsCommand non-interactive output
+  'Session duration: {{duration}}': '会话时长：{{duration}}',
+  'Prompts: {{count}}': '提示次数：{{count}}',
+  'API requests: {{count}}': 'API 请求数：{{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — 输入：{{prompt}}，输出：{{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具调用：{{total}}（{{success}} 成功，{{fail}} 失败）',
+  'Files: +{{added}} / -{{removed}} lines':
+    '文件：+{{added}} / -{{removed}} 行',
+  prompt: '输入',
+  output: '输出',
+  cached: '缓存',
+  'Estimated cost: ${{cost}}': '预估费用：${{cost}}',
+  'No model usage data yet.': '暂无模型使用数据。',
+  'No tool usage data yet.': '暂无工具使用数据。',
+
+  // StatsDialog
+  Models: '模型',
+  'All time': '所有时间',
+  'Last 7 days': '最近 7 天',
+  'Last 30 days': '最近 30 天',
+  'N/A': '无',
+  Sessions: '会话数',
+  days: '天',
+  Input: '输入',
+  'Tool calls': '工具调用',
+  'Code changes': '代码变更',
+  Projects: '项目统计',
+  Name: '名称',
+  Duration: '时长',
+  'Activity Heatmap': '用量热力统计',
+  'Loading stats...': '加载统计数据...',
+  '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
+    '\u2191 tab 切换标签 \u00b7 r 切换时间范围 \u00b7 esc 关闭',
+  Cost: '费用',
+  Less: '少',
+  More: '多',
+  '(no data)': '（无数据）',
+  d: '天',
+  h: '时',
+  m: '分',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API 请求',
+  'Tool Calls': '工具调用',
+  'Success rate': '成功率',
+  'Code Changes': '代码变更',
+  Tool: '工具',
+  reqs: '请求',
+  in: '输入',
+  out: '输出',
 
   // === History collapse/expand commands ===
   'Set history to collapse by default when resuming a session':

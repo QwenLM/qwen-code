@@ -820,8 +820,7 @@ export default {
     'Команде /fork требуется feature gate fork. Установите QWEN_CODE_ENABLE_FORK_SUBAGENT=1, чтобы включить его.',
   'The agent tool is unavailable; cannot fork.':
     'Инструмент агента недоступен; fork создать нельзя.',
-  'Failed to launch fork: {{error}}':
-    'Не удалось запустить fork: {{error}}',
+  'Failed to launch fork: {{error}}': 'Не удалось запустить fork: {{error}}',
   'User launched a background fork via /fork: {{directive}}':
     'Пользователь запустил фоновый fork через /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
@@ -1353,6 +1352,21 @@ export default {
     'В этой сессии не было вызовов инструментов.',
   'Session start time is unavailable, cannot calculate stats.':
     'Время начала сессии недоступно, невозможно рассчитать статистику.',
+  Activity: 'Активность',
+  Efficiency: 'Эффективность',
+  Today: 'Сегодня',
+  'Token Trend': 'Тренд токенов',
+  'Cache Hit Rate': 'Попадание в кэш',
+  'Tool Success': 'Успех инструментов',
+  'Tool Leaderboard': 'Рейтинг инструментов',
+  Time: 'Время',
+  Success: 'Успех',
+  Cache: 'Кэш',
+  Latency: 'Задержка',
+  'Code Impact': 'Изменения кода',
+  net: 'нетто',
+  streak: 'серия',
+  best: 'рекорд',
 
   // ============================================================================
   // Command Format Migration
@@ -1934,12 +1948,6 @@ export default {
     'Последующие dream-запуски могут пропускаться как заблокированные, пока следующая очистка устаревших сессий не удалит файл.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'Планировщик не увидел временную метку этого dream-запуска; следующий цикл dream может запуститься раньше обычного.',
-  // === Same-as-English optimization ===
-  ' (not in model registry)': ' (не в реестре моделей)',
-  'start server': 'запустить сервер',
-  '中国 (China)': 'Китай',
-  '中国 (China) - 阿里云百炼': 'Китай - 阿里云百炼',
-
   // === History collapse/expand commands ===
   'Set history to collapse by default when resuming a session':
     'Set history to collapse by default when resuming a session',
@@ -1958,5 +1966,47 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
-    'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
+
+  // === Same-as-English optimization ===
+  ' (not in model registry)': ' (не в реестре моделей)',
+  'start server': 'запустить сервер',
+  '中国 (China)': 'Китай',
+  '中国 (China) - 阿里云百炼': 'Китай - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': 'Карта активности',
+  Less: 'Меньше',
+  More: 'Больше',
+  Sessions: 'Сессии',
+  Duration: 'Длительность',
+  Projects: 'Проекты',
+  'Loading stats...': 'Загрузка статистики...',
+  '(no data)': '(нет данных)',
+  d: 'д',
+  h: 'ч',
+  m: 'м',
+  Input: 'Ввод',
+  Models: 'Модели',
+  'All time': 'За всё время',
+  'Last 7 days': 'Последние 7 дней',
+  'Last 30 days': 'Последние 30 дней',
+  'Show usage statistics dashboard.':
+    'Показать панель статистики использования.',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'API-запросы',
+  'Tool Calls': 'Вызовы инструментов',
+  'Success rate': 'Успешность',
+  'Code Changes': 'Изменения кода',
+  Tool: 'Инструмент',
+  reqs: 'запр.',
+  in: 'вх.',
+  out: 'вых.',
+  'In/Out': 'Вх/Вых',
 };
