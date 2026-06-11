@@ -15,7 +15,11 @@ import { SnoozeStore } from './routing/snooze.js';
 import { loadLayeredRoutingMatcher } from './routing/rules.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
-import { loadLayeredPolicy } from './policy/loader.js';
+import {
+  loadLayeredPolicy,
+  lintPolicyFile,
+  formatPolicyLint,
+} from './policy/loader.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
@@ -134,5 +138,20 @@ if (process.argv[2] === 'serve') {
     // eslint-disable-next-line no-console
     console.error('qwen-rc serve failed:', err);
     process.exit(1);
+  });
+} else if (process.argv[2] === 'policy' && process.argv[3] === 'lint') {
+  // `qwen-rc policy lint <file>` — daemon-free schema check (exit 0 valid,
+  // 1 invalid, 2 usage). The bug-prone logic is in the pure, unit-tested
+  // lintPolicyFile/formatPolicyLint; this is trivial glue.
+  const file = process.argv[4];
+  if (!file) {
+    // eslint-disable-next-line no-console
+    console.error('usage: qwen-rc policy lint <file>');
+    process.exit(2);
+  }
+  lintPolicyFile(file).then((result) => {
+    // eslint-disable-next-line no-console
+    console.log(formatPolicyLint(file, result));
+    process.exit(result.ok ? 0 : 1);
   });
 }
