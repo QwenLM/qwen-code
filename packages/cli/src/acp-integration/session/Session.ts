@@ -88,6 +88,7 @@ import {
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   acquireSleepInhibitor,
+  clearGoalTerminalObserver,
   setGoalTerminalObserver,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -458,6 +459,7 @@ export class Session implements SessionContext {
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
 
+    this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
   }
 
@@ -507,6 +509,7 @@ export class Session implements SessionContext {
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    clearGoalTerminalObserver(this.sessionId);
   }
 
   /**
@@ -943,7 +946,6 @@ export class Session implements SessionContext {
             let parts: Part[] | null;
 
             if (isSlashCommand(inputText)) {
-              const isGoalCommand = /^\/goal(?:\s|$)/i.test(inputText.trim());
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -956,9 +958,6 @@ export class Session implements SessionContext {
                 slashCommandResult,
                 params.prompt,
               );
-              if (isGoalCommand) {
-                this.#installGoalTerminalObserver();
-              }
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model
