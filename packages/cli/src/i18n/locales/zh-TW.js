@@ -23,7 +23,7 @@ export default {
   '"{{name}}" {{state}}.': '"{{name}}" {{state}}。',
   '(Tab / ←→ to switch)': '（Tab / ←→ 切換）',
   '+ Add new marketplace': '+ 新增市場來源',
-  '+ Install new extension': '+ 安裝新擴展',
+  '+ Install a new extension': '+ 安裝一個新擴展',
   Actions: '操作',
   'Add Marketplace': '新增市場來源',
   'Add a marketplace in the Sources tab to discover extensions.':
@@ -119,6 +119,9 @@ export default {
   'Will install:': '將安裝：',
   'Would open: {{url}}': '將開啟：{{url}}',
   'Y/Enter to confirm · N/Esc to cancel': 'Y/Enter 確認 · N/Esc 取消',
+  'Press R to retry · Esc to go back': '按 R 重試 · Esc 返回',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter 選擇 · R 刷新 · Esc 返回',
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
@@ -127,8 +130,6 @@ export default {
   '{{count}} Skills': '{{count}} 個技能',
   '{{count}} available extensions': '{{count}} 個可用擴展',
   '↑ more above': '↑ 上方更多',
-  '↑↓ navigate · Enter details · Esc close':
-    '↑↓ 導覽 · Enter 查看詳情 · Esc 關閉',
   '↑↓ navigate · Enter open · d remove marketplace · Esc close':
     '↑↓ 導覽 · Enter 開啟 · d 移除市場來源 · Esc 關閉',
   '↑↓ navigate · Enter select · Esc close': '↑↓ 導覽 · Enter 選擇 · Esc 關閉',
@@ -612,6 +613,7 @@ export default {
     '擴展 "{{name}}" 安裝成功，並已在當前工作區啟用。',
   'Marketplace "{{name}}" not found.': '未找到市場源 "{{name}}"。',
   'No marketplace sources added yet.': '尚未添加任何市場源。',
+  'No marketplaces added yet.': '尚未添加任何市場源。',
   'Adds a marketplace source (Claude format).':
     '添加一個市場源（Claude 格式）。',
   'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':

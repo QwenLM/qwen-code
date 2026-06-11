@@ -22,25 +22,27 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../../../utils/errors.js';
-import { ExtensionActionsView } from '../views/ExtensionActionsView.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
 
 const debugLogger = createDebugLogger('SOURCES_TAB');
+
+// How many installed plugins to list in the marketplace detail before
+// collapsing the rest into a "… and N more" summary (keeps the view short).
+const INSTALLED_PREVIEW_LIMIT = 5;
 
 type SourcesView =
   | 'list'
   | 'install-extension'
   | 'add'
   | 'detail'
-  | 'extension-detail'
   | 'remove-confirm';
 type SourceDetailAction = 'browse' | 'update' | 'remove';
 
-// Flat, navigable entries shown on the Marketplaces tab list.
+// Flat, navigable entries shown on the Marketplaces tab list. Installed
+// extensions are not listed here — they live on the Installed tab.
 type Entry =
   | { kind: 'install-extension' }
   | { kind: 'add-marketplace' }
-  | { kind: 'extension'; extension: Extension }
   | { kind: 'marketplace'; source: ExtensionSource };
 
 interface SourcesTabProps {
@@ -63,12 +65,6 @@ function formatDate(iso?: string): string | null {
   return new Date(time).toLocaleDateString();
 }
 
-function extensionSourceLabel(ext: Extension): string {
-  const meta = ext.installMetadata;
-  if (!meta) return t('local');
-  return `${redactUrlCredentials(meta.source)} (${meta.type})`;
-}
-
 export const SourcesTab = ({
   config,
   isActive,
@@ -88,11 +84,8 @@ export const SourcesTab = ({
   const [detailConfig, setDetailConfig] =
     useState<ClaudeMarketplaceConfig | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  // The marketplace / extension currently being viewed or confirmed.
+  // The marketplace currently being viewed or confirmed.
   const [detailSource, setDetailSource] = useState<ExtensionSource | null>(
-    null,
-  );
-  const [detailExtension, setDetailExtension] = useState<Extension | null>(
     null,
   );
 
@@ -113,18 +106,14 @@ export const SourcesTab = ({
     load();
   }, [load, reloadSignal]);
 
-  // Entries: two action rows, then installed extensions, then sources.
+  // Entries: two action rows, then the configured marketplaces.
   const entries = useMemo<Entry[]>(
     () => [
       { kind: 'install-extension' },
       { kind: 'add-marketplace' },
-      ...extensions.map((extension) => ({
-        kind: 'extension' as const,
-        extension,
-      })),
       ...sources.map((source) => ({ kind: 'marketplace' as const, source })),
     ],
-    [extensions, sources],
+    [sources],
   );
 
   // Keep the cursor in range as the list changes.
@@ -136,9 +125,26 @@ export const SourcesTab = ({
 
   const selectedEntry = entries[selectedIndex];
 
-  // Context-aware footer hint based on the highlighted row (list view only).
+  // Context-aware footer hint. Mostly list-view only, but the marketplace
+  // detail surfaces an R-to-retry hint when its load failed.
   useEffect(() => {
-    if (!isActive || view !== 'list') {
+    if (!isActive) {
+      onFooter(null);
+      return;
+    }
+    if (view === 'detail') {
+      // R re-fetches in the detail view either way; advertise it in the
+      // footer (as a retry on failure, a refresh once loaded).
+      if (detailLoading) {
+        onFooter(null);
+      } else if (!detailConfig) {
+        onFooter(t('Press R to retry · Esc to go back'));
+      } else {
+        onFooter(t('Enter to select · R refresh · Esc to go back'));
+      }
+      return () => onFooter(null);
+    }
+    if (view !== 'list') {
       onFooter(null);
       return;
     }
@@ -147,20 +153,24 @@ export const SourcesTab = ({
       onFooter(
         t('↑↓ navigate · Enter open · d remove marketplace · Esc close'),
       );
-    } else if (kind === 'extension') {
-      onFooter(t('↑↓ navigate · Enter details · Esc close'));
     } else {
       onFooter(t('↑↓ navigate · Enter select · Esc close'));
     }
     return () => onFooter(null);
-  }, [isActive, view, selectedEntry?.kind, onFooter]);
+  }, [
+    isActive,
+    view,
+    selectedEntry?.kind,
+    onFooter,
+    detailLoading,
+    detailConfig,
+  ]);
 
   const goToList = useCallback(() => {
     setView('list');
     setInput('');
     setDetailConfig(null);
     setDetailSource(null);
-    setDetailExtension(null);
     onLockChange(false);
   }, [onLockChange]);
 
@@ -229,15 +239,21 @@ export const SourcesTab = ({
     [extensionManager, onLockChange, onStatus],
   );
 
-  const openExtensionDetail = useCallback(
-    (extension: Extension) => {
-      onStatus(null);
-      setDetailExtension(extension);
-      setView('extension-detail');
-      onLockChange(true);
-    },
-    [onLockChange, onStatus],
-  );
+  // Re-fetch the marketplace config for the currently-open detail. Used by the
+  // R key so a failed load can be retried without leaving the detail view.
+  const refetchDetail = useCallback(async () => {
+    if (!extensionManager || !detailSource) return;
+    setDetailLoading(true);
+    setDetailConfig(null);
+    try {
+      const cfg = await extensionManager.loadSource(detailSource.source);
+      setDetailConfig(cfg ?? null);
+    } catch (error) {
+      debugLogger.error('Failed to load marketplace detail:', error);
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [extensionManager, detailSource]);
 
   const removeSource = useCallback(() => {
     if (!extensionManager || !detailSource) return;
@@ -314,9 +330,6 @@ export const SourcesTab = ({
             setView('add');
             onLockChange(true);
             break;
-          case 'extension':
-            openExtensionDetail(selectedEntry.extension);
-            break;
           case 'marketplace':
             void openSourceDetail(selectedEntry.source);
             break;
@@ -351,12 +364,19 @@ export const SourcesTab = ({
     },
   );
 
-  // Marketplace detail: Escape goes back; the selector owns Enter. (The
-  // extension detail view owns its own keyboard handling.)
+  // Marketplace detail: Escape goes back; R re-fetches (retry on load failure);
+  // the selector owns Enter.
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
         goToList();
+      } else if (
+        (key.name === 'r' || key.sequence === 'r') &&
+        !key.ctrl &&
+        !key.meta &&
+        !detailLoading
+      ) {
+        void refetchDetail();
       }
     },
     { isActive: isActive && view === 'detail' },
@@ -442,23 +462,6 @@ export const SourcesTab = ({
     );
   }
 
-  if (view === 'extension-detail' && detailExtension) {
-    return (
-      <ExtensionActionsView
-        config={config}
-        extension={detailExtension}
-        isActive={isActive}
-        showFavorite={false}
-        onStatus={onStatus}
-        onReload={() => {
-          void load();
-          onChanged();
-        }}
-        onExit={goToList}
-      />
-    );
-  }
-
   if (view === 'detail' && detailSource) {
     const plugins = detailConfig?.plugins ?? [];
     const availableCount = plugins.length;
@@ -520,23 +523,23 @@ export const SourcesTab = ({
                     count: String(installedHere.length),
                   })}
                 </Text>
-                {installedHere.map((p) => (
-                  <Box key={p.name} flexDirection="column">
-                    <Box>
-                      <Box minWidth={2} flexShrink={0}>
-                        <Text color={theme.status.success}>{'●'}</Text>
-                      </Box>
-                      <Text color={theme.text.primary}>{p.name}</Text>
+                {installedHere.slice(0, INSTALLED_PREVIEW_LIMIT).map((p) => (
+                  <Box key={p.name}>
+                    <Box minWidth={2} flexShrink={0}>
+                      <Text color={theme.status.success}>{'●'}</Text>
                     </Box>
-                    {p.description ? (
-                      <Box paddingLeft={2}>
-                        <Text color={theme.text.secondary}>
-                          {p.description}
-                        </Text>
-                      </Box>
-                    ) : null}
+                    <Text color={theme.text.primary}>{p.name}</Text>
                   </Box>
                 ))}
+                {installedHere.length > INSTALLED_PREVIEW_LIMIT ? (
+                  <Text color={theme.text.secondary}>
+                    {t('... and {{count}} more', {
+                      count: String(
+                        installedHere.length - INSTALLED_PREVIEW_LIMIT,
+                      ),
+                    })}
+                  </Text>
+                ) : null}
               </Box>
             ) : null}
 
@@ -551,6 +554,9 @@ export const SourcesTab = ({
           <Box flexDirection="column" gap={1}>
             <Text color={theme.status.error}>
               {t('Could not load this marketplace.')}
+            </Text>
+            <Text color={theme.text.secondary}>
+              {t('Press R to retry · Esc to go back')}
             </Text>
             <RadioButtonSelect
               items={[
@@ -615,8 +621,7 @@ export const SourcesTab = ({
     );
   };
 
-  const extensionsStart = 2;
-  const sourcesStart = 2 + extensions.length;
+  const sourcesStart = 2;
 
   return (
     <Box flexDirection="column">
@@ -624,7 +629,7 @@ export const SourcesTab = ({
         <Text color={theme.text.accent} bold>
           {t('Add new')}
         </Text>
-        {renderRow(0, t('+ Install new extension'), undefined, true)}
+        {renderRow(0, t('+ Install a new extension'), undefined, true)}
         {renderRow(
           1,
           t('+ Add new marketplace'),
@@ -632,17 +637,6 @@ export const SourcesTab = ({
           true,
         )}
       </Box>
-
-      {extensions.length > 0 ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={theme.text.accent} bold>
-            {t('Extensions')} ({extensions.length})
-          </Text>
-          {extensions.map((ext, i) =>
-            renderRow(extensionsStart + i, ext.name, extensionSourceLabel(ext)),
-          )}
-        </Box>
-      ) : null}
 
       {sources.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>
@@ -657,15 +651,13 @@ export const SourcesTab = ({
             ),
           )}
         </Box>
-      ) : null}
-
-      {extensions.length === 0 && sources.length === 0 ? (
+      ) : (
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
-            {t('No extensions or sources added yet.')}
+            {t('No marketplaces added yet.')}
           </Text>
         </Box>
-      ) : null}
+      )}
     </Box>
   );
 };

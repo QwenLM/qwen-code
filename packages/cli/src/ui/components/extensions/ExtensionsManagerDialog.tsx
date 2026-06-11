@@ -249,9 +249,13 @@ export function ExtensionsManagerDialog({
         )}
 
         <Text color={theme.text.secondary}>
-          {tabLocked
-            ? t('Enter to select · Esc to go back')
-            : (tabFooter ?? footerHint(activeTab))}
+          {/* A tab-provided hint wins even while a sub-view is locked, so a
+              locked view (e.g. a failed marketplace load offering R to retry)
+              can surface its own footer instead of the generic locked text. */}
+          {tabFooter ??
+            (tabLocked
+              ? t('Enter to select · Esc to go back')
+              : footerHint(activeTab))}
         </Text>
       </Box>
     </Box>

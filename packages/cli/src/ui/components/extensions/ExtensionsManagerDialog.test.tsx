@@ -15,7 +15,6 @@ import { SettingsContext } from '../../contexts/SettingsContext.js';
 import { ShellFocusContext } from '../../contexts/ShellFocusContext.js';
 import { LoadedSettings } from '../../../config/settings.js';
 import type { UIState } from '../../contexts/UIStateContext.js';
-import { SettingScope } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   Extension,
@@ -361,126 +360,10 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     // 'Add new' is the section title for the action rows; it also appears inside
     // '+ Add new marketplace', so assert it renders at least twice (title + row).
     expect((frame?.split('Add new').length ?? 1) - 1).toBeGreaterThanOrEqual(2);
-    expect(frame).toContain('Install new extension');
+    expect(frame).toContain('Install a new extension');
     expect(frame).toContain('Claude plugin marketplace'); // (Claude) annotation
     expect(frame).toContain('Marketplaces'); // section header
     expect(frame).toContain('Skills');
-  });
-
-  it('shows extension actions without Favorites in the Sources extension detail', async () => {
-    const manager = createManager({
-      extensions: [mockExtension('alpha', true)],
-    });
-    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.SOURCES,
-    });
-    await waitFor(() => {
-      expect(lastFrame()).toContain('alpha'); // Extensions section row
-    });
-    // Rows: Install ext (0), Add marketplace (1), alpha extension (2).
-    stdin.write('\x1B[B');
-    stdin.write('\x1B[B');
-    await waitFor(() => {
-      expect(lastFrame()).toContain('● alpha');
-    });
-    stdin.write('\r'); // Enter -> shared extension actions view
-    await waitFor(() => {
-      expect(lastFrame()).toContain('Change scope');
-    });
-    const frame = lastFrame();
-    expect(frame).toContain('Disable'); // alpha is active
-    expect(frame).toContain('Mark for Update');
-    expect(frame).toContain('Uninstall');
-    // Favorites is omitted in the Sources tab.
-    expect(frame).not.toContain('Favorites');
-  });
-
-  it('toggles enable/disable in the Sources extension detail and keeps the label in sync', async () => {
-    const manager = createManager({
-      extensions: [mockExtension('alpha', true)],
-    });
-    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.SOURCES,
-    });
-    await waitFor(() => {
-      expect(lastFrame()).toContain('alpha');
-    });
-    stdin.write('\x1B[B');
-    stdin.write('\x1B[B');
-    await waitFor(() => {
-      expect(lastFrame()).toContain('● alpha');
-    });
-    stdin.write('\r'); // open detail
-    await waitFor(() => {
-      expect(lastFrame()).toContain('Disable'); // active -> Disable
-    });
-    stdin.write('\r'); // Disable (toggle is the first action)
-    await waitFor(() => {
-      expect(manager.disableExtension).toHaveBeenCalled();
-      expect(lastFrame()).toContain('Enable'); // label flipped
-    });
-    stdin.write('\r'); // Enable (toggle still first)
-    await waitFor(() => {
-      expect(manager.enableExtension).toHaveBeenCalled();
-      expect(lastFrame()).toContain('Disable'); // flipped back, not stuck
-    });
-  });
-
-  it('change-scope re-scopes and re-enables a disabled extension in the Sources detail', async () => {
-    const manager = createManager({
-      extensions: [mockExtension('alpha', false)], // disabled
-    });
-    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
-      initialTab: EXTENSIONS_TABS.SOURCES,
-    });
-    await waitFor(() => {
-      expect(lastFrame()).toContain('alpha');
-    });
-    stdin.write('\x1B[B');
-    stdin.write('\x1B[B');
-    await waitFor(() => {
-      expect(lastFrame()).toContain('● alpha');
-    });
-    stdin.write('\r'); // open detail
-    await waitFor(() => {
-      expect(lastFrame()).toContain('Enable'); // disabled -> Enable label
-    });
-    // Actions (no favorite in Sources): toggle(0), change-scope(1), ...
-    stdin.write('\x1B[B'); // highlight Change scope
-    stdin.write('\r'); // enter scope-select
-    await waitFor(() => {
-      expect(lastFrame()).toContain('Project (Workspace)');
-    });
-    stdin.write('\x1B[B'); // highlight Project (index 1)
-    stdin.write('\r'); // select Project
-    await waitFor(() => {
-      expect(manager.setExtensionScope).toHaveBeenCalledWith(
-        'alpha',
-        'project',
-      );
-    });
-    // Project scope => disable at User, enable at Workspace.
-    expect(manager.disableExtension).toHaveBeenCalledWith(
-      'alpha',
-      SettingScope.User,
-    );
-    expect(manager.enableExtension).toHaveBeenCalledWith(
-      'alpha',
-      SettingScope.Workspace,
-    );
-    // Back on the detail: scope is Project and the extension is now enabled.
-    await waitFor(() => {
-      const frame = lastFrame();
-      expect(frame).toContain('Project');
-      expect(frame).toContain('Disable'); // enabled -> Disable label
-    });
-    // Re-entering the scope selector reflects the now-current scope (Project),
-    // not a default of Global — so the change is visibly in effect.
-    stdin.write('\x1B[B'); // highlight Change scope
-    stdin.write('\r'); // enter scope-select again
-    await waitFor(() => {
-      expect(lastFrame()).toContain('Current: Project (Workspace)');
-    });
   });
 
   it('shows a CC-style marketplace detail with installed plugins and actions', async () => {
@@ -505,8 +388,8 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     await waitFor(() => {
       expect(lastFrame()).toContain('Skills');
     });
-    // Rows: Install ext (0), Add marketplace (1), pdf extension (2), Skills (3).
-    stdin.write('\x1B[B');
+    // Installed extensions are not listed here; rows are:
+    // Install ext (0), Add marketplace (1), Skills (2).
     stdin.write('\x1B[B');
     stdin.write('\x1B[B');
     await waitFor(() => {
@@ -518,11 +401,96 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     const frame = lastFrame();
     expect(frame).toContain('2 available extensions');
+    // The detail still reflects which of this marketplace's plugins are
+    // installed, even though the tab list no longer shows extensions.
     expect(frame).toContain('Installed extensions (1):');
     expect(frame).toContain('pdf');
     expect(frame).toContain('Browse extensions (2)');
     expect(frame).toContain('Update marketplace');
     expect(frame).toContain('Remove marketplace');
+    // The footer advertises the R refresh shortcut once the detail has loaded.
+    expect(frame).toContain('R refresh');
+  });
+
+  it('collapses a long installed-plugins list in the marketplace detail', async () => {
+    const installed = Array.from({ length: 8 }, (_, i) =>
+      mockExtension(`ext-${i}`, true),
+    );
+    const manager = createManager({
+      extensions: installed,
+      sources: [
+        { name: 'Skills', source: 'anthropics/skills', type: 'github' },
+      ],
+    });
+    manager.loadSource = vi.fn().mockResolvedValue({
+      name: 'Skills',
+      owner: { name: 'o', email: 'e' },
+      plugins: installed.map((ext) => ({
+        name: ext.name,
+        version: '1',
+        source: 'a/s',
+      })),
+    });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.SOURCES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Skills');
+    });
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Skills');
+    });
+    stdin.write('\r'); // open detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Installed extensions (8):');
+    });
+    const frame = lastFrame();
+    // First five are shown; the rest collapse into a summary line.
+    expect(frame).toContain('ext-0');
+    expect(frame).toContain('ext-4');
+    expect(frame).not.toContain('ext-5');
+    expect(frame).toContain('and 3 more');
+  });
+
+  it('retries a failed marketplace load when R is pressed', async () => {
+    const manager = createManager({
+      sources: [
+        { name: 'Skills', source: 'anthropics/skills', type: 'github' },
+      ],
+    });
+    // First load fails (null), retry succeeds.
+    manager.loadSource = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        name: 'Skills',
+        owner: { name: 'o', email: 'e' },
+        plugins: [{ name: 'pdf', version: '1', source: 'a/s' }],
+      });
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      initialTab: EXTENSIONS_TABS.SOURCES,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Skills');
+    });
+    stdin.write('\x1B[B');
+    stdin.write('\x1B[B');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Skills');
+    });
+    stdin.write('\r'); // open detail -> first load fails
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Could not load this marketplace.');
+    });
+    // The retry hint shows both inline and in the bottom footer.
+    expect((lastFrame()?.split('Press R to retry').length ?? 1) - 1).toBe(2);
+    stdin.write('r'); // retry -> second load succeeds
+    await waitFor(() => {
+      expect(lastFrame()).toContain('1 available extensions');
+    });
+    expect(manager.loadSource).toHaveBeenCalledTimes(2);
   });
 
   it('Browse plugins jumps to Discover filtered by the marketplace', async () => {
@@ -620,7 +588,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
-      expect(lastFrame()).toContain('Install new extension');
+      expect(lastFrame()).toContain('Install a new extension');
     });
     stdin.write('\r'); // Enter on row 0 -> install-extension sub-view (locks tabs)
     await waitFor(() => {
@@ -628,7 +596,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     });
     stdin.write('\x1b'); // Escape should return to the list, not close the dialog
     await waitFor(() => {
-      expect(lastFrame()).toContain('Install new extension');
+      expect(lastFrame()).toContain('Install a new extension');
     });
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -638,9 +606,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       initialTab: EXTENSIONS_TABS.SOURCES,
     });
     await waitFor(() => {
-      expect(lastFrame()).toContain('Install new extension');
+      expect(lastFrame()).toContain('Install a new extension');
     });
-    stdin.write('\r'); // Enter on the first row (Install new extension)
+    stdin.write('\r'); // Enter on the first row (Install a new extension)
     await waitFor(() => {
       expect(lastFrame()).toContain('Install Extension');
     });

@@ -23,7 +23,7 @@ export default {
   '"{{name}}" {{state}}.': '"{{name}}" {{state}}.',
   '(Tab / ←→ to switch)': '(Tab / ←→ to switch)',
   '+ Add new marketplace': '+ Add new marketplace',
-  '+ Install new extension': '+ Install new extension',
+  '+ Install a new extension': '+ Install a new extension',
   Actions: 'Actions',
   'Add Marketplace': 'Add Marketplace',
   'Add a marketplace in the Sources tab to discover extensions.':
@@ -122,6 +122,9 @@ export default {
   'Would open: {{url}}': 'Would open: {{url}}',
   'Y/Enter to confirm · N/Esc to cancel':
     'Y/Enter to confirm · N/Esc to cancel',
+  'Press R to retry · Esc to go back': 'Press R to retry · Esc to go back',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter to select · R refresh · Esc to go back',
   'from {{marketplace}}': 'from {{marketplace}}',
   installed: 'installed',
   '{{count}} Agents': '{{count}} Agents',
@@ -130,8 +133,6 @@ export default {
   '{{count}} Skills': '{{count}} Skills',
   '{{count}} available extensions': '{{count}} available extensions',
   '↑ more above': '↑ more above',
-  '↑↓ navigate · Enter details · Esc close':
-    '↑↓ navigate · Enter details · Esc close',
   '↑↓ navigate · Enter open · d remove marketplace · Esc close':
     '↑↓ navigate · Enter open · d remove marketplace · Esc close',
   '↑↓ navigate · Enter select · Esc close':
@@ -681,6 +682,7 @@ export default {
     'Extension "{{name}}" installed successfully and enabled for the current workspace.',
   'Marketplace "{{name}}" not found.': 'Marketplace "{{name}}" not found.',
   'No marketplace sources added yet.': 'No marketplace sources added yet.',
+  'No marketplaces added yet.': 'No marketplaces added yet.',
   'Adds a marketplace source (Claude format).':
     'Adds a marketplace source (Claude format).',
   'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
