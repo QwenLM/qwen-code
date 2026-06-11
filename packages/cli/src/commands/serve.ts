@@ -46,6 +46,7 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
+  'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
@@ -164,6 +165,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         array: true,
         description: 'Cross-origin allowlist for browser webui clients.',
+      })
+      .option('allow-private-auth-base-url', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Allow /workspace/auth/provider to install localhost/private-network baseUrl values. ' +
+          'Use only for local development with trusted clients.',
       })
       .option('prompt-deadline-ms', {
         type: 'number',
@@ -379,6 +387,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
+        allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0

@@ -23,7 +23,7 @@ import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
-import { StatusBar } from './components/StatusBar';
+import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -53,6 +53,10 @@ import {
   ModelMessage,
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
+import {
+  AUTH_ACTIVE_EVENT,
+  AuthMessage,
+} from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import {
   SETTINGS_ACTIVE_EVENT,
@@ -84,7 +88,15 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  TasksStatusMessage,
+  type SerializedTasksMessage,
+} from './components/messages/TasksStatusMessage';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from './adapters/toolClassification';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -103,6 +115,11 @@ import {
   parseMcpStatusMessage,
   serializeMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
+import {
+  GOAL_STATUS_ACTIVE_EVENT,
+  serializeGoalStatusMessage,
+} from './components/messages/GoalStatusMessage';
+import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type {
   ACPToolCall,
@@ -152,10 +169,33 @@ function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
 }
 
+// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
+const GOAL_CLEAR_KEYWORDS = new Set([
+  'clear',
+  'stop',
+  'off',
+  'reset',
+  'none',
+  'cancel',
+]);
+
+function isGoalClearCommand(text: string): boolean {
+  const goalArg = text
+    .replace(/^\/goal\b/i, '')
+    .trim()
+    .toLowerCase();
+  return GOAL_CLEAR_KEYWORDS.has(goalArg);
+}
+
 interface QueuedPrompt {
   id: number;
   text: string;
   images?: PromptImage[];
+}
+
+interface ActiveGoalStatus {
+  condition: string;
+  setAt: number;
 }
 
 interface LocalAnchoredMessage {
@@ -395,14 +435,38 @@ function parseRenameArgument(
 }
 
 function isAgentTool(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  return (
-    name === 'agent' || name === 'task' || Boolean(tool.args?.subagent_type)
-  );
+  return isSubAgentToolCall(tool);
 }
 
 function isActiveTool(tool: ACPToolCall): boolean {
   return tool.status === 'pending' || tool.status === 'in_progress';
+}
+
+function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
+  if (tool.args?.is_background !== true) return false;
+  const name = tool.toolName.toLowerCase();
+  return (
+    name === 'shell' ||
+    name === 'bash' ||
+    name === 'run_shell_command' ||
+    name === 'exec'
+  );
+}
+
+function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (
+        isBackgroundSubAgentToolCall(tool) ||
+        isBackgroundShellToolCall(tool)
+      ) {
+        parts.push(`${tool.callId}:${tool.status}`);
+      }
+    }
+  }
+  return parts.join('|');
 }
 
 interface FloatingPanels {
@@ -430,7 +494,11 @@ function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
       if (nextTodos) {
         todos = hasActiveTodos(nextTodos) ? nextTodos : [];
       }
-      if (isAgentTool(tool) && isActiveTool(tool)) {
+      if (
+        isAgentTool(tool) &&
+        isActiveTool(tool) &&
+        !isBackgroundSubAgentToolCall(tool)
+      ) {
         agents.push(tool);
       }
     }
@@ -666,8 +734,16 @@ export function App({
     (a) =>
       `${a.callId}:${a.status}:${a.subTools?.length ?? 0}:${getAgentPanelVersion(a)}`,
   );
+  const backgroundTaskActivityKey = useMemo(
+    () => getBackgroundTaskActivityKey(messages),
+    [messages],
+  );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
+  const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
+  const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
+  activeGoalRef.current = activeGoal;
   const {
     followupState,
     onAcceptFollowup,
@@ -721,6 +797,7 @@ export function App({
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
+  const [authInlineOpen, setAuthInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
@@ -735,11 +812,15 @@ export function App({
   const escPressCountRef = useRef(0);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
+  const [tasksPanelMessage, setTasksPanelMessage] =
+    useState<SerializedTasksMessage | null>(null);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
+  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
   const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
+  const authPanelActive = usePanelActive(AUTH_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
@@ -747,6 +828,7 @@ export function App({
   currentModelRef.current = currentModel;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -763,10 +845,12 @@ export function App({
     dialogOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
+    tasksPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
     modelPanelActive ||
-    settingsPanelActive;
+    settingsPanelActive ||
+    authPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -809,6 +893,7 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
+    setTasksPanelMessage(null);
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
@@ -1121,12 +1206,38 @@ export function App({
 
   useEffect(() => {
     if (connection.sessionId) {
+      setActiveGoal(null);
       onSessionIdChange?.(connection.sessionId);
       if (!onSessionIdChange) {
         replaceSessionUrl(connection.sessionId);
       }
     }
   }, [connection.sessionId, onSessionIdChange]);
+
+  useEffect(() => {
+    const onGoalStatusActive = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          active?: boolean;
+          condition?: string;
+          setAt?: number;
+        }>
+      ).detail;
+      if (!detail?.active) {
+        setActiveGoal(null);
+        return;
+      }
+      if (!detail.condition) return;
+      setActiveGoal({
+        condition: detail.condition,
+        setAt: detail.setAt ?? Date.now(),
+      });
+    };
+
+    window.addEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+    return () =>
+      window.removeEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+  }, []);
 
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
@@ -1208,6 +1319,119 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const openTasksPanel = useCallback(() => {
+    sessionActions
+      .getTasks()
+      .then((snapshot) => {
+        setTasksPanelMessage({ snapshot });
+      })
+      .catch((error: unknown) => {
+        reportError(error, 'Failed to load tasks');
+      });
+  }, [reportError, sessionActions]);
+
+  const dispatchGoalSet = useCallback(
+    (condition: string, setAt: number) => {
+      setActiveGoal({ condition, setAt });
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'set',
+            condition,
+            setAt,
+          }),
+        },
+      ]);
+    },
+    [store],
+  );
+
+  const dispatchGoalCleared = useCallback(
+    (goal: ActiveGoalStatus | null) => {
+      if (!goal) return;
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'cleared',
+            condition: goal.condition,
+            durationMs: Date.now() - goal.setAt,
+          }),
+        },
+      ]);
+      setActiveGoal(null);
+    },
+    [store],
+  );
+
+  const handleBusyGoalClear = useCallback(
+    (text: string) => {
+      const goalToClear = activeGoalRef.current;
+      store.appendLocalUserMessage(text);
+      dispatchGoalCleared(goalToClear);
+      sessionActions.clearGoal().catch((error: unknown) => {
+        if (goalToClear) {
+          dispatchGoalSet(goalToClear.condition, goalToClear.setAt);
+        }
+        reportError(error, 'Failed to clear /goal');
+      });
+      return true;
+    },
+    [dispatchGoalCleared, dispatchGoalSet, reportError, sessionActions, store],
+  );
+
+  const handleGoalSlashCommand = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      opts?: { sendToDaemon?: boolean },
+    ) => {
+      const goalArg = text.replace(/^\/goal\b/i, '').trim();
+      const lowerGoalArg = goalArg.toLowerCase();
+      const sendToDaemon = opts?.sendToDaemon ?? true;
+
+      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+        if (!sendToDaemon) {
+          store.appendLocalUserMessage(text);
+          dispatchGoalCleared(activeGoalRef.current);
+          return true;
+        }
+        return handleBusyGoalClear(text);
+      } else if (goalArg) {
+        const optimisticGoal = { condition: goalArg, setAt: Date.now() };
+        store.appendLocalUserMessage(text);
+        dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
+        if (!sendToDaemon) {
+          return true;
+        }
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) => {
+            reportError(error, 'Failed to send /goal command');
+          },
+        );
+        return true;
+      }
+
+      store.appendLocalUserMessage(text);
+      if (sendToDaemon) {
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) =>
+            reportError(error, 'Failed to send /goal command'),
+        );
+      }
+      return true;
+    },
+    [
+      dispatchGoalCleared,
+      dispatchGoalSet,
+      handleBusyGoalClear,
+      reportError,
+      sendPrompt,
+      store,
+    ],
+  );
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1219,16 +1443,28 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
-          if (
+          if (cmd === 'tasks') {
+            store.appendLocalUserMessage(text);
             handleTasksSlashCommand({
               cmd,
-              promptBlocked,
               getTasks: sessionActions.getTasks,
-              dispatch: store.dispatch,
+              dispatch: (events) => store.dispatch(events),
               reportError,
-            })
-          ) {
+            });
             return true;
+          }
+          if (cmd === 'goal') {
+            if (promptBlocked) {
+              if (isGoalClearCommand(text)) {
+                return handleBusyGoalClear(text);
+              }
+              const goalArg = text.replace(/^\/goal\b/i, '').trim();
+              if (goalArg) {
+                setActiveGoal({ condition: goalArg, setAt: Date.now() });
+              }
+              return enqueuePrompt(text, images);
+            }
+            return handleGoalSlashCommand(text, images);
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -1322,6 +1558,11 @@ export function App({
           }
           if (cmd === 'release') {
             setShowReleaseDialog(true);
+            return true;
+          }
+          if (cmd === 'auth') {
+            store.appendLocalUserMessage(text);
+            setAuthInlineOpen(true);
             return true;
           }
           if (cmd === 'model') {
@@ -1769,6 +2010,8 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      handleBusyGoalClear,
+      handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       onLanguageChange,
@@ -1842,6 +2085,16 @@ export function App({
     return true;
   }, [floatingAgents.length]);
 
+  const handleFocusTaskPill = useCallback((): boolean => {
+    if (bottomHidden) return false;
+    return statusBarRef.current?.focusTaskPill() ?? false;
+  }, [bottomHidden]);
+
+  const handleFocusFooterFromEditor = useCallback((): boolean => {
+    if (handleFocusActiveAgents()) return true;
+    return handleFocusTaskPill();
+  }, [handleFocusActiveAgents, handleFocusTaskPill]);
+
   const handleReturnToEditor = useCallback((text?: string) => {
     if (text) {
       editorRef.current?.insertText(text);
@@ -1900,6 +2153,15 @@ export function App({
 
       if (pendingApproval || bottomHidden) return;
 
+      if (tasksPanelMessage) {
+        e.preventDefault();
+        e.stopPropagation();
+        setTasksPanelMessage(null);
+        handleReturnToEditor();
+        resetEscapeState();
+        return;
+      }
+
       if (clearQueuedPrompts()) {
         e.preventDefault();
         resetEscapeState();
@@ -1948,6 +2210,8 @@ export function App({
     handleCycleMode,
     pendingApproval,
     bottomHidden,
+    tasksPanelMessage,
+    handleReturnToEditor,
     clearQueuedPrompts,
   ]);
 
@@ -2137,9 +2401,22 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
+                    authInlineOpen ||
                     approvalModeInlineOpen ||
                     settingsInlineOpen ? (
                       <>
+                        {authInlineOpen && (
+                          <AuthMessage
+                            onMessage={(text, type = 'status') => {
+                              store.dispatch([
+                                type === 'error'
+                                  ? { type: 'error', text }
+                                  : { type: 'status', text },
+                              ]);
+                            }}
+                            onClose={() => setAuthInlineOpen(false)}
+                          />
+                        )}
                         {approvalModeInlineOpen && (
                           <ApprovalModeMessage
                             currentMode={currentMode}
@@ -2199,9 +2476,10 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
+                    authInlineOpen ||
                     approvalModeInlineOpen ||
                     settingsInlineOpen
-                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
+                      ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
                   // The approval-mode/model pickers and the settings panel are
@@ -2239,7 +2517,7 @@ export function App({
                 : styles.footer
             }
           >
-            {floatingTodos.length > 0 && (
+            {floatingTodos.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <TodoPanel todos={floatingTodos} />
               </div>
@@ -2257,11 +2535,12 @@ export function App({
                   skills={loadedSkills}
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
-                  onFocusActiveAgents={handleFocusActiveAgents}
+                  onFocusActiveAgents={handleFocusFooterFromEditor}
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
-                  dialogOpen={bottomHidden}
+                  sessionName={sessionDisplayName}
+                  dialogOpen={bottomHidden || tasksPanelMessage !== null}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
@@ -2275,7 +2554,20 @@ export function App({
                 />
               </div>
             )}
+            {tasksPanelMessage && (
+              <div className={styles.tasksBottomPanel}>
+                <TasksStatusMessage
+                  message={tasksPanelMessage}
+                  manageActiveEvent={false}
+                  onClose={() => {
+                    setTasksPanelMessage(null);
+                    handleReturnToEditor();
+                  }}
+                />
+              </div>
+            )}
             {!shouldHideComposer &&
+              !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel />
               ) : (
@@ -2287,14 +2579,20 @@ export function App({
                   }
                   onShowContext={() => showContextUsage('/context', false)}
                   onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
+                  ref={statusBarRef}
+                  onOpenTasks={() => openTasksPanel()}
+                  onReturnToInput={handleReturnToEditor}
+                  taskActivityKey={backgroundTaskActivityKey}
+                  activeGoal={activeGoal}
                 />
               ))}
 
-            {floatingAgents.length > 0 && (
+            {floatingAgents.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <ActiveAgentsPanel
                   ref={activeAgentsPanelRef}
                   agents={floatingAgents}
+                  onFocusTaskPill={handleFocusTaskPill}
                   onReturnToInput={handleReturnToEditor}
                 />
               </div>

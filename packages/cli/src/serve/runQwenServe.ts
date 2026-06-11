@@ -15,6 +15,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
@@ -35,8 +36,15 @@ import {
   recordDaemonPromptQueueWait,
   recordDaemonSessionLifecycle,
   registerDaemonGaugeCallbacks,
+  findProviderById,
+  buildInstallPlan,
+  applyProviderInstallPlan,
+  resolveBaseUrl,
+  getDefaultModelIds,
   resolveTelemetrySettings,
   shutdownTelemetry,
+  type AuthType,
+  type ProviderSetupInputs,
   type TelemetryRuntimeConfig,
   type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
@@ -57,7 +65,11 @@ import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
-import type { ServeOptions } from './types.js';
+import type {
+  ServeOptions,
+  ServeAuthProviderInstallRequest,
+  ServeAuthProviderInstallResult,
+} from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
@@ -330,9 +342,44 @@ export interface RunHandle {
   close(): Promise<void>;
 }
 
+function normalizeInstallModelIds(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): string[] {
+  const fromRequest = req.modelIds
+    ?.map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  const modelIds =
+    fromRequest && fromRequest.length > 0
+      ? fromRequest
+      : getDefaultModelIds(provider);
+  return [...new Set(modelIds)];
+}
+
+function buildProviderSetupInputs(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): ProviderSetupInputs {
+  const protocol = (req.protocol ?? provider.protocol) as AuthType;
+  const baseUrl = resolveBaseUrl(provider, req.baseUrl);
+  return {
+    ...(provider.protocolOptions ? { protocol } : {}),
+    baseUrl,
+    apiKey: req.apiKey.trim(),
+    modelIds: normalizeInstallModelIds(req, provider),
+    ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
+  };
+}
+
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Whether to start the real ACP child eagerly after listen. Production
+   * keeps this on; tests can disable it so boot-path assertions do not wait
+   * on a real child bridge.
+   */
+  preheatBridge?: boolean;
   /**
    * Workspace filesystem factory. When omitted, `runQwenServe`
    * constructs one using `boundWorkspace`, `trustedWorkspace`, and a
@@ -359,6 +406,11 @@ export interface RunQwenServeDeps {
    * audit emission stays visible in the operator log.
    */
   fsAuditEmit?: (event: BridgeEvent) => void;
+}
+
+function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
+  if (deps.preheatBridge !== undefined) return deps.preheatBridge;
+  return process.env['VITEST_WORKER_ID'] === undefined;
 }
 
 /**
@@ -484,6 +536,13 @@ export async function runQwenServe(
             'token gates API routes; /health and /demo remain pre-auth ' +
             'on loopback unless --require-auth is set)'
           : ''),
+    );
+  }
+  if (opts.allowPrivateAuthBaseUrl) {
+    writeStderrLine(
+      'qwen serve: --allow-private-auth-base-url enabled; ' +
+        '/workspace/auth/provider may install localhost/private-network ' +
+        'model endpoints. Use only for local development with trusted clients.',
     );
   }
 
@@ -897,6 +956,38 @@ export async function runQwenServe(
         const fresh = loadSettings(workspace);
         fresh.setValue(scope, key, value);
       }),
+    installAuthProvider: (req) =>
+      withSettingsLock(
+        boundWorkspace,
+        async (): Promise<ServeAuthProviderInstallResult> => {
+          const provider = findProviderById(req.providerId);
+          if (!provider) {
+            throw new Error(`Unsupported auth provider: ${req.providerId}`);
+          }
+          const inputs = buildProviderSetupInputs(req, provider);
+          const plan = buildInstallPlan(provider, inputs);
+          const fresh = loadSettings(boundWorkspace);
+          await applyProviderInstallPlan(plan, {
+            settings: createLoadedSettingsAdapter(fresh),
+            doRefreshAuth: false,
+          });
+          emitDaemonLog('Auth provider installed.', {
+            'qwen-code.daemon.auth.provider_id': provider.id,
+            'qwen-code.daemon.auth.auth_type': plan.authType,
+          });
+          return {
+            v: 1,
+            providerId: provider.id,
+            providerLabel: provider.label,
+            authType: plan.authType,
+            ...(plan.modelSelection?.modelId
+              ? { modelId: plan.modelSelection.modelId }
+              : {}),
+            ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+            message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+          };
+        },
+      ),
   });
   // Pull the device-flow registry back out so the close hook can
   // dispose it before `bridge.shutdown()`, ensuring polling timers +
@@ -1238,7 +1329,7 @@ export async function runQwenServe(
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
-      if (!deps.bridge) {
+      if (!deps.bridge && shouldPreheatBridge(deps)) {
         bridge.preheat().catch((err) => {
           writeStderrLine(
             `qwen serve: ACP preheat failed, will retry on first session: ${

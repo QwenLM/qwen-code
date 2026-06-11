@@ -7,6 +7,10 @@
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SubagentMeta } from '../types.js';
 import type { Usage } from '@agentclientprotocol/sdk';
+import {
+  getActiveGoal,
+  type GoalTerminalEvent,
+} from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './BaseEmitter.js';
 
 /**
@@ -30,6 +34,7 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
+    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -38,10 +43,31 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
+          ...(activeGoal
+            ? {
+                goal: {
+                  condition: activeGoal.condition,
+                  iterations: activeGoal.iterations,
+                  setAt: activeGoal.setAt,
+                  lastReason: activeGoal.lastReason,
+                },
+              }
+            : {}),
         },
       },
     });
   }
+
+  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalTerminal: event,
+      },
+    });
+  }
+
   /**
    * Emits a user message chunk.
    *

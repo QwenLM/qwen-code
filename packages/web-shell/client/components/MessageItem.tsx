@@ -26,6 +26,7 @@ interface MessageItemProps {
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
+  isLatest?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -34,6 +35,7 @@ export const MessageItem = memo(function MessageItem({
   onConfirm,
   onShowContextDetail,
   workspaceCwd,
+  isLatest = false,
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
@@ -63,6 +65,7 @@ export const MessageItem = memo(function MessageItem({
           content={message.content}
           variant={message.variant}
           onShowContextDetail={onShowContextDetail}
+          isLatest={isLatest}
         />
       );
     case 'user_shell':
@@ -108,6 +111,7 @@ function areMessageItemPropsEqual(
   if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.isLatest !== next.isLatest) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 

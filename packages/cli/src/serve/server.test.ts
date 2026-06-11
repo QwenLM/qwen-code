@@ -122,14 +122,17 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'auth_provider_install',
   'workspace_memory',
   'workspace_agents',
+  'workspace_agent_generate',
   'workspace_env',
   'workspace_preflight',
   'session_context',
   'session_context_usage',
   'session_supported_commands',
   'session_tasks',
+  'session_stats',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -137,6 +140,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
   // refused per-server cells).
   'mcp_guardrails',
+  'workspace_mcp_manage',
   // Issue #4175 PR 14b. Always-on. Daemon emits typed push events for
   // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
   // `mcp_child_refused_batch` coalesced per pass).
@@ -306,6 +310,14 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  cancelSessionTaskImpl?: (
+    sessionId: string,
+    taskId: string,
+    taskKind: 'agent' | 'shell' | 'monitor',
+  ) => Promise<{ cancelled: boolean }>;
+  clearSessionGoalImpl?: (
+    sessionId: string,
+  ) => Promise<{ cleared: boolean; condition?: string }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -446,6 +458,12 @@ interface FakeBridge extends AcpSessionBridge {
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
+  cancelSessionTaskCalls: Array<{
+    sessionId: string;
+    taskId: string;
+    taskKind: 'agent' | 'shell' | 'monitor';
+  }>;
+  clearSessionGoalCalls: string[];
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -534,6 +552,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
+  const clearSessionGoalCalls: string[] = [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -705,6 +725,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const cancelSessionTaskImpl =
+    opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
+  const clearSessionGoalImpl =
+    opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -835,6 +859,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
+    cancelSessionTaskCalls,
+    clearSessionGoalCalls,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1002,6 +1028,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
+    },
+    async cancelSessionTask(sessionId, taskId, taskKind) {
+      cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
+      return cancelSessionTaskImpl(sessionId, taskId, taskKind);
+    },
+    async clearSessionGoal(sessionId) {
+      clearSessionGoalCalls.push(sessionId);
+      return clearSessionGoalImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -2148,6 +2182,142 @@ describe('createServeApp', () => {
       expect(commandsRes.body.sessionId).toBe('missing');
       expect(tasksRes.status).toBe(404);
       expect(tasksRes.body.sessionId).toBe('missing');
+    });
+
+    it('rejects task cancellation with invalid kind', async () => {
+      const bridge = fakeBridge();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'other' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`kind` must be "agent", "shell", or "monitor"',
+      );
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('cancels a session task through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'agent' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        { sessionId: 's-1', taskId: 'task-1', taskKind: 'agent' },
+      ]);
+    });
+
+    it('maps task cancellation bridge errors', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'shell' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('clears a session goal through the bridge', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async () => ({
+          cleared: true,
+          condition: 'ship it',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cleared: true, condition: 'ship it' });
+      expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('maps goal clear bridge errors', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('returns cleared false when no session goal is active', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async () => ({ cleared: false }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cleared: false });
+      expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
     });
   });
 
@@ -7754,6 +7924,212 @@ describe('auth device-flow routes', () => {
       .set('Host', `127.0.0.1:${baseOpts.port}`);
     expect(res.status).toBe(200);
     expect(res.body.features).toContain('auth_device_flow');
+  });
+
+  it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        protocol: 'qwen-oauth',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider rejects private baseUrl values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://127.0.0.1:11434/v1',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_base_url');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider rejects private IPv6 baseUrl values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://[::1]:11434/v1',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_base_url');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider rejects IPv4-mapped IPv6 baseUrl values', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://[::ffff:127.0.0.1]:11434/v1',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_base_url');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'http://100.64.1.1:11434/v1',
+    'http://[::]:11434/v1',
+    'http://[febf::1]:11434/v1',
+    'http://[::ffff:169.254.169.254]:11434/v1',
+  ])(
+    'POST /workspace/auth/provider rejects private baseUrl %s',
+    async (baseUrl) => {
+      const installAuthProvider = vi.fn();
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge,
+        installAuthProvider,
+      });
+
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_base_url');
+      expect(installAuthProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it('POST /workspace/auth/provider allows private baseUrl values when explicitly enabled', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp(
+      {
+        ...baseOpts,
+        token: 'tkn',
+        allowPrivateAuthBaseUrl: true,
+      },
+      undefined,
+      {
+        bridge,
+        installAuthProvider,
+      },
+    );
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'http://127.0.0.1:11434/v1/',
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom-openai-compatible',
+      apiKey: 'sk-test',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+    });
+  });
+
+  it('POST /workspace/auth/provider filters invalid advanced numeric fields', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1/',
+        advancedConfig: {
+          enableThinking: true,
+          contextWindowSize: -1,
+          maxTokens: 8192,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom-openai-compatible',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/v1',
+      advancedConfig: {
+        enableThinking: true,
+        maxTokens: 8192,
+      },
+    });
   });
 
   it('upstream provider.start failure → 502 upstream_error, not 500', async () => {

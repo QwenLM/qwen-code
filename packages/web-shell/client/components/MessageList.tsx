@@ -11,7 +11,10 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
-import { isSubAgentToolCall } from '../adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
 import { MessageItem } from './MessageItem';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
@@ -82,6 +85,23 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
     msg.tools.length === 1 &&
     isSubAgentToolCall(msg.tools[0])
   );
+}
+
+function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    msg.tools.length === 1 &&
+    isBackgroundSubAgentToolCall(msg.tools[0])
+  );
+}
+
+function isBackgroundLaunchNarration(msg: Message): boolean {
+  // The daemon often streams short main-agent thought text between background
+  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
+  // those as internal launch narration and shows a single Parallel agents box.
+  // Only skip thought-only messages here; any user-facing assistant content
+  // still breaks the group and remains visible.
+  return msg.role === 'assistant' && Boolean(msg.thinking) && !msg.content;
 }
 
 function isForceExpandGroup(
@@ -169,6 +189,46 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   const items: DisplayItem[] = [];
   let i = 0;
   while (i < messages.length) {
+    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
+      const grouped: Message[] = [];
+      let j = i;
+      while (j < messages.length) {
+        const current = messages[j];
+        if (isBackgroundAgentOnlyToolGroup(current)) {
+          grouped.push(current);
+          j++;
+          continue;
+        }
+        if (isBackgroundLaunchNarration(current)) {
+          let nextAgentIdx = j + 1;
+          while (
+            nextAgentIdx < messages.length &&
+            isBackgroundLaunchNarration(messages[nextAgentIdx])
+          ) {
+            nextAgentIdx++;
+          }
+          if (
+            nextAgentIdx < messages.length &&
+            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
+          ) {
+            j = nextAgentIdx;
+            continue;
+          }
+        }
+        break;
+      }
+
+      if (grouped.length >= 2) {
+        items.push({
+          type: 'parallel_agents',
+          key: `par-${grouped[0].id}`,
+          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+        });
+        i = j;
+        continue;
+      }
+    }
+
     if (isAgentOnlyToolGroup(messages[i])) {
       const start = i;
       while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
@@ -527,6 +587,7 @@ export function MessageList({
           onConfirm={onConfirm}
           onShowContextDetail={onShowContextDetail}
           workspaceCwd={workspaceCwd}
+          isLatest={itemIndex === displayItems.length - 1}
         />
       );
     },

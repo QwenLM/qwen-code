@@ -22,6 +22,29 @@ function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
   };
 }
 
+function makeBackgroundAgentToolGroup(id: string): Message {
+  return {
+    id,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${id}`,
+        toolName: 'Agent',
+        status: 'pending',
+        args: {
+          description: `task ${id}`,
+          run_in_background: true,
+        },
+        rawOutput: {
+          type: 'task_execution',
+          taskDescription: `task ${id}`,
+          status: 'background',
+        },
+      },
+    ],
+  };
+}
+
 function makeMultiToolGroup(id: string): Message {
   return {
     id,
@@ -39,6 +62,15 @@ function makeUserMessage(id: string): Message {
 
 function makeAssistantMessage(id: string): Message {
   return { id, role: 'assistant', content: 'response' };
+}
+
+function makeThoughtMessage(id: string): Message {
+  return {
+    id,
+    role: 'assistant',
+    content: '',
+    thinking: 'launching another agent',
+  };
 }
 
 describe('groupParallelAgents', () => {
@@ -156,6 +188,39 @@ describe('groupParallelAgents', () => {
     expect(items[1].type).toBe('parallel_agents');
     expect(items[2].type).toBe('message');
     expect(items[3].type).toBe('message');
+  });
+
+  it('groups background agents separated by thought-only launch narration', () => {
+    const msgs = [
+      makeBackgroundAgentToolGroup('a1'),
+      makeThoughtMessage('t1'),
+      makeBackgroundAgentToolGroup('a2'),
+    ];
+    const items = groupParallelAgents(msgs);
+    expect(items).toHaveLength(1);
+    expect(items[0].type).toBe('parallel_agents');
+    if (items[0].type === 'parallel_agents') {
+      expect(items[0].agents.map((a) => a.callId)).toEqual([
+        'call-a1',
+        'call-a2',
+      ]);
+    }
+  });
+
+  it('preserves background thought narration when it is not between launches', () => {
+    const msgs = [
+      makeBackgroundAgentToolGroup('a1'),
+      makeThoughtMessage('t1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeThoughtMessage('t2'),
+    ];
+    const items = groupParallelAgents(msgs);
+    expect(items).toHaveLength(2);
+    expect(items[0].type).toBe('parallel_agents');
+    expect(items[1].type).toBe('message');
+    if (items[1].type === 'message') {
+      expect(items[1].message.id).toBe('t2');
+    }
   });
 });
 

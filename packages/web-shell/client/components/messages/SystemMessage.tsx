@@ -6,6 +6,11 @@ import {
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
 import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
+import {
+  TasksStatusMessage,
+  parseTasksStatusMessage,
+} from './TasksStatusMessage';
+import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
 import styles from './SystemMessage.module.css';
 
@@ -14,12 +19,14 @@ interface SystemMessageProps {
   variant: 'info' | 'error' | 'warning';
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  isLatest?: boolean;
 }
 
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
   onShowContextDetail,
+  isLatest = false,
 }: SystemMessageProps) {
   const contextUsage =
     variant === 'info' ? parseContextUsageMessage(content) : null;
@@ -57,6 +64,26 @@ export const SystemMessage = memo(function SystemMessage({
     return (
       <div className={styles.flushMessage}>
         <McpStatusMessage message={mcpStatus} />
+      </div>
+    );
+  }
+
+  const tasksStatus =
+    variant === 'info' ? parseTasksStatusMessage(content) : null;
+  if (tasksStatus) {
+    return (
+      <div className={styles.flushMessage}>
+        <TasksStatusMessage message={tasksStatus} />
+      </div>
+    );
+  }
+
+  const goalStatus =
+    variant === 'info' ? parseGoalStatusMessage(content) : null;
+  if (goalStatus) {
+    return (
+      <div className={styles.flushMessage}>
+        <GoalStatusMessage status={goalStatus} activateFooter={isLatest} />
       </div>
     );
   }

@@ -25,8 +25,8 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
+  GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
-import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   AuthType,
   ApprovalMode,
@@ -72,6 +72,7 @@ import {
   getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
+  formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -87,7 +88,10 @@ import {
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   acquireSleepInhibitor,
+  clearGoalTerminalObserver,
+  setGoalTerminalObserver,
 } from '@qwen-code/qwen-code-core';
+import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -455,6 +459,7 @@ export class Session implements SessionContext {
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
 
+    this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
   }
 
@@ -504,6 +509,7 @@ export class Session implements SessionContext {
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    clearGoalTerminalObserver(this.sessionId);
   }
 
   /**
@@ -520,6 +526,16 @@ export class Session implements SessionContext {
         (update) => this.sendUpdate(update),
       );
     }
+  }
+
+  #installGoalTerminalObserver(): void {
+    setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
+      void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
+        debugLogger.warn(
+          `Failed to emit goal terminal update: ${this.#formatError(error)}`,
+        );
+      });
+    });
   }
 
   /**
@@ -662,7 +678,6 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-
     if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
@@ -715,7 +730,6 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-
     // Abort any in-progress cron execution (user prompt takes priority)
     if (this.cronAbortController) {
       this.cronAbortController.abort();
@@ -2936,9 +2950,23 @@ export class Session implements SessionContext {
                       hookResult.updatedInput as typeof invocation.params;
                   }
 
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
+                  if (approvalMode === ApprovalMode.AUTO) {
+                    const snapshot = {
+                      ...this.config.getAutoModeDenialState(),
+                    };
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                    this.config.setAutoModeDenialState(snapshot);
+                    debugLogger.debug(
+                      `Auto mode denial counters preserved after hook approval: ` +
+                        formatDenialStateLog(snapshot),
+                    );
+                  } else {
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                  }
                 } else {
                   return earlyErrorResponse(
                     new Error(

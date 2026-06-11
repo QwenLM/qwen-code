@@ -5,14 +5,17 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
+  ALL_PROVIDERS,
   BTW_MAX_INPUT_LENGTH,
   SessionService,
+  shouldShowStep,
   TrustGateError,
   emitDaemonLog,
   hashDaemonWorkspace,
@@ -86,6 +89,10 @@ import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
+  type ServeAuthProviderCatalog,
+  type ServeAuthProviderDescriptor,
+  type ServeAuthProviderInstallRequest,
+  type ServeAuthProviderInstallResult,
   type ServeOptions,
 } from './types.js';
 import { getDemoHtml } from './demo.js';
@@ -220,6 +227,308 @@ async function listWorkspaceSessionsForResponse(
   });
 }
 
+const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
+  'protocol',
+  'baseUrl',
+  'apiKey',
+  'models',
+  'advancedConfig',
+];
+
+function buildAuthProviderDescriptor(
+  provider: (typeof ALL_PROVIDERS)[number],
+): ServeAuthProviderDescriptor {
+  const steps = AUTH_PROVIDER_STEPS.filter((step) =>
+    shouldShowStep(provider, step),
+  );
+  return {
+    id: provider.id,
+    label: provider.label,
+    description: provider.description,
+    ...(provider.uiGroup ? { uiGroup: provider.uiGroup } : {}),
+    protocol: provider.protocol,
+    ...(provider.protocolOptions
+      ? { protocolOptions: [...provider.protocolOptions] }
+      : {}),
+    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
+    ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
+    ...(provider.models
+      ? {
+          models: provider.models.map((model) => ({
+            id: model.id,
+            ...(model.contextWindowSize !== undefined
+              ? { contextWindowSize: model.contextWindowSize }
+              : {}),
+            ...(model.enableThinking !== undefined
+              ? { enableThinking: model.enableThinking }
+              : {}),
+            ...(model.modalities ? { modalities: model.modalities } : {}),
+            ...(model.description ? { description: model.description } : {}),
+          })),
+        }
+      : {}),
+    ...(provider.modelsEditable !== undefined
+      ? { modelsEditable: provider.modelsEditable }
+      : {}),
+    ...(provider.apiKeyPlaceholder
+      ? { apiKeyPlaceholder: provider.apiKeyPlaceholder }
+      : {}),
+    ...(typeof provider.documentationUrl === 'string'
+      ? { documentationUrl: provider.documentationUrl }
+      : {}),
+    ...(provider.showAdvancedConfig !== undefined
+      ? { showAdvancedConfig: provider.showAdvancedConfig }
+      : {}),
+    ...(provider.uiLabels ? { uiLabels: provider.uiLabels } : {}),
+    steps,
+  };
+}
+
+function buildAuthProviderCatalog(
+  workspaceCwd: string,
+): ServeAuthProviderCatalog {
+  const providers = ALL_PROVIDERS.map(buildAuthProviderDescriptor);
+  const providerIdsByGroup = (group: string) =>
+    providers
+      .filter((provider) => provider.uiGroup === group)
+      .map((provider) => provider.id);
+  return {
+    v: 1,
+    workspaceCwd,
+    providers,
+    groups: [
+      {
+        id: 'alibaba',
+        label: 'Alibaba ModelStudio',
+        description:
+          'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+        providerIds: providerIdsByGroup('alibaba'),
+      },
+      {
+        id: 'third-party',
+        label: 'Third-party Providers',
+        description: 'Choose a built-in provider and connect with an API key',
+        providerIds: providerIdsByGroup('third-party'),
+      },
+      {
+        id: 'custom',
+        label: 'Custom Provider',
+        description:
+          'Manually connect a local server, proxy, or unsupported provider',
+        providerIds: providerIdsByGroup('custom'),
+      },
+    ],
+  };
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0);
+  return result.length > 0 ? [...new Set(result)] : undefined;
+}
+
+function parsePositiveBoundedInteger(
+  value: unknown,
+  max: number,
+): number | undefined {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    value > max
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function parseIPv4MappedHexSuffix(suffix: string): string | undefined {
+  const hexParts = suffix.split(':');
+  if (hexParts.length !== 2) return undefined;
+
+  const [hiRaw, loRaw] = hexParts;
+  if (!/^[0-9a-f]{1,4}$/i.test(hiRaw) || !/^[0-9a-f]{1,4}$/i.test(loRaw)) {
+    return undefined;
+  }
+
+  const hi = Number.parseInt(hiRaw, 16);
+  const lo = Number.parseInt(loRaw, 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
+function parseIPv6FirstHextet(host: string): number | undefined {
+  const first = host.split(':', 1)[0];
+  if (!first || !/^[0-9a-f]{1,4}$/i.test(first)) return undefined;
+  return Number.parseInt(first, 16);
+}
+
+function isBlockedAuthProviderHost(hostname: string): boolean {
+  const stripped = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+  const host = stripped.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+
+  const bareHost =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  const ipVersion = net.isIP(bareHost);
+  if (ipVersion === 4) {
+    const parts = bareHost.split('.').map((part) => Number(part));
+    const [a, b] = parts;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b !== undefined && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b !== undefined && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+
+  if (ipVersion === 6) {
+    if (bareHost === '::' || bareHost === '::1') return true;
+    const firstHextet = parseIPv6FirstHextet(bareHost);
+    if (
+      firstHextet !== undefined &&
+      ((firstHextet >= 0xfe80 && firstHextet <= 0xfebf) ||
+        (firstHextet & 0xfe00) === 0xfc00)
+    ) {
+      return true;
+    }
+    if (bareHost.startsWith('::ffff:')) {
+      const suffix = bareHost.slice('::ffff:'.length);
+      if (net.isIP(suffix) === 4) {
+        return isBlockedAuthProviderHost(suffix);
+      }
+      const mappedIPv4 = parseIPv4MappedHexSuffix(suffix);
+      return mappedIPv4 ? isBlockedAuthProviderHost(mappedIPv4) : true;
+    }
+  }
+
+  return false;
+}
+
+function parseAuthProviderBaseUrl(
+  value: unknown,
+  allowPrivateBaseUrl: boolean,
+): string | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  if (!allowPrivateBaseUrl && isBlockedAuthProviderHost(parsed.hostname)) {
+    return null;
+  }
+  return parsed.toString().replace(/\/$/, '');
+}
+
+type AuthProviderParseResult =
+  | { ok: true; value: ServeAuthProviderInstallRequest }
+  | { ok: false; code: string; error: string };
+
+function parseAuthProviderInstallRequest(
+  body: Record<string, unknown>,
+  options?: { allowPrivateBaseUrl?: boolean },
+): AuthProviderParseResult {
+  const providerId = body['providerId'];
+  const apiKey = body['apiKey'];
+  if (
+    typeof providerId !== 'string' ||
+    providerId.trim().length === 0 ||
+    typeof apiKey !== 'string' ||
+    apiKey.trim().length === 0
+  ) {
+    return {
+      ok: false,
+      code: 'invalid_request',
+      error: '`providerId` and `apiKey` are required',
+    };
+  }
+  const protocol = body['protocol'];
+  const baseUrl = parseAuthProviderBaseUrl(
+    body['baseUrl'],
+    options?.allowPrivateBaseUrl === true,
+  );
+  if (baseUrl === null) {
+    return {
+      ok: false,
+      code: 'invalid_base_url',
+      error:
+        '`baseUrl` must be an http(s) URL without credentials or blocked private-network host',
+    };
+  }
+  const modelIds = parseStringArray(body['modelIds']);
+  const rawAdvanced =
+    body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
+      ? (body['advancedConfig'] as Record<string, unknown>)
+      : undefined;
+  const rawMultimodal =
+    rawAdvanced?.['multimodal'] && typeof rawAdvanced['multimodal'] === 'object'
+      ? (rawAdvanced['multimodal'] as Record<string, unknown>)
+      : undefined;
+  const contextWindowSize = parsePositiveBoundedInteger(
+    rawAdvanced?.['contextWindowSize'],
+    10_000_000,
+  );
+  const maxTokens = parsePositiveBoundedInteger(
+    rawAdvanced?.['maxTokens'],
+    10_000_000,
+  );
+  const advancedConfig = rawAdvanced
+    ? {
+        ...(typeof rawAdvanced['enableThinking'] === 'boolean'
+          ? { enableThinking: rawAdvanced['enableThinking'] }
+          : {}),
+        ...(rawMultimodal
+          ? {
+              multimodal: {
+                ...(typeof rawMultimodal['image'] === 'boolean'
+                  ? { image: rawMultimodal['image'] }
+                  : {}),
+                ...(typeof rawMultimodal['pdf'] === 'boolean'
+                  ? { pdf: rawMultimodal['pdf'] }
+                  : {}),
+                ...(typeof rawMultimodal['audio'] === 'boolean'
+                  ? { audio: rawMultimodal['audio'] }
+                  : {}),
+                ...(typeof rawMultimodal['video'] === 'boolean'
+                  ? { video: rawMultimodal['video'] }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+      }
+    : undefined;
+  return {
+    ok: true,
+    value: {
+      providerId: providerId.trim(),
+      ...(typeof protocol === 'string' && protocol.trim()
+        ? {
+            protocol:
+              protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
+          }
+        : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      apiKey,
+      ...(modelIds ? { modelIds } : {}),
+      ...(advancedConfig ? { advancedConfig } : {}),
+    },
+  };
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -264,7 +573,19 @@ export interface ServeAppDeps {
    */
   deviceFlowProviders?: DeviceFlowProvider[];
   /**
-   * Optional daemon logger.
+   * Installs an LLM auth provider by applying the same provider install plan
+   * used by interactive `/auth`. Production `runQwenServe` injects a
+   * settings-backed implementation; tests/direct embeds may omit it, in which
+   * case the route reports `not_implemented`.
+   */
+  installAuthProvider?: (
+    req: ServeAuthProviderInstallRequest,
+  ) => Promise<ServeAuthProviderInstallResult>;
+  /**
+   * Optional daemon logger. When provided, `sendBridgeError` routes
+   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
+   * the daemon log file). When omitted, falls back to existing
+   * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
   workspace?: DaemonWorkspaceService;
@@ -687,7 +1008,7 @@ export function createServeApp(
   const sendBridgeError = (
     res: import('express').Response,
     err: unknown,
-    ctx?: { route?: string; sessionId?: string },
+    ctx?: BridgeErrorContext,
   ) => sendBridgeErrorImpl(res, err, ctx, daemonLog);
   const sendPermissionVoteError = (
     res: import('express').Response,
@@ -1297,6 +1618,66 @@ export function createServeApp(
     });
   });
 
+  app.get('/workspace/auth/providers', (_req, res) => {
+    res.status(200).json(buildAuthProviderCatalog(boundWorkspace));
+  });
+
+  app.post(
+    '/workspace/auth/provider',
+    mutate({ strict: true }),
+    async (req, res) => {
+      if (!deps.installAuthProvider) {
+        res.status(501).json({
+          error: 'Auth provider installation is not implemented by this daemon',
+          code: 'not_implemented',
+        });
+        return;
+      }
+      const parsed = parseAuthProviderInstallRequest(safeBody(req), {
+        allowPrivateBaseUrl: opts.allowPrivateAuthBaseUrl === true,
+      });
+      if (!parsed.ok) {
+        res.status(400).json({
+          error: parsed.error,
+          code: parsed.code,
+        });
+        return;
+      }
+      const installRequest = parsed.value;
+      const knownProvider = ALL_PROVIDERS.find(
+        (provider) => provider.id === installRequest.providerId,
+      );
+      if (!knownProvider) {
+        res.status(400).json({
+          error: `Unsupported auth provider: ${installRequest.providerId}`,
+          code: 'unsupported_provider',
+        });
+        return;
+      }
+      if (installRequest.protocol) {
+        const allowedProtocols =
+          knownProvider.protocolOptions && knownProvider.protocolOptions.length
+            ? knownProvider.protocolOptions
+            : [knownProvider.protocol];
+        if (!allowedProtocols.includes(installRequest.protocol)) {
+          res.status(400).json({
+            error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
+            code: 'unsupported_protocol',
+          });
+          return;
+        }
+      }
+      try {
+        res.status(200).json(await deps.installAuthProvider(installRequest));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/auth/provider',
+          providerId: installRequest.providerId,
+        });
+      }
+    },
+  );
+
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
     // 1 daemon = 1 workspace. Three input shapes:
@@ -1638,6 +2019,61 @@ export function createServeApp(
       sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
     }
   });
+
+  app.post(
+    '/session/:id/tasks/:taskId/cancel',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      const taskId = req.params['taskId'];
+      if (!sessionId || !taskId) {
+        res.status(400).json({
+          error: '`sessionId` and `taskId` route parameters are required',
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const kind = body['kind'];
+      if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
+        res
+          .status(400)
+          .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        return;
+      }
+      try {
+        res
+          .status(200)
+          .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/tasks/:taskId/cancel',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/session/:id/goal/clear',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      try {
+        res.status(200).json(await bridge.clearSessionGoal(sessionId));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/goal/clear',
+          sessionId,
+        });
+      }
+    },
+  );
 
   app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
@@ -3684,6 +4120,25 @@ function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
 
 type OmitId<T> = Omit<T, 'id'>;
 
+type BridgeErrorContext = {
+  route?: string;
+  sessionId?: string;
+  [key: string]: string | number | boolean | undefined;
+};
+
+function bridgeErrorExtraContext(
+  ctx: BridgeErrorContext | undefined,
+): Record<string, string | number | boolean> {
+  const extra: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(ctx ?? {})) {
+    if (key === 'route' || key === 'sessionId' || value === undefined) {
+      continue;
+    }
+    extra[key] = value;
+  }
+  return extra;
+}
+
 /**
  * Map a thrown bridge error to an HTTP response.
  *
@@ -3698,7 +4153,7 @@ type OmitId<T> = Omit<T, 'id'>;
 function sendBridgeErrorImpl(
   res: import('express').Response,
   err: unknown,
-  ctx?: { route?: string; sessionId?: string },
+  ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
   if (err instanceof WorkspaceInitConflictError) {
@@ -3969,6 +4424,7 @@ function sendBridgeErrorImpl(
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
   recordDaemonBridgeError(err);
+  const extraContext = bridgeErrorExtraContext(ctx);
   recordDaemonError(undefined, err, {
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
@@ -3976,6 +4432,7 @@ function sendBridgeErrorImpl(
   emitDaemonLog('Daemon bridge error.', {
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    ...extraContext,
     'error.type': err instanceof Error ? err.name : typeof err,
     'error.message': (err instanceof Error ? err.message : String(err)).slice(
       0,
@@ -3989,12 +4446,14 @@ function sendBridgeErrorImpl(
       {
         ...(ctx?.route ? { route: ctx.route } : {}),
         ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        ...extraContext,
       },
     );
   } else {
     const ctxParts = [
       ctx?.route,
       ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+      ...Object.entries(extraContext).map(([key, value]) => `${key}=${value}`),
     ].filter(Boolean);
     const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
     writeStderrLine(

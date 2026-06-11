@@ -100,6 +100,12 @@ export {
 export { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 export type {
   DaemonApprovalMode,
+  DaemonAuthProviderBaseUrlOption,
+  DaemonAuthProviderCatalog,
+  DaemonAuthProviderDescriptor,
+  DaemonAuthProviderInstallRequest,
+  DaemonAuthProviderInstallResult,
+  DaemonAuthProviderModel,
   DaemonContextCategoryBreakdown,
   DaemonContextFileScope,
   DaemonContextMemoryDetail,

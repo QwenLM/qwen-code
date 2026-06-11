@@ -383,6 +383,18 @@ export interface AcpSessionBridge {
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
 
+  /** Cancel a background task in a live session. */
+  cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    taskKind: 'agent' | 'shell' | 'monitor',
+  ): Promise<{ cancelled: boolean }>;
+
+  /** Clear an active goal in a live session without cancelling the running prompt. */
+  clearSessionGoal(
+    sessionId: string,
+  ): Promise<{ cleared: boolean; condition?: string }>;
+
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;
 

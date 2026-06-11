@@ -220,6 +220,7 @@ describe('Session', () => {
   };
   let mockBackgroundTaskRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
+    hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
   };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
@@ -261,6 +262,7 @@ describe('Session', () => {
     };
     mockBackgroundTaskRegistry = {
       setNotificationCallback: vi.fn(),
+      hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),

@@ -1,6 +1,25 @@
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react';
+import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
+import { useActions, useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { TASKS_STATUS_ACTIVE_EVENT } from './messages/TasksStatusMessage';
 import styles from './StatusBar.module.css';
+
+const TASKS_POLL_INTERVAL_MS = 3000;
+const MAX_EMPTY_TASK_POLLS = 2;
+const GOAL_PILL_INTERVAL_MS = 1000;
+
+export interface StatusBarHandle {
+  focusTaskPill(): boolean;
+}
 
 function getModeIndicator(
   mode: string,
@@ -25,7 +44,6 @@ function getModeIndicator(
 
 interface StatusBarProps {
   escapeHint?: boolean;
-  /** Open the approval-mode picker so the mode can be chosen with the mouse. */
   onSelectMode: () => void;
   /** Open the model picker so the model can be chosen with the mouse. */
   onSelectModel: () => void;
@@ -33,6 +51,13 @@ interface StatusBarProps {
   onShowContext: () => void;
   /** Open the inline settings panel so settings are reachable with the mouse. */
   onOpenSettings: () => void;
+  onOpenTasks?: () => void;
+  onReturnToInput?: (text?: string) => void;
+  taskActivityKey?: string;
+  activeGoal?: {
+    condition: string;
+    setAt: number;
+  } | null;
 }
 
 // Feather "settings" gear, stroke-based like PromptChevron so it inherits
@@ -56,117 +81,350 @@ function GearIcon() {
   );
 }
 
-export function StatusBar({
-  escapeHint,
-  onSelectMode,
-  onSelectModel,
-  onShowContext,
-  onOpenSettings,
-}: StatusBarProps) {
-  const connection = useConnection();
-  const connected = connection.status === 'connected';
-  const currentModel = connection.currentModel ?? '';
-  const currentMode = connection.currentMode ?? '';
-  const tokenCount = connection.tokenCount ?? 0;
-  const contextWindow = connection.contextWindow ?? 0;
-  const { t } = useI18n();
-  const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
-  const pctDisplay = pct.toFixed(1);
-  const modeIndicator = getModeIndicator(currentMode, t);
+function formatCount(
+  count: number,
+  singularKey: string,
+  pluralKey: string,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  return t(count === 1 ? singularKey : pluralKey, { count });
+}
 
-  return (
-    <div className={styles.bar}>
-      <div className={styles.left}>
-        {connected && (
-          // Anchored at the corner, outside the escape-hint swap below, so
-          // the settings entry never moves. Hidden while disconnected like
-          // every other control here — the panel needs the daemon to load
-          // settings. Same stopPropagation contract as the mode button: the
-          // settings panel dismisses on outside mousedown/touchstart, so the
-          // opening press must not reach the window or clicking the gear
-          // again could never toggle the panel closed.
-          <button
-            type="button"
-            className={styles.settingsButton}
-            onClick={onOpenSettings}
-            onMouseDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
-            title={t('settings.title')}
-            aria-label={t('settings.title')}
-            aria-haspopup="dialog"
-          >
-            <GearIcon />
-          </button>
-        )}
-        {escapeHint ? (
-          <span className={styles.escapeHint}>{t('editor.escClearHint')}</span>
-        ) : modeIndicator ? (
-          // The hint advertises "click to switch", so the indicator is always
-          // a real button — never a non-interactive label. stopPropagation on
-          // both mousedown and touchstart keeps the trigger from counting as an
-          // "outside" press for the picker's own dismiss handler (it listens on
-          // exactly those two), so re-activating toggles cleanly on mouse and
-          // touch alike.
-          <button
-            type="button"
-            className={styles.modeButton}
-            onClick={onSelectMode}
-            onMouseDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
-            title={t('mode.select')}
-            aria-haspopup="listbox"
-          >
-            <span className={`${styles.modeLabel} ${modeIndicator.className}`}>
-              {modeIndicator.label}
-            </span>
-            <span className={styles.modeHint}>{t('status.modeHint')}</span>
-          </button>
-        ) : (
-          <span>{t('status.shortcuts')}</span>
-        )}
-      </div>
+export function getTaskPillLabel(
+  tasks: readonly DaemonSessionTaskStatus[],
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  if (tasks.length === 0) return '';
 
-      <div className={styles.right}>
-        {!connected && (
-          <span className={styles.disconnected}>
-            {t('status.disconnected')}
-          </span>
-        )}
-        {currentModel && (
-          // Mirrors the mode indicator on the left: the model label is a
-          // button that opens the existing model picker. stopPropagation on
-          // mousedown/touchstart keeps the opening press from counting as an
-          // "outside" press for the picker's own dismiss handler.
-          <button
-            type="button"
-            className={styles.modelButton}
-            onClick={onSelectModel}
-            onMouseDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
-            title={t('model.select')}
-            aria-haspopup="listbox"
-          >
-            <span className={styles.model}>{currentModel}</span>
-          </button>
-        )}
-        {contextWindow > 0 && tokenCount > 0 && (
-          // Clicking the percentage runs the same flow as typing /context:
-          // it echoes the command and appends the usage breakdown to the
-          // transcript. No stopPropagation here — unlike the mode/model
-          // buttons this opens no picker, and if one is open the press
-          // should dismiss it like any other outside press.
-          <button
-            type="button"
-            className={styles.contextButton}
-            onClick={onShowContext}
-            title={t('contextUsage.title')}
-          >
-            <span className={styles.context}>
-              {t('status.contextUsed', { pct: pctDisplay })}
-            </span>
-          </button>
-        )}
-      </div>
-    </div>
+  const running = tasks.filter((task) => task.status === 'running');
+  if (running.length > 0) {
+    const counts = { agent: 0, shell: 0, monitor: 0 };
+    for (const task of running) {
+      counts[task.kind]++;
+    }
+    const parts: string[] = [];
+    if (counts.shell > 0) {
+      parts.push(
+        formatCount(counts.shell, 'tasks.pill.shell', 'tasks.pill.shells', t),
+      );
+    }
+    if (counts.agent > 0) {
+      parts.push(
+        formatCount(counts.agent, 'tasks.pill.agent', 'tasks.pill.agents', t),
+      );
+    }
+    if (counts.monitor > 0) {
+      parts.push(
+        formatCount(
+          counts.monitor,
+          'tasks.pill.monitor',
+          'tasks.pill.monitors',
+          t,
+        ),
+      );
+    }
+    return parts.join(', ');
+  }
+
+  const pausedAgents = tasks.filter(
+    (task) => task.kind === 'agent' && task.status === 'paused',
+  );
+  if (pausedAgents.length > 0) {
+    return t(
+      pausedAgents.length === 1
+        ? 'tasks.pill.agentPaused'
+        : 'tasks.pill.agentsPaused',
+      { count: pausedAgents.length },
+    );
+  }
+
+  return t(tasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany', {
+    count: tasks.length,
+  });
+}
+
+function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
+  return tasks.some(
+    (task) => task.status === 'running' || task.status === 'paused',
   );
 }
+
+function formatGoalElapsed(ms: number): string {
+  if (ms < 1000) return '';
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
+  function StatusBar(
+    {
+      escapeHint,
+      onSelectMode,
+      onSelectModel,
+      onShowContext,
+      onOpenSettings,
+      onOpenTasks,
+      onReturnToInput,
+      taskActivityKey,
+      activeGoal,
+    },
+    ref,
+  ) {
+    const connection = useConnection();
+    const actions = useActions();
+    const connected = connection.status === 'connected';
+    const currentModel = connection.currentModel ?? '';
+    const currentMode = connection.currentMode ?? '';
+    const tokenCount = connection.tokenCount ?? 0;
+    const contextWindow = connection.contextWindow ?? 0;
+    const { t } = useI18n();
+    const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
+    const pctDisplay = pct.toFixed(1);
+    const modeIndicator = getModeIndicator(currentMode, t);
+    const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
+    const [pollingActive, setPollingActive] = useState(false);
+    const [tasksPanelActive, setTasksPanelActive] = useState(false);
+    const [, setGoalTick] = useState(0);
+    const emptyPollsRef = useRef(0);
+    const tasksRefreshInFlightRef = useRef(false);
+    const taskPillRef = useRef<HTMLButtonElement>(null);
+
+    useEffect(() => {
+      if (!connected) {
+        setTasks([]);
+        setPollingActive(false);
+        emptyPollsRef.current = 0;
+        return;
+      }
+    }, [connected]);
+
+    useEffect(() => {
+      if (!connected || !taskActivityKey) return;
+      emptyPollsRef.current = 0;
+      setPollingActive(true);
+    }, [connected, taskActivityKey]);
+
+    useEffect(() => {
+      if (tasksPanelActive) return;
+      if (!connected || !pollingActive) return;
+
+      let disposed = false;
+      const refresh = () => {
+        if (tasksRefreshInFlightRef.current) return;
+        tasksRefreshInFlightRef.current = true;
+        actions
+          .getTasks()
+          .then((snapshot) => {
+            if (disposed) return;
+            setTasks(snapshot.tasks);
+            if (snapshot.tasks.length === 0) {
+              emptyPollsRef.current += 1;
+              if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
+                setPollingActive(false);
+              }
+              return;
+            }
+            emptyPollsRef.current = 0;
+            if (!hasActiveTask(snapshot.tasks)) {
+              setPollingActive(false);
+            }
+          })
+          .catch((error: unknown) => {
+            if (disposed) return;
+            console.warn('[web-shell] failed to refresh tasks:', error);
+          })
+          .finally(() => {
+            tasksRefreshInFlightRef.current = false;
+          });
+      };
+
+      refresh();
+      const id = setInterval(refresh, TASKS_POLL_INTERVAL_MS);
+      return () => {
+        disposed = true;
+        clearInterval(id);
+      };
+    }, [actions, connected, pollingActive, tasksPanelActive]);
+
+    useEffect(() => {
+      const onTasksPanelActive = (event: Event) => {
+        const detail = (event as CustomEvent<{ active?: boolean }>).detail;
+        const active = detail?.active === true;
+        setTasksPanelActive(active);
+        if (!active && hasActiveTask(tasks)) {
+          setPollingActive(true);
+        }
+      };
+      window.addEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
+      return () =>
+        window.removeEventListener(
+          TASKS_STATUS_ACTIVE_EVENT,
+          onTasksPanelActive,
+        );
+    }, [tasks]);
+
+    useEffect(() => {
+      if (!activeGoal) return;
+      const id = setInterval(
+        () => setGoalTick((tick) => (tick + 1) % 1_000_000),
+        GOAL_PILL_INTERVAL_MS,
+      );
+      return () => clearInterval(id);
+    }, [activeGoal]);
+
+    const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
+    const goalElapsed = activeGoal
+      ? formatGoalElapsed(Date.now() - activeGoal.setAt)
+      : '';
+    const goalLabel = activeGoal
+      ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
+      : '';
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        focusTaskPill() {
+          if (!taskPillLabel) return false;
+          taskPillRef.current?.focus({ preventScroll: true });
+          return true;
+        },
+      }),
+      [taskPillLabel],
+    );
+
+    const handleTaskPillKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+      if (
+        event.key === 'Enter' ||
+        event.key === 'ArrowDown' ||
+        (event.key === 'n' && event.ctrlKey)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenTasks?.();
+        return;
+      }
+      if (
+        event.key === 'ArrowUp' ||
+        event.key === 'Escape' ||
+        (event.key === 'p' && event.ctrlKey)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        onReturnToInput?.();
+        return;
+      }
+      if (
+        event.key.length === 1 &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        onReturnToInput?.(event.key);
+      }
+    };
+
+    return (
+      <div className={styles.bar}>
+        <div className={styles.left}>
+          {connected && (
+            <button
+              type="button"
+              className={styles.settingsButton}
+              onClick={onOpenSettings}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              title={t('settings.title')}
+              aria-label={t('settings.title')}
+              aria-haspopup="dialog"
+            >
+              <GearIcon />
+            </button>
+          )}
+          {escapeHint ? (
+            <span className={styles.escapeHint}>
+              {t('editor.escClearHint')}
+            </span>
+          ) : modeIndicator ? (
+            <button
+              type="button"
+              className={styles.modeButton}
+              onClick={onSelectMode}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              title={t('mode.select')}
+              aria-haspopup="listbox"
+            >
+              <span
+                className={`${styles.modeLabel} ${modeIndicator.className}`}
+              >
+                {modeIndicator.label}
+              </span>
+              <span className={styles.modeHint}>{t('status.modeHint')}</span>
+            </button>
+          ) : (
+            <span>{t('status.shortcuts')}</span>
+          )}
+          {taskPillLabel && (
+            <>
+              <span className={styles.separator}>·</span>
+              <button
+                ref={taskPillRef}
+                type="button"
+                className={styles.taskPill}
+                onClick={onOpenTasks}
+                onKeyDown={handleTaskPillKeyDown}
+                disabled={!onOpenTasks}
+              >
+                {taskPillLabel}
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className={styles.right}>
+          {!connected && (
+            <span className={styles.disconnected}>
+              {t('status.disconnected')}
+            </span>
+          )}
+          {currentModel && (
+            <button
+              type="button"
+              className={styles.modelButton}
+              onClick={onSelectModel}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              title={t('model.select')}
+              aria-haspopup="listbox"
+            >
+              <span className={styles.model}>{currentModel}</span>
+            </button>
+          )}
+          {contextWindow > 0 && tokenCount > 0 && (
+            <button
+              type="button"
+              className={styles.contextButton}
+              onClick={onShowContext}
+              title={t('contextUsage.title')}
+            >
+              <span className={styles.context}>
+                {t('status.contextUsed', { pct: pctDisplay })}
+              </span>
+            </button>
+          )}
+          {goalLabel && (
+            <span className={styles.goal} title={activeGoal?.condition}>
+              {goalLabel}
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  },
+);

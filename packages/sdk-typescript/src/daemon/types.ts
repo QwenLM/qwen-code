@@ -857,6 +857,9 @@ export interface DaemonSessionAgentTaskStatus {
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
 }
 
 export interface DaemonSessionShellTaskStatus {
@@ -1315,6 +1318,89 @@ export interface DaemonAuthStatusSnapshot {
   /** Provider ids the daemon advertises support for under
    *  `POST /workspace/auth/device-flow`. */
   supportedDeviceFlowProviders: DaemonAuthProviderId[];
+}
+
+export interface DaemonAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  description?: string;
+}
+
+export interface DaemonAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface DaemonAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: string;
+  protocolOptions?: string[];
+  baseUrl?: string | DaemonAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: DaemonAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface DaemonAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: DaemonAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface DaemonAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: string;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: {
+      image?: boolean;
+      pdf?: boolean;
+      audio?: boolean;
+      video?: boolean;
+    };
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface DaemonAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: string;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
 }
 
 /** A frame in the SSE event stream. */

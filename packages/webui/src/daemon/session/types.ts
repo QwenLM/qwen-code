@@ -17,6 +17,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonShellCommandResult,
@@ -46,6 +47,7 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   currentMode?: string;
+  displayName?: string;
   tokenCount?: number;
   contextWindow?: number;
   providers?: DaemonWorkspaceProvidersStatus;
@@ -112,6 +114,8 @@ export type DaemonNoticeOperation =
   | 'load_context'
   | 'load_context_usage'
   | 'load_tasks'
+  | 'cancel_task'
+  | 'clear_goal'
   | 'load_stats'
   | 'refresh_commands'
   | 'recap_session'
@@ -240,6 +244,11 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionBtwResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
+  cancelTask(
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+  ): Promise<{ cancelled: boolean }>;
+  clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
 }
 

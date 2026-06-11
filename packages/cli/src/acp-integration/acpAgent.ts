@@ -57,6 +57,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  unregisterGoalHook,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -2571,6 +2572,7 @@ class QwenAgent implements Agent {
       );
     }
 
+    unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
     uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
@@ -5666,6 +5668,115 @@ class QwenAgent implements Agent {
           ],
         });
         return { sessionId, injected: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskCancel: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const taskKind = params['taskKind'];
+        if (
+          taskKind !== 'agent' &&
+          taskKind !== 'shell' &&
+          taskKind !== 'monitor'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'taskKind must be "agent", "shell", or "monitor"',
+          );
+        }
+        debugLogger.info(
+          `sessionTaskCancel requested sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind}`,
+        );
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        switch (taskKind) {
+          case 'agent': {
+            const task = config.getBackgroundTaskRegistry().get(taskId);
+            if (
+              !task ||
+              (task.status !== 'running' && task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            if (task.status === 'paused') {
+              config.getBackgroundTaskRegistry().abandon(taskId);
+            } else {
+              config.getBackgroundTaskRegistry().cancel(taskId);
+            }
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          case 'shell': {
+            const task = config.getBackgroundShellRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            config.getBackgroundShellRegistry().requestCancel(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          case 'monitor': {
+            const task = config.getMonitorRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            config.getMonitorRegistry().cancel(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          default: {
+            const exhaustive: never = taskKind;
+            throw new Error(`Unhandled task kind: ${exhaustive}`);
+          }
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const cleared = unregisterGoalHook(config, sessionId);
+        debugLogger.info(
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+        );
+        return {
+          cleared: !!cleared,
+          condition: cleared?.condition,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];

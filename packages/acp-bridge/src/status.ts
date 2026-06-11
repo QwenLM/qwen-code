@@ -134,6 +134,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   // Runtime MCP server mutation ext-methods
+  sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalClear: 'qwen/control/session/goal/clear',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReloadEnv: 'qwen/control/workspace/reload_env',
@@ -475,6 +477,9 @@ export interface ServeSessionAgentTaskStatus {
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
 }
 
 export interface ServeSessionShellTaskStatus {

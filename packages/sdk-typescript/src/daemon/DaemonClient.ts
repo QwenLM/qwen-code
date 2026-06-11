@@ -13,6 +13,9 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
+  DaemonAuthProviderCatalog,
+  DaemonAuthProviderInstallRequest,
+  DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -29,6 +32,7 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -1127,6 +1131,51 @@ export class DaemonClient {
     );
   }
 
+  async sessionTaskCancel(
+    sessionId: string,
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ kind }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/tasks/:taskId/cancel',
+          );
+        }
+        return (await res.json()) as { cancelled: boolean };
+      },
+    );
+  }
+
+  async sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
+        }
+        return (await res.json()) as { cleared: boolean; condition?: string };
+      },
+    );
+  }
+
   async sessionStats(
     sessionId: string,
     clientId?: string,
@@ -2158,6 +2207,38 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/auth/status');
         }
         return (await res.json()) as DaemonAuthStatusSnapshot;
+      },
+    );
+  }
+
+  async getAuthProviders(): Promise<DaemonAuthProviderCatalog> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/providers`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auth/providers');
+        }
+        return (await res.json()) as DaemonAuthProviderCatalog;
+      },
+    );
+  }
+
+  async installAuthProvider(
+    req: DaemonAuthProviderInstallRequest,
+  ): Promise<DaemonAuthProviderInstallResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/provider`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/auth/provider');
+        }
+        return (await res.json()) as DaemonAuthProviderInstallResult;
       },
     );
   }

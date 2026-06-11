@@ -552,10 +552,11 @@ function broadcastTurnComplete(
 /**
  * Extract a human-readable message from an unknown error value.
  * Handles Error instances, JSON-RPC error objects (`{ code, message,
- * data: { details } }` or string `data`), and plain objects with a `message`
- * property.
+ * data: { details } }`, `{ data: { message } }`, or string `data`), and plain
+ * objects with a `message` property.
  * JSON-RPC internal errors carry the generic `"Internal error"` as
- * `message`; the actual detail lives in `data.details`.
+ * `message`; the actual detail often lives in `data.details` or
+ * provider-specific `data.message`.
  */
 export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -578,6 +579,8 @@ function extractJsonRpcErrorDetail(data: unknown): string | undefined {
   if (typeof data === 'object' && data !== null) {
     const details = (data as Record<string, unknown>)['details'];
     if (typeof details === 'string' && details.length > 0) return details;
+    const message = (data as Record<string, unknown>)['message'];
+    if (typeof message === 'string' && message.length > 0) return message;
   }
   return undefined;
 }
@@ -3510,6 +3513,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionStatus<ServeSessionTasksStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
+      );
+    },
+
+    async cancelSessionTask(sessionId, taskId, taskKind) {
+      return requestSessionStatus<{ cancelled: boolean }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
+        { taskId, taskKind },
+      );
+    },
+
+    async clearSessionGoal(sessionId) {
+      return requestSessionStatus<{ cleared: boolean; condition?: string }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
       );
     },
 

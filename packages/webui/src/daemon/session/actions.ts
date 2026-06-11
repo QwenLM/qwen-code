@@ -10,6 +10,7 @@ import type {
   DaemonSessionClient,
   DaemonSessionBtwResult,
   DaemonSessionRecapResult,
+  DaemonSessionTaskStatus,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -631,6 +632,50 @@ export function createDaemonSessionActions({
           'Get tasks failed',
           error,
           'load_tasks',
+        );
+      }
+    },
+
+    async cancelTask(taskId: string, kind: DaemonSessionTaskStatus['kind']) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Cancel task failed',
+        'cancel_task',
+      );
+      try {
+        return await withActionTimeout(
+          session.cancelTask(taskId, kind),
+          'Cancel task timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Cancel task failed',
+          error,
+          'cancel_task',
+        );
+      }
+    },
+
+    async clearGoal() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Clear goal failed',
+        'clear_goal',
+      );
+      try {
+        return await withActionTimeout(
+          session.clearGoal(),
+          'Clear goal timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Clear goal failed',
+          error,
+          'clear_goal',
         );
       }
     },

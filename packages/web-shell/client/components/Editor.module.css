@@ -8,6 +8,26 @@
   background: var(--text-secondary);
 }
 
+.borderTop {
+  position: relative;
+}
+
+.borderTopLabel {
+  position: absolute;
+  right: 2ch;
+  top: 50%;
+  max-width: min(48ch, calc(100% - 4ch));
+  padding: 0 1ch;
+  overflow: hidden;
+  color: var(--text-secondary);
+  background: var(--app-bg);
+  font-size: 12px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+
 .line {
   display: flex;
   align-items: baseline;
