@@ -63,7 +63,7 @@ function readIgnoreFile(filePath: string): string | undefined {
   } catch (_error) {
     const error = _error as NodeJS.ErrnoException;
     if (error.code !== 'ENOENT') {
-      debugLogger.debug(`Failed to read ${filePath}: ${error.message}`);
+      debugLogger.warn(`Failed to read ${filePath}: ${error.message}`);
     }
     return undefined;
   }

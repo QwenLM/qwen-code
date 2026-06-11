@@ -12,6 +12,18 @@ import {
   cleanupTmpDir,
 } from '../../test-utils/file-system-test-helpers.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  isEnabled: vi.fn(() => false),
+}));
+
+vi.mock('../debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 describe('Ignore', () => {
   describe('getDirectoryFilter', () => {
     it('should ignore directories matching directory patterns', () => {
@@ -67,12 +79,20 @@ describe('Ignore', () => {
     ig2.add('baz');
     expect(ig1.getFingerprint()).not.toBe(ig2.getFingerprint());
   });
+
+  it('should include addSource patterns in the fingerprint', () => {
+    const ig1 = new Ignore().addSource('build/');
+    const ig2 = new Ignore().addSource('dist/');
+
+    expect(ig1.getFingerprint()).not.toBe(ig2.getFingerprint());
+  });
 });
 
 describe('loadIgnoreRules', () => {
   let tmpDir: string;
 
   afterEach(async () => {
+    vi.clearAllMocks();
     vi.restoreAllMocks();
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
@@ -124,6 +144,21 @@ describe('loadIgnoreRules', () => {
     expect(fileFilter('agent-secret.txt')).toBe(true);
     expect(fileFilter('ai-secret.txt')).toBe(true);
     expect(fileFilter('visible.txt')).toBe(false);
+  });
+
+  it('should apply .agentignore directory patterns to directory filtering', async () => {
+    tmpDir = await createTmpDir({
+      '.agentignore': 'build/',
+    });
+    const ignore = loadIgnoreRules({
+      projectRoot: tmpDir,
+      useGitignore: false,
+      useQwenignore: true,
+      ignoreDirs: [],
+    });
+    const dirFilter = ignore.getDirectoryFilter();
+    expect(dirFilter('build/')).toBe(true);
+    expect(dirFilter('src/')).toBe(false);
   });
 
   it('should not let custom ignore negations unignore .qwenignore matches', async () => {
@@ -239,6 +274,36 @@ describe('loadIgnoreRules', () => {
         ignoreDirs: [],
       }),
     ).not.toThrow();
+  });
+
+  it('should warn when an existing ignore file cannot be read', async () => {
+    tmpDir = await createTmpDir({
+      '.agentignore': '*.log',
+    });
+    const originalReadFileSync = fs.readFileSync;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      filePath: fs.PathOrFileDescriptor,
+      options?: BufferEncoding | null,
+    ) => {
+      if (String(filePath).endsWith('.agentignore')) {
+        const error = new Error('permission denied') as NodeJS.ErrnoException;
+        error.code = 'EACCES';
+        throw error;
+      }
+      return originalReadFileSync(filePath, options);
+    }) as typeof fs.readFileSync);
+
+    expect(() =>
+      loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: true,
+        ignoreDirs: [],
+      }),
+    ).not.toThrow();
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to read'),
+    );
   });
 
   it('should always add .git to the ignore list', async () => {
