@@ -35,6 +35,10 @@ import {
   toSummary as agentToSummary,
   toDetail as agentToDetail,
 } from '../workspaceAgents.js';
+import {
+  InvalidCursorError,
+  listWorkspaceSessionsForResponse,
+} from '../server.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -198,7 +202,7 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
-  if (err instanceof AcpParamError) {
+  if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
   if (err instanceof SubagentError) {
@@ -670,10 +674,29 @@ export class AcpDispatcher {
         }
 
         case 'session/list': {
-          const sessions = this.bridge.listWorkspaceSessions(
+          const cursor =
+            typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
+          const metaSize =
+            typeof meta?.['size'] === 'number'
+              ? (meta['size'] as number)
+              : undefined;
+          const result = await listWorkspaceSessionsForResponse(
+            this.bridge,
             this.boundWorkspace,
+            { cursor, size: metaSize },
           );
-          this.replyConn(conn, id, { sessions });
+          this.replyConn(conn, id, {
+            sessions: result.sessions.map((s) => ({
+              sessionId: s.sessionId,
+              cwd: s.workspaceCwd,
+              title: s.title,
+              updatedAt: s.updatedAt,
+            })),
+            ...(result.nextCursor != null
+              ? { nextCursor: result.nextCursor }
+              : {}),
+          });
           return;
         }
 

@@ -184,14 +184,50 @@ export function resolveBridgeFsFactory(input: {
   });
 }
 
-const WORKSPACE_SESSION_LIST_SIZE = 100;
+const DEFAULT_SESSION_PAGE_SIZE = 20;
+const MAX_SESSION_PAGE_SIZE = 100;
 
-async function listWorkspaceSessionsForResponse(
+export interface ListWorkspaceSessionsOptions {
+  cursor?: string;
+  size?: number;
+}
+
+export interface ListWorkspaceSessionsResult {
+  sessions: BridgeSessionSummary[];
+  nextCursor?: string;
+}
+
+export class InvalidCursorError extends Error {
+  constructor(cursor: string) {
+    super(`Invalid cursor: "${cursor}" is not a valid numeric cursor`);
+    this.name = 'InvalidCursorError';
+  }
+}
+
+export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
-): Promise<BridgeSessionSummary[]> {
-  const persisted = await new SessionService(workspaceCwd).listSessions({
-    size: WORKSPACE_SESSION_LIST_SIZE,
+  options?: ListWorkspaceSessionsOptions,
+): Promise<ListWorkspaceSessionsResult> {
+  const pageSize = Math.min(
+    Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
+    MAX_SESSION_PAGE_SIZE,
+  );
+
+  let numericCursor: number | undefined;
+  if (options?.cursor) {
+    const parsed = Number(options.cursor);
+    if (!Number.isFinite(parsed)) {
+      throw new InvalidCursorError(options.cursor);
+    }
+    numericCursor = parsed;
+  }
+  const isFirstPage = numericCursor === undefined;
+
+  const sessionService = new SessionService(workspaceCwd);
+  const persisted = await sessionService.listSessions({
+    cursor: numericCursor,
+    size: pageSize,
   });
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
@@ -207,24 +243,44 @@ async function listWorkspaceSessionsForResponse(
     });
   }
 
-  for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
-    bySessionId.set(live.sessionId, {
-      ...existing,
-      ...live,
-      createdAt: existing?.createdAt ?? live.createdAt,
-      title: live.title ?? existing?.title,
-      updatedAt: live.updatedAt ?? existing?.updatedAt,
-      clientCount: live.clientCount,
-      hasActivePrompt: live.hasActivePrompt,
-    });
+    if (existing) {
+      bySessionId.set(live.sessionId, {
+        ...existing,
+        ...live,
+        createdAt: existing.createdAt,
+        title: live.title ?? existing.title,
+        updatedAt: live.updatedAt ?? existing.updatedAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    } else if (
+      isFirstPage &&
+      !(await sessionService.sessionExists(live.sessionId))
+    ) {
+      bySessionId.set(live.sessionId, {
+        ...live,
+        createdAt: live.createdAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    }
   }
 
-  return [...bySessionId.values()].sort((a, b) => {
+  const sessions = [...bySessionId.values()].sort((a, b) => {
     const aTime = Date.parse(a.updatedAt ?? a.createdAt);
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
+
+  const nextCursor =
+    persisted.nextCursor != null
+      ? String(persisted.nextCursor)
+      : undefined;
+
+  return { sessions, nextCursor };
 }
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -2424,9 +2480,29 @@ export function createServeApp(
       return;
     }
     try {
-      const sessions = await listWorkspaceSessionsForResponse(bridge, key);
-      res.status(200).json({ sessions });
+      const cursor =
+        typeof req.query['cursor'] === 'string'
+          ? req.query['cursor']
+          : undefined;
+      const sizeParam = req.query['size'];
+      const size =
+        typeof sizeParam === 'string' ? parseInt(sizeParam, 10) : undefined;
+      const result = await listWorkspaceSessionsForResponse(bridge, key, {
+        cursor,
+        size: Number.isFinite(size) ? size : undefined,
+      });
+      res.status(200).json({
+        sessions: result.sessions,
+        ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
+      });
     } catch (err) {
+      if (err instanceof InvalidCursorError) {
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_cursor',
+        });
+        return;
+      }
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
           key,
