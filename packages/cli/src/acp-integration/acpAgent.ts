@@ -6634,8 +6634,20 @@ class QwenAgent implements Agent {
               }
             }
 
-            await config.refreshHierarchicalMemory();
-            await config.getGeminiClient()?.refreshSystemInstruction();
+            try {
+              await config.refreshHierarchicalMemory();
+            } catch (err) {
+              debugLogger.warn(
+                `reload: refreshHierarchicalMemory failed for session ${id}: ${err}`,
+              );
+            }
+            try {
+              await config.getGeminiClient()?.refreshSystemInstruction();
+            } catch (err) {
+              debugLogger.warn(
+                `reload: refreshSystemInstruction failed for session ${id}: ${err}`,
+              );
+            }
 
             refreshed.push(id);
           }),
