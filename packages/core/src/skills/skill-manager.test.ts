@@ -930,9 +930,10 @@ Body`);
     it('should return all user-level base dirs', () => {
       const baseDirs = manager.getSkillsBaseDirs('user');
 
-      expect(baseDirs).toHaveLength(2);
+      expect(baseDirs).toHaveLength(3);
       expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.agents', 'skills'));
+      expect(baseDirs).toContain(path.join('/home/user', '.claude', 'skills'));
     });
 
     it('should return bundled-level base dir', () => {

@@ -12,7 +12,11 @@ import {
 } from './types.js';
 import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import {
+  normalizeSkillPriority,
+  scaffoldSkill,
+  removeSkill,
+} from '@qwen-code/qwen-code-core';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -29,8 +33,6 @@ export const skillsCommand: SlashCommand = {
   action: async (
     context: CommandContext,
   ): Promise<void | SlashCommandActionReturn> => {
-    // `/skills` is dialog-only. Any trailing args are ignored — the dialog
-    // is the single entry for browsing, search, toggle, and skill launch.
     const skillManager = context.services.config?.getSkillManager();
     if (!skillManager) {
       context.ui.addItem(
@@ -43,6 +45,101 @@ export const skillsCommand: SlashCommand = {
       return;
     }
 
+    const args = context.invocation?.args?.trim() ?? '';
+
+    // /skills add <name>  — scaffold a new user-level skill
+    if (args.startsWith('add ') || args === 'add') {
+      const name = args.slice(4).trim();
+      if (!name) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Usage: /skills add <name>'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const userSkillsDir = skillManager.getSkillsBaseDirs('user')[0];
+      if (!userSkillsDir) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not resolve user skills directory.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      try {
+        const filePath = await scaffoldSkill(userSkillsDir, name);
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              `Created skill "${name}" at ${filePath}\nEdit it to add your instructions, then use /${name} to invoke it.`,
+            ),
+          },
+          Date.now(),
+        );
+      } catch (err) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: err instanceof Error ? err.message : String(err),
+          },
+          Date.now(),
+        );
+      }
+      return;
+    }
+
+    // /skills remove <name>  — delete a user-level skill
+    if (args.startsWith('remove ') || args === 'remove') {
+      const name = args.slice(7).trim();
+      if (!name) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Usage: /skills remove <name>'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const userSkillsDir = skillManager.getSkillsBaseDirs('user')[0];
+      if (!userSkillsDir) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not resolve user skills directory.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      try {
+        await removeSkill(userSkillsDir, name);
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t(`Removed skill "${name}".`),
+          },
+          Date.now(),
+        );
+      } catch (err) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: err instanceof Error ? err.message : String(err),
+          },
+          Date.now(),
+        );
+      }
+      return;
+    }
+
+    // /skills  — open the dialog (interactive) or list (ACP)
     if (context.executionMode === 'interactive') {
       return { type: 'dialog', dialog: 'skills_manage' };
     }

@@ -42,3 +42,10 @@ export {
   SkillActivationRegistry,
   splitConditionalSkills,
 } from './skill-activation.js';
+
+// Skill lifecycle helpers (create / remove)
+export { scaffoldSkill } from './skill-scaffold.js';
+export { removeSkill } from './skill-remove.js';
+
+// NL-based skill suggestion
+export { suggestSkills, scoreSkillRelevance } from './skill-suggest.js';

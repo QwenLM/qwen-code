@@ -899,6 +899,20 @@ export class SkillManager {
   }
 
   /**
+   * Synchronous snapshot of all currently cached skills, flattened across
+   * all scope levels. Returns an empty array when the cache hasn't been
+   * populated yet (before `refreshCache()` completes).
+   *
+   * Intended for hot paths that cannot await `listSkills()` — e.g. the
+   * NL suggestion check in the input submission handler.
+   */
+  listSkillsCached(): SkillConfig[] {
+    if (!this.skillsCache) return [];
+    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
+    return levels.flatMap((level) => this.skillsCache!.get(level) ?? []);
+  }
+
+  /**
    * Gets the base directory for skills at a specific level.
    *
    * @param level - Storage level
@@ -911,11 +925,16 @@ export class SkillManager {
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
       case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          v === QWEN_DIR
-            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
-            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
-        );
+        return [
+          ...SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+            v === QWEN_DIR
+              ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+              : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          ),
+          // Auto-discover skills from Claude Code's user skills directory.
+          // Silently ignored on machines without Claude Code installed.
+          path.join(os.homedir(), '.claude', SKILLS_CONFIG_DIR),
+        ];
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':

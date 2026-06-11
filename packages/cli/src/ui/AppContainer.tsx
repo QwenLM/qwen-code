@@ -64,6 +64,7 @@ import {
   restoreWorktreeContext,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  suggestSkills,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -1781,6 +1782,32 @@ export const AppContainer = (props: AppContainerProps) => {
       ) {
         void submitQuery(submittedValue);
         return;
+      }
+
+      // NL skill suggestion: show a hint when the prompt matches a skill.
+      const skillManager = config.getSkillManager();
+      if (skillManager) {
+        const disabled = config.getDisabledSkillNames();
+        const cachedSkills = skillManager
+          .listSkillsCached()
+          .filter(
+            (s) =>
+              !disabled.has(s.name.toLowerCase()) && !s.disableModelInvocation,
+          );
+        const suggestions = suggestSkills(submittedValue, cachedSkills);
+        if (suggestions.length > 0) {
+          const hint = suggestions
+            .slice(0, 2)
+            .map((s) => `/${s.name}`)
+            .join(', ');
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Skill suggestion: ${hint} — type the command to use it, or continue to ask normally.`,
+            },
+            Date.now(),
+          );
+        }
       }
 
       addMessage(submittedValue);
