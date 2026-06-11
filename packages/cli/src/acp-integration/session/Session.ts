@@ -748,7 +748,11 @@ export class Session implements SessionContext {
       this.pendingSlashOnComplete = undefined;
       if (onComplete) {
         await onComplete(
-          result.stopReason === 'end_turn' ? undefined : { errored: true },
+          result.stopReason === 'end_turn'
+            ? undefined
+            : result.stopReason === 'cancelled'
+              ? { cancelled: true }
+              : { errored: true },
         ).catch((e: unknown) => debugLogger.warn('slash onComplete threw:', e));
       }
       this.#startCronSchedulerIfNeeded();
@@ -757,12 +761,15 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       return result;
     } catch (error) {
-      // The turn threw — still fire onComplete (errored) so the run isn't
-      // stranded, then re-throw.
+      // The turn threw — still fire onComplete so the run isn't stranded, then
+      // re-throw. Distinguish a cancellation (SIGINT/abort) from a real error
+      // so a cancelled run records as 'cancelled', not 'failed'.
       const onComplete = this.pendingSlashOnComplete;
       this.pendingSlashOnComplete = undefined;
       if (onComplete) {
-        await onComplete({ errored: true }).catch((e: unknown) =>
+        await onComplete(
+          pendingSend.signal.aborted ? { cancelled: true } : { errored: true },
+        ).catch((e: unknown) =>
           debugLogger.warn('slash onComplete (errored) threw:', e),
         );
       }
