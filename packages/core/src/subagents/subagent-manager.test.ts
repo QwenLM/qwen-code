@@ -684,6 +684,71 @@ You are an agent.
       expect(config.maxTurns).toBeUndefined();
     });
 
+    it('should parse nested mcpServers as a record', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+        github: { type: 'http', url: 'https://example.com' },
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers:\n  filesystem:\n    type: stdio\n    command: node\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should drop mcpServers of the wrong top-level shape', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers: 'just-a-string',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers: just-a-string\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toBeUndefined();
+    });
+
+    it('should parse nested hooks as a record of arrays', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toEqual(hooks);
+    });
+
+    it('should drop hooks with non-array values per event', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks: { PreToolUse: 'not-an-array' },
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse: not-an-array\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toBeUndefined();
+    });
+
     it('should preserve color from allowlist', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
@@ -803,6 +868,40 @@ You are an agent.
     it('should not serialize background when undefined', () => {
       const serialized = manager.serializeSubagent(validConfig);
       expect(serialized).not.toContain('background');
+    });
+
+    it('should include mcpServers in the frontmatter object passed to stringifyYaml', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, mcpServers });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should include hooks in the frontmatter object passed to stringifyYaml', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, hooks });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.hooks).toEqual(hooks);
+    });
+
+    it('should omit mcpServers / hooks when the record is empty', () => {
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({
+        ...validConfig,
+        mcpServers: {},
+        hooks: {},
+      });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toBeUndefined();
+      expect(frontmatterArg.hooks).toBeUndefined();
     });
 
     it('should roundtrip background through serialize and parse', () => {

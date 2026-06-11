@@ -874,6 +874,99 @@ describe('HookRegistry', () => {
     });
   });
 
+  describe('addAgentHooks — per-agent frontmatter ephemeral entries', () => {
+    it('appends entries tagged with agentScope and returns an unregister callback', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      expect(registry.getAllHooks()).toHaveLength(0);
+
+      const unregister = registry.addAgentHooks(
+        {
+          [HookEventName.PreToolUse]: [
+            {
+              matcher: 'Bash',
+              hooks: [
+                {
+                  type: HookType.Command,
+                  command: 'echo per-agent',
+                  name: 'agent-hook',
+                },
+              ],
+            },
+          ],
+        },
+        'agent:test:abc',
+      );
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect(after[0].source).toBe(HooksConfigSource.Session);
+      expect(after[0].agentScope).toBe('agent:test:abc');
+
+      unregister();
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('coexists with session/user hooks of the same identity', async () => {
+      const userHooks: Parameters<HookRegistry['addAgentHooks']>[0] = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              { type: HookType.Command, command: 'echo same', name: 'shared' },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      expect(registry.getAllHooks()).toHaveLength(1);
+
+      // Same identity, different source path (Session + agentScope) — must
+      // NOT be deduped against the user-source entry.
+      registry.addAgentHooks(userHooks, 'agent:test:def');
+      expect(registry.getAllHooks()).toHaveLength(2);
+    });
+
+    it('two concurrent agents each keep their own copy of an identical hook', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      const sameHooks: Parameters<HookRegistry['addAgentHooks']>[0] = {
+        [HookEventName.PostToolUse]: [
+          {
+            hooks: [
+              { type: HookType.Command, command: 'echo done', name: 'h' },
+            ],
+          },
+        ],
+      };
+
+      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1');
+      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2');
+
+      expect(registry.getAllHooks()).toHaveLength(2);
+      u1();
+      const remaining = registry.getAllHooks();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].agentScope).toBe('agent:b:2');
+      u2();
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('silently keeps entries when the hooks payload is empty', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      const unregister = registry.addAgentHooks({}, 'agent:empty:0');
+      expect(registry.getAllHooks()).toHaveLength(0);
+      // No-op unregister should not throw
+      unregister();
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+  });
+
   describe('getAllHooks', () => {
     it('should return a copy of entries array', async () => {
       const hooksConfig = {

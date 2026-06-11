@@ -117,3 +117,66 @@ export function isColor(value: unknown): value is ColorValue {
     (COLOR_VALUES as readonly string[]).includes(value)
   );
 }
+
+/**
+ * Parse a frontmatter `mcpServers` value into the record-of-specs shape
+ * qwen-code's MCP layer expects. Matches CC `gS8`'s shallow validation:
+ *
+ *   - non-object / array / null → undefined (whole field dropped)
+ *   - string (CC's server-name reference form) → undefined; qwen-code does
+ *     not support the reference form yet, so it is rejected at this layer
+ *     rather than silently passed through and later confusing the MCP loader
+ *   - record-of-records → keep entries whose value is a plain object,
+ *     drop entries whose value is a scalar / array / null
+ *
+ * The deep `{ type, command, args, ... }` validation per spec is intentionally
+ * deferred to the runtime MCP loader (which already owns the union for
+ * stdio/sse/http/etc.). This mirrors CC, where Ig5 keeps mcpServers as
+ * `z.unknown()` at parse time and gS8 / DL7 run per-item `safeParse` at
+ * registration time. Drop-the-whole-field is preferred over throw so a
+ * malformed mcpServers block doesn't kill the entire agent.
+ */
+export function parseAgentMcpServers(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [name, spec] of Object.entries(record)) {
+    if (spec !== null && typeof spec === 'object' && !Array.isArray(spec)) {
+      result[name] = spec;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Parse a frontmatter `hooks` value into the record-of-event-matchers shape
+ * qwen-code's hook layer expects. Matches CC `TKO` / `_u`'s shallow
+ * validation:
+ *
+ *   - non-object / array / null → undefined (whole field dropped)
+ *   - record → keep entries whose value is an array, drop entries whose
+ *     value is a non-array (a scalar / object / null is never a valid
+ *     HookMatcher list)
+ *
+ * Per-matcher / per-hook `{ type, command, ... }` validation is deferred to
+ * the runtime hook subsystem (`SessionHooksManager` already owns the discriminated
+ * union for command/http/function/prompt). Drop-the-whole-field is preferred
+ * over throw, matching the rest of the DL7 lenient posture.
+ */
+export function parseAgentHooks(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [eventName, matchers] of Object.entries(record)) {
+    if (Array.isArray(matchers)) {
+      result[eventName] = matchers;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}

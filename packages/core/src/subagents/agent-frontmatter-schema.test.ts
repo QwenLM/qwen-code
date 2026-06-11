@@ -9,6 +9,8 @@ import {
   PERMISSION_MODE_VALUES,
   COLOR_VALUES,
   claudePermissionModeToApprovalMode,
+  parseAgentHooks,
+  parseAgentMcpServers,
   parseMaxTurns,
   isPermissionMode,
   isColor,
@@ -129,6 +131,76 @@ describe('agent-frontmatter-schema', () => {
       expect(isColor('magenta')).toBe(false);
       expect(isColor('white')).toBe(false);
       expect(isColor(undefined)).toBe(false);
+    });
+  });
+
+  describe('parseAgentMcpServers — CC gS8 shallow validation', () => {
+    it('keeps a record-of-records as-is', () => {
+      const input = {
+        filesystem: { type: 'stdio', command: 'node' },
+        github: { type: 'http', url: 'https://example.com' },
+      };
+      expect(parseAgentMcpServers(input)).toEqual(input);
+    });
+
+    it('drops scalar / array entries inside the record', () => {
+      const input = {
+        good: { type: 'stdio', command: 'node' },
+        scalarBad: 'a-string',
+        arrayBad: [1, 2, 3],
+        nullBad: null,
+      };
+      expect(parseAgentMcpServers(input)).toEqual({
+        good: { type: 'stdio', command: 'node' },
+      });
+    });
+
+    it('returns undefined for non-object top-level', () => {
+      expect(parseAgentMcpServers(undefined)).toBeUndefined();
+      expect(parseAgentMcpServers(null)).toBeUndefined();
+      expect(parseAgentMcpServers('a-string')).toBeUndefined();
+      expect(parseAgentMcpServers(['arr'])).toBeUndefined();
+      expect(parseAgentMcpServers(42)).toBeUndefined();
+    });
+
+    it('returns undefined when no entries survive shape filtering', () => {
+      const input = { onlyBad: 'string', alsoBad: [1] };
+      expect(parseAgentMcpServers(input)).toBeUndefined();
+    });
+  });
+
+  describe('parseAgentHooks — CC TKO shallow validation', () => {
+    it('keeps a record-of-arrays as-is', () => {
+      const input = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+        PostToolUse: [{ matcher: '*', hooks: [] }],
+      };
+      expect(parseAgentHooks(input)).toEqual(input);
+    });
+
+    it('drops non-array values per event', () => {
+      const input = {
+        PreToolUse: [{ matcher: 'Bash', hooks: [] }],
+        BogusEvent: 'not-an-array',
+        AlsoBad: { not: 'an array' },
+      };
+      expect(parseAgentHooks(input)).toEqual({
+        PreToolUse: [{ matcher: 'Bash', hooks: [] }],
+      });
+    });
+
+    it('returns undefined for non-object top-level', () => {
+      expect(parseAgentHooks(undefined)).toBeUndefined();
+      expect(parseAgentHooks(null)).toBeUndefined();
+      expect(parseAgentHooks('PreToolUse')).toBeUndefined();
+      expect(parseAgentHooks(['x'])).toBeUndefined();
+    });
+
+    it('returns undefined when no events survive shape filtering', () => {
+      const input = { PreToolUse: 'wrong shape' };
+      expect(parseAgentHooks(input)).toBeUndefined();
     });
   });
 });

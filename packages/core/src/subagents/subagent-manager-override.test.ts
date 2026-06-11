@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { Config, ApprovalMode } from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
+import type { SubagentConfig } from './types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
 import { ReadFileTool } from '../tools/read-file.js';
@@ -42,13 +43,24 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
   function callBuildOverride(
     manager: SubagentManager,
     base: Config,
+    config?: Partial<SubagentConfig>,
   ): Promise<Config> {
     const fn = (
       manager as unknown as {
-        buildSubagentContextOverride: (b: Config) => Promise<Config>;
+        buildSubagentContextOverride: (
+          b: Config,
+          c: SubagentConfig,
+        ) => Promise<Config>;
       }
     ).buildSubagentContextOverride.bind(manager);
-    return fn(base);
+    const fullConfig: SubagentConfig = {
+      name: 'test-agent',
+      description: 'test',
+      systemPrompt: '',
+      level: 'session',
+      ...config,
+    };
+    return fn(base, fullConfig);
   }
 
   it('returns a Config whose registry is distinct from the parent and binds Edit/Read to the override', async () => {
@@ -198,5 +210,62 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const boundConfig = (childEdit as any).config as Config;
     expect(boundConfig.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+  });
+
+  describe('per-agent mcpServers override', () => {
+    it('exposes session + agent servers via getMcpServers, with agent winning on key collision', async () => {
+      const parent = new Config(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+      // Pre-seed a session-level MCP server so the merge has something to
+      // shadow. addMcpServers must be called before initialization, which
+      // bareMode skips for us.
+      parent.addMcpServers({
+        'session-only': { type: 'stdio', command: 'node-a' } as never,
+        shared: { type: 'stdio', command: 'session-version' } as never,
+      });
+
+      const manager = new SubagentManager(parent);
+      const child = await callBuildOverride(manager, parent, {
+        mcpServers: {
+          'agent-only': { type: 'stdio', command: 'node-b' },
+          shared: { type: 'stdio', command: 'agent-version' },
+        },
+      });
+
+      const merged = child.getMcpServers();
+      expect(Object.keys(merged ?? {}).sort()).toEqual([
+        'agent-only',
+        'session-only',
+        'shared',
+      ]);
+      // Agent wins on collision (CC `scope: 'agent'` semantics).
+      expect((merged?.['shared'] as { command: string }).command).toBe(
+        'agent-version',
+      );
+      // Session server passes through unchanged.
+      expect((merged?.['session-only'] as { command: string }).command).toBe(
+        'node-a',
+      );
+    });
+
+    it('leaves getMcpServers untouched when no per-agent servers are declared', async () => {
+      const parent = new Config(baseParams);
+      const parentRegistry = await parent.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (parent as any).toolRegistry = parentRegistry;
+      parent.addMcpServers({
+        'session-only': { type: 'stdio', command: 'node' } as never,
+      });
+      const manager = new SubagentManager(parent);
+      const child = await callBuildOverride(manager, parent);
+      // Child has no own getMcpServers; prototype resolves to parent's.
+      expect(child.getMcpServers()).toEqual(parent.getMcpServers());
+    });
   });
 });
