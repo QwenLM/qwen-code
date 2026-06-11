@@ -10,7 +10,11 @@ import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
 import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
-import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  loadSettings,
+  reloadEnvironment,
+  SettingScope,
+} from '../config/settings.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
@@ -781,6 +785,12 @@ export async function runQwenServe(
       ...(opts.channelIdleTimeoutMs !== undefined
         ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
         : {}),
+      ...(opts.sessionReapIntervalMs !== undefined
+        ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
+        : {}),
+      ...(opts.sessionIdleTimeoutMs !== undefined
+        ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
+        : {}),
       boundWorkspace,
       childEnvOverrides,
       channelFactory,
@@ -844,6 +854,11 @@ export async function runQwenServe(
     // sessions during the cold-spawn window).
     isChannelLive: () => bridge.isChannelLive(),
     persistDisabledTools: persistDisabledToolsFn,
+    reloadDaemonEnv: (workspace) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = loadSettings(workspace, { skipLoadEnvironment: true });
+        return reloadEnvironment(fresh.merged, workspace);
+      }),
     queryWorkspaceStatus: (method, idle) =>
       bridge.queryWorkspaceStatus(method, idle),
     invokeWorkspaceCommand: (method, params, invokeOpts) =>

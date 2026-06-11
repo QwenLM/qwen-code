@@ -352,6 +352,9 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
+  if (req.method === 'POST' && path === '/workspace/reload-env') {
+    return { route: 'POST /workspace/reload-env' };
+  }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {
     return { route: 'POST /workspace/mcp/:server/restart' };
@@ -988,6 +991,7 @@ export function createServeApp(
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
         rateLimit: opts.rateLimit === true,
+        reloadEnvAvailable: deps.workspace !== undefined,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -2524,6 +2528,26 @@ export function createServeApp(
   });
 
   app.post(
+    '/workspace/reload-env',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const ctx = buildWorkspaceCtx(
+          req,
+          'POST /workspace/reload-env',
+          clientId,
+        );
+        const result = await workspace.reloadEnv(ctx);
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route: 'POST /workspace/reload-env' });
+      }
+    },
+  );
+
+  app.post(
     '/workspace/tools/:name/enable',
     mutate({ strict: true }),
     async (req, res) => {
@@ -3057,7 +3081,12 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  mountAcpHttp(app, bridge, { boundWorkspace, workspace });
+  mountAcpHttp(app, bridge, {
+    boundWorkspace,
+    workspace,
+    fsFactory,
+    deviceFlowRegistry,
+  });
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware

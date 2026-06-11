@@ -14,6 +14,7 @@ import type {
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import {
+  isDaemonTurnError,
   isNonBlockingAccepted,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
@@ -26,7 +27,9 @@ import {
 } from '../timing.js';
 import type {
   ActivePrompt,
+  AddDaemonSessionNotice,
   DaemonConnectionState,
+  DaemonNoticeOperation,
   DaemonPromptStatus,
   DaemonSessionActions,
   PendingSessionLoad,
@@ -44,6 +47,7 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
   passiveAssistantDoneTimerRef: TimerRef;
+  addNotice: AddDaemonSessionNotice;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
   setRestoreSessionId: Dispatch<SetStateAction<string | undefined>>;
@@ -60,6 +64,7 @@ export function createDaemonSessionActions({
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
   passiveAssistantDoneTimerRef,
+  addNotice,
   setConnection,
   setPromptStatus,
   setRestoreSessionId,
@@ -76,14 +81,24 @@ export function createDaemonSessionActions({
     if (pendingSessionLoadRef.current) {
       clearTimeout(pendingSessionLoadRef.current.timeout);
       pendingSessionLoadRef.current.reject(
-        new Error(`Session ${mode} superseded by a newer request`),
+        new DOMException(
+          `Session ${mode} superseded by a newer request`,
+          'AbortError',
+        ),
       );
     }
     const loadPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (pendingSessionLoadRef.current?.id === loadId) {
           pendingSessionLoadRef.current = undefined;
-          reject(new Error(`Session ${mode} timed out`));
+          reject(
+            dispatchActionError(
+              addNotice,
+              `${capitalize(mode)} session failed`,
+              new Error(`Session ${mode} timed out`),
+              mode === 'load' ? 'load_session' : 'resume_session',
+            ),
+          );
         }
       }, 30_000);
       pendingSessionLoadRef.current = {
@@ -107,16 +122,18 @@ export function createDaemonSessionActions({
   return {
     async sendPrompt(text, options) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Prompt failed',
+        'send_prompt',
       );
       const sessionId = session.sessionId;
       if (activePromptsRef.current.has(sessionId)) {
         throw dispatchActionError(
-          store,
+          addNotice,
           'Prompt failed',
           'A prompt is already in progress',
+          'send_prompt',
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
@@ -158,9 +175,15 @@ export function createDaemonSessionActions({
         if (sessionRef.current?.sessionId === sessionId) {
           store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
-        const msg = error instanceof Error ? error.message : String(error);
-        store.dispatch({ type: 'error', text: msg, recoverable: true });
-        throw error instanceof Error ? error : new Error(msg);
+        if (isDaemonTurnError(error)) {
+          throw error;
+        }
+        throw dispatchActionError(
+          addNotice,
+          'Prompt failed',
+          error,
+          'send_prompt',
+        );
       } finally {
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
@@ -174,9 +197,10 @@ export function createDaemonSessionActions({
 
     async cancel() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Cancel failed',
+        'cancel_prompt',
       );
       const active = activePromptsRef.current.get(session.sessionId);
       active?.controller.abort();
@@ -190,7 +214,12 @@ export function createDaemonSessionActions({
       try {
         await withActionTimeout(session.cancel(), 'Cancel timed out');
       } catch (error) {
-        throw dispatchActionError(store, 'Cancel failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Cancel failed',
+          error,
+          'cancel_prompt',
+        );
       } finally {
         if (
           cancelGuard &&
@@ -207,9 +236,10 @@ export function createDaemonSessionActions({
 
     async setModel(modelId) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Set model failed',
+        'switch_model',
       );
       try {
         const result = await withActionTimeout(
@@ -219,15 +249,21 @@ export function createDaemonSessionActions({
         setConnection((current) => ({ ...current, currentModel: modelId }));
         return result;
       } catch (error) {
-        throw dispatchActionError(store, 'Set model failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Set model failed',
+          error,
+          'switch_model',
+        );
       }
     },
 
     async setApprovalMode(mode, opts) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Set approval mode failed',
+        'set_approval_mode',
       );
       try {
         const result = await withActionTimeout(
@@ -243,15 +279,21 @@ export function createDaemonSessionActions({
         }));
         return result;
       } catch (error) {
-        throw dispatchActionError(store, 'Set approval mode failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Set approval mode failed',
+          error,
+          'set_approval_mode',
+        );
       }
     },
 
     async respondToPermission(requestId, response) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Permission response failed',
+        'submit_permission',
       );
       try {
         return await withActionTimeout(
@@ -259,15 +301,21 @@ export function createDaemonSessionActions({
           'Permission response timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Permission response failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Permission response failed',
+          error,
+          'submit_permission',
+        );
       }
     },
 
     async submitPermission(requestId, optionId, answers) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Permission response failed',
+        'submit_permission',
       );
       const response =
         optionId !== undefined && optionId.length > 0
@@ -285,7 +333,12 @@ export function createDaemonSessionActions({
           'Permission response timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Permission response failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Permission response failed',
+          error,
+          'submit_permission',
+        );
       }
     },
 
@@ -298,7 +351,19 @@ export function createDaemonSessionActions({
     async listSessions() {
       const session = sessionRef.current;
       if (!session) return [];
-      return session.client.listWorkspaceSessions(session.workspaceCwd);
+      try {
+        return await withActionTimeout(
+          session.client.listWorkspaceSessions(session.workspaceCwd),
+          'List sessions timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'List sessions failed',
+          error,
+          'list_sessions',
+        );
+      }
     },
 
     async loadSession(sessionId) {
@@ -319,7 +384,7 @@ export function createDaemonSessionActions({
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
-          new Error('New session requested'),
+          new DOMException('New session requested', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
@@ -331,94 +396,152 @@ export function createDaemonSessionActions({
     async releaseSession(sessionId) {
       try {
         const session = requireSessionForAction(
-          store,
+          addNotice,
           sessionRef.current,
           'Release session failed',
+          'release_session',
         );
         await withActionTimeout(
           session.client.closeSession(sessionId),
           'Release session timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Release session failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Release session failed',
+          error,
+          'release_session',
+        );
       }
     },
 
     async closeSession() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Close session failed',
+        'close_session',
       );
-      await withActionTimeout(session.close(), 'Close session timed out');
+      try {
+        await withActionTimeout(session.close(), 'Close session timed out');
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Close session failed',
+          error,
+          'close_session',
+        );
+      }
     },
 
     async refreshCommands() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Refresh commands failed',
+        'refresh_commands',
       );
-      const status = await withActionTimeout(
-        session.supportedCommands(),
-        'Refresh commands timed out',
-      );
-      const { commands, skills } = mapSupportedCommands(status);
-      setConnection((current) => ({
-        ...current,
-        commands,
-        skills,
-        supportedCommands: status,
-      }));
+      try {
+        const status = await withActionTimeout(
+          session.supportedCommands(),
+          'Refresh commands timed out',
+        );
+        const { commands, skills } = mapSupportedCommands(status);
+        setConnection((current) => ({
+          ...current,
+          commands,
+          skills,
+          supportedCommands: status,
+        }));
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Refresh commands failed',
+          error,
+          'refresh_commands',
+        );
+      }
     },
 
     async getContext() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Load context failed',
+        'load_context',
       );
-      const context = await withActionTimeout(
-        session.context(),
-        'Load context timed out',
-      );
-      setConnection((current) => ({
-        ...current,
-        context,
-        currentMode: getModeFromSessionContext(context) ?? current.currentMode,
-      }));
-      return context;
+      try {
+        const context = await withActionTimeout(
+          session.context(),
+          'Load context timed out',
+        );
+        setConnection((current) => ({
+          ...current,
+          context,
+          currentMode:
+            getModeFromSessionContext(context) ?? current.currentMode,
+        }));
+        return context;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load context failed',
+          error,
+          'load_context',
+        );
+      }
     },
 
     async getContextUsage(opts) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Load context usage failed',
+        'load_context_usage',
       );
-      return await withActionTimeout(
-        session.contextUsage(opts),
-        'Load context usage timed out',
-      );
+      try {
+        return await withActionTimeout(
+          session.contextUsage(opts),
+          'Load context usage timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load context usage failed',
+          error,
+          'load_context_usage',
+        );
+      }
     },
 
     async renameSession(displayName) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Rename session failed',
+        'rename_session',
       );
-      return withActionTimeout(
-        session.updateMetadata({ displayName }),
-        'Rename session timed out',
-      );
+      try {
+        return await withActionTimeout(
+          session.updateMetadata({ displayName }),
+          'Rename session timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Rename session failed',
+          error,
+          'rename_session',
+        );
+      }
     },
 
     async recapSession(): Promise<DaemonSessionRecapResult> {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Recap session failed',
+        'recap_session',
       );
       try {
         return await withActionTimeout(
@@ -426,7 +549,12 @@ export function createDaemonSessionActions({
           'Recap session timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Recap session failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Recap session failed',
+          error,
+          'recap_session',
+        );
       }
     },
 
@@ -435,9 +563,10 @@ export function createDaemonSessionActions({
       opts?: { signal?: AbortSignal },
     ): Promise<DaemonSessionBtwResult> {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Side question failed',
+        'btw_session',
       );
       try {
         return await withActionTimeout(
@@ -448,15 +577,21 @@ export function createDaemonSessionActions({
         if (opts?.signal?.aborted || isAbortError(error)) {
           throw error;
         }
-        throw dispatchActionError(store, 'Side question failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Side question failed',
+          error,
+          'btw_session',
+        );
       }
     },
 
     async sendShellCommand(command: string) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Shell command failed',
+        'send_shell_command',
       );
       const shellKey = `${session.sessionId}:shell`;
       setPromptStatus('waiting');
@@ -465,7 +600,12 @@ export function createDaemonSessionActions({
       try {
         return await session.shellCommand(command, ctrl.signal);
       } catch (error) {
-        throw dispatchActionError(store, 'Shell command failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Shell command failed',
+          error,
+          'send_shell_command',
+        );
       } finally {
         if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
           activePromptsRef.current.delete(shellKey);
@@ -478,27 +618,39 @@ export function createDaemonSessionActions({
 
     async getTasks() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Get tasks failed',
+        'load_tasks',
       );
       try {
         return await withActionTimeout(session.tasks(), 'Get tasks timed out');
       } catch (error) {
-        throw dispatchActionError(store, 'Get tasks failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Get tasks failed',
+          error,
+          'load_tasks',
+        );
       }
     },
 
     async getStats() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Load stats failed',
+        'load_stats',
       );
       try {
         return await withActionTimeout(session.stats(), 'Load stats timed out');
       } catch (error) {
-        throw dispatchActionError(store, 'Load stats failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Load stats failed',
+          error,
+          'load_stats',
+        );
       }
     },
 
@@ -507,9 +659,10 @@ export function createDaemonSessionActions({
       response: PermissionResponse,
     ): Promise<boolean> {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Global permission response failed',
+        'submit_permission',
       );
       try {
         return await withActionTimeout(
@@ -518,9 +671,10 @@ export function createDaemonSessionActions({
         );
       } catch (error) {
         throw dispatchActionError(
-          store,
+          addNotice,
           'Global permission response failed',
           error,
+          'submit_permission',
         );
       }
     },
@@ -601,28 +755,48 @@ function getModeFromSessionContext(
 }
 
 function requireSessionForAction(
-  store: DaemonTranscriptStore,
+  addNotice: AddDaemonSessionNotice,
   session: DaemonSessionClient | undefined,
   action: string,
+  operation: DaemonNoticeOperation,
 ): DaemonSessionClient {
   if (!session) {
-    throw dispatchActionError(store, action, 'Daemon session is not connected');
+    throw dispatchActionError(
+      addNotice,
+      action,
+      'Daemon session is not connected',
+      operation,
+    );
   }
   return session;
 }
 
 function dispatchActionError(
-  store: DaemonTranscriptStore,
+  addNotice: AddDaemonSessionNotice,
   action: string,
   error: unknown,
+  operation: DaemonNoticeOperation,
 ): Error {
+  if (isAbortError(error)) {
+    if (error instanceof Error) return error;
+    const message = error instanceof DOMException ? error.message : 'Aborted';
+    const abortError = new Error(message);
+    abortError.name = 'AbortError';
+    return abortError;
+  }
   const message = error instanceof Error ? error.message : String(error);
-  store.dispatch({
-    type: 'error',
-    text: `${action}: ${message}`,
+  addNotice({
+    severity: 'error',
+    category: 'user_action',
+    operation,
+    code: `daemon.${operation}.failed`,
+    message: `${action}: ${message}`,
+    debugMessage: message,
     recoverable: true,
   });
-  return error instanceof Error ? error : new Error(message);
+  return markNoticeDispatched(
+    error instanceof Error ? error : new Error(message),
+  );
 }
 
 function isAbortError(error: unknown): boolean {
@@ -630,4 +804,14 @@ function isAbortError(error: unknown): boolean {
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
   );
+}
+
+function markNoticeDispatched(error: Error): Error {
+  return Object.assign(error, {
+    _alreadyDispatched: true as const,
+  });
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }

@@ -154,6 +154,23 @@ export function normalizeDaemonEvent(
         },
       ];
     }
+    case 'turn_error': {
+      const code = getString(event.data, 'code');
+      const promptId = getString(event.data, 'promptId');
+      return [
+        {
+          ...base,
+          type: 'error',
+          source: 'turn_error',
+          recoverable: true,
+          ...(code ? { code } : {}),
+          ...(promptId ? { promptId } : {}),
+          text:
+            getString(event.data, 'message') ??
+            'Prompt failed (no details available)',
+        },
+      ];
+    }
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
@@ -547,6 +564,7 @@ function normalizeToolUpdate(
     return {
       ...base,
       type: 'error',
+      code: 'daemon.protocol.tool_update_missing_tool_call_id',
       recoverable: true,
       text: `Tool update missing toolCallId${title ? ` (${title})` : ''}`,
     };

@@ -8,6 +8,8 @@ import type { Application, Request, Response } from 'express';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import type { WorkspaceFileSystemFactory } from '../fs/index.js';
+import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
@@ -26,13 +28,11 @@ const CONN_GRACE_MS = 10_000;
 
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
-  /** Workspace service facade for workspace-scoped operations. */
   workspace: DaemonWorkspaceService;
-  /** Defaults to `process.env.QWEN_SERVE_ACP_HTTP !== '0'`. */
+  fsFactory?: WorkspaceFileSystemFactory;
+  deviceFlowRegistry?: DeviceFlowRegistry;
   enabled?: boolean;
-  /** Mount path; defaults to `/acp`. */
   path?: string;
-  /** Concurrent-connection cap; `0` disables. Defaults to the registry default. */
   maxConnections?: number;
 }
 
@@ -66,6 +66,8 @@ export function mountAcpHttp(
     bridge,
     opts.boundWorkspace,
     opts.workspace,
+    opts.fsFactory,
+    opts.deviceFlowRegistry,
   );
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
@@ -87,6 +89,19 @@ export function mountAcpHttp(
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {
+    // RFD: Content-Type MUST be application/json; otherwise 415.
+    const ct = req.headers['content-type'];
+    if (!ct || !ct.includes('application/json')) {
+      res.status(415).json({ error: 'Content-Type must be application/json' });
+      return;
+    }
+    // RFD: batch JSON-RPC arrays → 501 Not Implemented.
+    if (Array.isArray(req.body)) {
+      res
+        .status(501)
+        .json({ error: 'Batch JSON-RPC requests are not supported' });
+      return;
+    }
     const parsed = parseInbound(req.body);
     if (!parsed.ok) {
       writeStderrLine(
@@ -140,15 +155,28 @@ export function mountAcpHttp(
       return;
     }
 
-    const conn = registry.get(headerOf(req, ACP_CONNECTION_HEADER));
-    if (!conn) {
+    const connHeader = headerOf(req, ACP_CONNECTION_HEADER);
+    if (!connHeader) {
       res
         .status(400)
         .json(
           rpcError(
             isRequest(message) ? message.id : null,
             RPC.INVALID_REQUEST,
-            'Missing or unknown Acp-Connection-Id',
+            'Missing Acp-Connection-Id',
+          ),
+        );
+      return;
+    }
+    const conn = registry.get(connHeader);
+    if (!conn) {
+      res
+        .status(404)
+        .json(
+          rpcError(
+            isRequest(message) ? message.id : null,
+            RPC.INVALID_REQUEST,
+            'Unknown Acp-Connection-Id',
           ),
         );
       return;
@@ -177,9 +205,22 @@ export function mountAcpHttp(
 
   // ── GET /acp (SSE) ─────────────────────────────────────────────────
   app.get(path, (req: Request, res: Response) => {
-    const conn = registry.get(headerOf(req, ACP_CONNECTION_HEADER));
+    // RFD: Accept MUST include text/event-stream; otherwise 406.
+    const accept = req.headers['accept'] ?? '';
+    if (!accept.includes('text/event-stream')) {
+      res
+        .status(406)
+        .json({ error: 'Accept header must include text/event-stream' });
+      return;
+    }
+    const connHeader = headerOf(req, ACP_CONNECTION_HEADER);
+    if (!connHeader) {
+      res.status(400).json({ error: 'Missing Acp-Connection-Id' });
+      return;
+    }
+    const conn = registry.get(connHeader);
     if (!conn) {
-      res.status(400).json({ error: 'Missing or unknown Acp-Connection-Id' });
+      res.status(404).json({ error: 'Unknown Acp-Connection-Id' });
       return;
     }
     const sessionId = headerOf(req, ACP_SESSION_HEADER);

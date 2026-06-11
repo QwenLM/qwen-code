@@ -63,6 +63,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  'env_reloaded',
   // Runtime MCP server add/remove events. Fired by
   // `POST /workspace/mcp/servers` on success (including replace and
   // same-fingerprint no-op).
@@ -798,6 +799,17 @@ export type DaemonMcpServerRestartRefusedEvent = DaemonEventEnvelope<
   DaemonMcpServerRestartRefusedData
 >;
 
+export interface DaemonEnvReloadedData {
+  updatedKeys: string[];
+  removedKeys: string[];
+  childReloaded: boolean;
+  sessionsRefreshed?: string[];
+}
+export type DaemonEnvReloadedEvent = DaemonEventEnvelope<
+  'env_reloaded',
+  DaemonEnvReloadedData
+>;
+
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
   DaemonAuthDeviceFlowStartedData
@@ -873,6 +885,7 @@ export type DaemonControlEvent =
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
+  | DaemonEnvReloadedEvent
   | DaemonMcpServerAddedEvent
   | DaemonMcpServerRemovedEvent
   | DaemonSessionRewoundEvent;
@@ -1382,6 +1395,10 @@ export function asKnownDaemonEvent(
       return isMcpServerRestartRefusedData(event.data)
         ? (event as DaemonMcpServerRestartRefusedEvent)
         : undefined;
+    case 'env_reloaded':
+      return event.data != null && typeof event.data === 'object'
+        ? (event as DaemonEnvReloadedEvent)
+        : undefined;
     case 'followup_suggestion':
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
@@ -1781,6 +1798,7 @@ export function reduceDaemonSessionEvent(
       };
     case 'mcp_server_added':
     case 'mcp_server_removed':
+    case 'env_reloaded':
       return base;
     case 'session_rewound':
       return {

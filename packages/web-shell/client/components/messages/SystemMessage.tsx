@@ -12,18 +12,24 @@ import styles from './SystemMessage.module.css';
 interface SystemMessageProps {
   content: string;
   variant: 'info' | 'error' | 'warning';
+  /** Run /context detail, exactly like typing it (context-usage panels). */
+  onShowContextDetail?: () => void;
 }
 
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
+  onShowContextDetail,
 }: SystemMessageProps) {
   const contextUsage =
     variant === 'info' ? parseContextUsageMessage(content) : null;
   if (contextUsage) {
     return (
       <div className={styles.flushMessage}>
-        <ContextUsageMessage status={contextUsage} />
+        <ContextUsageMessage
+          status={contextUsage}
+          onShowDetail={onShowContextDetail}
+        />
       </div>
     );
   }

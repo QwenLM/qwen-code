@@ -323,7 +323,7 @@ interface DiscoveredFile {
  * 16.5's responsibility per scope decision in issue #4175. Path-
  * based rules (`.qwen/rules/`) are also out of scope for v1.
  */
-async function collectWorkspaceMemoryStatus(
+export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
 ): Promise<ServeWorkspaceMemoryStatus> {
   const filenames = new Set(getAllGeminiMdFilenames());

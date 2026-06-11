@@ -60,6 +60,7 @@ import type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonEnvReloadResponse,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -191,6 +192,18 @@ export class DaemonHttpError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+export interface DaemonTurnError extends DaemonHttpError {
+  _daemonTurnError: true;
+}
+
+export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
 }
 
 export interface CreateSessionRequest {
@@ -1462,6 +1475,30 @@ export class DaemonClient {
     );
   }
 
+  async reloadEnv(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonEnvReloadResponse> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/reload-env`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/reload-env');
+        }
+        return (await res.json()) as DaemonEnvReloadResponse;
+      },
+      opts?.timeoutMs,
+    );
+  }
+
   async manageMcpServer(
     serverName: string,
     action: DaemonMcpManageAction,
@@ -2318,10 +2355,13 @@ export function matchTurnEvent(
       code?: string;
     };
     if (data.promptId === promptId) {
-      throw new DaemonHttpError(
-        500,
-        data.code ?? 'turn_error',
-        data.message ?? 'Prompt failed',
+      throw Object.assign(
+        new DaemonHttpError(
+          500,
+          data.code ?? 'turn_error',
+          data.message ?? 'Prompt failed',
+        ),
+        { _daemonTurnError: true as const },
       );
     }
   }

@@ -10,12 +10,15 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
@@ -23,6 +26,11 @@ import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  ToastHost,
+  type ToastTone,
+  type WebShellToast,
+} from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
@@ -46,7 +54,10 @@ import {
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { SettingsDialog } from './components/dialogs/SettingsDialog';
+import {
+  SETTINGS_ACTIVE_EVENT,
+  SettingsMessage,
+} from './components/messages/SettingsMessage';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
   ThemeDialog,
@@ -115,6 +126,7 @@ export const CompactModeContext = createContext(false);
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
+const MAX_TOASTS = 4;
 const COMPACT_MODE_STORAGE_KEY = 'web-shell:compact-mode';
 
 function loadCompactMode(): boolean {
@@ -198,8 +210,12 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
+  virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
+  /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
+  onToast?: (tone: ToastTone, message: string) => void;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -225,12 +241,15 @@ function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-interface AlreadyDispatchedError extends Error {
-  _alreadyDispatched: true;
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }
 
-function markAlreadyDispatched(error: Error): AlreadyDispatchedError {
-  return Object.assign(error, { _alreadyDispatched: true as const });
+interface AlreadyDispatchedError extends Error {
+  _alreadyDispatched: true;
 }
 
 function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
@@ -239,6 +258,26 @@ function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
     error !== null &&
     (error as AlreadyDispatchedError)._alreadyDispatched === true
   );
+}
+
+function logSessionNoticesHook(notices: readonly DaemonSessionNotice[]): void {
+  if (notices.length > 0) {
+    console.info('[web-shell] useSessionNotices()', { notices });
+  }
+}
+
+function shouldToastNotice(notice: DaemonSessionNotice): boolean {
+  return (
+    notice.category === 'validation' ||
+    notice.category === 'user_action' ||
+    notice.category === 'system'
+  );
+}
+
+function toastToneFromNotice(notice: DaemonSessionNotice): ToastTone {
+  if (notice.severity === 'warning') return 'warning';
+  if (notice.severity === 'info') return 'info';
+  return 'error';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -506,7 +545,9 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   compactThinking = false,
+  virtualScrollThreshold,
   markdown,
+  onToast,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -528,9 +569,34 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
+  const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
+  const toastIdRef = useRef(0);
+  const [toasts, setToasts] = useState<WebShellToast[]>([]);
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+  const pushToast = useCallback((tone: ToastTone, message: string) => {
+    if (onToastRef.current) {
+      onToastRef.current(tone, message);
+      return;
+    }
+    const toast: WebShellToast = {
+      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
+      tone,
+      message,
+    };
+    setToasts((current) => {
+      const withoutDuplicate = current.filter(
+        (item) => item.tone !== tone || item.message !== message,
+      );
+      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
+    });
+  }, []);
 
-  const messages = useMessages();
+  const messages = useMessages(t);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
@@ -619,16 +685,10 @@ export function App({
       opts?: { optimisticUserMessage?: boolean },
     ) => {
       clearFollowup();
-      return sessionActions
-        .sendPrompt(text, {
-          images,
-          optimisticUserMessage: opts?.optimisticUserMessage,
-        })
-        .catch((error: unknown) => {
-          throw markAlreadyDispatched(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        });
+      return sessionActions.sendPrompt(text, {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+      });
     },
     [clearFollowup, sessionActions],
   );
@@ -659,7 +719,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
@@ -679,6 +739,7 @@ export function App({
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
+  const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
@@ -697,28 +758,47 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog ||
-    showSettingsDialog;
+    showToolsDialog;
   const bottomHidden =
     dialogOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
-    modelPanelActive;
+    modelPanelActive ||
+    settingsPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        console.debug('[web-shell] turn error rendered in transcript', error);
+        return;
+      }
       if (isAlreadyDispatched(error)) {
-        console.error('[web-shell] error already dispatched', error);
+        console.debug('[web-shell] error already handled by notice', error);
         return;
       }
       const message = formatError(error, fallback);
       console.error('[web-shell]', message, error);
-      store.dispatch([{ type: 'error', text: message }]);
+      pushToast('error', message);
     },
-    [store],
+    [pushToast],
   );
+
+  useEffect(() => {
+    logSessionNoticesHook(notices);
+    for (const notice of notices) {
+      if (shouldToastNotice(notice)) {
+        pushToast(toastToneFromNotice(notice), notice.message);
+      } else if (notice.category === 'lifecycle') {
+        console.debug('[web-shell] daemon notice', notice);
+      } else {
+        console.warn('[web-shell] daemon notice', notice);
+      }
+      dismissNotice(notice.id);
+    }
+  }, [dismissNotice, notices, pushToast]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -765,17 +845,10 @@ export function App({
       },
       (error: unknown) => {
         if (activeSessionIdRef.current !== sessionId) return;
-        console.error('[recap] failed:', error);
-        setRecapMessage({
-          anchorAfterId,
-          anchorIndex,
-          message: {
-            id: messageId,
-            role: 'system',
-            content: formatError(error, t('recap.failed')),
-            variant: 'error',
-          },
-        });
+        setRecapMessage(null);
+        if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+          console.warn('[web-shell] unhandled recap failure', error);
+        }
       },
     );
   }, [connection.sessionId, messages, sessionActions, t]);
@@ -784,12 +857,7 @@ export function App({
     (rawQuestion: string) => {
       const question = rawQuestion.trim();
       if (!question) {
-        store.dispatch([
-          {
-            type: 'error',
-            text: t('btw.empty'),
-          },
-        ]);
+        pushToast('error', t('btw.empty'));
         return;
       }
 
@@ -825,17 +893,14 @@ export function App({
             if (activeSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
-            setBtwMessage({
-              id: messageId,
-              role: 'btw',
-              question,
-              answer: formatError(error, t('btw.failed')),
-              isPending: false,
-            });
+            setBtwMessage(null);
+            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+              console.warn('[web-shell] unhandled btw failure', error);
+            }
           },
         );
     },
-    [connection.sessionId, sessionActions, store, t],
+    [connection.sessionId, pushToast, sessionActions, t],
   );
 
   const dismissBtwMessage = useCallback(() => {
@@ -1037,7 +1102,8 @@ export function App({
 
   useEffect(() => {
     if (connection.error) {
-      onError?.(new Error(connection.error));
+      const error = new Error(connection.error);
+      onError?.(error);
     }
   }, [connection.error, onError]);
 
@@ -1112,6 +1178,36 @@ export function App({
     handleSetMode(next);
   }, [currentMode, handleSetMode]);
 
+  // Shared by the /context slash command and the status-bar context
+  // indicator. Echoes the command as a local user message first — that also
+  // makes the transcript follow the tail (MessageList Rule 4), so the panel
+  // is revealed even when the click comes while scrolled up.
+  const showContextUsage = useCallback(
+    (commandText: string, detail: boolean) => {
+      store.appendLocalUserMessage(commandText);
+      sessionActions
+        .getContextUsage({ detail })
+        .then((result) => {
+          store.dispatch([
+            {
+              type: 'status',
+              text: serializeContextUsageMessage(result),
+            },
+          ]);
+        })
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to load context usage');
+        });
+    },
+    [store, sessionActions, reportError],
+  );
+
+  // Stable reference: this travels through the memoized MessageList →
+  // MessageItem chain, so an inline closure would defeat their memo.
+  const handleShowContextDetail = useCallback(() => {
+    showContextUsage('/context detail', true);
+  }, [showContextUsage]);
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1141,12 +1237,7 @@ export function App({
             } else if (!themeArg) {
               setShowThemeDialog(true);
             } else {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('error.unsupportedTheme'),
-                },
-              ]);
+              pushToast('error', t('error.unsupportedTheme'));
             }
             return true;
           }
@@ -1193,9 +1284,7 @@ export function App({
                 normalizedArg,
               );
               if (!valid) {
-                store.dispatch([
-                  { type: 'error', text: t('language.invalid') },
-                ]);
+                pushToast('error', t('language.invalid'));
                 return true;
               }
               const nextLanguage = normalizeLanguage(languageArg);
@@ -1400,7 +1489,8 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            setShowSettingsDialog(true);
+            store.appendLocalUserMessage(text);
+            setSettingsInlineOpen(true);
             return true;
           }
           if (cmd === 'context') {
@@ -1410,22 +1500,10 @@ export function App({
               contextArg === 'detail' ||
               contextArg === '-d'
             ) {
-              store.appendLocalUserMessage(text);
-              sessionActions
-                .getContextUsage({
-                  detail: contextArg === 'detail' || contextArg === '-d',
-                })
-                .then((result) => {
-                  store.dispatch([
-                    {
-                      type: 'status',
-                      text: serializeContextUsageMessage(result),
-                    },
-                  ]);
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load context usage');
-                });
+              showContextUsage(
+                text,
+                contextArg === 'detail' || contextArg === '-d',
+              );
               return true;
             }
           }
@@ -1491,12 +1569,7 @@ export function App({
             }
             const displayName = renameArg.displayName;
             if (!displayName) {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('rename.empty'),
-                },
-              ]);
+              pushToast('error', t('rename.empty'));
               return true;
             }
             sessionActions
@@ -1510,15 +1583,7 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text:
-                      error instanceof Error
-                        ? error.message
-                        : 'Failed to rename session',
-                  },
-                ]);
+                reportError(error, 'Failed to rename session');
               });
             return true;
           }
@@ -1667,9 +1732,7 @@ export function App({
                       { type: 'status', text: t('bug.submitted') },
                     ]);
                   } else {
-                    store.dispatch([
-                      { type: 'error', text: t('bug.popupBlocked') },
-                    ]);
+                    pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
@@ -1709,10 +1772,12 @@ export function App({
       handleThemeChange,
       handleSetMode,
       onLanguageChange,
+      pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
       selectedLanguage,
+      showContextUsage,
       t,
       workspaceActions,
     ],
@@ -1763,15 +1828,10 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
-    sessionActions
-      .cancel()
-      .then(() => {
-        store.dispatch([{ type: 'status', text: t('request.cancelled') }]);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to cancel request');
-      });
-  }, [sessionActions, store, t, reportError]);
+    sessionActions.cancel().catch((error: unknown) => {
+      reportError(error, 'Failed to cancel request');
+    });
+  }, [sessionActions, reportError]);
 
   const handleFocusActiveAgents = useCallback((): boolean => {
     if (floatingAgents.length === 0) return false;
@@ -1789,7 +1849,6 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
       if (bottomHidden) return;
@@ -1979,6 +2038,7 @@ export function App({
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
         <div className={appClassName} style={externalStyle} data-web-shell-root>
+          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
           {dialogOpen && (
             <div className={styles.dialogOverlay} data-keyboard-scope>
               {showResumeDialog && (
@@ -2009,14 +2069,10 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('delete.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('delete.failed', { reason }));
                   }}
                   onClose={() => setShowDeleteDialog(false)}
                 />
@@ -2032,14 +2088,10 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('release.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('release.failed', { reason }));
                   }}
                   onClose={() => setShowReleaseDialog(false)}
                 />
@@ -2060,18 +2112,6 @@ export function App({
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
               )}
-              {showSettingsDialog && (
-                <SettingsDialog
-                  onClose={() => setShowSettingsDialog(false)}
-                  onSubDialog={(key) => {
-                    setShowSettingsDialog(false);
-                    if (key === 'ui.theme') setShowThemeDialog(true);
-                    else if (key === 'fastModel') setModelInlineMode('fast');
-                    else if (key === 'tools.approvalMode')
-                      setApprovalModeInlineOpen(true);
-                  }}
-                />
-              )}
             </div>
           )}
 
@@ -2089,6 +2129,7 @@ export function App({
                   messages={displayMessages}
                   pendingApproval={pendingApproval}
                   onConfirm={handleConfirm}
+                  onShowContextDetail={handleShowContextDetail}
                   catchingUp={connection.catchingUp}
                   workspaceCwd={connection.workspaceCwd || ''}
                   welcomeHeader={welcomeHeader}
@@ -2096,7 +2137,8 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen ? (
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen ? (
                       <>
                         {approvalModeInlineOpen && (
                           <ApprovalModeMessage
@@ -2137,6 +2179,19 @@ export function App({
                             onClose={() => setMemoryInlineOpen(false)}
                           />
                         )}
+                        {settingsInlineOpen && (
+                          <SettingsMessage
+                            onClose={() => setSettingsInlineOpen(false)}
+                            onSubDialog={(key) => {
+                              setSettingsInlineOpen(false);
+                              if (key === 'ui.theme') setShowThemeDialog(true);
+                              else if (key === 'fastModel')
+                                setModelInlineMode('fast');
+                              else if (key === 'tools.approvalMode')
+                                setApprovalModeInlineOpen(true);
+                            }}
+                          />
+                        )}
                       </>
                     ) : undefined
                   }
@@ -2144,17 +2199,21 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen
-                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen
+                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
-                  // The approval-mode and model pickers are reachable by mouse
-                  // from the status bar, so they reveal themselves when opened
-                  // while the user is scrolled up; the agents/memory panels
-                  // keep the user's scroll position.
+                  // The approval-mode/model pickers and the settings panel are
+                  // reachable by mouse from the status bar, so they reveal
+                  // themselves when opened while the user is scrolled up; the
+                  // agents/memory panels keep the user's scroll position.
                   autoScrollTailIntoView={
-                    approvalModeInlineOpen || modelInlineMode !== null
+                    approvalModeInlineOpen ||
+                    modelInlineMode !== null ||
+                    settingsInlineOpen
                   }
+                  virtualScrollThreshold={virtualScrollThreshold}
                 />
 
                 {btwMessage?.role === 'btw' && (
@@ -2226,6 +2285,8 @@ export function App({
                   onSelectModel={() =>
                     setModelInlineMode((v) => (v ? null : 'main'))
                   }
+                  onShowContext={() => showContextUsage('/context', false)}
+                  onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
                 />
               ))}
 

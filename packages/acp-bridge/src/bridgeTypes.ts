@@ -129,6 +129,11 @@ export interface SessionMetadataUpdate {
   displayName?: string;
 }
 
+export interface CloseSessionOpts {
+  /** Override the default `'client_close'` reason in the `session_closed` event. */
+  reason?: string;
+}
+
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
@@ -259,6 +264,7 @@ export interface AcpSessionBridge {
   closeSession(
     sessionId: string,
     context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
   ): Promise<void>;
 
   /**

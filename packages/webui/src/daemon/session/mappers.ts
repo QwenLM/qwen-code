@@ -173,10 +173,39 @@ export function getCurrentMode(
   return getString(modes, 'currentModeId') ?? getString(modes, 'currentMode');
 }
 
+/**
+ * Latest usage token count carried in a replay snapshot, or undefined if
+ * no replayed event has one. Token usage is not part of the attach-time
+ * status fetches — it only arrives on streaming `session_update` events —
+ * so on session load the last usage-bearing replay event is the freshest
+ * count available.
+ */
+export function getReplayTokenCount(
+  events: readonly DaemonEvent[],
+): number | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    try {
+      const event = events[i];
+      if (event.type !== 'session_update') continue;
+      const update = getRecord(getRecord(event.data)?.['update']);
+      const tokenCount = getUsageTokenCount(update);
+      if (tokenCount !== undefined) return tokenCount;
+    } catch {
+      // Malformed replay events are skipped, mirroring the replay
+      // injection loop — a usage scan must not fail the whole attach.
+    }
+  }
+  return undefined;
+}
+
+// Sub-agent usage events carry `parentToolCallId` in `_meta`; skip them
+// so the status bar only reflects the main conversation's context usage.
 function getUsageTokenCount(
   update: Record<string, unknown> | undefined,
 ): number | undefined {
-  const usage = getRecord(getRecord(update?.['_meta'])?.['usage']);
+  const meta = getRecord(update?.['_meta']);
+  if (meta?.['parentToolCallId'] !== undefined) return undefined;
+  const usage = getRecord(meta?.['usage']);
   const count =
     getNumber(usage, 'inputTokens') ?? getNumber(usage, 'totalTokens');
   return count !== undefined && count > 0 ? count : undefined;

@@ -86,6 +86,63 @@ export interface DaemonSessionProviderProps {
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
 
+export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
+
+export type DaemonNoticeCategory =
+  | 'validation'
+  | 'user_action'
+  | 'connection'
+  | 'protocol'
+  | 'lifecycle'
+  | 'system';
+
+export type DaemonNoticeOperation =
+  | 'send_prompt'
+  | 'send_shell_command'
+  | 'switch_model'
+  | 'set_approval_mode'
+  | 'submit_permission'
+  | 'cancel_prompt'
+  | 'load_session'
+  | 'resume_session'
+  | 'close_session'
+  | 'rename_session'
+  | 'release_session'
+  | 'list_sessions'
+  | 'load_context'
+  | 'load_context_usage'
+  | 'load_tasks'
+  | 'load_stats'
+  | 'refresh_commands'
+  | 'recap_session'
+  | 'btw_session'
+  | 'stream'
+  | 'normalize_event';
+
+export interface DaemonSessionNotice {
+  id: string;
+  severity: DaemonNoticeSeverity;
+  category: DaemonNoticeCategory;
+  operation?: DaemonNoticeOperation;
+  code: string;
+  message: string;
+  debugMessage?: string;
+  recoverable?: boolean;
+  createdAt: number;
+}
+
+type AddDaemonSessionNoticeInput = Omit<
+  DaemonSessionNotice,
+  'id' | 'createdAt'
+> & {
+  id?: string;
+  createdAt?: number;
+};
+
+export type AddDaemonSessionNotice = (
+  notice: AddDaemonSessionNoticeInput,
+) => DaemonSessionNotice;
+
 export interface DaemonModelInfo {
   id: string;
   baseModelId?: string;

@@ -204,6 +204,51 @@ class FakeBridge {
     this.detached.push({ sessionId, clientId });
   }
   async preheat() {}
+
+  // Wave 1+2 stubs
+  async generateSessionRecap(sessionId: string) {
+    return { sessionId, recap: 'test recap' };
+  }
+  async generateSessionBtw(sessionId: string, question: string) {
+    return { sessionId, answer: `re: ${question}` };
+  }
+  async executeShellCommand(sessionId: string, command: string) {
+    return { exitCode: 0, output: `$ ${command}`, aborted: false };
+  }
+  async getSessionContextUsageStatus(sessionId: string) {
+    return { sessionId, used: 100, total: 1000 };
+  }
+  async getSessionTasksStatus(sessionId: string) {
+    return { sessionId, tasks: [] };
+  }
+  async getWorkspaceToolsStatus() {
+    return { v: 1, tools: [] };
+  }
+  async getWorkspaceMcpToolsStatus(serverName: string) {
+    return { v: 1, serverName, tools: [] };
+  }
+  async addRuntimeMcpServer(name: string) {
+    return {
+      name,
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 0,
+      originatorClientId: 'c',
+    };
+  }
+  async removeRuntimeMcpServer(name: string) {
+    return {
+      name,
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'c',
+    };
+  }
+  publishWorkspaceEvent() {}
+  knownClientIds() {
+    return new Set<string>();
+  }
 }
 
 // A minimal fake workspace service for dispatch tests.
@@ -235,6 +280,9 @@ const fakeWorkspace = {
   },
   async restartMcpServer() {
     return { ok: true };
+  },
+  async reloadEnv() {
+    return { updatedKeys: [], removedKeys: [], childReloaded: false };
   },
 } as unknown as DaemonWorkspaceService;
 
@@ -356,14 +404,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
   }
 
-  it('initialize → 200 + Acp-Connection-Id; unknown conn → 400', async () => {
+  it('initialize → 200 + Acp-Connection-Id; unknown conn → 404', async () => {
     await initialize();
     const bad = await post('nope', {
       jsonrpc: '2.0',
       id: 2,
       method: 'session/new',
     });
-    expect(bad.status).toBe(400);
+    expect(bad.status).toBe(404);
   });
 
   it('session/new reply rides the connection-scoped stream', async () => {
@@ -1436,7 +1484,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('DELETE tears the connection down (subsequent POST 400)', async () => {
+  it('DELETE tears the connection down (subsequent POST 404)', async () => {
     const connId = await initialize();
     const del = await fetch(`${base}/acp`, {
       method: 'DELETE',
@@ -1448,6 +1496,498 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 12,
       method: 'session/new',
     });
-    expect(after.status).toBe(400);
+    expect(after.status).toBe(404);
+  });
+
+  // ── Wave 1+2: new _qwen/* method tests ──────────────────────────
+
+  describe('protocol compliance', () => {
+    it('POST non-JSON Content-Type → 415', async () => {
+      const res = await fetch(`${base}/acp`, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: '{}',
+      });
+      expect(res.status).toBe(415);
+    });
+
+    it('POST batch JSON-RPC array → 501', async () => {
+      const res = await fetch(`${base}/acp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'foo' }]),
+      });
+      expect(res.status).toBe(501);
+    });
+
+    it('GET without text/event-stream Accept → 406', async () => {
+      const connId = await initialize();
+      const res = await fetch(`${base}/acp`, {
+        headers: {
+          accept: 'application/json',
+          'acp-connection-id': connId,
+        },
+      });
+      expect(res.status).toBe(406);
+    });
+
+    it('POST missing Acp-Connection-Id → 400', async () => {
+      const res = await fetch(`${base}/acp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'session/list',
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe('session extension methods', () => {
+    it('_qwen/session/recap returns recap', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 50,
+        method: '_qwen/session/recap',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', recap: 'test recap' },
+      });
+    });
+
+    it('_qwen/session/btw validates question length', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 51,
+        method: '_qwen/session/btw',
+        params: { sessionId: 'sess-1', question: '' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/session/btw returns answer', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 52,
+        method: '_qwen/session/btw',
+        params: { sessionId: 'sess-1', question: 'what?' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { answer: 're: what?' },
+      });
+    });
+
+    it('_qwen/session/shell rejects empty command', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 53,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: '' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/session/shell returns result', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 54,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'ls' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { exitCode: 0, output: '$ ls' },
+      });
+    });
+
+    it('_qwen/session/detach succeeds', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 55,
+        method: '_qwen/session/detach',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { ok: true } });
+      expect(bridge.detached.length).toBeGreaterThan(0);
+    });
+
+    it('_qwen/session/context_usage returns usage', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 56,
+        method: '_qwen/session/context_usage',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', used: 100 },
+      });
+    });
+
+    it('_qwen/session/tasks returns tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 57,
+        method: '_qwen/session/tasks',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('session methods reject unowned session', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/recap',
+        params: { sessionId: 'unknown-session' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+  });
+
+  describe('workspace methods', () => {
+    it('_qwen/workspace/tools returns tools', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/workspace/tools',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ result: { v: 1, tools: [] } });
+    });
+
+    it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/workspace/mcp/tools',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/workspace/mcp/tools returns tools', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 62,
+        method: '_qwen/workspace/mcp/tools',
+        params: { serverName: 'fs' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { serverName: 'fs', tools: [] },
+      });
+    });
+
+    it('_qwen/workspace/mcp/servers/add rejects missing name', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/workspace/mcp/servers/add',
+        params: { config: {} },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/workspace/mcp/servers/remove rejects missing name', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 64,
+        method: '_qwen/workspace/mcp/servers/remove',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/sessions/delete rejects non-array', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 65,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: 'not-array' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/sessions/delete rejects >100 ids', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      const ids = Array.from({ length: 101 }, (_, i) => `s${i}`);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 66,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: ids },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+  });
+
+  describe('auth methods', () => {
+    it('_qwen/workspace/auth/status returns empty when no registry', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: '_qwen/workspace/auth/status',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { pendingDeviceFlows: [] },
+      });
+    });
+
+    it('_qwen/workspace/auth/device_flow/start rejects without registry', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 71,
+        method: '_qwen/workspace/auth/device_flow/start',
+        params: { providerId: 'test' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32603 } });
+    });
+  });
+
+  describe('memory methods', () => {
+    it('_qwen/workspace/memory/write rejects non-string content', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 80,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 123 },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/workspace/memory/write rejects invalid scope', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 81,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'hi', scope: 'invalid' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/workspace/memory/write rejects invalid mode', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 82,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'hi', mode: 'invalid' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+  });
+
+  describe('file methods', () => {
+    it('_qwen/file/read rejects without fsFactory (503-equivalent)', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32603 } });
+    });
+
+    it('_qwen/file/read rejects missing path', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: '_qwen/file/read',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/file/write rejects missing content', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 92,
+        method: '_qwen/file/write',
+        params: { path: 'test.txt' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/file/edit rejects missing oldText/newText', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/edit',
+        params: { path: 'test.txt' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/file/glob rejects missing pattern', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 94,
+        method: '_qwen/file/glob',
+        params: {},
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
   });
 });

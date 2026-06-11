@@ -6,6 +6,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -45,6 +46,10 @@ export function DaemonWorkspaceProvider({
   );
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;
+  const capabilitiesClientRef = useRef<DaemonClient | undefined>(undefined);
+  const capabilitiesPromiseRef = useRef<
+    Promise<DaemonCapabilities> | undefined
+  >(undefined);
   const resolvedCwdRef = useRef<string | undefined>(workspaceCwd);
 
   const [capabilities, setCapabilities] = useState<
@@ -54,6 +59,25 @@ export function DaemonWorkspaceProvider({
     autoConnect ? 'connecting' : 'idle',
   );
   const [error, setError] = useState<Error | undefined>(undefined);
+  const getCapabilities = useCallback(() => {
+    if (!client) {
+      return Promise.reject(new Error('Daemon workspace client unavailable'));
+    }
+    if (capabilitiesClientRef.current !== client) {
+      capabilitiesClientRef.current = client;
+      capabilitiesPromiseRef.current = undefined;
+    }
+    if (!capabilitiesPromiseRef.current) {
+      const promise = client.capabilities().catch((error: unknown) => {
+        if (capabilitiesPromiseRef.current === promise) {
+          capabilitiesPromiseRef.current = undefined;
+        }
+        throw error;
+      });
+      capabilitiesPromiseRef.current = promise;
+    }
+    return capabilitiesPromiseRef.current;
+  }, [client]);
 
   useEffect(() => {
     if (!client) return undefined;
@@ -62,8 +86,7 @@ export function DaemonWorkspaceProvider({
     setCapabilities(undefined);
 
     let disposed = false;
-    void client
-      .capabilities()
+    void getCapabilities()
       .then((caps) => {
         if (!disposed) {
           setCapabilities(caps);
@@ -80,7 +103,7 @@ export function DaemonWorkspaceProvider({
     return () => {
       disposed = true;
     };
-  }, [client]);
+  }, [client, getCapabilities]);
 
   resolvedCwdRef.current = capabilities?.workspaceCwd ?? workspaceCwd;
 
@@ -105,6 +128,7 @@ export function DaemonWorkspaceProvider({
       status,
       error,
       capabilities,
+      getCapabilities,
       actions: workspaceActions,
     };
   }, [
@@ -115,6 +139,7 @@ export function DaemonWorkspaceProvider({
     status,
     error,
     capabilities,
+    getCapabilities,
     workspaceActions,
   ]);
 
