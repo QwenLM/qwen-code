@@ -281,8 +281,12 @@ const fakeWorkspace = {
   async restartMcpServer() {
     return { ok: true };
   },
-  async reloadEnv() {
-    return { updatedKeys: [], removedKeys: [], childReloaded: false };
+  async reload() {
+    return {
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
+      childReloaded: false,
+    };
   },
 } as unknown as DaemonWorkspaceService;
 

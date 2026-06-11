@@ -219,7 +219,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'rate_limit' &&
-      f !== 'workspace_reload_env',
+      f !== 'workspace_reload',
   ),
   'workspace_settings',
   'workspace_init',
@@ -242,7 +242,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'rate_limit',
-  'workspace_reload_env',
+  'workspace_reload',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -511,7 +511,6 @@ interface FakeBridge extends AcpSessionBridge {
   closeCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
-    opts?: import('@qwen-code/acp-bridge').CloseSessionOpts;
   }>;
   updateMetadataCalls: Array<{
     sessionId: string;
@@ -1114,12 +1113,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       removeRuntimeMcpServerCalls.push({ name, originatorClientId });
       return removeRuntimeMcpServerImpl(name, originatorClientId);
     },
-    async closeSession(sessionId, context, opts) {
-      closeCalls.push({
-        sessionId,
-        ...(context ? { context } : {}),
-        ...(opts ? { opts } : {}),
-      });
+    async closeSession(sessionId, context) {
+      closeCalls.push({ sessionId, ...(context ? { context } : {}) });
       return closeImpl(sessionId, context);
     },
     updateSessionMetadata(sessionId, metadata, context) {
@@ -1421,13 +1416,13 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_reload_env') {
-          expect(predicate({ reloadEnvAvailable: true })).toBe(true);
-          expect(predicate({ reloadEnvAvailable: false })).toBe(false);
+        if (feature === 'workspace_reload') {
+          expect(predicate({ reloadAvailable: true })).toBe(true);
+          expect(predicate({ reloadAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, {
-              reloadEnvAvailable: true,
+              reloadAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -5632,36 +5627,6 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ status: 'degraded' });
-    });
-  });
-
-  describe('session idle reaper — wire integration', () => {
-    it('deep health reflects reduced sessionCount after closeSession', async () => {
-      let count = 2;
-      const bridge = fakeBridge();
-      Object.defineProperty(bridge, 'sessionCount', { get: () => count });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-
-      const before = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(before.body.sessions).toBe(2);
-
-      count = 0;
-      const after = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(after.body.sessions).toBe(0);
-    });
-
-    it('DELETE /session/:id passes no opts (reason defaults to client_close)', async () => {
-      const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      await request(app)
-        .delete('/session/sess-1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(bridge.closeCalls).toHaveLength(1);
-      expect(bridge.closeCalls[0]?.opts).toBeUndefined();
     });
   });
 
