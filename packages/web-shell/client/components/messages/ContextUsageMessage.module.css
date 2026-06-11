@@ -1,0 +1,162 @@
+.panel {
+  display: flex;
+  width: min(100%, 720px);
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.title {
+  margin-bottom: 8px;
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.metaLine {
+  display: flex;
+  width: 100%;
+  max-width: 56ch;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.progress {
+  max-width: 56ch;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.spacer {
+  height: 8px;
+}
+
+.row,
+.detailRow,
+.subDetailRow {
+  display: grid;
+  width: 100%;
+  align-items: baseline;
+  column-gap: 0;
+}
+
+.row {
+  grid-template-columns: 2ch 24ch minmax(0, 1fr);
+}
+
+.detailRow {
+  grid-template-columns: 4ch 32ch minmax(0, 1fr);
+  padding-left: 2ch;
+}
+
+.subDetailRow {
+  grid-template-columns: 6ch 30ch minmax(0, 1fr);
+  padding-left: 4ch;
+}
+
+.symbol {
+  width: 2ch;
+}
+
+.label {
+  color: var(--text-primary);
+}
+
+.value {
+  justify-self: end;
+  color: var(--text-secondary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.detailName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent-color);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sectionTitle {
+  margin-top: 8px;
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.detailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skillBlock {
+  display: flex;
+  flex-direction: column;
+}
+
+.hint {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.detailCommand {
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent-color);
+  cursor: pointer;
+}
+
+.detailCommand:hover,
+.detailCommand:focus-visible {
+  text-decoration: underline;
+}
+
+.estimateHint {
+  margin-bottom: 8px;
+  color: var(--warning-color);
+  font-style: italic;
+}
+
+.bodyLoaded {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.accent {
+  color: var(--accent-color);
+}
+
+.secondary {
+  color: var(--text-secondary);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.success {
+  color: var(--success-color);
+}
+
+@media (max-width: 720px) {
+  .panel {
+    font-size: 12px;
+    overflow-x: auto;
+  }
+}

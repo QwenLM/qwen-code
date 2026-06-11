@@ -58,6 +58,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ChatRecordingService: MockChatRecordingService,
     uiTelemetryService: {
       getMetrics: vi.fn(),
+      getMetricsForSession: vi.fn(),
     },
   };
 });
@@ -289,6 +290,9 @@ describe('runNonInteractive', () => {
   function setupMetricsMock(overrides?: Partial<SessionMetrics>): void {
     const mockMetrics = createMockMetrics(overrides);
     vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+    vi.mocked(uiTelemetryService.getMetricsForSession).mockReturnValue(
+      mockMetrics,
+    );
   }
 
   async function* createStreamFromEvents(

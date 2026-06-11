@@ -1,0 +1,33 @@
+.message {
+  margin-bottom: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.prefix {
+  color: var(--user-color);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.body {
+  color: var(--msg-body-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.imageThumb {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 8px;
+  object-fit: contain;
+  border: 1px solid var(--border-color, #e5e7eb);
+}

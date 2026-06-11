@@ -20,12 +20,17 @@ import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { resourceFromAttributes } from '@opentelemetry/resources';
-import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import {
+  BatchSpanProcessor,
+  type ReadableSpan,
+  type Span as SdkSpan,
+  type SpanProcessor,
+} from '@opentelemetry/sdk-trace-node';
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
-import type { Config } from '../config/config.js';
+import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { SERVICE_NAME } from './constants.js';
 import { initializeMetrics } from './metrics.js';
 import {
@@ -36,7 +41,7 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { createSessionRootContext } from './tracer.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { endInteractionSpan } from './session-tracing.js';
 
@@ -104,9 +109,8 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
  * UndiciInstrumentation still creates client HTTP spans — the propagator
  * only governs whether `propagation.inject()` writes `traceparent` into
  * the outgoing request's header carrier. With this propagator installed,
- * inject is a no-op and outbound requests carry no trace headers. PR
- * #4390 review (LaZzyMan): split outbound-wire behavior out of telemetry
- * default-on.
+ * inject is a no-op and outbound requests carry no trace headers.
+ * Outbound-wire behavior is split out of telemetry default-on.
  */
 const NOOP_PROPAGATOR: TextMapPropagator = {
   inject() {},
@@ -121,6 +125,7 @@ const NOOP_PROPAGATOR: TextMapPropagator = {
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
 let telemetryShutdownPromise: Promise<void> | undefined;
+let activeMetricReader: PeriodicExportingMetricReader | undefined;
 
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
@@ -176,7 +181,24 @@ function validateUrl(url: string | undefined): string | undefined {
   }
 }
 
-export function initializeTelemetry(config: Config): void {
+class SessionIdSpanProcessor implements SpanProcessor {
+  onStart(span: SdkSpan): void {
+    try {
+      if ((span as unknown as ReadableSpan).attributes?.['session.id']) return;
+      const sessionId = getCurrentSessionId();
+      if (sessionId) {
+        span.setAttribute('session.id', sessionId);
+      }
+    } catch {
+      // OTel processor errors must not break span creation
+    }
+  }
+  onEnd(_span: ReadableSpan): void {}
+  async shutdown(): Promise<void> {}
+  async forceFlush(): Promise<void> {}
+}
+
+export function initializeTelemetry(config: TelemetryRuntimeConfig): void {
   if (telemetryInitialized || !config.getTelemetryEnabled()) {
     return;
   }
@@ -299,7 +321,7 @@ export function initializeTelemetry(config: Config): void {
             // In interactive (TUI) mode, route bridge diagnostics to the OTEL
             // debug log file so they don't break out of the Ink render area
             // via raw stderr. In non-interactive mode, leave the default sink
-            // alone so CI / scripts can still see export failures on stderr —
+            // alone so CI / scripts can still see export failures on stderr
             // the canonical diagnostic channel for batch runs.
             //
             // Caveat for interactive mode: when the user has explicitly
@@ -365,7 +387,7 @@ export function initializeTelemetry(config: Config): void {
   // that gets exported, creating an infinite feedback loop. Use WHATWG URL
   // parsing so a parsed prefix is always { origin, pathname } — never the
   // dangerous bare `"http"` fallback that startsWith would match against
-  // every HTTP URL on the wire. See PR #4390 review feedback (wenshao).
+  // every HTTP URL on the wire.
   function normalizeOtlpPrefix(
     raw: string | undefined,
   ): { origin: string; pathname: string } | undefined {
@@ -374,10 +396,9 @@ export function initializeTelemetry(config: Config): void {
     // settings.json (`"value"` → `value`). Use the SAME lenient regex as
     // `parseOtlpEndpoint` (line 109) so any endpoint the exporter accepts
     // also gets a feedback-loop guard. Asymmetric quotes (e.g. `"value'`)
-    // are almost certainly typos but `parseOtlpEndpoint` strips them too —
+    // are almost certainly typos but `parseOtlpEndpoint` strips them too;
     // mismatching here would let the exporter connect while the guard
-    // returned `undefined`, reintroducing the parasitic-span loop. See PR
-    // #4390 review feedback (wenshao).
+    // returned `undefined`, reintroducing the parasitic-span loop.
     const s = raw.trim().replace(/^["']|["']$/g, '');
     try {
       const u = new URL(s);
@@ -414,7 +435,7 @@ export function initializeTelemetry(config: Config): void {
   //   - host: prefix `https://otlp.example.com` matches `https://otlp.example.com.evil.net`
   // Comparing origin exactly + pathname with a path-boundary check avoids all
   // three. The next char after the prefix pathname must be `/`, `?`, `#`, or
-  // end-of-string. See PR #4390 review feedback (wenshao).
+  // end-of-string.
   const matchesOtlpPrefix = (origin: string, path: string): boolean => {
     for (const prefix of otlpUrlPrefixes) {
       if (origin !== prefix.origin) continue;
@@ -439,7 +460,7 @@ export function initializeTelemetry(config: Config): void {
     return path.slice(0, cut);
   };
 
-  // Outbound trace-context propagation gate (PR #4390 review, LaZzyMan):
+  // Outbound trace-context propagation gate:
   // by default, install a no-op propagator so `traceparent` does NOT get
   // written onto outbound `fetch` requests to LLM providers. Operators
   // who want server-side trace stitching (e.g. ARMS+DashScope) opt in via
@@ -459,7 +480,9 @@ export function initializeTelemetry(config: Config): void {
     // before the detectors settle (e.g. during HttpInstrumentation span creation).
     autoDetectResources: false,
     ...(textMapPropagator && { textMapPropagator }),
-    spanProcessors: spanExporter ? [new BatchSpanProcessor(spanExporter)] : [],
+    spanProcessors: spanExporter
+      ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
+      : [],
     logRecordProcessors: logExporter
       ? [new BatchLogRecordProcessor(logExporter)]
       : logToSpanProcessor
@@ -470,8 +493,7 @@ export function initializeTelemetry(config: Config): void {
       new HttpInstrumentation({
         // OTLP HTTP exporter uses node:http (patched here, not by undici).
         // Without this, every OTLP upload batch creates a parasitic client
-        // span that itself gets exported → feedback loop. See PR #4390
-        // review feedback (wenshao).
+        // span that itself gets exported → feedback loop.
         ignoreOutgoingRequestHook: (req) => {
           if (otlpUrlPrefixes.length === 0) return false;
           // Protocol must be known to compare reliably. The previous
@@ -481,8 +503,7 @@ export function initializeTelemetry(config: Config): void {
           // Now: when proto can't be determined, fail open (return false →
           // request gets instrumented). Worst case is a parasitic client
           // span for an OTLP request — observable and recoverable, vs. the
-          // unbounded feedback loop the previous default produced. See PR
-          // #4390 review feedback (wenshao).
+          // unbounded feedback loop the previous default produced.
           const proto = req.protocol
             ? String(req.protocol).replace(/:$/, '')
             : undefined;
@@ -493,8 +514,7 @@ export function initializeTelemetry(config: Config): void {
           // returns false → silent guard bypass. Currently unreachable because
           // `@opentelemetry/otlp-exporter-base` always sets `hostname`, but
           // the fallback exists and must be correct. Strip the port — IPv6
-          // literals like `"[::1]:443"` keep their bracketed host. See PR
-          // #4390 review feedback (wenshao).
+          // literals like `"[::1]:443"` keep their bracketed host.
           let host = req.hostname || '';
           if (!host && req.host) {
             const h = String(req.host);
@@ -512,8 +532,7 @@ export function initializeTelemetry(config: Config): void {
           // `normalizeOtlpPrefix` applies via `URL.origin`. Without this,
           // prefix `http://collector` (no explicit port) wouldn't match a
           // request to `http://collector:80/v1/traces` because `prefix.origin`
-          // strips `:80` while the manually built string keeps it. See PR
-          // #4390 review feedback (wenshao).
+          // strips `:80` while the manually built string keeps it.
           let origin: string;
           try {
             origin = new URL(`${proto}://${host}${portPart}`).origin;
@@ -546,6 +565,7 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    activeMetricReader = metricReader;
     const sessionId = config.getSessionId();
     setSessionContext(createSessionRootContext(sessionId), sessionId);
     setShellTracePropagation(
@@ -558,9 +578,9 @@ export function initializeTelemetry(config: Config): void {
 }
 
 /**
- * Refresh the session root context with a new session ID.
+ * Refresh the session context with a new session ID.
  * Must be called whenever the session changes (e.g. /clear, /resume)
- * so that new spans inherit the correct traceId.
+ * so that SessionIdSpanProcessor stamps spans with the correct session.id.
  */
 export function refreshSessionContext(sessionId: string): void {
   if (!telemetryInitialized) return;
@@ -625,10 +645,37 @@ export async function shutdownTelemetry(): Promise<void> {
     } finally {
       telemetryInitialized = false;
       sdk = undefined;
+      activeMetricReader = undefined;
       telemetryShutdownPromise = undefined;
       setSessionContext(undefined);
       setShellTracePropagation(false);
     }
   })();
   return telemetryShutdownPromise;
+}
+
+const FORCE_FLUSH_TIMEOUT_MS = 2_000;
+
+export async function forceFlushMetrics(): Promise<void> {
+  if (!telemetryInitialized || !activeMetricReader) return;
+  const flush = activeMetricReader.forceFlush();
+  flush.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `forceFlushMetrics timed out after ${FORCE_FLUSH_TIMEOUT_MS}ms`,
+          ),
+        ),
+      FORCE_FLUSH_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([flush, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -1,0 +1,59 @@
+{
+  "name": "@qwen-code/web-shell",
+  "version": "0.0.1-preview.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/index.js",
+    "dist/types"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.0",
+    "@codemirror/commands": "^6.7.0",
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.35.0",
+    "@tanstack/react-virtual": "^3.13.26",
+    "codemirror": "^6.0.0",
+    "katex": "^0.16.47",
+    "mermaid": "^11.15.0",
+    "react-markdown": "^9.0.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "remark-math": "^6.0.0",
+    "shiki": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@qwen-code/sdk": ">=0.1.8",
+    "@qwen-code/webui": ">=0.0.1",
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@qwen-code/sdk": "file:../sdk-typescript",
+    "@qwen-code/webui": "file:../webui",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0",
+    "vitest": "^3.2.4"
+  }
+}

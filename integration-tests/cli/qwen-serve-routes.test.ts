@@ -214,6 +214,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_preflight',
       'session_context',
       'session_supported_commands',
+      'session_tasks',
       'session_close',
       'session_metadata',
       'mcp_guardrails',
