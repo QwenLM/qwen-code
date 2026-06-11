@@ -224,8 +224,8 @@ this setting.
 >
 > Configure a fast model via `/model --fast <model>` (e.g.
 > `qwen3-coder-flash`) to make `/recap` fast and cheap. Set
-> `general.showSessionRecap` to `false` to opt out of the auto-trigger
-> while keeping the manual command available.
+> `general.showSessionRecap` to `true` to enable the auto-trigger; the
+> manual `/recap` command always works regardless of this setting.
 
 ### 1.8 Diff Viewer (`/diff`)
 
