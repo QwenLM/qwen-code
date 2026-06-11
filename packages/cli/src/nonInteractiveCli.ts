@@ -1370,8 +1370,13 @@ export async function runNonInteractive(
                       settings,
                     );
                     if (slashCommandResult.type === 'submit_prompt') {
-                      modelText = partListToText(slashCommandResult.content);
+                      // Capture onComplete BEFORE partListToText: if the latter
+                      // throws on an unexpected content shape, the throw happens
+                      // outside the try below, so the finally that fires
+                      // slashOnComplete never runs — leaving currentRun stuck at
+                      // 'implementing' until the 2h stale reclaim.
                       slashOnComplete = slashCommandResult.onComplete;
+                      modelText = partListToText(slashCommandResult.content);
                     } else if (slashCommandResult.type === 'message') {
                       // Terminal response — emit and skip model submission.
                       // Run checkCronDone() in finally so an emit failure can't

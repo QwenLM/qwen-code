@@ -198,12 +198,14 @@ async function getRepoRoot(config: Config): Promise<string> {
   if (cached) return cached;
   const resolved = (async () => {
     try {
-      const { stdout } = await execFileAsync('git', [
-        '-C',
-        cwd,
-        'rev-parse',
-        '--show-toplevel',
-      ]);
+      const { stdout } = await execFileAsync(
+        'git',
+        ['-C', cwd, 'rev-parse', '--show-toplevel'],
+        // Bound the call: a malicious/misconfigured .git/config (e.g. a
+        // blocking credential helper or core.sshCommand) must not hang the
+        // CLI indefinitely. Mirrors resolveRepoRoot() in autoImproveState.ts.
+        { timeout: 10_000 },
+      );
       return stdout.trim();
     } catch {
       // Don't permanently cache a transient git failure (uninitialized repo,
@@ -264,8 +266,13 @@ function makePendingRunRef(): AutoImproveRunRef {
     .toISOString()
     .replace(/\.\d{3}Z$/, 'Z')
     .replace(/[:.]/g, '-');
+  // Add a random suffix (matching makeLoopId): the second-precision stamp
+  // alone is not unique for two ticks starting within the same wall-clock
+  // second, which would let a stale onComplete pass markRunCompleted's
+  // expectedRunId ownership guard and clobber a newer run's state.
+  const suffix = Math.random().toString(16).slice(2, 8);
   return {
-    runId: `pending-${stamp}`,
+    runId: `pending-${stamp}-${suffix}`,
     status: 'implementing',
     startedAt: now.toISOString(),
   };
