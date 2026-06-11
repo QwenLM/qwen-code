@@ -7547,6 +7547,19 @@ describe('extractErrorMessage', () => {
     ).toBe('session not found');
   });
 
+  it('extracts provider messages from JSON-RPC error data', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: {
+          code: 'ServiceUnavailable',
+          message: '<503> model serving is throttled',
+        },
+      }),
+    ).toBe('<503> model serving is throttled');
+  });
+
   it('extracts details from Error subclasses with JSON-RPC data', () => {
     expect(
       extractErrorMessage(

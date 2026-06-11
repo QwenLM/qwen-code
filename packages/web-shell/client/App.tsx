@@ -1365,6 +1365,19 @@ export function App({
     [store],
   );
 
+  const handleBusyGoalClear = useCallback(
+    (text: string) => {
+      const goalToClear = activeGoalRef.current;
+      store.appendLocalUserMessage(text);
+      dispatchGoalCleared(goalToClear);
+      sessionActions.clearGoal().catch((error: unknown) => {
+        reportError(error, 'Failed to clear /goal');
+      });
+      return true;
+    },
+    [dispatchGoalCleared, reportError, sessionActions, store],
+  );
+
   const handleGoalSlashCommand = useCallback(
     (
       text: string,
@@ -1374,45 +1387,30 @@ export function App({
       const goalArg = text.replace(/^\/goal\b/i, '').trim();
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
-      store.appendLocalUserMessage(text);
 
       if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
-        const goalToClear = activeGoalRef.current;
         if (!sendToDaemon) {
-          dispatchGoalCleared(goalToClear);
+          store.appendLocalUserMessage(text);
+          dispatchGoalCleared(activeGoalRef.current);
           return true;
         }
-        sendPrompt(text, images, { optimisticUserMessage: false })
-          .then(() => {
-            if (activeGoalRef.current === goalToClear) {
-              dispatchGoalCleared(goalToClear);
-            }
-          })
-          .catch((error: unknown) =>
-            reportError(error, 'Failed to send /goal command'),
-          );
-        return true;
+        return handleBusyGoalClear(text);
       } else if (goalArg) {
         const optimisticGoal = { condition: goalArg, setAt: Date.now() };
+        store.appendLocalUserMessage(text);
         dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
         if (!sendToDaemon) {
           return true;
         }
         sendPrompt(text, images, { optimisticUserMessage: false }).catch(
           (error: unknown) => {
-            const currentGoal = activeGoalRef.current;
-            if (
-              currentGoal?.condition === optimisticGoal.condition &&
-              currentGoal.setAt === optimisticGoal.setAt
-            ) {
-              dispatchGoalCleared(optimisticGoal);
-            }
             reportError(error, 'Failed to send /goal command');
           },
         );
         return true;
       }
 
+      store.appendLocalUserMessage(text);
       if (sendToDaemon) {
         sendPrompt(text, images, { optimisticUserMessage: false }).catch(
           (error: unknown) =>
@@ -1421,26 +1419,14 @@ export function App({
       }
       return true;
     },
-    [dispatchGoalCleared, dispatchGoalSet, reportError, sendPrompt, store],
-  );
-
-  const handleBusyGoalClear = useCallback(
-    (text: string) => {
-      const goalToClear = activeGoalRef.current;
-      store.appendLocalUserMessage(text);
-      sessionActions
-        .clearGoal()
-        .then(() => {
-          if (activeGoalRef.current === goalToClear) {
-            dispatchGoalCleared(goalToClear);
-          }
-        })
-        .catch((error: unknown) => {
-          reportError(error, 'Failed to clear /goal');
-        });
-      return true;
-    },
-    [dispatchGoalCleared, reportError, sessionActions, store],
+    [
+      dispatchGoalCleared,
+      dispatchGoalSet,
+      handleBusyGoalClear,
+      reportError,
+      sendPrompt,
+      store,
+    ],
   );
 
   const handleSubmit = useCallback(
