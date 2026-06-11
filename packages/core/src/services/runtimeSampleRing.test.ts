@@ -59,7 +59,7 @@ describe('RuntimeSampleRing', () => {
     expect(sample.cpuPercent).toBeGreaterThanOrEqual(0);
   });
 
-  it('returns previous sample when elapsed is 0 (same ms tick)', () => {
+  it('reuses the previous cpuPercent but captures fresh memory on a same-ms tick', () => {
     const mem = {
       rss: 100,
       heapUsed: 50,
@@ -73,12 +73,39 @@ describe('RuntimeSampleRing', () => {
 
     const first = ring.record(mem);
 
-    // Same timestamp — should return copy of first sample
-    const second = ring.record(mem);
-    expect(second).toEqual(first);
+    // Same timestamp, but memory has moved. cpuPercent can't be recomputed with
+    // zero elapsed time, so it stays at the previous value — but the memory
+    // fields must reflect the fresh snapshot, since the caller reports them.
+    const grownMem = { ...mem, rss: 999, heapUsed: 777 };
+    const second = ring.record(grownMem);
 
-    // Verify it's a copy, not the same reference
+    expect(second.cpuPercent).toBe(first.cpuPercent);
+    expect(second.rss).toBe(999);
+    expect(second.heapUsed).toBe(777);
     expect(second).not.toBe(first);
+  });
+
+  it('records a sample even when the very first call lands on the same ms', () => {
+    const mem = {
+      rss: 123,
+      heapUsed: 50,
+      heapTotal: 80,
+      external: 10,
+      arrayBuffers: 0,
+    };
+
+    // Pin time to the ring's construction instant so the first record() hits the
+    // elapsed <= 0 branch with an empty buffer. The sample must still be stored,
+    // otherwise the first hard/critical dump would miss it.
+    const fixedNow = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    const localRing = new RuntimeSampleRing();
+
+    const sample = localRing.record(mem);
+
+    expect(sample.cpuPercent).toBe(0);
+    expect(sample.rss).toBe(123);
+    expect(localRing.getAll()).toHaveLength(1);
   });
 
   it('accumulates the CPU delta from a same-tick sample into the next sample', () => {
@@ -116,7 +143,9 @@ describe('RuntimeSampleRing', () => {
     // 16ms of CPU (8ms from the skipped tick + 8ms after) over 100ms = 16%,
     // normalized by core count. A regression that updates prevCpuUsage in the
     // elapsed <= 0 branch would yield only 8% / cores here.
-    const coreCount = os.cpus().length || 1;
+    // Mirror getCpuCoreCount()'s resolution order so the assertion holds
+    // regardless of which API the implementation reads.
+    const coreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
     expect(third.cpuPercent).toBeCloseTo(16 / coreCount, 2);
   });
 

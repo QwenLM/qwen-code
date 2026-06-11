@@ -34,7 +34,34 @@ export interface RuntimeSample {
 }
 
 const RING_BUFFER_SIZE = 60;
-const CPU_CORE_COUNT = os.cpus().length || 1;
+
+let cpuCoreCount: number | undefined;
+
+/**
+ * Effective CPU core count, resolved lazily and memoized.
+ *
+ * Resolved on first use (not at import time) so that test files which
+ * `vi.mock('node:os')` without a `cpus`/`availableParallelism` export don't
+ * crash at module-collection time — this module is transitively imported by
+ * `config.ts`, i.e. by almost everything.
+ *
+ * Prefers `os.availableParallelism()` (Node ≥18.14), which honors cgroup CPU
+ * quotas, so a 2-core container on a 64-core host isn't normalized by 64.
+ * Falls back to `os.cpus().length`, then to 1 if both are unavailable or throw.
+ */
+function getCpuCoreCount(): number {
+  if (cpuCoreCount === undefined) {
+    try {
+      cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+    } catch {
+      cpuCoreCount = 1;
+    }
+    if (!cpuCoreCount || cpuCoreCount < 1) {
+      cpuCoreCount = 1;
+    }
+  }
+  return cpuCoreCount;
+}
 
 /**
  * Ring buffer that holds the most recent N runtime samples.
@@ -58,40 +85,51 @@ export class RuntimeSampleRing {
     const deltaSystem = absCpu.system - this.prevCpuUsage.system;
     const cpuTotalUs = deltaUser + deltaSystem;
 
-    // When elapsed is 0 (two checks in the same ms tick), skip updating
-    // prevCpuUsage/prevSampleTime so the CPU delta accumulates into the
-    // next sample instead of being permanently lost.
+    // When elapsed is 0 (two checks in the same ms tick) the CPU delta can't be
+    // computed yet, so reuse the previous sample's cpuPercent (stale) while still
+    // capturing the fresh memory snapshot from `mem`. The sample is still pushed
+    // — so the ring is never empty after a recorded check, even on the very first
+    // call — and prevCpuUsage/prevSampleTime are left untouched so the CPU delta
+    // accumulates into the next sample instead of being permanently lost.
     if (elapsed <= 0) {
       const last = this.samples[this.samples.length - 1];
-      if (last) return { ...last };
-      return {
+      return this.push({
         ts: now,
         rss: mem.rss,
         heapUsed: mem.heapUsed,
         heapTotal: mem.heapTotal,
         external: mem.external,
-        cpuPercent: 0,
-      };
+        cpuPercent: last?.cpuPercent ?? 0,
+      });
     }
 
-    const cpuPercent = ((cpuTotalUs / (elapsed * 1000)) * 100) / CPU_CORE_COUNT;
+    // process.cpuUsage() aggregates CPU time across all cores, so normalize by
+    // the core count to keep cpuPercent within 0–100. Clamp at 0: cpuUsage() is
+    // not strictly monotonic under cgroup accounting in some containers/VMs, so a
+    // delta can come back negative.
+    const cpuPercent = Math.max(
+      0,
+      ((cpuTotalUs / (elapsed * 1000)) * 100) / getCpuCoreCount(),
+    );
 
-    const sample: RuntimeSample = {
+    this.prevCpuUsage = absCpu;
+    this.prevSampleTime = now;
+    return this.push({
       ts: now,
       rss: mem.rss,
       heapUsed: mem.heapUsed,
       heapTotal: mem.heapTotal,
       external: mem.external,
       cpuPercent: Math.round(cpuPercent * 100) / 100,
-    };
+    });
+  }
 
+  /** Append a sample to the ring, evicting the oldest if over capacity. */
+  private push(sample: RuntimeSample): RuntimeSample {
     this.samples.push(sample);
     if (this.samples.length > RING_BUFFER_SIZE) {
       this.samples.shift();
     }
-
-    this.prevCpuUsage = absCpu;
-    this.prevSampleTime = now;
     return sample;
   }
 
