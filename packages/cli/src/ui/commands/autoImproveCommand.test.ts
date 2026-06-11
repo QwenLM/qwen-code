@@ -34,6 +34,7 @@ describe('autoImproveCommand', () => {
     create: vi.fn(() => ({ id: 'job-1' })),
     list: vi.fn(() => [{ id: 'job-1' }]),
     delete: vi.fn(() => true),
+    refresh: vi.fn(() => true),
   };
 
   beforeEach(async () => {
@@ -760,6 +761,9 @@ describe('autoImproveCommand', () => {
       `tick ${active.activeLoopId}`,
     );
     expect(result).toMatchObject({ type: 'submit_prompt' });
+    // Each active tick refreshes the recurring cron job's expiry so the
+    // 3-day hard expiry can't silently reap a long-running loop.
+    expect(scheduler.refresh).toHaveBeenCalledWith('job-1');
   });
 
   it('skips ticks when stop was requested', async () => {

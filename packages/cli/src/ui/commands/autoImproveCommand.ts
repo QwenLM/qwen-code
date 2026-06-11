@@ -935,6 +935,16 @@ async function tickAutoImproveClaim(
     );
   }
 
+  // Keep the recurring cron job alive. CronScheduler hard-expires recurring
+  // jobs 3 days after creation and reaps them on tick(), which would silently
+  // kill a long-running loop. Every active tick (which fires far more often
+  // than every 3 days) pushes the expiry forward, so the job persists for the
+  // life of the loop. Done here — after confirming the loop is active and
+  // running — so a stopped/stale loop's job is still allowed to expire.
+  if (state.cronJobId && config.isCronEnabled()) {
+    config.getCronScheduler().refresh(state.cronJobId);
+  }
+
   if (isActiveAutoImproveRunRef(state.currentRun)) {
     if (isStaleAutoImproveRunRef(state.currentRun, Date.now())) {
       // The previous run is stuck: its completion write failed, or the process

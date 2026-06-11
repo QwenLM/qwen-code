@@ -132,6 +132,22 @@ export class CronScheduler {
   }
 
   /**
+   * Extends a recurring job's expiry window to THREE_DAYS_MS from now.
+   *
+   * Recurring jobs are created with a 3-day expiry and reaped by tick() once
+   * past it. Long-running consumers (e.g. the auto-improve loop) call this on
+   * each fire so a job that ticks far more often than every 3 days is never
+   * silently reaped. No-op for one-shot jobs (expiresAt stays Infinity) and
+   * unknown ids. Returns true if a recurring job's expiry was extended.
+   */
+  refresh(id: string): boolean {
+    const job = this.jobs.get(id);
+    if (!job || !job.recurring) return false;
+    job.expiresAt = Date.now() + THREE_DAYS_MS;
+    return true;
+  }
+
+  /**
    * Returns all active jobs.
    */
   list(): CronJob[] {

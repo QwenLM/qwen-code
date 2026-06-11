@@ -59,6 +59,34 @@ describe('CronScheduler', () => {
     });
   });
 
+  describe('refresh', () => {
+    it('extends a recurring job past its original 3-day expiry', () => {
+      const job = scheduler.create('*/5 * * * *', 'recurring', true);
+      const original = job.expiresAt;
+      // Advance wall clock so the refreshed window is strictly later.
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 60_000;
+        expect(scheduler.refresh(job.id)).toBe(true);
+      } finally {
+        Date.now = realNow;
+      }
+      const refreshed = scheduler.list().find((j) => j.id === job.id)!;
+      expect(refreshed.expiresAt).toBeGreaterThan(original);
+    });
+
+    it('is a no-op for one-shot jobs', () => {
+      const job = scheduler.create('*/1 * * * *', 'once', false);
+      expect(scheduler.refresh(job.id)).toBe(false);
+      const after = scheduler.list().find((j) => j.id === job.id)!;
+      expect(after.expiresAt).toBe(Infinity);
+    });
+
+    it('returns false for a non-existent job', () => {
+      expect(scheduler.refresh('nonexistent')).toBe(false);
+    });
+  });
+
   describe('list', () => {
     it('returns empty array when no jobs', () => {
       expect(scheduler.list()).toEqual([]);
