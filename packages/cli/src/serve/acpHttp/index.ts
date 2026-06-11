@@ -32,6 +32,36 @@ export const ACP_SESSION_HEADER = 'acp-session-id';
  */
 const CONN_GRACE_MS = 10_000;
 
+const WS_EXEMPT_METHODS = new Set([
+  '_qwen/session/heartbeat',
+  '_qwen/session/update_metadata',
+]);
+
+const WS_READ_METHODS = new Set([
+  'session/list',
+  '_qwen/session/context',
+  '_qwen/session/supported_commands',
+  '_qwen/session/context_usage',
+  '_qwen/session/tasks',
+  '_qwen/workspace/mcp',
+  '_qwen/workspace/skills',
+  '_qwen/workspace/providers',
+  '_qwen/workspace/env',
+  '_qwen/workspace/preflight',
+  '_qwen/workspace/tools',
+  '_qwen/workspace/mcp/tools',
+  '_qwen/workspace/agents/list',
+  '_qwen/workspace/agents/get',
+  '_qwen/workspace/memory',
+  '_qwen/workspace/auth/status',
+  '_qwen/workspace/auth/device_flow/get',
+  '_qwen/file/read',
+  '_qwen/file/read_bytes',
+  '_qwen/file/stat',
+  '_qwen/file/list',
+  '_qwen/file/glob',
+]);
+
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
   workspace: DaemonWorkspaceService;
@@ -467,7 +497,12 @@ export function mountAcpHttp(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let connRef: any;
         let messageQueue = Promise.resolve();
-        const wsKey = socket.remoteAddress ?? 'ws-unknown';
+        const rawAddr =
+          (socket as unknown as { remoteAddress?: string }).remoteAddress ??
+          'ws-unknown';
+        const wsKey = rawAddr.startsWith('::ffff:')
+          ? rawAddr.slice(7)
+          : rawAddr;
 
         ws.on('error', (err) => {
           writeStderrLine(
@@ -616,9 +651,14 @@ export function mountAcpHttp(
             ];
             if (typeof sid === 'string' && conn.ownsSession(sid)) {
               const binding = conn.sessions.get(sid);
-              if (binding && !binding.stream) {
+              if (
+                binding &&
+                !binding.stream &&
+                conn.connStream &&
+                !conn.connStream.isClosed
+              ) {
                 const ac = new AbortController();
-                conn.attachSessionStream(sid, conn.connStream!, ac);
+                conn.attachSessionStream(sid, conn.connStream, ac);
                 const myAbort = ac;
                 const cleanupSession = () => {
                   const b = conn.sessions.get(sid);
@@ -638,36 +678,48 @@ export function mountAcpHttp(
             }
           }
 
-          // Rate limit: classify by method name, matching REST tiers.
           if (opts.checkRate && isRequest(message)) {
             const m = message.method;
-            const tier: RateLimitTier =
-              m === 'session/prompt' || m === '_qwen/session/prompt'
-                ? 'prompt'
-                : m.startsWith('session/') || m.startsWith('_qwen/session/')
-                  ? 'read'
-                  : 'mutation';
-            if (!opts.checkRate(wsKey, tier)) {
-              ws.send(
-                JSON.stringify(
-                  rpcError(
-                    message.id,
-                    RPC.INTERNAL_ERROR,
-                    'Rate limit exceeded',
+            if (WS_EXEMPT_METHODS.has(m)) {
+              // Heartbeat + metadata update: exempt from rate limiting
+              // (mirrors REST resolveTier returning null for heartbeat)
+            } else {
+              const tier: RateLimitTier =
+                m === 'session/prompt' || m === '_qwen/session/prompt'
+                  ? 'prompt'
+                  : WS_READ_METHODS.has(m)
+                    ? 'read'
+                    : 'mutation';
+              if (!opts.checkRate(wsKey, tier)) {
+                ws.send(
+                  JSON.stringify(
+                    rpcError(
+                      message.id,
+                      RPC.INTERNAL_ERROR,
+                      'Rate limit exceeded',
+                    ),
                   ),
-                ),
-              );
-              return;
+                );
+                return;
+              }
             }
           }
 
-          await dispatcher
+          // Prompt is long-running (minutes); awaiting it would block
+          // permission votes and cancel requests queued behind it → deadlock.
+          // Fire-and-forget so the message queue stays unblocked.
+          const isPrompt =
+            isRequest(message) &&
+            (message.method === 'session/prompt' ||
+              message.method === '_qwen/session/prompt');
+          const dispatchP = dispatcher
             .handle(conn, message, undefined, fromLoopback)
             .catch((err: unknown) => {
               writeStderrLine(
                 `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
               );
             });
+          if (!isPrompt) await dispatchP;
         }
       });
     };

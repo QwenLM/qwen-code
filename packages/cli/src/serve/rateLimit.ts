@@ -290,7 +290,13 @@ export function createRateLimiter(
     const now = Date.now();
     let tierMap = buckets.get(key);
     if (!tierMap) {
-      if (buckets.size >= MAX_BUCKETS) return true;
+      if (buckets.size >= MAX_BUCKETS) {
+        config.onError?.(
+          new Error(`rate limit bucket overflow: ${buckets.size} keys`),
+          `tryConsume:${tier}`,
+        );
+        return true;
+      }
       tierMap = new Map();
       buckets.set(key, tierMap);
     }

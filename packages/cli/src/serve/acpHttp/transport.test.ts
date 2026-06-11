@@ -2072,10 +2072,10 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
-  it('rejects WS upgrade with non-loopback Host header', async () => {
+  it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);
-    // The Host header will be 127.0.0.1:PORT which is allowed
+    // The Host header will be 127.0.0.1:PORT which is in the allowlist
     expect(result.code).toBe(101);
   });
 
