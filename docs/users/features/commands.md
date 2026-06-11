@@ -18,19 +18,20 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command     | Description                                               | Usage Examples                                                |
-| ----------- | --------------------------------------------------------- | ------------------------------------------------------------- |
-| `/init`     | Analyze current directory and create initial context file | `/init`                                                       |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                                                    |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                                                   |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                                                     |
-| `/recap`    | Generate a one-line session recap now                     | `/recap`                                                      |
-| `/restore`  | Restore a tool call to state before it was suggested      | `/restore` (list) or `/restore <ID>`                          |
-| `/delete`   | Delete a previous session                                 | `/delete`                                                     |
-| `/branch`   | Fork the current conversation into a new session          | `/branch` or `/fork`                                          |
-| `/rewind`   | Rewind conversation to a previous turn                    | `/rewind` or `/rollback`                                      |
-| `/export`   | Export session history to file                            | `/export html`, `/export md`, `/export json`, `/export jsonl` |
-| `/rename`   | Rename or tag the current session                         | `/rename My Feature` or `/tag`                                |
+| Command     | Description                                                  | Usage Examples                                                |
+| ----------- | ------------------------------------------------------------ | ------------------------------------------------------------- |
+| `/init`     | Analyze current directory and create initial context file    | `/init`                                                       |
+| `/summary`  | Generate project summary based on conversation history       | `/summary`                                                    |
+| `/compress` | Replace chat history with summary to save Tokens             | `/compress`                                                   |
+| `/resume`   | Resume a previous conversation session                       | `/resume`                                                     |
+| `/recap`    | Generate a one-line session recap now                        | `/recap`                                                      |
+| `/restore`  | Restore a tool call to state before it was suggested         | `/restore` (list) or `/restore <ID>`                          |
+| `/delete`   | Delete a previous session                                    | `/delete`                                                     |
+| `/branch`   | Fork the current conversation into a new session             | `/branch`                                                     |
+| `/fork`     | Spawn a background agent that inherits the full conversation | `/fork <directive>`                                           |
+| `/rewind`   | Rewind conversation to a previous turn                       | `/rewind` or `/rollback`                                      |
+| `/export`   | Export session history to file                               | `/export html`, `/export md`, `/export json`, `/export jsonl` |
+| `/rename`   | Rename or tag the current session                            | `/rename My Feature` or `/tag`                                |
 
 ### 1.2 Interface and Workspace Control
 
