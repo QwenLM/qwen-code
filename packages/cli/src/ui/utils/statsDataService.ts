@@ -248,7 +248,7 @@ export async function loadStatsData(
   range: TimeRange,
   currentSession?: UsageSummaryRecord,
 ): Promise<StatsData> {
-  const persisted = await loadUsageHistory();
+  const persisted = await loadUsageHistory(currentSession?.sessionId);
   let records = persisted;
   if (currentSession) {
     records = persisted.filter((r) => r.sessionId !== currentSession.sessionId);
