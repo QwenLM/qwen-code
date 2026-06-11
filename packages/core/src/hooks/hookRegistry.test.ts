@@ -927,7 +927,25 @@ describe('HookRegistry', () => {
       // Same identity, different source path (Session + agentScope) — must
       // NOT be deduped against the user-source entry.
       registry.addAgentHooks(userHooks, 'agent:test:def');
-      expect(registry.getAllHooks()).toHaveLength(2);
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(2);
+      // Assert the scope tag itself participates in the dedup key, not just
+      // the count. A regression that drops `agentScope` from the dedup
+      // check would still produce 2 entries by ordering luck — this
+      // assertion catches that.
+      expect(
+        after.some(
+          (e) =>
+            e.source === HooksConfigSource.User && e.agentScope === undefined,
+        ),
+      ).toBe(true);
+      expect(
+        after.some(
+          (e) =>
+            e.source === HooksConfigSource.Session &&
+            e.agentScope === 'agent:test:def',
+        ),
+      ).toBe(true);
     });
 
     it('two concurrent agents each keep their own copy of an identical hook', async () => {

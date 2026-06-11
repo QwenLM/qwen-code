@@ -839,12 +839,26 @@ export class SubagentManager {
     // override spec rather than the session one.
     if (hasAgentMcpServers && config.mcpServers) {
       const subagentRegistry = subagentContext.getToolRegistry();
-      for (const serverName of Object.keys(config.mcpServers)) {
-        try {
-          await subagentRegistry.discoverToolsForServer(serverName);
-        } catch (error) {
+      const serverNames = Object.keys(config.mcpServers);
+      // Parallel discovery: one misbehaving server (e.g. a stdio command
+      // that hangs at startup) shouldn't serialise behind the others and
+      // delay the subagent spawn by the sum of every per-server timeout.
+      // Each call still carries the MCP layer's own per-server connect
+      // timeout (stdio default 30s, remote default 5s, per-spec override
+      // via `discoveryTimeoutMs`); `allSettled` only removes the
+      // serialisation between siblings. Rejections are logged-and-dropped
+      // so a single bad server doesn't block the others' tools from
+      // landing in the subagent's registry.
+      const results = await Promise.allSettled(
+        serverNames.map((name) =>
+          subagentRegistry.discoverToolsForServer(name),
+        ),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === 'rejected') {
           debugLogger.warn(
-            `Failed to discover per-agent MCP server "${serverName}" for subagent "${config.name}": ${error instanceof Error ? error.message : String(error)}`,
+            `Failed to discover per-agent MCP server "${serverNames[i]}" for subagent "${config.name}": ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
           );
         }
       }

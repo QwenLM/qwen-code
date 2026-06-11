@@ -142,7 +142,12 @@ export function parseAgentMcpServers(
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  const result: Record<string, unknown> = {};
+  // `Object.create(null)` so a YAML key of literal `__proto__` lands as a
+  // plain own property (instead of triggering the `__proto__` setter on
+  // `Object.prototype` and silently mutating the result's prototype chain).
+  // Matches the null-prototype guarantee `yaml-parser.ts:stripNullValues`
+  // already enforces on the input record we receive from yaml.parse.
+  const result = Object.create(null) as Record<string, unknown>;
   for (const [name, spec] of Object.entries(record)) {
     if (spec !== null && typeof spec === 'object' && !Array.isArray(spec)) {
       result[name] = spec;
@@ -172,7 +177,8 @@ export function parseAgentHooks(
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  const result: Record<string, unknown> = {};
+  // See `parseAgentMcpServers` for why this uses a null-prototype object.
+  const result = Object.create(null) as Record<string, unknown>;
   for (const [eventName, matchers] of Object.entries(record)) {
     if (Array.isArray(matchers)) {
       result[eventName] = matchers;
