@@ -317,7 +317,7 @@ jobs:
           exit "$EXIT_CODE"
 
       - name: 'Read verdict from skill output'
-        if: always()
+        if: 'always()'
         id: 'capture'
         env:
           RUN_OUTCOME: '${{ steps.run.outcome }}'
@@ -383,14 +383,14 @@ jobs:
           fi
 
       - name: 'Checkout base branch'
-        if: steps.pr_state.outputs.should_review == 'true'
+        if: "steps.pr_state.outputs.should_review == 'true'"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
 
       - name: 'Run review'
-        if: steps.pr_state.outputs.should_review == 'true'
+        if: "steps.pr_state.outputs.should_review == 'true'"
         id: 'run'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
@@ -548,7 +548,7 @@ jobs:
           fi
 
       - name: 'Upload tmux results'
-        if: always()
+        if: 'always()'
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
@@ -576,7 +576,7 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
 
       - name: 'Download tmux artifact'
-        if: needs.tmux-testing.result == 'success'
+        if: "needs.tmux-testing.result == 'success'"
         uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # v4.3.0
         with:
           name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
@@ -614,7 +614,7 @@ jobs:
           prompt: '/approval-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
 
       - name: 'Read verdict from skill output'
-        if: always()
+        if: 'always()'
         run: |
           VERDICT_FILE="/tmp/triage-results/approval-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
