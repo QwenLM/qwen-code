@@ -65,6 +65,7 @@
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
+    "proper-lockfile": "^4.1.2",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
     "strip-ansi": "^7.1.0",
@@ -72,7 +73,8 @@
     "undici": "^6.22.0",
     "uuid": "^9.0.1",
     "web-tree-sitter": "^0.24.7",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "yaml": "^2.8.1"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

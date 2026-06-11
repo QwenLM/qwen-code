@@ -154,4 +154,88 @@ describe('RewindSelector', () => {
     expect(lastFrame()).toContain('› #2 second prompt');
     expect(lastFrame()).not.toContain('Restore conversation only');
   });
+
+  it('falls back to conversation-only options when diff stats fail', async () => {
+    vi.spyOn(fileHistoryService, 'getDiffStats').mockRejectedValue(
+      new Error('diff unavailable'),
+    );
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={true}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    pressKey({ name: 'return' });
+    await flush();
+
+    expect(fileHistoryService.getDiffStats).toHaveBeenCalledWith('prompt-2');
+    expect(lastFrame()).toContain('Restore conversation only');
+    expect(lastFrame()).toContain('Never mind');
+    expect(lastFrame()).toContain('File restore is unavailable for this turn');
+    expect(lastFrame()).not.toContain('Restore code and conversation');
+    expect(lastFrame()).not.toContain('Restore code only');
+  });
+
+  it('does not request diff stats when the selected turn has no prompt id', async () => {
+    vi.spyOn(fileHistoryService, 'getDiffStats').mockResolvedValue({
+      filesChanged: ['src/foo.ts'],
+      insertions: 2,
+      deletions: 0,
+    });
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={true}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    pressKey({ name: 'return' });
+    await flush();
+
+    expect(fileHistoryService.getDiffStats).not.toHaveBeenCalled();
+    expect(lastFrame()).toContain('Restore conversation only');
+    expect(lastFrame()).toContain('Never mind');
+    expect(lastFrame()).toContain('File restore is unavailable for this turn');
+    expect(lastFrame()).not.toContain('Restore code and conversation');
+    expect(lastFrame()).not.toContain('Restore code only');
+  });
+
+  it('confirms a conversation-only rewind when checkpointing is disabled', () => {
+    const onRewind = vi.fn();
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        onRewind={onRewind}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={false}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    pressKey({ name: 'return' });
+
+    expect(lastFrame()).toContain(
+      'This will remove all conversation after this turn.',
+    );
+
+    pressKey({ sequence: 'y' });
+
+    expect(onRewind).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 2 }),
+      'conversation',
+    );
+  });
 });

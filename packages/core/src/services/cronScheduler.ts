@@ -115,6 +115,8 @@ export class CronScheduler {
       recurring,
       createdAt: now,
       expiresAt: recurring ? now + THREE_DAYS_MS : Infinity,
+      // Prevent the scheduler from firing during the creation minute
+      lastFiredAt: now - (now % 60_000),
       jitterMs,
     };
 

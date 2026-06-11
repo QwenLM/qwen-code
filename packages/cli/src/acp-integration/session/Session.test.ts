@@ -45,6 +45,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
+    generatePromptSuggestion: vi.fn(),
+    logPromptSuggestion: vi.fn(),
   };
 });
 
@@ -58,22 +60,6 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
-
-// Partial-mock `@qwen-code/qwen-code-core` so the daemon follow-up
-// suggestion tests below can spy on `generatePromptSuggestion` /
-// `logPromptSuggestion` without spinning up a real LLM client. Other
-// existing tests still get the real `CompressionStatus`, `ApprovalMode`,
-// `AuthType`, etc. via the spread.
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual = await vi.importActual<
-    typeof import('@qwen-code/qwen-code-core')
-  >('@qwen-code/qwen-code-core');
-  return {
-    ...actual,
-    generatePromptSuggestion: vi.fn(),
-    logPromptSuggestion: vi.fn(),
-  };
-});
 
 function chatRecord(overrides: Record<string, unknown>): ChatRecord {
   return {
@@ -2575,6 +2561,136 @@ describe('Session', () => {
         expect(drainCalls).toHaveLength(1);
       });
 
+      it('latches mid-turn drain off after repeated timeouts when the client never responds', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // A non-conforming client that silently drops unknown methods: the
+        // drain request never settles. The turn must not hang on it.
+        mockClient.extMethod = vi.fn().mockReturnValue(new Promise(() => {}));
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        // Four prompts, each with one tool batch. The first three time out
+        // (consecutive-strike budget), the fourth must skip the drain.
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+
+        // Three consecutive timeouts trip the latch, so the never-answered
+        // extMethod is attempted on the first three tool batches only.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(3);
+      }, 20_000);
+
+      it('resets the timeout strike count when a drain succeeds', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // Timeout, success, then timeouts: the success must reset the strike
+        // count, so the latch needs three NEW consecutive timeouts to trip.
+        mockClient.extMethod = vi
+          .fn()
+          .mockReturnValueOnce(new Promise(() => {}))
+          .mockResolvedValueOnce({ messages: [] })
+          .mockReturnValue(new Promise(() => {}));
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'c',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]);
+        const streamMock = vi.fn();
+        for (let i = 0; i < 5; i++) {
+          streamMock
+            .mockResolvedValueOnce(toolCallStream())
+            .mockResolvedValueOnce(createEmptyStream());
+        }
+        mockChat.sendMessageStream = streamMock;
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        for (let i = 0; i < 5; i++) {
+          await session.prompt(prompt);
+        }
+
+        // Strikes: timeout(1), success(reset to 0), timeout(1), timeout(2),
+        // timeout(3 -> latch). All five batches attempt the drain; without
+        // the reset the latch would trip on the fourth batch and the fifth
+        // attempt would be skipped.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(5);
+      }, 30_000);
+
       it('keeps mid-turn drain enabled after a transient error', async () => {
         const tool = {
           name: 'read_file',
@@ -3309,6 +3425,78 @@ describe('Session', () => {
         .mock.calls[0][0].options as Array<{ kind: string }>;
       expect(options.some((option) => option.kind === 'allow_always')).toBe(
         false,
+      );
+    });
+
+    it('emits terminalSequence returned by permission notification hooks over ACP', async () => {
+      const notificationHookSpy = vi
+        .spyOn(core, 'fireNotificationHook')
+        .mockResolvedValue({ terminalSequence: '\x07' });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { path: '/tmp/file.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Need permission',
+          prompt: 'Allow?',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Inspect file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-terminal-sequence',
+                  name: 'read_file',
+                  args: { path: '/tmp/file.txt' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        notificationHookSpy.mockRestore();
+      }
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/terminal-sequence',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          terminalSequence: '\x07',
+        },
       );
     });
 

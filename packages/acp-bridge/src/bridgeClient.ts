@@ -460,9 +460,11 @@ export class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * Handle child->bridge ACP `extNotification` calls. Three methods are
+   * Handle child->bridge ACP `extNotification` calls. Five methods are
    * recognized — `qwen/notify/session/model-update`,
-   * `qwen/notify/session/prompt-suggestion` (followup assist), and
+   * `qwen/notify/session/mode-update`,
+   * `qwen/notify/session/prompt-suggestion` (followup assist),
+   * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently
    * for forward-compat.
@@ -503,6 +505,15 @@ export class BridgeClient implements Client {
       });
       return;
     }
+    if (method === 'qwen/notify/session/terminal-sequence') {
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string') return;
+      const { v: _v, sessionId: _sid, ...rest } = params;
+      void _v;
+      void _sid;
+      this.publishExtNotification(sessionId, 'terminal_sequence', rest);
+      return;
+    }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
@@ -524,10 +535,18 @@ export class BridgeClient implements Client {
     void _v;
     void _sid;
     void _kind;
+    this.publishExtNotification(sessionId, type, rest);
+  }
+
+  private publishExtNotification(
+    sessionId: string,
+    type: string,
+    data: Record<string, unknown>,
+  ): void {
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
-      data: rest,
+      data,
       ...(entry?.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),
