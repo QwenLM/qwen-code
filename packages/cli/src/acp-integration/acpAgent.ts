@@ -5550,8 +5550,9 @@ class QwenAgent implements Agent {
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
                 const cfg = s.getConfig();
+                let sessionPath: string | undefined;
                 try {
-                  const sessionPath = cfg.getOutputLanguageFilePath();
+                  sessionPath = cfg.getOutputLanguageFilePath();
                   if (sessionPath && sessionPath !== writtenPath) {
                     updateOutputLanguageFile(settingValue, sessionPath);
                   }
