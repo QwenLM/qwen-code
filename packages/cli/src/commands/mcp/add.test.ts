@@ -63,7 +63,7 @@ describe('mcp add command', () => {
     mockSetValue = vi.fn();
     mockWriteStderrLine.mockClear();
     mockedLoadSettings.mockReturnValue({
-      forScope: () => ({ settings: {} }),
+      forScope: () => ({ settings: {}, originalSettings: {} }),
       setValue: mockSetValue,
       workspace: { path: '/path/to/project' },
       user: { path: '/home/user' },
@@ -175,7 +175,7 @@ describe('mcp add command', () => {
     const setupMocks = (cwd: string, workspacePath: string) => {
       vi.spyOn(process, 'cwd').mockReturnValue(cwd);
       mockedLoadSettings.mockReturnValue({
-        forScope: () => ({ settings: {} }),
+        forScope: () => ({ settings: {}, originalSettings: {} }),
         setValue: mockSetValue,
         workspace: { path: workspacePath },
         user: { path: '/home/user' },
@@ -325,15 +325,17 @@ describe('mcp add command', () => {
     const updatedArgs = ['new'];
 
     beforeEach(() => {
+      const serverData = {
+        mcpServers: {
+          [serverName]: {
+            command: initialCommand,
+          },
+        },
+      };
       mockedLoadSettings.mockReturnValue({
         forScope: () => ({
-          settings: {
-            mcpServers: {
-              [serverName]: {
-                command: initialCommand,
-              },
-            },
-          },
+          settings: serverData,
+          originalSettings: serverData,
         }),
         setValue: mockSetValue,
         workspace: { path: '/path/to/project' },

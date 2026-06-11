@@ -67,7 +67,12 @@ describe('mcp remove command', () => {
       },
     };
     mockedLoadSettings.mockReturnValue({
-      forScope: () => ({ settings: mockSettings }),
+      workspace: { path: '/home/user/project' },
+      user: { path: '/home/user' },
+      forScope: () => ({
+        settings: mockSettings,
+        originalSettings: mockSettings,
+      }),
       setValue: mockSetValue,
     });
     mockWriteStdoutLine.mockClear();

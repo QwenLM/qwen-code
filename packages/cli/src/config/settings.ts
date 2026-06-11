@@ -470,8 +470,20 @@ export class LoadedSettings {
       value = stripRuntimeSnapshotPrefix(value);
     }
     const settingsFile = this.forScope(scope);
-    setNestedPropertySafe(settingsFile.settings, key, value);
+    // Write the raw value to originalSettings (preserves ${VAR} tokens for
+    // settings like mcpServers that may contain env-var references).
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    // Write the env-resolved version to .settings so that consumers of
+    // settings.merged see actual values, not literal ${VAR} strings.
+    const resolved = resolveEnvVarsInObject(
+      { [key]: value } as Settings,
+      getHomeEnvFallbackVars(),
+    );
+    setNestedPropertySafe(
+      settingsFile.settings,
+      key,
+      (resolved as Record<string, unknown>)[key],
+    );
     this._merged = this.computeMergedSettings();
     const replacePath = key === 'mcpServers' ? key.split('.') : [];
     saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
