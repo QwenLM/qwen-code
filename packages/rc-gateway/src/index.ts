@@ -85,6 +85,15 @@ export {
   type ToolCallContext,
 } from './policy/evaluator.js';
 export { PolicyEnforcer } from './policy/enforcer.js';
+export {
+  QuotaStore,
+  FileQuotaWal,
+  MemoryQuotaWal,
+  type QuotaLimit,
+  type QuotaState,
+  type QuotaRecord,
+  type QuotaWal,
+} from './policy/quotas.js';
 export { SnoozeStore, type SnoozeState } from './routing/snooze.js';
 export {
   WorkingDeviceTracker,
