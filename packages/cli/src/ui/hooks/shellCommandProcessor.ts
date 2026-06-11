@@ -27,6 +27,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { SHELL_COMMAND_NAME } from '../constants.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import crypto from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -36,6 +37,10 @@ export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const MAX_OUTPUT_LENGTH = 10000;
 const debugLogger = createDebugLogger('SHELL_COMMAND_PROCESSOR');
 
+function copyString(value: string): string {
+  return Buffer.from(value).toString('utf8');
+}
+
 function addShellCommandToGeminiHistory(
   geminiClient: GeminiClient,
   rawQuery: string,
@@ -43,7 +48,8 @@ function addShellCommandToGeminiHistory(
 ) {
   const modelContent =
     resultText.length > MAX_OUTPUT_LENGTH
-      ? resultText.substring(0, MAX_OUTPUT_LENGTH) + '\n... (truncated)'
+      ? copyString(resultText.substring(0, MAX_OUTPUT_LENGTH)) +
+        '\n... (truncated)'
       : resultText;
 
   geminiClient.addHistory({
