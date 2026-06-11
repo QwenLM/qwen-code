@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { QuotaStore, MemoryQuotaWal, type QuotaLimit } from './quotas.js';
+import {
+  QuotaStore,
+  MemoryQuotaWal,
+  quotaLimitsFromPolicy,
+  type QuotaLimit,
+} from './quotas.js';
+import type { Policy } from './loader.js';
 
 /** limitsFor over a fixed map; unknown ids → undefined (untracked). */
 const limitsFrom =
@@ -147,5 +153,88 @@ describe('QuotaStore compaction', () => {
       limitsFrom({ a: { count: 100, windowSec: 600 } }),
     );
     expect(reloaded.remaining('a', T0 + 3)).toBe(97);
+  });
+});
+
+describe('quotaLimitsFromPolicy', () => {
+  const policy = (rules: Policy['rules']): Policy => ({
+    defaults: { action: 'prompt', requireScope: 'approve' },
+    rules,
+  });
+
+  it('maps id → maxPerWindow, skipping id-less and non-quota rules', () => {
+    const m = quotaLimitsFromPolicy(
+      policy([
+        {
+          id: 'q',
+          match: { tool: 'bash' },
+          action: 'allow',
+          maxPerWindow: { count: 2, windowSec: 60 },
+        },
+        { id: 'plain', match: { tool: 'git' }, action: 'allow' },
+        {
+          match: { tool: 'rm' },
+          action: 'deny',
+          maxPerWindow: { count: 1, windowSec: 10 },
+        },
+      ]),
+    );
+    expect([...m.keys()]).toEqual(['q']);
+    expect(m.get('q')).toEqual({ count: 2, windowSec: 60 });
+  });
+
+  it('first id wins on a (defensive) duplicate', () => {
+    const m = quotaLimitsFromPolicy(
+      policy([
+        {
+          id: 'q',
+          match: { tool: 'a' },
+          action: 'allow',
+          maxPerWindow: { count: 1, windowSec: 1 },
+        },
+        {
+          id: 'q',
+          match: { tool: 'b' },
+          action: 'allow',
+          maxPerWindow: { count: 9, windowSec: 9 },
+        },
+      ]),
+    );
+    expect(m.get('q')).toEqual({ count: 1, windowSec: 1 });
+  });
+
+  it('CONTRACT: a QuotaStore whose limitsFor closes over a Map reflects a later in-place mutation (the cli hot-reload rebuild)', async () => {
+    // This pins the mechanism cli.ts relies on: rebuild limits by mutating the
+    // SAME map the store's limitsFor closure captured at boot.
+    const limits = new Map<string, QuotaLimit>();
+    const store = await QuotaStore.create(new MemoryQuotaWal(), (id) =>
+      limits.get(id),
+    );
+    // Initially untracked → no limit.
+    expect(store.state('q', T0)).toBe('untracked');
+    expect(store.remaining('q', T0)).toBeUndefined();
+
+    // Simulate a reload that adds a quota for 'q' by mutating in place.
+    const next = quotaLimitsFromPolicy({
+      defaults: { action: 'prompt', requireScope: 'approve' },
+      rules: [
+        {
+          id: 'q',
+          match: { tool: 'bash' },
+          action: 'allow',
+          maxPerWindow: { count: 2, windowSec: 60 },
+        },
+      ],
+    });
+    limits.clear();
+    for (const [k, v] of next) limits.set(k, v);
+
+    // The SAME store now sees the new limit without being rebuilt.
+    expect(store.state('q', T0)).toBe('room');
+    expect(store.remaining('q', T0)).toBe(2);
+
+    // A subsequent reload that drops the rule → untracked again.
+    limits.clear();
+    expect(store.state('q', T0)).toBe('untracked');
   });
 });

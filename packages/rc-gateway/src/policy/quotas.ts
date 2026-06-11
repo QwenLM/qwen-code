@@ -283,3 +283,30 @@ export class FileQuotaWal implements QuotaWal {
     }
   }
 }
+
+/**
+ * Build the per-rule quota limits map from a policy: `rule.id → maxPerWindow`
+ * for every rule that has BOTH (id-less rules can't be tracked; rules without
+ * `maxPerWindow` aren't rate-limited). First id wins on a duplicate (the loader
+ * already rejects duplicate ids, so this is just defensive). PURE.
+ *
+ * Used by BOTH the boot path and the hot-reload path so they construct limits
+ * identically (no drift). On reload the caller rebuilds the SAME map IN PLACE
+ * (`clear()` + copy) so the `limitsFor` closure a {@link QuotaStore} captured at
+ * boot reflects the new policy without reconstructing the store.
+ */
+export function quotaLimitsFromPolicy(
+  policy: import('./loader.js').Policy,
+): Map<string, QuotaLimit> {
+  const limits = new Map<string, QuotaLimit>();
+  for (const r of policy.rules) {
+    if (
+      r.id !== undefined &&
+      r.maxPerWindow !== undefined &&
+      !limits.has(r.id)
+    ) {
+      limits.set(r.id, r.maxPerWindow);
+    }
+  }
+  return limits;
+}

@@ -98,11 +98,16 @@ export {
   QuotaStore,
   FileQuotaWal,
   MemoryQuotaWal,
+  quotaLimitsFromPolicy,
   type QuotaLimit,
   type QuotaState,
   type QuotaRecord,
   type QuotaWal,
 } from './policy/quotas.js';
+export {
+  PolicyReloader,
+  type PolicyReloaderOptions,
+} from './policy/reloader.js';
 export { SnoozeStore, type SnoozeState } from './routing/snooze.js';
 export {
   WorkingDeviceTracker,
