@@ -3248,7 +3248,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           openai: [
             {
               id: 'deepseek-chat',
-              baseUrl: 'https://api.deepseek.com',
+              baseUrl: 'https://user:sk-provider@api.deepseek.com/v1',
               envKey: 'DEEPSEEK_API_KEY',
             },
             {
@@ -3270,19 +3270,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     }) as AgentLike;
 
-    await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual({
+    const providers = await agent.extMethod('qwen/providers/list', {});
+    expect(providers).toEqual({
       providers: [
         expect.objectContaining({
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
-            baseUrl: 'https://api.deepseek.com',
+            baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
           },
         }),
       ],
     });
+    expect(JSON.stringify(providers)).not.toContain('sk-provider');
 
     mockConnectionState.resolve();
     await agentPromise;

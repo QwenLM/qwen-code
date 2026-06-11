@@ -3088,7 +3088,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       });
       switch (outcome.kind) {
         case 'resolved':
-        case 'recorded':
+        case 'recorded': // consensus-policy intermediate vote
           return true;
         case 'already_resolved':
           // Mediator already emitted `permission_already_resolved`.

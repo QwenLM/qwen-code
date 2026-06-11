@@ -1499,7 +1499,7 @@ function readExistingProviderConfig(
 
   return {
     protocol,
-    baseUrl,
+    baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
