@@ -112,11 +112,12 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
           if (tc.request.callId === toolCallId && tc.status === 'executing') {
             const executingTc = tc as TrackedExecutingToolCall;
-            return { ...executingTc, liveOutput: outputChunk };
+            return { ...executingTc, liveOutput: compactOutput };
           }
           return tc;
         }),

@@ -7,7 +7,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import {
   useReactToolScheduler,
   mapToDisplay,
@@ -509,6 +509,66 @@ describe('useReactToolScheduler', () => {
       }),
     });
     expect(result.current[0]).toEqual([]);
+  });
+
+  it('compacts live output before storing it in React state', async () => {
+    vi.useRealTimers();
+    const longOutput = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+    let resolveExecution!: (result: ToolResult) => void;
+    const streamingTool = new MockTool({
+      name: 'streamTool',
+      displayName: 'Stream Tool',
+      canUpdateOutput: true,
+      execute: vi.fn((_params, _signal, updateOutput) => {
+        updateOutput?.(longOutput);
+        return new Promise<ToolResult>((resolve) => {
+          resolveExecution = resolve;
+        });
+      }),
+    });
+
+    mockToolRegistry.getTool.mockReturnValue(streamingTool);
+
+    const { result } = renderScheduler();
+    const request: ToolCallRequestInfo = {
+      callId: 'stream-call',
+      name: 'streamTool',
+      args: { param: 'value' },
+    } as any;
+
+    act(() => {
+      result.current[1](request, new AbortController().signal);
+    });
+
+    await waitFor(() => {
+      expect(
+        result.current[0].some((call) => call.status === 'executing'),
+      ).toBe(true);
+    });
+
+    const executingCall = result.current[0].find(
+      (call) => call.status === 'executing',
+    ) as { liveOutput?: string } | undefined;
+    expect(executingCall?.liveOutput).not.toBe(longOutput);
+    expect(executingCall?.liveOutput?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(executingCall?.liveOutput).toContain('head-');
+    expect(executingCall?.liveOutput).toContain('-tail');
+    expect(executingCall?.liveOutput).toContain('truncated from');
+
+    await act(async () => {
+      resolveExecution({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      } as ToolResult);
+    });
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
   });
 });
 

@@ -3053,7 +3053,7 @@ export class CoreToolScheduler {
       ? (outputChunk: ToolResultDisplay) => {
           const compactOutput = compactToolResultDisplayForHistory(outputChunk);
           if (this.outputUpdateHandler) {
-            this.outputUpdateHandler(callId, compactOutput);
+            this.outputUpdateHandler(callId, outputChunk);
           }
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'

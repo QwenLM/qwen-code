@@ -4094,7 +4094,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     expect(execSpanRecord?.endMetadata?.cancelled).toBe(true);
   });
 
-  it('compacts live output before retaining it in scheduler state', async () => {
+  it('compacts live output only before retaining it in scheduler state', async () => {
     const longOutput = `head-${'x'.repeat(
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
     )}-tail`;
@@ -4213,13 +4213,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
       expect(outputUpdateHandler).toHaveBeenCalled();
     });
 
-    const compactOutput = outputUpdateHandler.mock.calls[0][1] as string;
-    expect(compactOutput.length).toBeLessThanOrEqual(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    );
-    expect(compactOutput).toContain('head-');
-    expect(compactOutput).toContain('-tail');
-    expect(compactOutput).toContain('truncated from');
+    expect(outputUpdateHandler.mock.calls[0][1]).toBe(longOutput);
 
     const liveOutputUpdate = onToolCallsUpdate.mock.calls
       .map((call) => call[0][0] as ToolCall)
@@ -4227,7 +4221,13 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         (call): call is ExecutingToolCall =>
           call.status === 'executing' && call.liveOutput !== undefined,
       );
-    expect(liveOutputUpdate?.liveOutput).toBe(compactOutput);
+    const retainedOutput = liveOutputUpdate?.liveOutput as string;
+    expect(retainedOutput.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedOutput).toContain('head-');
+    expect(retainedOutput).toContain('-tail');
+    expect(retainedOutput).toContain('truncated from');
 
     abortController.abort();
     await schedulePromise;
