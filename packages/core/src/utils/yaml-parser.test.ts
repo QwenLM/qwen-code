@@ -308,39 +308,29 @@ describe('yaml-parser', () => {
       });
     });
 
-    // The following two tests pin known limitations of this lightweight YAML
-    // parser that surfaced while porting Claude Code's declarative-agent
-    // schema (see docs/declarative-agents-port.md). They will FAIL when the
-    // parser gains real nested-YAML support (e.g. after switching to
-    // `js-yaml`) — that failure is the signal to revisit the
-    // `mcpServers` / `hooks` carve-outs in SubagentManager and the
-    // documentation around them.
-    describe('known limitations — nested YAML (pin until js-yaml lands)', () => {
-      it('garbles array-of-records: deeper keys leak to parent scope', () => {
+    describe('nested YAML support', () => {
+      it('should parse array-of-records with nested object values', () => {
         const yaml =
           'mcpServers:\n  - filesystem:\n      type: stdio\n      command: node';
         const result = parse(yaml);
-        // What we'd ideally get: { mcpServers: [{ filesystem: { type: 'stdio', command: 'node' } }] }
-        // What the lightweight parser actually returns: the list item is read
-        // as the bare key string "filesystem:" and the deeper indented keys
-        // become siblings of mcpServers at the top level.
-        expect(result['mcpServers']).toEqual(['filesystem:']);
-        expect(result['type']).toBe('stdio');
-        expect(result['command']).toBe('node');
+        expect(result['mcpServers']).toEqual([
+          {
+            filesystem: {
+              type: 'stdio',
+              command: 'node',
+            },
+          },
+        ]);
+        expect(result['type']).toBeUndefined();
+        expect(result['command']).toBeUndefined();
       });
 
-      it('garbles record-of-records: deeper keys leak into the record', () => {
+      it('should parse record-of-records with nested arrays', () => {
         const yaml = 'hooks:\n  PreToolUse:\n    - matcher: Read';
         const result = parse(yaml);
-        // Ideal: { hooks: { PreToolUse: [{ matcher: 'Read' }] } }
-        // Actual: nested list-item parsed as a sibling key with the dash
-        // pasted into the key.
-        expect((result['hooks'] as Record<string, unknown>)['PreToolUse']).toBe(
-          '',
-        );
-        expect((result['hooks'] as Record<string, unknown>)['- matcher']).toBe(
-          'Read',
-        );
+        expect(result['hooks']).toEqual({
+          PreToolUse: [{ matcher: 'Read' }],
+        });
       });
     });
   });
