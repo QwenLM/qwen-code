@@ -974,8 +974,6 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // registry's approval-change callback), so `pendingApprovals` is current.
   // When present in detail mode, the dialog renders the shared
   // ToolConfirmationMessage and yields keyboard focus to it.
-  const selectedAgentId =
-    selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   const selectedApproval: BackgroundApproval | undefined =
     selectedEntry?.kind === 'agent'
       ? selectedEntry.pendingApprovals?.[0]
@@ -987,7 +985,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   // through the registry, which invokes the parked call's `respond` to
   // resume the agent's tool call.
   const approvalConfirmationDetails: ToolCallConfirmationDetails | undefined =
-    selectedApproval && selectedAgentId
+    selectedApproval && selectedAgentIdForActivity
       ? // The spread restores every field except `onConfirm`; the cast is
         // needed because TS can't prove the discriminated-union shape across
         // an object spread.
@@ -1000,7 +998,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
             await config
               .getBackgroundTaskRegistry()
               .resolvePendingApproval(
-                selectedAgentId,
+                selectedAgentIdForActivity,
                 selectedApproval.callId,
                 outcome,
                 payload,
