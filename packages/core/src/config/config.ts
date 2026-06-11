@@ -1148,7 +1148,7 @@ export class Config {
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
-  private readonly outputLanguageFilePath?: string;
+  private outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
@@ -3025,6 +3025,10 @@ export class Config {
 
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
+  }
+
+  setOutputLanguageFilePath(filePath: string): void {
+    this.outputLanguageFilePath = filePath;
   }
 
   setUserMemory(newUserMemory: string): void {

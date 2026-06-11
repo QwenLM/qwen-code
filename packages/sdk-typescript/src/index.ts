@@ -169,6 +169,7 @@ export {
   type PromptTextContent,
   type RestoreSessionRequest,
   type SetModelResult,
+  type SetSessionLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';

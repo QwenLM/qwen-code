@@ -1289,6 +1289,8 @@ export function createServeApp(
     };
   }
 
+  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
+
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
@@ -1318,6 +1320,7 @@ export function createServeApp(
       workspaceCwd: boundWorkspace,
       // Active mediation policy under the `policy` namespace.
       policy: { permission: bridge.permissionPolicy },
+      supportedLanguages: LANGUAGE_CODES,
     };
     res.status(200).json(envelope);
   });
@@ -2695,8 +2698,6 @@ export function createServeApp(
       }
     },
   );
-
-  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
 
   app.post('/session/:id/language', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
