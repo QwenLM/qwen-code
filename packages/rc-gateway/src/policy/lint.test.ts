@@ -61,6 +61,15 @@ describe('lintPolicyFile', () => {
     expect(r.error).toMatch(/file not found/);
   });
 
+  it('reports a non-ENOENT read error (e.g. a directory) as invalid without throwing', async () => {
+    // Passing the temp DIR as the path → readFile rejects with EISDIR, the
+    // non-ENOENT arm → {ok:false, "cannot read …"} (never throws).
+    const r = await lintPolicyFile(dir);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/cannot read/);
+    expect(r.error).not.toMatch(/file not found/);
+  });
+
   it('lists rules using the still-deferred maxPerWindow field', async () => {
     const p = await write(
       'deferred.yaml',
