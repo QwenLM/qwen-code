@@ -778,7 +778,10 @@ export interface SubmitPromptResult {
    * `{ errored: true }` when the turn ended in an error so the callback can
    * record a failed terminal state (mirrors SubmitPromptActionReturn).
    */
-  onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
+  onComplete?: (opts?: {
+    errored?: boolean;
+    cancelled?: boolean;
+  }) => Promise<void>;
 }
 
 /**

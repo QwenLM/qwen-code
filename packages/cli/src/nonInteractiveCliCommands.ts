@@ -50,7 +50,10 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'submit_prompt';
       content: PartListUnion;
-      onComplete?: (opts?: { errored?: boolean }) => Promise<void>;
+      onComplete?: (opts?: {
+        errored?: boolean;
+        cancelled?: boolean;
+      }) => Promise<void>;
     }
   | {
       type: 'message';

@@ -627,13 +627,12 @@ export async function compactAutoImproveRunIndex(
   // rewrites the file, so it grows unbounded on disk (and every read pays an
   // O(N) parse). Rewrite the truncated view once the raw file exceeds the cap.
   // Read the raw record count first so we only pay the write when needed.
+  const indexPath = getAutoImproveRunIndexPath(repoRoot, loopId);
   let rawCount: number;
+  let parsed: unknown;
   try {
-    const raw = await fs.readFile(
-      getAutoImproveRunIndexPath(repoRoot, loopId),
-      'utf8',
-    );
-    const parsed = JSON.parse(raw) as unknown;
+    const raw = await fs.readFile(indexPath, 'utf8');
+    parsed = JSON.parse(raw);
     const runs = isRecord(parsed) ? parsed['runs'] : undefined;
     rawCount = Array.isArray(runs) ? runs.length : 0;
   } catch {
@@ -646,8 +645,9 @@ export async function compactAutoImproveRunIndex(
   // tick appends one record → cap+1). Only rewrite once the raw file has grown
   // to twice the cap, amortizing the read+parse+write to once per ~MAX ticks.
   if (rawCount <= MAX_RUN_INDEX_RECORDS * 2) return;
-  const normalized = await readAutoImproveRunIndex(repoRoot, loopId);
-  const indexPath = getAutoImproveRunIndexPath(repoRoot, loopId);
+  // Reuse the parse from the count check rather than re-reading the file via
+  // readAutoImproveRunIndex — same normalization, one fewer read+parse.
+  const normalized = normalizeRunIndex(parsed);
   const tmpPath = `${indexPath}.tmp`;
   await fs.writeFile(
     tmpPath,
