@@ -163,6 +163,18 @@ export function loadPolicy(text: string): Policy {
     return rule;
   });
 
+  // Reject duplicate rule ids (fail-closed): ids key the audit trail AND the quota
+  // store, so a collision would make `ruleId`/quota ambiguous — almost certainly a
+  // config mistake. (cycle 43)
+  const seenIds = new Set<string>();
+  for (const r of rules) {
+    if (r.id === undefined) continue;
+    if (seenIds.has(r.id)) {
+      throw new PolicyError(`duplicate rule id: ${r.id}`);
+    }
+    seenIds.add(r.id);
+  }
+
   const policy: Policy = {
     defaults: { action: defaultAction, requireScope: defaultScope },
     rules,

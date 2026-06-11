@@ -62,4 +62,14 @@ describe('loadPolicy maxPerWindow validation (cycle 43)', () => {
     expect(() => loadPolicy(withMax('{ windowSec: 60 }'))).toThrow(PolicyError);
     expect(() => loadPolicy(withMax('{ count: 5 }'))).toThrow(PolicyError);
   });
+
+  it('rejects duplicate rule ids (ambiguous audit/quota key)', () => {
+    const yaml = `rules:\n  - id: dup\n    match: { tool: bash }\n    action: allow\n  - id: dup\n    match: { tool: git }\n    action: deny\n`;
+    expect(() => loadPolicy(yaml)).toThrow(/duplicate rule id: dup/);
+  });
+
+  it('allows multiple id-less rules (only ids must be unique)', () => {
+    const yaml = `rules:\n  - match: { tool: bash }\n    action: allow\n  - match: { tool: git }\n    action: deny\n`;
+    expect(loadPolicy(yaml).rules).toHaveLength(2);
+  });
 });
