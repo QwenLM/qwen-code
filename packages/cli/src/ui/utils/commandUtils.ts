@@ -174,6 +174,9 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackMsg = `xsel not found`;
           }
 
+          // Tools exist but failed — try OSC 52 before giving up
+          if (writeOsc52(text)) return;
+
           throw new Error(
             `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
           );
