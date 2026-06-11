@@ -198,6 +198,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
     width !== undefined &&
     width > 0 &&
     !isScreenReaderEnabled &&
+    !!theme.background.primary &&
     supportsTrueColor();
 
   const fallback = (
@@ -216,7 +217,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
     return fallback;
   }
 
-  const bg = resolveColor(theme.background.primary || 'black') || 'black';
+  const bg = resolveColor(theme.background.primary) || theme.background.primary;
   const bandColor = subtleBandColor(bg);
   if (!bandColor) {
     return fallback;
