@@ -6605,16 +6605,18 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
-            }
 
-            if (changed.has('tools')) {
               const newMode = newMerged.tools?.approvalMode;
               if (
                 newMode &&
                 APPROVAL_MODES.includes(newMode as ApprovalMode) &&
                 newMode !== config.getApprovalMode()
               ) {
-                config.setApprovalMode(newMode as ApprovalMode);
+                try {
+                  config.setApprovalMode(newMode as ApprovalMode);
+                } catch {
+                  // Trust-gate or validation failure — continue with other refreshes
+                }
               }
             }
 
