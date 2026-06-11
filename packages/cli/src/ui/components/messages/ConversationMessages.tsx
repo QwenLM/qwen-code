@@ -397,11 +397,17 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 
   if (isPending) {
     const innerWidth = Math.max(contentWidth - 2, 20);
-    const display = tailVisualLines(
-      text,
-      innerWidth,
-      MAX_STREAMING_THINKING_VISUAL_LINES,
-    );
+    const maxLines =
+      availableTerminalHeight != null
+        ? Math.max(
+            1,
+            Math.min(
+              MAX_STREAMING_THINKING_VISUAL_LINES,
+              Math.floor(availableTerminalHeight / 3),
+            ),
+          )
+        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    const display = tailVisualLines(text, innerWidth, maxLines);
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
@@ -451,11 +457,17 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
 
   if (isPending) {
     const innerWidth = Math.max(contentWidth - 2, 20);
-    const display = tailVisualLines(
-      text,
-      innerWidth,
-      MAX_STREAMING_THINKING_VISUAL_LINES,
-    );
+    const maxLines =
+      availableTerminalHeight != null
+        ? Math.max(
+            1,
+            Math.min(
+              MAX_STREAMING_THINKING_VISUAL_LINES,
+              Math.floor(availableTerminalHeight / 3),
+            ),
+          )
+        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    const display = tailVisualLines(text, innerWidth, maxLines);
     return (
       <Box paddingLeft={2}>
         <Text dimColor wrap="truncate">
