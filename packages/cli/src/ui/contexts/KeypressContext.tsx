@@ -194,6 +194,7 @@ export function KeypressProvider({
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
     let swallowingSgrMouse = false;
+    let sgrMouseTimeout: NodeJS.Timeout | null = null;
 
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
@@ -683,13 +684,32 @@ export function KeypressProvider({
       // events (digits, semicolons, M/m). Without this filter, those
       // trailing characters would appear as typed text in the input box.
       if (swallowingSgrMouse) {
-        if (key.name === 'm' || key.sequence === 'M') {
+        if (key.ctrl && key.name === 'c') {
           swallowingSgrMouse = false;
+          if (sgrMouseTimeout) {
+            clearTimeout(sgrMouseTimeout);
+            sgrMouseTimeout = null;
+          }
+        } else {
+          if (key.name === 'm' || key.sequence === 'M') {
+            swallowingSgrMouse = false;
+            if (sgrMouseTimeout) {
+              clearTimeout(sgrMouseTimeout);
+              sgrMouseTimeout = null;
+            }
+          }
+          return;
         }
-        return;
       }
       if (key.sequence === `${ESC}[<`) {
         swallowingSgrMouse = true;
+        if (sgrMouseTimeout) {
+          clearTimeout(sgrMouseTimeout);
+        }
+        sgrMouseTimeout = setTimeout(() => {
+          swallowingSgrMouse = false;
+          sgrMouseTimeout = null;
+        }, KITTY_SEQUENCE_TIMEOUT_MS);
         return;
       }
 
@@ -1172,6 +1192,12 @@ export function KeypressProvider({
 
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
+
+      if (sgrMouseTimeout) {
+        clearTimeout(sgrMouseTimeout);
+        sgrMouseTimeout = null;
+      }
+      swallowingSgrMouse = false;
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
