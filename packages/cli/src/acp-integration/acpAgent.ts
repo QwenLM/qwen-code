@@ -2572,6 +2572,7 @@ class QwenAgent implements Agent {
     }
 
     this.mcpPool?.releaseSession(sessionId);
+    uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
   }
 
@@ -4236,8 +4237,7 @@ class QwenAgent implements Agent {
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
-    // TODO: uiTelemetryService is process-wide; multi-session stats are cumulative
-    const metrics = uiTelemetryService.getMetrics();
+    const metrics = uiTelemetryService.getMetricsForSession(sessionId);
     const now = Date.now();
     const createdAt = session.getCreatedAt();
 
