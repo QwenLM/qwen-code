@@ -31,6 +31,8 @@ export interface RateLimitConfig {
 
 export interface RateLimiterInstance {
   middleware: RequestHandler;
+  /** Check rate limit without Express req/res. Returns true if allowed. */
+  checkRate(key: string, tier: RateLimitTier): boolean;
   reset(): void;
   setDraining(v: boolean): void;
   dispose(): void;
@@ -227,7 +229,7 @@ export function createRateLimiter(
   const gcTimer = setInterval(sweep, GC_TIMER_INTERVAL_MS);
   gcTimer.unref();
 
-  // Middleware
+  // Middleware — delegates to tryConsume for the shared bucket logic.
   const middleware: RequestHandler = (
     req: Request,
     res: Response,
@@ -252,55 +254,21 @@ export function createRateLimiter(
       }
 
       const key = keyExtractor(req);
-      const tierConfig = config.tiers[tier];
-      const rate = rates[tier];
-      const now = Date.now();
-
-      // Fail-open if bucket map is at capacity
-      let tierMap = buckets.get(key);
-      if (!tierMap) {
-        if (buckets.size >= MAX_BUCKETS) {
-          config.onError?.(
-            new Error(`rate limit bucket overflow: ${buckets.size} keys`),
-            req.path,
-          );
-          next();
-          return;
-        }
-        tierMap = new Map();
-        buckets.set(key, tierMap);
-      }
-
-      let bucket = tierMap.get(tier);
-      if (!bucket) {
-        bucket = { tokens: tierConfig.max, lastRefill: now };
-        tierMap.set(tier, bucket);
-      }
-
-      // Continuous drip refill
-      const elapsed = Math.max(0, now - bucket.lastRefill);
-      bucket.tokens = Math.min(tierConfig.max, bucket.tokens + elapsed * rate);
-      bucket.lastRefill = now;
-
-      if (bucket.tokens >= 1) {
-        bucket.tokens -= 1;
+      if (tryConsume(key, tier)) {
         next();
       } else {
-        // Rate limited
-        hitCounts[tier]++;
-        const retryAfterMs = Math.ceil((1 - bucket.tokens) / rate);
+        const tierConfig = config.tiers[tier];
+        const rate = rates[tier];
+        const bucket = buckets.get(key)?.get(tier);
+        const retryAfterMs = Math.ceil((1 - (bucket?.tokens ?? 0)) / rate);
         const retryAfterSec = Math.ceil(retryAfterMs / 1000);
-
-        if (sampledLog) {
-          sampledLog.log(tier, key);
-        }
 
         res.setHeader('Retry-After', String(retryAfterSec));
         res.setHeader('X-RateLimit-Limit', String(tierConfig.max));
         res.setHeader('X-RateLimit-Remaining', '0');
         res.setHeader(
           'X-RateLimit-Reset',
-          String(Math.ceil((now + retryAfterMs) / 1000)),
+          String(Math.ceil((Date.now() + retryAfterMs) / 1000)),
         );
         res.status(429).json({
           error: 'Rate limit exceeded',
@@ -315,8 +283,43 @@ export function createRateLimiter(
     }
   };
 
+  function tryConsume(key: string, tier: RateLimitTier): boolean {
+    if (draining) return true;
+    const tierConfig = config.tiers[tier];
+    const rate = rates[tier];
+    const now = Date.now();
+    let tierMap = buckets.get(key);
+    if (!tierMap) {
+      if (buckets.size >= MAX_BUCKETS) {
+        config.onError?.(
+          new Error(`rate limit bucket overflow: ${buckets.size} keys`),
+          `tryConsume:${tier}`,
+        );
+        return true;
+      }
+      tierMap = new Map();
+      buckets.set(key, tierMap);
+    }
+    let bucket = tierMap.get(tier);
+    if (!bucket) {
+      bucket = { tokens: tierConfig.max, lastRefill: now };
+      tierMap.set(tier, bucket);
+    }
+    const elapsed = Math.max(0, now - bucket.lastRefill);
+    bucket.tokens = Math.min(tierConfig.max, bucket.tokens + elapsed * rate);
+    bucket.lastRefill = now;
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return true;
+    }
+    hitCounts[tier]++;
+    if (sampledLog) sampledLog.log(tier, key);
+    return false;
+  }
+
   return {
     middleware,
+    checkRate: tryConsume,
     reset() {
       buckets.clear();
       hitCounts.prompt = 0;

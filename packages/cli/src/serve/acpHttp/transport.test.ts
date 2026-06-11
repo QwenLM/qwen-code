@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
@@ -1993,5 +1994,255 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
+  });
+});
+
+// ── WebSocket transport security tests ────────────────────────────────
+describe('ACP WebSocket transport security', () => {
+  let server: Server;
+  let port: number;
+  let bridge: FakeBridge;
+
+  function startServer(
+    opts: {
+      token?: string;
+      checkRate?: (key: string, tier: string) => boolean;
+    } = {},
+  ) {
+    return new Promise<void>((resolve) => {
+      bridge = new FakeBridge();
+      const app = express();
+      app.use(express.json());
+      const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+        boundWorkspace: '/ws',
+        workspace: fakeWorkspace,
+        enabled: true,
+        token: opts.token,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        checkRate: opts.checkRate as any,
+      });
+      server = app.listen(0, '127.0.0.1', () => {
+        port = (server.address() as AddressInfo).port;
+        handle?.attachServer(server);
+        resolve();
+      });
+    });
+  }
+
+  afterEach(async () => {
+    server?.closeAllConnections?.();
+    await new Promise<void>((r) => server?.close(() => r()) ?? r());
+  });
+
+  function wsConnect(
+    opts: { headers?: Record<string, string> } = {},
+  ): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+        headers: opts.headers,
+      });
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+  }
+
+  function wsConnectRaw(
+    host: string,
+    origin?: string,
+  ): Promise<{ code: number }> {
+    return new Promise((resolve) => {
+      const headers: Record<string, string> = {};
+      if (origin) headers['Origin'] = origin;
+      const ws = new WebSocket(`ws://${host}:${port}/acp`, {
+        headers,
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) => {
+        resolve({ code: res.statusCode ?? 0 });
+      });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
+  function sendRpc(ws: WebSocket, msg: unknown): Promise<unknown> {
+    return new Promise((resolve) => {
+      ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+      ws.send(JSON.stringify(msg));
+    });
+  }
+
+  // ── Host allowlist ──────────────────────────────────────────────────
+  it('accepts WS upgrade with loopback Host header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', undefined);
+    // The Host header will be 127.0.0.1:PORT which is in the allowlist
+    expect(result.code).toBe(101);
+  });
+
+  // ── CSWSH origin check ─────────────────────────────────────────────
+  it('rejects WS upgrade with cross-origin Origin header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade with loopback Origin header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');
+    expect(result.code).toBe(101);
+  });
+
+  // ── Bearer token auth ──────────────────────────────────────────────
+  it('rejects WS upgrade without token when token is configured', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectRaw('127.0.0.1');
+    expect(result.code).toBe(401);
+  });
+
+  it('rejects WS upgrade with wrong token', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await new Promise<{ code: number }>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+    expect(result.code).toBe(401);
+  });
+
+  it('allows WS upgrade with correct token', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const ws = await wsConnect({
+      headers: { Authorization: 'Bearer secret-token-123' },
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  // ── maxPayload ─────────────────────────────────────────────────────
+  it('closes WS on oversized frame (>10MB)', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    const closed = new Promise<number>((resolve) => {
+      ws.once('close', (code) => resolve(code));
+      ws.once('error', () => {});
+    });
+    try {
+      ws.send('x'.repeat(10 * 1024 * 1024 + 1));
+    } catch {
+      // ws may throw synchronously for oversized payloads
+    }
+    const code = await closed;
+    expect(code).toBe(1009); // 1009 = message too big
+  });
+
+  // ── Initialize timeout ─────────────────────────────────────────────
+  it('requires initialize as first message', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    const reply = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session/new',
+      params: {},
+    });
+    expect(reply).toMatchObject({ error: { code: -32600 } });
+    ws.close();
+  });
+
+  // ── Message serialization ──────────────────────────────────────────
+  it('serializes concurrent WS messages (no race)', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    // Initialize first
+    const initReply = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    expect(initReply).toMatchObject({ result: { protocolVersion: 1 } });
+    // Send two messages rapidly — both should succeed without race
+    const replies: unknown[] = [];
+    const done = new Promise<void>((resolve) => {
+      ws.on('message', (data) => {
+        replies.push(JSON.parse(data.toString()));
+        if (replies.length >= 2) resolve();
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: {},
+      }),
+    );
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/list',
+        params: {},
+      }),
+    );
+    await done;
+    const ids = replies.map((r) => (r as { id: number }).id).sort();
+    expect(ids).toEqual([2, 3]);
+    ws.close();
+  });
+
+  // ── Rate limiter ───────────────────────────────────────────────────
+  it('enforces rate limits on WS messages', async () => {
+    let callCount = 0;
+    await startServer({
+      checkRate: () => {
+        callCount++;
+        return callCount <= 2;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    // First two post-init messages should pass
+    const r1 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r1).toMatchObject({ id: 2 });
+    const r2 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r2).toMatchObject({ id: 3 });
+    // Third should be rate-limited
+    const r3 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r3).toMatchObject({ error: { message: 'Rate limit exceeded' } });
+    ws.close();
   });
 });
