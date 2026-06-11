@@ -6565,6 +6565,8 @@ class QwenAgent implements Agent {
         const envResult = reloadEnvironment(newMerged, cwd);
 
         const changed = diffSettingsKeys(oldMerged, newMerged);
+        const envChanged =
+          envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
@@ -6592,7 +6594,7 @@ class QwenAgent implements Agent {
             ) {
               await config.switchModel(authType, newModelName);
             } else if (
-              (changed.has('modelProviders') || changed.has('env')) &&
+              (changed.has('modelProviders') || envChanged) &&
               authType
             ) {
               await config.refreshAuth(authType);
@@ -6603,14 +6605,6 @@ class QwenAgent implements Agent {
                 newMerged.tools?.disabled,
               );
               config.setDisabledTools(new Set(disabled));
-            }
-
-            if (changed.has('permissions')) {
-              config.getPermissionManager()?.updatePersistentRules({
-                allow: newMerged.permissions?.allow,
-                ask: newMerged.permissions?.ask,
-                deny: newMerged.permissions?.deny,
-              });
             }
 
             if (changed.has('tools')) {
