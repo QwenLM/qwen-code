@@ -1701,14 +1701,18 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-appr-reset')).toBeUndefined();
     });
 
-    it('re-parks the approval and reports failure when respond() rejects', async () => {
+    it('fails the agent when a parked approval respond() rejects', async () => {
       const respond = vi.fn(async () => {
         throw new Error('frames torn down');
       });
       const onChange = vi.fn();
+      const onStatus = vi.fn();
+      const onNotify = vi.fn();
       registry.register(makeRegistration('bg-appr-retry'));
       registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
       registry.setApprovalChangeCallback(onChange);
+      registry.setStatusChangeCallback(onStatus);
+      registry.setNotificationCallback(onNotify);
 
       const ok = await registry.resolvePendingApproval(
         'bg-appr-retry',
@@ -1716,15 +1720,15 @@ describe('BackgroundTaskRegistry', () => {
         ToolConfirmationOutcome.ProceedOnce,
       );
 
-      // respond() failed → the call is still parked in the scheduler, so the
-      // prompt must reappear (not vanish while the agent silently hangs).
       expect(ok).toBe(false);
-      expect(registry.getPendingApprovals('bg-appr-retry')).toHaveLength(1);
-      expect(registry.getPendingApprovals('bg-appr-retry')[0].callId).toBe(
-        'c1',
+      expect(registry.getPendingApprovals('bg-appr-retry')).toHaveLength(0);
+      expect(registry.get('bg-appr-retry')?.status).toBe('failed');
+      expect(registry.get('bg-appr-retry')?.error).toBe(
+        'Failed to resolve background approval: c1',
       );
-      // Two emissions: optimistic clear, then the re-park.
-      expect(onChange).toHaveBeenCalledTimes(2);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onStatus).toHaveBeenCalledOnce();
+      expect(onNotify).toHaveBeenCalledOnce();
     });
 
     it('auto-rejects parked approvals on cancel', () => {

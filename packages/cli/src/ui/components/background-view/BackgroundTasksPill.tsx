@@ -24,11 +24,6 @@ const KIND_NAMES = {
 } as const;
 
 /**
- * Pill label: prefer live running counts, then paused resumable agent counts;
- * once everything is terminal, switch to a generic "done" form so the pill
- * still invites reopening the dialog to inspect final state.
- */
-/**
  * True if any background agent has a tool call parked awaiting user
  * approval (permission bubbling). Drives the pill's "needs approval"
  * marker so the user is nudged to open the dialog and answer.
@@ -39,6 +34,11 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
   );
 }
 
+/**
+ * Pill label: prefer live running counts, then paused resumable agent counts;
+ * once everything is terminal, switch to a generic "done" form so the pill
+ * still invites reopening the dialog to inspect final state.
+ */
 export function getPillLabel(entries: readonly DialogEntry[]): string {
   if (entries.length === 0) return '';
 

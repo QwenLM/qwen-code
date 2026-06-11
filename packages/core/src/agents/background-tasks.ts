@@ -690,21 +690,7 @@ export class BackgroundTaskRegistry {
         `Failed to resolve background approval for ${agentId}/${callId}:`,
         error,
       );
-      // respond() never reached the scheduler, so the tool call is still
-      // parked in awaiting_approval. Re-add the approval (if the entry is
-      // still live and the call hasn't since been re-parked) and re-emit so
-      // the prompt reappears and the user can retry — otherwise the UI would
-      // show "nothing pending" while the agent silently hangs.
-      const live = this.agents.get(agentId);
-      if (
-        live &&
-        live.isBackgrounded &&
-        live.status === 'running' &&
-        !(live.pendingApprovals ?? []).some((a) => a.callId === callId)
-      ) {
-        live.pendingApprovals = [...(live.pendingApprovals ?? []), approval];
-        this.emitApprovalChange(live);
-      }
+      this.fail(agentId, `Failed to resolve background approval: ${callId}`);
       return false;
     }
     return true;
