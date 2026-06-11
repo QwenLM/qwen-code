@@ -1730,6 +1730,40 @@ describe('MemoryPressureMonitor', () => {
       expect(mockDebugLogger.error).toHaveBeenCalledTimes(1);
     });
 
+    it('logs first sampling failure at error level and subsequent ones at debug', () => {
+      // Make the OTel recording path throw so the sampling try/catch fires.
+      mockIsPerformanceMonitoringActive.mockReturnValue(true);
+      mockRecordMemoryUsage.mockImplementation(() => {
+        throw new Error('OTel export failed');
+      });
+      setMemUsage(4 * 1024 * 1024 * 1024); // normal pressure, no cleanup
+
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+      mockDebugLogger.error.mockClear();
+      mockDebugLogger.debug.mockClear();
+
+      // First failure: should log at error level
+      monitor.performCheck();
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+
+      mockDebugLogger.error.mockClear();
+      mockDebugLogger.debug.mockClear();
+
+      // Second failure: should log at debug level (not error)
+      monitor.performCheck();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+      expect(mockDebugLogger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+    });
+
     it('passes runtime samples to the diagnostics dumper on hard pressure', async () => {
       const dumpSpy = vi
         .spyOn(MemoryDiagnosticsDumper.prototype, 'dump')

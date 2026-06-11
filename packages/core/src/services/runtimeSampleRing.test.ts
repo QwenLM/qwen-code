@@ -220,4 +220,64 @@ describe('RuntimeSampleRing', () => {
     ring.reset();
     expect(ring.getAll().length).toBe(0);
   });
+
+  it('survives process.cpuUsage() throwing during construction and record()', () => {
+    vi.spyOn(process, 'cpuUsage').mockImplementation(() => {
+      throw new Error('/proc/self/stat unavailable');
+    });
+
+    // Constructor calls safeCpuUsage() for the initial baseline — must not throw.
+    const restrictedRing = new RuntimeSampleRing();
+
+    let mockTime = Date.now() + 100;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      mockTime += 100;
+      return mockTime;
+    });
+
+    const mem = {
+      rss: 500_000_000,
+      heapUsed: 300_000_000,
+      heapTotal: 400_000_000,
+      external: 10_000_000,
+      arrayBuffers: 5_000_000,
+    };
+
+    // record() also calls safeCpuUsage() — must not throw.
+    const sample = restrictedRing.record(mem);
+    expect(sample.rss).toBe(500_000_000);
+    expect(sample.cpuPercent).toBe(0);
+
+    // reset() calls safeCpuUsage() for the new baseline — must not throw.
+    expect(() => restrictedRing.reset()).not.toThrow();
+  });
+
+  it('clamps cpuPercent at 100 when CPU bursting exceeds wall-clock × cores', () => {
+    const coreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+
+    let mockCpu = { user: 0, system: 0 };
+    vi.spyOn(process, 'cpuUsage').mockImplementation(() => ({ ...mockCpu }));
+    let mockTime = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => mockTime);
+
+    const localRing = new RuntimeSampleRing();
+
+    // Advance 100ms but report enough CPU-time to exceed 100% per core.
+    // 100ms = 100_000µs wall-clock. For 100% on N cores we'd need
+    // N * 100_000µs of CPU. Report 2× that to trigger the clamp.
+    mockTime = 1100;
+    const excessiveCpuUs = coreCount * 100_000 * 2;
+    mockCpu = { user: excessiveCpuUs, system: 0 };
+
+    const mem = {
+      rss: 100,
+      heapUsed: 50,
+      heapTotal: 80,
+      external: 10,
+      arrayBuffers: 0,
+    };
+    const sample = localRing.record(mem);
+
+    expect(sample.cpuPercent).toBe(100);
+  });
 });

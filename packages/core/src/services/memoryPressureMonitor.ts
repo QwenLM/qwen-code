@@ -64,13 +64,29 @@ function getCpuCoreCount(): number {
 }
 
 /**
+ * `process.cpuUsage()` can throw in restricted containers that lack
+ * `/proc/self/stat`. CPU sampling is an optional observability feature, so a
+ * failure here must never break the surrounding memory-pressure system —
+ * return a zero baseline instead. The next successful call computes its delta
+ * against this zero, which at worst over-reports a single sample; far better
+ * than the constructor or `reset()` throwing and disabling pressure cleanup.
+ */
+function safeCpuUsage(): NodeJS.CpuUsage {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return { user: 0, system: 0 };
+  }
+}
+
+/**
  * Ring buffer that holds the most recent N runtime samples.
  * Always active for local diagnostics dumps; OTel metric reporting is
  * gated separately by `isPerformanceMonitoringActive()`.
  */
 export class RuntimeSampleRing {
   private readonly samples: RuntimeSample[] = [];
-  private prevCpuUsage = process.cpuUsage();
+  private prevCpuUsage = safeCpuUsage();
   private prevSampleTime = Date.now();
 
   /**
@@ -80,7 +96,7 @@ export class RuntimeSampleRing {
   record(mem: NodeJS.MemoryUsage): RuntimeSample {
     const now = Date.now();
     const elapsed = now - this.prevSampleTime;
-    const absCpu = process.cpuUsage();
+    const absCpu = safeCpuUsage();
     const deltaUser = absCpu.user - this.prevCpuUsage.user;
     const deltaSystem = absCpu.system - this.prevCpuUsage.system;
     const cpuTotalUs = deltaUser + deltaSystem;
@@ -104,12 +120,14 @@ export class RuntimeSampleRing {
     }
 
     // process.cpuUsage() aggregates CPU time across all cores, so normalize by
-    // the core count to keep cpuPercent within 0–100. Clamp at 0: cpuUsage() is
-    // not strictly monotonic under cgroup accounting in some containers/VMs, so a
-    // delta can come back negative.
-    const cpuPercent = Math.max(
-      0,
-      ((cpuTotalUs / (elapsed * 1000)) * 100) / getCpuCoreCount(),
+    // the core count to keep cpuPercent within the documented 0–100 range.
+    // Both clamps guard against cgroup accounting quirks: the lower bound
+    // because cpuUsage() isn't strictly monotonic in some containers/VMs (a
+    // delta can come back negative), the upper bound because CPU bursting can
+    // transiently spend more CPU-time than wall-clock × core count.
+    const cpuPercent = Math.min(
+      100,
+      Math.max(0, ((cpuTotalUs / (elapsed * 1000)) * 100) / getCpuCoreCount()),
     );
 
     this.prevCpuUsage = absCpu;
@@ -139,7 +157,7 @@ export class RuntimeSampleRing {
 
   reset(): void {
     this.samples.length = 0;
-    this.prevCpuUsage = process.cpuUsage();
+    this.prevCpuUsage = safeCpuUsage();
     this.prevSampleTime = Date.now();
   }
 }
@@ -228,6 +246,11 @@ export class MemoryPressureMonitor extends EventEmitter {
 
   private pendingCheck = false;
   private cleanupInProgress = false;
+  // Sampling runs every pressure check, so a persistent failure would spam the
+  // logs. Surface the first failure at error level (so operators can tell
+  // "metrics enabled but every sample threw" from "never enabled"), then drop
+  // to debug for the repeats.
+  private hasLoggedSamplingError = false;
   private activeCleanupAction: CleanupRecommendation['action'] = 'none';
   private lastCleanupAction: CleanupRecommendation['action'] = 'none';
   private queuedCleanupRecommendation?: CleanupRecommendation;
@@ -344,7 +367,13 @@ export class MemoryPressureMonitor extends EventEmitter {
           recordCpuUsage(this.coreConfig, sample.cpuPercent, {});
         }
       } catch (err) {
-        debugLogger.debug(`Runtime sampling failed: ${getErrorMessage(err)}`);
+        const msg = `Runtime sampling failed: ${getErrorMessage(err)}`;
+        if (this.hasLoggedSamplingError) {
+          debugLogger.debug(msg);
+        } else {
+          this.hasLoggedSamplingError = true;
+          debugLogger.error(msg);
+        }
       }
     }
 

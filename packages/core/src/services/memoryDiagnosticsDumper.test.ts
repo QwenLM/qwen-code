@@ -248,6 +248,50 @@ describe('MemoryDiagnosticsDumper', () => {
     expect(writtenContent.session.available).toBe(false);
   });
 
+  it('Phase 1 uses last ring sample for memoryUsage instead of calling process.memoryUsage()', async () => {
+    const config = createMockConfig();
+    const dumper = new MemoryDiagnosticsDumper(config);
+
+    const fakeSamples = [
+      {
+        ts: 1000000,
+        rss: 111_111_111,
+        heapUsed: 222_222_222,
+        heapTotal: 333_333_333,
+        external: 44_444_444,
+        cpuPercent: 12.5,
+      },
+    ];
+
+    await dumper.dump('hard', fakeSamples);
+
+    const phase1Content = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+    );
+    // Phase 1 should use the last sample's fields, not process.memoryUsage()
+    expect(phase1Content.memoryUsage.rss).toBe(111_111_111);
+    expect(phase1Content.memoryUsage.heapUsed).toBe(222_222_222);
+    expect(phase1Content.memoryUsage.heapTotal).toBe(333_333_333);
+    expect(phase1Content.memoryUsage.external).toBe(44_444_444);
+    // arrayBuffers is not in ring samples, filled with 0
+    expect(phase1Content.memoryUsage.arrayBuffers).toBe(0);
+  });
+
+  it('Phase 1 falls back to process.memoryUsage() when no samples provided', async () => {
+    const config = createMockConfig();
+    const dumper = new MemoryDiagnosticsDumper(config);
+
+    await dumper.dump('hard', []);
+
+    const phase1Content = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+    );
+    // With empty samples array, should fall back to process.memoryUsage()
+    // which returns real values (not the fake ring sample values)
+    expect(phase1Content.memoryUsage).toBeDefined();
+    expect(phase1Content.memoryUsage.rss).toBeGreaterThan(0);
+  });
+
   it('includes recentSamples in both Phase 1 and Phase 2 payloads', async () => {
     const config = createMockConfig();
     const dumper = new MemoryDiagnosticsDumper(config);
