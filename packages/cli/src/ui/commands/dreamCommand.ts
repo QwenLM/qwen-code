@@ -16,6 +16,7 @@ export const dreamCommand: SlashCommand = {
     return t('Consolidate managed auto-memory topic files.');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
   action: async (context) => {
     const config = context.services.config;
     if (!config) {
@@ -26,30 +27,50 @@ export const dreamCommand: SlashCommand = {
       };
     }
 
-    const projectRoot = config.getProjectRoot();
-    const memoryRoot = getAutoMemoryRoot(projectRoot);
-    const transcriptDir = path.join(
-      new Storage(projectRoot).getProjectDir(),
-      'chats',
-    );
+    try {
+      const projectRoot = config.getProjectRoot();
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      const transcriptDir = path.join(
+        new Storage(projectRoot).getProjectDir(),
+        'chats',
+      );
 
-    const prompt = config
-      .getMemoryManager()
-      .buildConsolidationPrompt(memoryRoot, transcriptDir);
+      const prompt = config
+        .getMemoryManager()
+        .buildConsolidationPrompt(memoryRoot, transcriptDir);
 
-    return {
-      type: 'submit_prompt',
-      content: prompt,
-      onComplete: async (opts?: { errored?: boolean; cancelled?: boolean }) => {
-        // onComplete now fires on the error AND cancellation paths too. Only
-        // record the manual dream run when the turn actually succeeded —
-        // otherwise a failed or cancelled /dream (API error / SIGINT abort)
-        // would persist a consolidation record as if it had completed.
-        if (opts?.errored || opts?.cancelled) return;
-        await config
+      const recordDream = async () =>
+        config
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());
-      },
-    };
+
+      if (context.executionMode === 'acp') {
+        recordDream().catch(() => {});
+        return { type: 'submit_prompt', content: prompt };
+      }
+
+      return {
+        type: 'submit_prompt',
+        content: prompt,
+        onComplete: async (opts?: {
+          errored?: boolean;
+          cancelled?: boolean;
+        }) => {
+          // Only record the manual dream run when the turn actually succeeded —
+          // a failed or cancelled /dream (API error / SIGINT abort) must not
+          // persist a consolidation record as if it had completed.
+          if (opts?.errored || opts?.cancelled) return;
+          await recordDream();
+        },
+      };
+    } catch (error) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Failed to process /dream: {{message}}', {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      };
+    }
   },
 };

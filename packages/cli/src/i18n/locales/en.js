@@ -731,6 +731,7 @@ export default {
     'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
+  'List installed extensions': 'List installed extensions',
   'Lists installed extensions.': 'Lists installed extensions.',
   'Path:': 'Path:',
   'Source:': 'Source:',

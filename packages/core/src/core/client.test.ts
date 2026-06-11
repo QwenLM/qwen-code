@@ -226,7 +226,9 @@ vi.mock('../utils/generateContentResponseUtilities', () => ({
 const mockUiTelemetryService = vi.hoisted(() => ({
   setLastPromptTokenCount: vi.fn(),
   getLastPromptTokenCount: vi.fn(),
+  setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
+  resetSession: vi.fn(),
   addEvent: vi.fn(),
 }));
 vi.mock('../telemetry/tracer.js', () => ({

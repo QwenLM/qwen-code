@@ -695,6 +695,7 @@ export default {
   'The name of the extension to update.': '要更新的扩展名称。',
   'Either an extension name or --all must be provided':
     '必须提供扩展名称或 --all',
+  'List installed extensions': '列出已安装的扩展',
   'Lists installed extensions.': '列出已安装的扩展。',
   'Path:': '路径：',
   'Source:': '来源：',

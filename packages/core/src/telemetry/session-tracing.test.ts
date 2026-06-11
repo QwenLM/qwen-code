@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode, type Context } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -142,6 +142,7 @@ import type { Config } from '../config/config.js';
 import {
   startInteractionSpan,
   endInteractionSpan,
+  withInteractionSpan,
   startLLMRequestSpan,
   endLLMRequestSpan,
   startToolSpan,
@@ -209,6 +210,73 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.ended).toBe(true);
       expect(mockSpans[0]!.statuses).toHaveLength(1);
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
+    });
+
+    it('defaults to ROOT_CONTEXT when no parentContext is provided', async () => {
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 's' }),
+        { promptId: 'p', model: 'm', messageType: 'cron' },
+        async () => {},
+      );
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
+    });
+
+    it('runs scoped interaction spans without mutating the global interaction context', async () => {
+      const config = createMockConfig({ sessionId: 'scoped-session' });
+      const result = await withInteractionSpan(
+        config,
+        {
+          promptId: 'prompt-scoped',
+          model: 'test-model',
+          messageType: 'acp_prompt',
+          parentContext: { parent: 'daemon' } as never,
+        },
+        async () => 'done',
+      );
+
+      expect(result).toBe('done');
+      expect(mockSpans).toHaveLength(1);
+      expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
+      expect(mockSpans[0]!.parentContext).toEqual({ parent: 'daemon' });
+      expect(mockSpans[0]!.attributes['session.id']).toBe('scoped-session');
+      expect(mockSpans[0]!.attributes['qwen-code.message_type']).toBe(
+        'acp_prompt',
+      );
+      expect(mockSpans[0]!.ended).toBe(true);
+      expect(mockSpans[0]!.statuses.at(-1)?.code).toBe(SpanStatusCode.OK);
+    });
+
+    it('marks the interaction span ERROR when getResultStatus returns "error"', async () => {
+      const config = createMockConfig();
+      await withInteractionSpan(
+        config,
+        { promptId: 'p-cron-err', model: 'm', messageType: 'cron' },
+        async () => 'done',
+        () => 'error',
+      );
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.attributes['qwen-code.turn_status']).toBe('error');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it('keeps a thrown error message instead of the generic error-status message', async () => {
+      const config = createMockConfig();
+      await expect(
+        withInteractionSpan(
+          config,
+          { promptId: 'p-throw', model: 'm', messageType: 'cron' },
+          async () => {
+            throw new Error('boom from fn');
+          },
+        ),
+      ).rejects.toThrow('boom from fn');
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.statuses.at(-1)?.message).toBe('boom from fn');
     });
 
     it('ends interaction span with error status', () => {
@@ -301,10 +369,9 @@ describe('session-tracing', () => {
     });
   });
 
-  describe('interaction span — trace context (#4486)', () => {
-    it('attaches to the session root context returned by getSessionContext', () => {
-      const fakeRoot = { __sessionRoot: true } as unknown as Context;
-      setSessionContext(fakeRoot, 'test-session');
+  describe('interaction span — per-prompt traceId', () => {
+    it('uses ROOT_CONTEXT as parent (each interaction is a trace root)', () => {
+      setSessionContext(undefined, 'test-session');
 
       startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
         promptId: 'p',
@@ -313,12 +380,10 @@ describe('session-tracing', () => {
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toBe(fakeRoot);
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
     });
 
-    it('anchors at session root even when an unrelated OTel span is active', () => {
-      const fakeRoot = { __sessionRoot: true } as unknown as Context;
-      setSessionContext(fakeRoot, 'test-session');
+    it('ignores active OTel span — interaction always starts a new trace', () => {
       mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
 
       startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
@@ -328,22 +393,18 @@ describe('session-tracing', () => {
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toBe(fakeRoot);
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
     });
 
-    it('falls back to otelContext.active() when no session context is set', () => {
-      // Intentionally NOT calling setSessionContext — exercises the fallback.
-      const fakeActive = { kind: 'fake-active-span' };
-      mockState.activeOtelSpan = fakeActive;
-
-      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+    it('still stamps session.id attribute for cross-prompt correlation', () => {
+      startInteractionSpan(createMockConfig({ sessionId: 'my-session' }), {
         promptId: 'p',
         model: 'm',
         messageType: 'userQuery',
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
+      expect(span?.attributes['session.id']).toBe('my-session');
     });
   });
 
@@ -662,6 +723,150 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('LLM request spans — response metadata & error enrichment', () => {
+    it('endLLMRequestSpan dual-emits response_id / gen_ai.response.id', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        responseId: 'chatcmpl-abc123',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBe('chatcmpl-abc123');
+      expect(attrs['gen_ai.response.id']).toBe('chatcmpl-abc123');
+    });
+
+    it('endLLMRequestSpan omits response_id when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBeUndefined();
+      expect(attrs['gen_ai.response.id']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan dual-emits finish_reason / gen_ai.response.finish_reasons (string vs array)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        finishReason: 'STOP',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['finish_reason']).toBe('STOP');
+      expect(attrs['gen_ai.response.finish_reasons']).toEqual(['STOP']);
+    });
+
+    it('endLLMRequestSpan omits finish_reason when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['finish_reason']).toBeUndefined();
+      expect(attrs['gen_ai.response.finish_reasons']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan dual-emits thoughts_token_count / gen_ai.usage.reasoning_tokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        thoughtsTokenCount: 42,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBe(42);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(42);
+    });
+
+    it('endLLMRequestSpan emits thoughts_token_count === 0 (no reasoning is meaningful info, not undefined)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        thoughtsTokenCount: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBe(0);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(0);
+    });
+
+    it('endLLMRequestSpan omits thoughts_token_count when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['thoughts_token_count']).toBeUndefined();
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits subagent_name when present', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        subagentName: 'Explore-abc123',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['subagent_name']).toBe('Explore-abc123');
+    });
+
+    it('endLLMRequestSpan omits subagent_name when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      expect(mockSpans[0]!.attributes['subagent_name']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits error_type and error.type on error spans', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: false,
+        error: 'API call failed',
+        errorType: 'RateLimitError',
+        errorStatusCode: 429,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['error_type']).toBe('RateLimitError');
+      expect(attrs['error.type']).toBe('RateLimitError');
+      expect(attrs['error_status_code']).toBe(429);
+    });
+
+    it('endLLMRequestSpan omits error_type/error_status_code on success spans', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['error_type']).toBeUndefined();
+      expect(attrs['error.type']).toBeUndefined();
+      expect(attrs['error_status_code']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits all new attributes together', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 500,
+        outputTokens: 100,
+        responseId: 'resp-xyz',
+        finishReason: 'MAX_TOKENS',
+        thoughtsTokenCount: 30,
+        subagentName: 'code-reviewer',
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['response_id']).toBe('resp-xyz');
+      expect(attrs['gen_ai.response.id']).toBe('resp-xyz');
+      expect(attrs['finish_reason']).toBe('MAX_TOKENS');
+      expect(attrs['gen_ai.response.finish_reasons']).toEqual(['MAX_TOKENS']);
+      expect(attrs['thoughts_token_count']).toBe(30);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(30);
+      expect(attrs['subagent_name']).toBe('code-reviewer');
+      expect(attrs['input_tokens']).toBe(500);
+      expect(attrs['output_tokens']).toBe(100);
+    });
+  });
+
   describe('tool spans', () => {
     it('creates and ends a tool span', () => {
       const span = startToolSpan('ReadFile', { 'tool.call_id': 'call-1' });
@@ -734,6 +939,103 @@ describe('session-tracing', () => {
       expect(bashSpan?.statuses[0]?.code).toBe(SpanStatusCode.OK);
       expect(readSpan?.statuses[0]?.code).toBe(SpanStatusCode.ERROR);
       expect(readSpan?.statuses[0]?.message).toBe('timeout');
+    });
+  });
+
+  describe('session.id derives from the owning session, not the process-global (#4602 review)', () => {
+    it('stamps a tool span with the interaction session.id even when the process-global belongs to another session', () => {
+      // Daemon scenario: telemetry init left the process-global pointing at
+      // session B, but the active interaction belongs to session A.
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps an llm_request span with the interaction session.id, not the global', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startLLMRequestSpan('m', 'p-a');
+      endLLMRequestSpan(span, { success: true });
+
+      const llmSpan = mockSpans.find((s) => s.name === 'qwen-code.llm_request');
+      expect(llmSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps a tool.execution span with the owning session id via the tool span context', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
+      endToolExecutionSpan(execSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+
+      const exec = mockSpans.find((s) => s.name === 'qwen-code.tool.execution');
+      expect(exec?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('isolates concurrent sessions: each tool span carries its own session id', async () => {
+      // Two interactions for two different sessions while the global is stale.
+      setSessionContext(undefined, 'stale-global');
+
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-A' }),
+        { promptId: 'pa', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Read', { 'tool.call_id': 'a1' }), {
+            success: true,
+          });
+        },
+      );
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-B' }),
+        { promptId: 'pb', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Write', { 'tool.call_id': 'b1' }), {
+            success: true,
+          });
+        },
+      );
+
+      const readSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Read',
+      );
+      const writeSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Write',
+      );
+      expect(readSpan?.attributes['session.id']).toBe('session-A');
+      expect(writeSpan?.attributes['session.id']).toBe('session-B');
+    });
+
+    it('falls back to the process-global session id for standalone spans (single-session CLI path)', () => {
+      // No interaction context — single-session CLI: the global is correct.
+      setSessionContext(undefined, 'cli-session');
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('cli-session');
     });
   });
 
