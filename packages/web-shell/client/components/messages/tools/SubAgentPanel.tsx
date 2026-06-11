@@ -1,5 +1,6 @@
-import { memo, useState, useMemo } from 'react';
+import { memo, useEffect, useRef, useState, useMemo } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
+import { useWebShellCustomization } from '../../../customization';
 import { Markdown } from '../Markdown';
 import {
   formatDurationMs,
@@ -173,6 +174,62 @@ function getAgentResultText(tool: ACPToolCall): string {
 
 type SubAgentTab = 'result' | 'tools';
 
+/**
+ * Live sub-agent stream (thinking + output) shown while the agent runs.
+ * With compactThinking enabled it collapses to a 5-line window pinned to
+ * the newest content, with a toggle to the full scrollable view.
+ */
+function SubAgentStream({ text }: { text: string }) {
+  const { compactThinking } = useWebShellCustomization();
+  const [streamExpanded, setStreamExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const streamRef = useRef<HTMLPreElement>(null);
+
+  const collapsed = compactThinking && !streamExpanded;
+
+  useEffect(() => {
+    const el = streamRef.current;
+    if (!el || !collapsed) return;
+    setOverflowing(el.scrollHeight > el.clientHeight);
+    // Pin the newest line into view while the stream grows.
+    el.scrollTop = el.scrollHeight;
+  }, [collapsed, text]);
+
+  useEffect(() => {
+    const el = streamRef.current;
+    if (!el || !collapsed) return;
+    const check = () => setOverflowing(el.scrollHeight > el.clientHeight);
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [collapsed]);
+
+  return (
+    <div>
+      <pre
+        ref={streamRef}
+        className={
+          collapsed
+            ? `${styles.stream} ${styles.streamCollapsed}`
+            : styles.stream
+        }
+      >
+        {text}
+      </pre>
+      {compactThinking && (overflowing || streamExpanded) && (
+        <button
+          className={styles.streamToggle}
+          onClick={() => setStreamExpanded((v) => !v)}
+          aria-expanded={streamExpanded}
+          aria-label="Toggle agent stream details"
+        >
+          {streamExpanded ? '▲' : '▼'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function SubAgentPanel({
   tool,
   defaultExpanded,
@@ -256,9 +313,7 @@ export function SubAgentPanel({
               {isComplete ? (
                 <Markdown content={tool.subContent || resultText} />
               ) : (
-                tool.subContent && (
-                  <pre className={styles.stream}>{tool.subContent}</pre>
-                )
+                tool.subContent && <SubAgentStream text={tool.subContent} />
               )}
             </div>
           )}

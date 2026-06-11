@@ -674,7 +674,9 @@ export type ServeHookMatcherKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'commandName'
+  | 'filePath';
 
 export interface ServeHookEventMeta {
   description: string;
@@ -792,6 +794,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     matcherKind: 'notificationType',
   },
   UserPromptSubmit: { description: 'When the user submits a prompt' },
+  UserPromptExpansion: {
+    description: 'When a slash command expands into a prompt',
+    matcherKind: 'commandName',
+  },
   SessionStart: {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
@@ -831,6 +837,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   },
   TodoCreated: { description: 'When a new todo item is created' },
   TodoCompleted: { description: 'When a todo item is marked as completed' },
+  InstructionsLoaded: {
+    description: 'When an instruction or context file is loaded',
+    matcherKind: 'filePath',
+  },
 };
 
 // ---------------------------------------------------------------------------

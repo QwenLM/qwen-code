@@ -1405,6 +1405,7 @@ export type DaemonHookEventName =
   | 'PostToolBatch'
   | 'Notification'
   | 'UserPromptSubmit'
+  | 'UserPromptExpansion'
   | 'SessionStart'
   | 'Stop'
   | 'SubagentStart'
@@ -1417,6 +1418,7 @@ export type DaemonHookEventName =
   | 'StopFailure'
   | 'TodoCreated'
   | 'TodoCompleted'
+  | 'InstructionsLoaded'
   | (string & {});
 
 export type DaemonHookMatcherKind =
@@ -1425,7 +1427,9 @@ export type DaemonHookMatcherKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'commandName'
+  | 'filePath';
 
 export interface DaemonHookEventMeta {
   description: string;

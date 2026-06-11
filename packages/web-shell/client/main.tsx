@@ -110,6 +110,7 @@ function StandaloneApp() {
           onThemeChange={handleThemeChange}
           language={language}
           onLanguageChange={handleLanguageChange}
+          compactThinking
         />
       </DaemonSessionProvider>
     </DaemonWorkspaceProvider>
