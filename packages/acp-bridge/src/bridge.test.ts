@@ -9654,3 +9654,164 @@ describe('close on last client detach', () => {
     await bridge.shutdown();
   });
 });
+
+describe('activePromptCount and lastActivityAt', () => {
+  it('activePromptCount is 0 and lastActivityAt is null before any activity', () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    expect(bridge.activePromptCount).toBe(0);
+    expect(bridge.lastActivityAt).toBeNull();
+  });
+
+  it('lastActivityAt is set after spawning a session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const before = Date.now();
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const after = Date.now();
+
+    expect(bridge.lastActivityAt).not.toBeNull();
+    expect(bridge.lastActivityAt).toBeGreaterThanOrEqual(before);
+    expect(bridge.lastActivityAt).toBeLessThanOrEqual(after);
+    expect(bridge.activePromptCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
+  it('activePromptCount increments during prompt and decrements after', async () => {
+    let releasePrompt: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((resolve) => {
+          releasePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    // Start prompt (don't await — it blocks until released)
+    const promptPromise = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'test' }],
+    });
+
+    // Wait for prompt to reach the agent
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    expect(bridge.activePromptCount).toBe(1);
+    const duringPromptActivity = bridge.lastActivityAt;
+    expect(duringPromptActivity).not.toBeNull();
+
+    // Release prompt
+    releasePrompt!();
+    await promptPromise;
+
+    expect(bridge.activePromptCount).toBe(0);
+    // lastActivityAt should be updated after prompt ends
+    expect(bridge.lastActivityAt).toBeGreaterThanOrEqual(duringPromptActivity!);
+
+    await bridge.shutdown();
+  });
+
+  it('activePromptCount tracks multiple concurrent sessions', async () => {
+    const releasers: Array<() => void> = [];
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          promptImpl: () =>
+            new Promise<PromptResponse>((resolve) => {
+              releasers.push(() => resolve({ stopReason: 'end_turn' }));
+            }),
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const s1 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const s2 = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+
+    // Start prompts on both sessions
+    const p1 = bridge.sendPrompt(s1.sessionId, {
+      sessionId: s1.sessionId,
+      prompt: [{ type: 'text', text: 'test1' }],
+    });
+    const p2 = bridge.sendPrompt(s2.sessionId, {
+      sessionId: s2.sessionId,
+      prompt: [{ type: 'text', text: 'test2' }],
+    });
+
+    // Wait for both prompts to reach agents
+    await vi.waitFor(() => {
+      const totalPrompts = handles.reduce(
+        (sum, h) => sum + h.agent.promptCalls.length,
+        0,
+      );
+      expect(totalPrompts).toBeGreaterThanOrEqual(2);
+    });
+
+    expect(bridge.activePromptCount).toBe(2);
+
+    // Release first prompt
+    releasers[0]!();
+    await p1;
+    expect(bridge.activePromptCount).toBe(1);
+
+    // Release second prompt
+    releasers[1]!();
+    await p2;
+    expect(bridge.activePromptCount).toBe(0);
+
+    await bridge.shutdown();
+  });
+
+  it('lastActivityAt updates on prompt start and end', async () => {
+    let releasePrompt: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((resolve) => {
+          releasePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const afterSpawn = bridge.lastActivityAt!;
+
+    // Small delay to ensure timestamp difference
+    await new Promise((r) => setTimeout(r, 5));
+
+    const promptPromise = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'test' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const afterPromptStart = bridge.lastActivityAt!;
+    expect(afterPromptStart).toBeGreaterThanOrEqual(afterSpawn);
+
+    await new Promise((r) => setTimeout(r, 5));
+
+    releasePrompt!();
+    await promptPromise;
+
+    const afterPromptEnd = bridge.lastActivityAt!;
+    expect(afterPromptEnd).toBeGreaterThanOrEqual(afterPromptStart);
+
+    await bridge.shutdown();
+  });
+});
