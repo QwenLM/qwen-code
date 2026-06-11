@@ -14,6 +14,7 @@ import { PushStore } from '../pushStore.js';
 import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
 import { PushNotifier } from './notifier.js';
+import { PushRateLimiter } from './rateLimiter.js';
 import type { PushPayload } from './payload.js';
 import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
@@ -837,5 +838,82 @@ rules:
       new Date('2026-06-10T12:00:00Z'),
     );
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('PushNotifier rate limit (cycle 46)', () => {
+  const PERM = {
+    type: 'permission_request',
+    data: { toolCall: { name: 'bash' }, requestId: 'r' },
+  };
+  const NOW = new Date(1_000_000);
+
+  it('drops sends past maxPerHour and audits push_rate_limited ONCE (firstDrop)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    await store.setMaxPerHour(sub.id, 1);
+    const rl = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      rl,
+    );
+
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // sent
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (transition)
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW); // dropped (no re-audit)
+
+    expect(sent).toHaveLength(1);
+    const limited = audit.calls.filter((c) => c.action === 'push_rate_limited');
+    expect(limited).toHaveLength(1); // only the transition audits
+    expect(limited[0].detail).toMatchObject({
+      subscriptionId: sub.id,
+      kind: 'permission.required',
+    });
+  });
+
+  it('with NO limiter wired there is no cap (back-compat)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    await store.setMaxPerHour(sub.id, 1);
+    const notifier = new PushNotifier(tokens, store, sender); // no limiter
+
+    await notifier.notify(PERM, { sessionId: 's1' });
+    await notifier.notify(PERM, { sessionId: 's1' });
+    expect(sent).toHaveLength(2); // maxPerHour ignored without a limiter
+  });
+
+  it('applies the default cap (30) when the subscription sets none', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const rl = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      rl,
+    );
+    for (let i = 0; i < 31; i++) {
+      await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    }
+    expect(sent).toHaveLength(30); // the default cap
   });
 });

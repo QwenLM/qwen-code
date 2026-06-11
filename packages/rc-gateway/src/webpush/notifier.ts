@@ -15,6 +15,7 @@ import type { RoutingMatcher } from '../routing/rules.js';
 import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
+import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
 
 /**
  * Per-kind required scope. A subscription only receives a kind if its owning
@@ -40,6 +41,7 @@ export class PushNotifier {
     private readonly audit?: AuditRecorder,
     private readonly workingDevice?: WorkingDeviceTracker,
     private readonly routing?: RoutingMatcher,
+    private readonly rateLimiter?: PushRateLimiter,
   ) {}
 
   /**
@@ -165,6 +167,29 @@ export class PushNotifier {
             },
           });
           return;
+        }
+        // Per-subscription rate limit (cycle 46): cap actual sends to maxPerHour
+        // within a rolling hour (default 30). Runs LAST — only pushes that
+        // survived every other gate count. tryConsume is pure/total (never
+        // throws → no try/catch needed to keep the gate fail-open). Audit ONLY
+        // the transition into the rate-limited state (firstDrop) so a storm
+        // produces one row, not thousands. No limiter wired → no cap.
+        if (this.rateLimiter) {
+          const { allowed, firstDrop } = this.rateLimiter.tryConsume(
+            r.id,
+            r.maxPerHour ?? DEFAULT_MAX_PER_HOUR,
+            now.getTime(),
+          );
+          if (!allowed) {
+            if (firstDrop) {
+              void this.audit?.record({
+                action: 'push_rate_limited',
+                target: ctx.sessionId,
+                detail: { kind: payload.kind, subscriptionId: r.id },
+              });
+            }
+            return;
+          }
         }
         await this.sender.send(r, payload);
       }),

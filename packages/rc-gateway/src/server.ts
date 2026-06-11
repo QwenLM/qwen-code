@@ -40,6 +40,7 @@ import {
 } from './routes/commands.js';
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
+import { PushRateLimiter } from './webpush/rateLimiter.js';
 import type { SnoozeStore } from './routing/snooze.js';
 import type { RoutingMatcher } from './routing/rules.js';
 import {
@@ -217,6 +218,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   let notifier: PushNotifier | undefined;
   if (deps.vapid && deps.pushStore) {
     const sender = new PushSender(deps.vapid, deps.pushStore, audit);
+    // Per-subscription rolling-hour push rate limiter (cycle 46). In-memory:
+    // a restart resets the counters (fail-open — never suppress a notification).
+    const rateLimiter = new PushRateLimiter();
     notifier = new PushNotifier(
       deps.store,
       deps.pushStore,
@@ -225,6 +229,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       audit,
       workingDevice,
       deps.routing,
+      rateLimiter,
     );
     app.use(
       '/rc/push',
