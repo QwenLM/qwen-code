@@ -194,6 +194,12 @@ const ContinuationMarkdownMessage: React.FC<
 export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
 
+  const useBand =
+    width !== undefined &&
+    width > 0 &&
+    !isScreenReaderEnabled &&
+    supportsTrueColor();
+
   const fallback = (
     <PrefixedTextMessage
       text={text}
@@ -202,15 +208,11 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
       textColor={theme.text.accent}
       ariaLabel={SCREEN_READER_USER_PREFIX}
       alignSelf="flex-start"
+      marginTop={useBand ? 0 : 1}
     />
   );
 
-  if (
-    width === undefined ||
-    width <= 0 ||
-    isScreenReaderEnabled ||
-    !supportsTrueColor()
-  ) {
+  if (!useBand) {
     return fallback;
   }
 
