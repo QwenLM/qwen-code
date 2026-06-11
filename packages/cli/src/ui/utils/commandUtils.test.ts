@@ -287,7 +287,7 @@ describe('commandUtils', () => {
         );
       });
 
-      it('should fall back to OSC 52 when both xclip and xsel are not found', async () => {
+      it('should throw when xclip/xsel missing and OSC 52 fails (no TTY)', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
@@ -323,8 +323,10 @@ describe('commandUtils', () => {
           return child as unknown as ReturnType<typeof spawn>;
         });
 
-        // Should not throw, should use OSC 52 fallback
-        await copyToClipboard(testText);
+        // No TTY available → OSC 52 fails → should throw
+        await expect(copyToClipboard(testText)).rejects.toThrow(
+          'Clipboard unavailable',
+        );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
         expect(mockSpawn).toHaveBeenNthCalledWith(
@@ -339,6 +341,61 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+      });
+
+      it('should fall back to OSC 52 when xclip/xsel missing and stdout is TTY', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            if (callCount === 0) {
+              const error = new Error('spawn xclip ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+              callCount++;
+            } else {
+              const error = new Error('spawn xsel ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available → OSC 52 succeeds → should not throw
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
 
       it('should emit error when xclip or xsel fail with stderr output (command installed)', async () => {

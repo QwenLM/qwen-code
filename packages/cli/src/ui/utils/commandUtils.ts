@@ -152,8 +152,8 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             // Neither xclip nor xsel available — try OSC 52 escape sequence
             // (works over SSH without X11 display server).
             if (!writeOsc52(text)) {
-              debugLogger.warn(
-                'OSC 52 clipboard write failed - no TTY available',
+              throw new Error(
+                'Clipboard unavailable: xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.',
               );
             }
             return;
