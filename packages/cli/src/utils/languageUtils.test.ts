@@ -50,6 +50,7 @@ import {
   resolveOutputLanguage,
   writeOutputLanguageFile,
   updateOutputLanguageFile,
+  writeOutputLanguageAndRegisterPath,
   initializeLlmOutputLanguage,
 } from './languageUtils.js';
 
@@ -477,6 +478,69 @@ describe('languageUtils', () => {
       }
 
       expect(resolvedPath).toBeUndefined();
+    });
+  });
+
+  describe('writeOutputLanguageAndRegisterPath', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
+    });
+
+    it('writes to config-bound path when available', () => {
+      const config = {
+        getOutputLanguageFilePath: vi
+          .fn()
+          .mockReturnValue('/proj/.qwen/output-language.md'),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Chinese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Chinese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).not.toHaveBeenCalled();
+    });
+
+    it('writes to global default and registers path when config path is undefined', () => {
+      const config = {
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Japanese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Japanese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+      );
+    });
+
+    it('handles null config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Korean', null);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
+    it('handles undefined config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Russian', undefined);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
     });
   });
 });

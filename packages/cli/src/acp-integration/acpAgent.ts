@@ -5560,7 +5560,7 @@ class QwenAgent implements Agent {
                   }
                 } catch (err) {
                   debugLogger.warn(
-                    'Failed to write output-language.md for session:',
+                    `Failed to write output-language.md for session ${s.getId()} (path=${sessionPath ?? 'global-default'}):`,
                     err,
                   );
                 }
