@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
+import { MemoryLengthWarningDisplay } from './MemoryLengthWarningDisplay.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { resolveCustomBanner } from '../utils/customBanner.js';
@@ -71,6 +72,13 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
     [showBanner, settings],
   );
 
+  const memoryLengthWarning = useMemo(
+    () => config.getMemoryLengthWarning(),
+    // Computed once at mount — memory is loaded before the first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   return (
     <Box flexDirection="column">
       {showBanner && (
@@ -83,6 +91,9 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           customBannerTitle={resolvedBanner?.title}
           customBannerSubtitle={resolvedBanner?.subtitle}
         />
+      )}
+      {memoryLengthWarning && (
+        <MemoryLengthWarningDisplay warning={memoryLengthWarning} />
       )}
       {showTips && <Tips />}
     </Box>

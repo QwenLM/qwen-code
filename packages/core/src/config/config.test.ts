@@ -133,6 +133,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
+    memoryContentBytes: 0,
     ruleCount: 0,
     conditionalRules: [],
     projectRoot: '/tmp',
@@ -1398,6 +1399,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      memoryContentBytes: 42,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -1419,6 +1421,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      memoryContentBytes: 42,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -1441,6 +1444,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      memoryContentBytes: 42,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -1468,6 +1472,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      memoryContentBytes: 42,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -1490,6 +1495,7 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      memoryContentBytes: 42,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: '/tmp',
@@ -1520,6 +1526,77 @@ describe('Server Config (config.ts)', () => {
         parentFilePath: '/tmp/project/AGENTS.md',
       },
     );
+  });
+
+  describe('getMemoryLengthWarning', () => {
+    function createConfigAndSetup(
+      contextWindowSize: number | undefined,
+      memoryBytes: number,
+    ) {
+      const config = new Config(baseParams);
+      // Set the contentGeneratorConfig with the desired contextWindowSize
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: MODEL,
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'test-key',
+        contextWindowSize,
+      } as ContentGeneratorConfig;
+      // Set the memory content bytes
+      (config as unknown as { memoryContentBytes: number }).memoryContentBytes =
+        memoryBytes;
+      return config;
+    }
+
+    it('should return null when memory is within threshold', () => {
+      // 1000 bytes = 250 tokens. 250 / 128000 = 0.2% — well under 15%.
+      const config = createConfigAndSetup(128_000, 1000);
+      expect(config.getMemoryLengthWarning()).toBeNull();
+    });
+
+    it('should return warning when memory exceeds 15% of context window', () => {
+      // 80,000 bytes = 20,000 tokens. 20000 / 128000 ≈ 15.6%.
+      const config = createConfigAndSetup(128_000, 80_000);
+
+      const warning = config.getMemoryLengthWarning();
+      expect(warning).not.toBeNull();
+      expect(warning!.estimatedTokens).toBe(20_000);
+      expect(warning!.contextWindowSize).toBe(128_000);
+      expect(warning!.percentUsed).toBeCloseTo(0.15625);
+    });
+
+    it('should scale threshold with model context window', () => {
+      // A 32K model warns at a lower absolute byte count than a 128K model.
+      // 20,000 bytes = 5,000 tokens. 5000 / 32000 ≈ 15.6%.
+      const config32k = createConfigAndSetup(32_000, 20_000);
+
+      const warning = config32k.getMemoryLengthWarning();
+      expect(warning).not.toBeNull();
+      expect(warning!.estimatedTokens).toBe(5_000);
+      expect(warning!.contextWindowSize).toBe(32_000);
+
+      // Same 20,000 bytes on 128K model — only 3.9%, no warning.
+      const config128k = createConfigAndSetup(128_000, 20_000);
+      expect(config128k.getMemoryLengthWarning()).toBeNull();
+    });
+
+    it('should return null when contextWindowSize is not set', () => {
+      const config = createConfigAndSetup(undefined, 100_000);
+      expect(config.getMemoryLengthWarning()).toBeNull();
+    });
+
+    it('should respect custom threshold parameter', () => {
+      // 60,000 bytes = 15,000 tokens. 15000 / 128000 ≈ 11.7%.
+      const config = createConfigAndSetup(128_000, 60_000);
+
+      // Default 15% threshold — no warning
+      expect(config.getMemoryLengthWarning()).toBeNull();
+      // Custom 10% threshold — triggers warning
+      expect(config.getMemoryLengthWarning(0.1)).not.toBeNull();
+    });
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {

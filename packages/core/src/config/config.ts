@@ -648,6 +648,15 @@ export interface AgentsCollabSettings {
   };
 }
 
+export interface MemoryLengthWarning {
+  /** Estimated token count of the loaded context files. */
+  estimatedTokens: number;
+  /** The model's context window size in tokens. */
+  contextWindowSize: number;
+  /** Fraction of context window consumed (0–1). */
+  percentUsed: number;
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -1105,6 +1114,7 @@ export class Config {
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private memoryContentBytes = 0;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
@@ -1284,6 +1294,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.memoryContentBytes = 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
@@ -1962,23 +1973,28 @@ export class Config {
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
   ): Promise<void> {
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
-        this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        {
-          explicitOnly: this.getBareMode(),
-          loadReason,
-          onInstructionsLoaded: createInstructionsLoadedCallback(
-            () => this.hookSystem,
-          ),
-        },
-      );
+    const {
+      memoryContent,
+      fileCount,
+      memoryContentBytes,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
+        ),
+      },
+    );
     if (this.getManagedAutoMemoryEnabled()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -2008,6 +2024,7 @@ export class Config {
       this.setUserMemory(memoryContent);
     }
     this.setGeminiMdFileCount(fileCount);
+    this.memoryContentBytes = memoryContentBytes;
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
@@ -2923,6 +2940,40 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  getMemoryContentBytes(): number {
+    return this.memoryContentBytes;
+  }
+
+  /**
+   * Compute a warning if context files (QWEN.md / AGENTS.md) exceed a
+   * percentage of the model's context window. Returns `null` when the
+   * memory size is within the threshold.
+   *
+   * @param thresholdPercent – fraction of the context window that triggers
+   *   the warning (default 0.15 = 15%).
+   */
+  getMemoryLengthWarning(thresholdPercent = 0.15): MemoryLengthWarning | null {
+    const contextWindowSize =
+      this.getContentGeneratorConfig()?.contextWindowSize;
+    if (!contextWindowSize || contextWindowSize <= 0) {
+      return null;
+    }
+
+    // Estimate tokens from bytes (UTF-8): ~4 bytes ≈ 1 token.
+    const estimatedTokens = Math.ceil(this.memoryContentBytes / 4);
+    const percentUsed = estimatedTokens / contextWindowSize;
+
+    if (percentUsed < thresholdPercent) {
+      return null;
+    }
+
+    return {
+      estimatedTokens,
+      contextWindowSize,
+      percentUsed,
+    };
   }
 
   getArenaManager(): ArenaManager | null {

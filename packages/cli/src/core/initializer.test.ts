@@ -43,6 +43,7 @@ describe('initializeApp', () => {
     getModelsConfig: ReturnType<typeof vi.fn>;
     getIdeMode: ReturnType<typeof vi.fn>;
     getGeminiMdFileCount: ReturnType<typeof vi.fn>;
+    getMemoryLengthWarning: ReturnType<typeof vi.fn>;
   };
   let mockSettings: {
     merged: Record<string, unknown>;
@@ -59,6 +60,7 @@ describe('initializeApp', () => {
       }),
       getIdeMode: vi.fn().mockReturnValue(false),
       getGeminiMdFileCount: vi.fn().mockReturnValue(0),
+      getMemoryLengthWarning: vi.fn().mockReturnValue(null),
     };
 
     mockSettings = {

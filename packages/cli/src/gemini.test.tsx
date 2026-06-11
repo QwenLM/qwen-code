@@ -109,6 +109,7 @@ vi.mock('./core/initializer.js', () => ({
     themeError: null,
     shouldOpenAuthDialog: false,
     geminiMdFileCount: 0,
+    memoryLengthWarning: null,
   }),
 }));
 
@@ -587,6 +588,7 @@ describe('gemini.tsx main function', () => {
       themeError: null,
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
+      memoryLengthWarning: null,
     });
     vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
     vi.spyOn(
@@ -1095,6 +1097,7 @@ describe('startInteractiveUI', () => {
       themeError: null,
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
+      memoryLengthWarning: null,
     };
 
     await startInteractiveUI(
@@ -1129,6 +1132,7 @@ describe('startInteractiveUI', () => {
       themeError: null,
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
+      memoryLengthWarning: null,
     };
 
     await startInteractiveUI(
@@ -1172,6 +1176,7 @@ describe('startInteractiveUI', () => {
       themeError: null,
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
+      memoryLengthWarning: null,
     };
 
     await startInteractiveUI(

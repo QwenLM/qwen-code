@@ -338,6 +338,8 @@ function concatenateInstructions(
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  /** Total byte size of the loaded memory content (before managed auto-memory). */
+  memoryContentBytes: number;
   /** Number of baseline rules injected at session start. */
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
@@ -531,6 +533,7 @@ export async function loadServerHierarchicalMemory(
   return {
     memoryContent,
     fileCount,
+    memoryContentBytes: Buffer.byteLength(memoryContent, 'utf-8'),
     ruleCount,
     conditionalRules,
     projectRoot: effectiveRoot,

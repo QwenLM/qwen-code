@@ -179,6 +179,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         Promise.resolve({
           memoryContent: extensionPaths?.join(',') || '',
           fileCount: extensionPaths?.length || 0,
+          memoryContentBytes: (extensionPaths?.join(',') || '').length,
           ruleCount: 0,
           conditionalRules: [],
           projectRoot: cwd || '/tmp',

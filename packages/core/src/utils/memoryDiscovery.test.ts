@@ -141,6 +141,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: '',
+      memoryContentBytes: expect.any(Number),
       fileCount: 0,
       ruleCount: 0,
       conditionalRules: [],
@@ -179,6 +180,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: '',
+      memoryContentBytes: expect.any(Number),
       fileCount: 0,
       ruleCount: 0,
       conditionalRules: [],
@@ -218,6 +220,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -241,6 +244,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -267,6 +271,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, customContextFile)} ---\ncustom context content\n--- End of Context from: ${path.relative(cwd, customContextFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -297,6 +302,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectContextFile)} ---\nproject context content\n--- End of Context from: ${path.relative(cwd, projectContextFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdContextFile)} ---\ncwd context content\n--- End of Context from: ${path.relative(cwd, cwdContextFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 2,
       ruleCount: 0,
       conditionalRules: [],
@@ -325,6 +331,7 @@ describe('loadServerHierarchicalMemory', () => {
     // Only upward traversal is performed, subdirectory files are not loaded
     expect(result).toEqual({
       memoryContent: `--- Context from: ${customFilename} ---\nCWD custom memory\n--- End of Context from: ${customFilename} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -352,6 +359,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, srcGeminiFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcGeminiFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 2,
       ruleCount: 0,
       conditionalRules: [],
@@ -380,6 +388,7 @@ describe('loadServerHierarchicalMemory', () => {
     // Subdirectory files are not loaded, only CWD and upward
     expect(result).toEqual({
       memoryContent: `--- Context from: ${DEFAULT_CONTEXT_FILENAME} ---\nCWD memory\n--- End of Context from: ${DEFAULT_CONTEXT_FILENAME} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -420,6 +429,7 @@ describe('loadServerHierarchicalMemory', () => {
     // Subdirectory files are not loaded, only global and upward from CWD
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootGeminiFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdGeminiFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdGeminiFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 4,
       ruleCount: 0,
       conditionalRules: [],
@@ -443,6 +453,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, extensionFilePath)} ---\nExtension memory content\n--- End of Context from: ${path.relative(cwd, extensionFilePath)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -845,6 +856,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, includedFile)} ---\nincluded directory memory\n--- End of Context from: ${path.relative(cwd, includedFile)} ---`,
+      memoryContentBytes: expect.any(Number),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],

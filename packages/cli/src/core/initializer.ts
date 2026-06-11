@@ -10,6 +10,7 @@ import {
   IdeConnectionType,
   logIdeConnection,
   type Config,
+  type MemoryLengthWarning,
 } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
@@ -21,6 +22,7 @@ export interface InitializationResult {
   themeError: string | null;
   shouldOpenAuthDialog: boolean;
   geminiMdFileCount: number;
+  memoryLengthWarning: MemoryLengthWarning | null;
 }
 
 /**
@@ -62,5 +64,6 @@ export async function initializeApp(
     themeError,
     shouldOpenAuthDialog,
     geminiMdFileCount: config.getGeminiMdFileCount(),
+    memoryLengthWarning: config.getMemoryLengthWarning(),
   };
 }
