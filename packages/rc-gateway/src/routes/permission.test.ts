@@ -89,7 +89,12 @@ describe('permission vote route', () => {
     expect((await res.json()).accepted).toBe(true);
     const voted = audit.calls.find((c) => c.action === 'permission_voted');
     expect(voted).toBeDefined();
-    expect(voted!.detail).toMatchObject({ requestId: 'req-1', accepted: true });
+    expect(voted!.detail).toMatchObject({
+      requestId: 'req-1',
+      accepted: true,
+      // A human vote is always the 'client' decision_source (cycle 39).
+      decisionSource: 'client',
+    });
   });
 
   it('tags the permission_voted row with shareId+shareLabel for a guest', async () => {

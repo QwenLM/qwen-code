@@ -258,4 +258,34 @@ describe('PolicyEnforcer', () => {
       voted: false,
     });
   });
+
+  it("stamps decisionSource:'policy' on a rule-decided allow/deny, 'default' on no-match (cycle 39)", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+
+    const a = fakeAudit();
+    await new PolicyEnforcer(daemon, allowBash, a.recorder).handlePermission(
+      's1',
+      permEvent('bash'),
+    );
+    expect(a.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
+
+    const d = fakeAudit();
+    await new PolicyEnforcer(daemon, denyBash, d.recorder).handlePermission(
+      's1',
+      permEvent('bash'),
+    );
+    expect(d.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
+
+    // No rule matches (empty policy) → default prompt → decisionSource 'default'.
+    const p = fakeAudit();
+    await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
+      's1',
+      permEvent('bash'),
+    );
+    expect(p.entries[0].detail).toMatchObject({
+      action: 'prompt',
+      decisionSource: 'default',
+    });
+  });
 });

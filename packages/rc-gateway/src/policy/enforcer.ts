@@ -44,7 +44,8 @@ function readRecord(
  * - **Never throws:** every daemon call is wrapped; a thrown/false vote audits
  *   `voted:false` and returns false (fall through to push).
  * - **Audit hygiene:** `policy_decision` detail carries only
- *   `{requestId, action, ruleId?, voted}` — NEVER the tool args/paths/prompt.
+ *   `{requestId, action, ruleId?, voted, decisionSource}` — NEVER the tool
+ *   args/paths/prompt. `decisionSource` is `'policy'|'default'` (a fixed token).
  */
 export class PolicyEnforcer {
   constructor(
@@ -110,6 +111,7 @@ export class PolicyEnforcer {
                 action: 'allow',
                 ruleId: d.ruleId,
                 voted: true,
+                decisionSource: d.source,
               },
             });
             return true;
@@ -121,7 +123,13 @@ export class PolicyEnforcer {
       void this.audit?.record({
         action: 'policy_decision',
         target: sessionId,
-        detail: { requestId, action: 'allow', ruleId: d.ruleId, voted: false },
+        detail: {
+          requestId,
+          action: 'allow',
+          ruleId: d.ruleId,
+          voted: false,
+          decisionSource: d.source,
+        },
       });
       return false;
     }
@@ -143,6 +151,7 @@ export class PolicyEnforcer {
                 action: 'deny',
                 ruleId: d.ruleId,
                 voted: true,
+                decisionSource: d.source,
               },
             });
             return true;
@@ -154,16 +163,31 @@ export class PolicyEnforcer {
       void this.audit?.record({
         action: 'policy_decision',
         target: sessionId,
-        detail: { requestId, action: 'deny', ruleId: d.ruleId, voted: false },
+        detail: {
+          requestId,
+          action: 'deny',
+          ruleId: d.ruleId,
+          voted: false,
+          decisionSource: d.source,
+        },
       });
       return false;
     }
 
     // prompt (incl. fail-closed default): never vote, fall through to push.
+    // decisionSource discriminates a rule-caused prompt ('policy') from the
+    // no-rule-match default fall-through ('default') — which `ruleId` cannot,
+    // since a matched rule may be id-less.
     void this.audit?.record({
       action: 'policy_decision',
       target: sessionId,
-      detail: { requestId, action: 'prompt', ruleId: d.ruleId, voted: false },
+      detail: {
+        requestId,
+        action: 'prompt',
+        ruleId: d.ruleId,
+        voted: false,
+        decisionSource: d.source,
+      },
     });
     return false;
   }

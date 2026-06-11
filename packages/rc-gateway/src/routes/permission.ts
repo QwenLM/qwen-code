@@ -64,7 +64,15 @@ export function createPermissionVoteRoute(
       target: sessionId,
       shareId: req.rcClient?.shareId,
       shareLabel: req.rcClient?.shareLabel,
-      detail: { requestId, outcome: body.outcome, accepted },
+      // decisionSource 'client': a vote through this route is always a human
+      // decision (the spec's third decision_source value, alongside the
+      // enforcer's 'policy'/'default').
+      detail: {
+        requestId,
+        outcome: body.outcome,
+        accepted,
+        decisionSource: 'client',
+      },
     });
 
     if (accepted) {
