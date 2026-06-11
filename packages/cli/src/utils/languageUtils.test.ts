@@ -241,6 +241,19 @@ describe('languageUtils', () => {
       expect(writtenContent).not.toContain('Prefer responding');
     });
 
+    it('should write to custom targetPath when provided', () => {
+      writeOutputLanguageFile('Korean', '/proj/.qwen/output-language.md');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith('/proj/.qwen', {
+        recursive: true,
+      });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
     it('should include exception clause for explicit user language requests', () => {
       writeOutputLanguageFile('English');
 

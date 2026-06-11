@@ -5550,7 +5550,9 @@ describe('sessionLanguage multi-session propagation', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
 
-    vi.mocked(loadCliConfig).mockImplementation(async () => sessionConfigs[sessionIdx]! as unknown as Config);
+    vi.mocked(loadCliConfig).mockImplementation(
+      async () => sessionConfigs[sessionIdx]! as unknown as Config,
+    );
 
     vi.mocked(Session).mockImplementation(() => {
       const cfg = sessionConfigs[sessionIdx]!;
@@ -5622,6 +5624,88 @@ describe('sessionLanguage multi-session propagation', () => {
 
     // Session C registered the global path
     expect(cfgC.setOutputLanguageFilePath).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still refreshes sessions when a file write fails', async () => {
+    const cfgOk = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-ok'),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+    });
+    const cfgFail = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-fail'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/readonly/.qwen/output-language.md'),
+    });
+
+    const sessionConfigs = [cfgOk, cfgFail];
+    let sessionIdx = 0;
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockImplementation(
+      async () => sessionConfigs[sessionIdx]! as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx]!;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      sessionIdx++;
+      return {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const bootConfig = makeConfig();
+    const agentPromise = runAcpAgent(
+      bootConfig as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/ok', mcpServers: [] });
+    await agent.newSession({ cwd: '/readonly', mcpServers: [] });
+
+    // Make writes for cfgFail's path throw
+    vi.mocked(updateOutputLanguageFile).mockImplementation(
+      (_value: string, path?: string) => {
+        if (path === '/readonly/.qwen/output-language.md') {
+          throw new Error('EACCES');
+        }
+      },
+    );
+
+    await agent.extMethod('qwen/control/session/language', {
+      sessionId: 's-ok',
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
+
+    // Both sessions still refreshed despite cfgFail's write failure
+    expect(cfgOk.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgFail.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(
+      cfgFail.getGeminiClient().refreshSystemInstruction,
+    ).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
