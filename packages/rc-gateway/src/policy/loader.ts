@@ -228,24 +228,38 @@ export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
  * file is loaded with cycle-14 semantics UNCHANGED: absent (ENOENT) → the
  * default-prompt policy; malformed → THROWS {@link PolicyError} (boot fails — a
  * malformed user policy must not be silently downgraded). The WORKSPACE layer is
- * fail-CLOSED: a malformed or unreadable workspace file is logged via `warn` and
- * IGNORED (keep the user policy — never apply unparseable `allow`s, never crash
- * boot). So this function throws ONLY on a malformed user file. `warn` defaults to
- * a no-op (the CLI passes a `console.warn` wrapper).
+ * fail-CLOSED: by default a malformed or unreadable workspace file is logged via
+ * `warn` and IGNORED (keep the user policy — never apply unparseable `allow`s,
+ * never crash boot). So at boot this function throws ONLY on a malformed user
+ * file. `warn` defaults to a no-op (the CLI passes a `console.warn` wrapper).
+ *
+ * **`strictWorkspace` (cycle 45, for HOT-RELOAD):** when true, a malformed/
+ * unreadable workspace file THROWS instead of being silently dropped. At boot,
+ * dropping a bad workspace layer is right (no previous ruleset to keep, must not
+ * crash). At RELOAD, silently dropping it would WIDEN permissions (workspace
+ * rules that shadowed user `allow`s vanish) and mis-report success — so the
+ * caller wants the error to propagate, retain the previous ruleset, and audit a
+ * failure. A workspace file that is merely ABSENT (ENOENT) still resolves to
+ * `null` (no throw) in both modes — a deleted workspace file is an intended
+ * removal of the layer, not a parse error.
  */
 export async function loadLayeredPolicy(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
+  opts: { strictWorkspace?: boolean } = {},
 ): Promise<Policy> {
   const user = (await loadPolicyFile(userPath)) ?? DEFAULT_PROMPT_POLICY;
   let workspace: Policy | null = null;
   if (workspaceCwd) {
     try {
+      // loadPolicyFile returns null for ENOENT (absent) and throws only for a
+      // malformed/unreadable file.
       workspace = await loadPolicyFile(
         join(workspaceCwd, '.qwen', 'policy.yaml'),
       );
     } catch (err) {
+      if (opts.strictWorkspace) throw err; // reload: retain the previous ruleset
       warn(
         `[policy] ignoring workspace policy.yaml: ${(err as Error).message}`,
       );

@@ -145,6 +145,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           workspaceCwd,
           // eslint-disable-next-line no-console
           (msg) => console.warn(msg),
+          // RELOAD semantics: a malformed workspace file must RETAIN the
+          // previous ruleset (throw → onError), not silently drop the layer and
+          // widen permissions. A deleted (ENOENT) workspace file still resolves
+          // to user-only (an intended layer removal).
+          { strictWorkspace: true },
         ),
       // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
       apply: (p) => {

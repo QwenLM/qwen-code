@@ -182,4 +182,47 @@ describe('loadLayeredPolicy', () => {
       loadLayeredPolicy(userPath, workspaceCwd, warn),
     ).rejects.toThrow();
   });
+
+  // cycle 45: hot-reload must RETAIN the previous ruleset on a malformed
+  // workspace edit, NOT silently drop the layer (which would widen permissions).
+  it('strictWorkspace: a malformed workspace file THROWS (reload retains previous)', async () => {
+    await writeFile(
+      userPath,
+      `rules:\n${rule('user-allow', 'allow', '{ tool: bash }')}`,
+    );
+    await writeFile(workspaceFile, 'rules: not-a-sequence\n');
+    await expect(
+      loadLayeredPolicy(userPath, workspaceCwd, warn, {
+        strictWorkspace: true,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('strictWorkspace: an ABSENT workspace file still resolves to user-only (intended removal)', async () => {
+    await writeFile(
+      userPath,
+      `rules:\n${rule('user-deny', 'deny', '{ tool: bash }')}`,
+    );
+    // workspaceFile not written → ENOENT.
+    const p = await loadLayeredPolicy(userPath, workspaceCwd, warn, {
+      strictWorkspace: true,
+    });
+    expect(evaluate(p, { tool: 'bash' }).ruleId).toBe('user-deny');
+  });
+
+  it('strictWorkspace: a VALID workspace file still layers normally', async () => {
+    await writeFile(
+      userPath,
+      `rules:\n${rule('user-prompt', 'prompt', '{ tool: bash }')}`,
+    );
+    await writeFile(
+      workspaceFile,
+      `rules:\n${rule('ws-allow', 'allow', '{ tool: bash }')}`,
+    );
+    const p = await loadLayeredPolicy(userPath, workspaceCwd, warn, {
+      strictWorkspace: true,
+    });
+    // Workspace prepended → wins the equal-specificity tie.
+    expect(evaluate(p, { tool: 'bash' }).ruleId).toBe('ws-allow');
+  });
 });
