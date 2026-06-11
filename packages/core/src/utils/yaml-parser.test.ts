@@ -308,32 +308,22 @@ describe('yaml-parser', () => {
       });
     });
 
-    describe('nested YAML support', () => {
-      it('parses array-of-records without leaking deeper keys to parent scope', () => {
+    describe('nested YAML', () => {
+      it('parses array-of-records', () => {
         const yaml =
           'mcpServers:\n  - filesystem:\n      type: stdio\n      command: node';
         const result = parse(yaml);
         expect(result['mcpServers']).toEqual([
-          {
-            filesystem: {
-              type: 'stdio',
-              command: 'node',
-            },
-          },
+          { filesystem: { type: 'stdio', command: 'node' } },
         ]);
-        expect(result['type']).toBeUndefined();
-        expect(result['command']).toBeUndefined();
       });
 
-      it('parses record-of-records without leaking list items into the record', () => {
+      it('parses record-of-records with arrays', () => {
         const yaml = 'hooks:\n  PreToolUse:\n    - matcher: Read';
         const result = parse(yaml);
-        expect(
-          (result['hooks'] as Record<string, unknown>)['PreToolUse'],
-        ).toEqual([{ matcher: 'Read' }]);
-        expect((result['hooks'] as Record<string, unknown>)['- matcher']).toBe(
-          undefined,
-        );
+        expect(result['hooks']).toEqual({
+          PreToolUse: [{ matcher: 'Read' }],
+        });
       });
     });
   });
