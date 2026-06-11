@@ -191,7 +191,7 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
-  it('compacts large shell output before storing UI and model history', async () => {
+  it('compacts large shell output for UI history without changing model history behavior', async () => {
     const largeOutput = `head-${'x'.repeat(100_000)}-tail`;
     const { result } = renderProcessorHook();
 
@@ -222,10 +222,11 @@ describe('useShellCommandProcessor', () => {
         text: string;
       }
     ).text;
-    expect(modelHistoryText.length).toBeLessThan(2600);
+    expect(modelHistoryText.length).toBeGreaterThan(10_000);
+    expect(modelHistoryText.length).toBeLessThan(10_500);
     expect(modelHistoryText).toContain('head-');
-    expect(modelHistoryText).toContain('-tail');
-    expect(modelHistoryText).toContain('truncated from');
+    expect(modelHistoryText).not.toContain('-tail');
+    expect(modelHistoryText).toContain('... (truncated)');
   });
 
   it('should handle command failure and display error status', async () => {

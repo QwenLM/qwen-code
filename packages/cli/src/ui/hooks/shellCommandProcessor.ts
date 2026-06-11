@@ -17,7 +17,6 @@ import type {
   ShellExecutionResult,
 } from '@qwen-code/qwen-code-core';
 import {
-  compactStringForHistory,
   compactToolResultDisplayForHistory,
   createDebugLogger,
   isBinary,
@@ -34,7 +33,7 @@ import fs from 'node:fs';
 import { themeManager } from '../../ui/themes/theme-manager.js';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
-const MAX_MODEL_HISTORY_OUTPUT_LENGTH = 2000;
+const MAX_OUTPUT_LENGTH = 10000;
 const debugLogger = createDebugLogger('SHELL_COMMAND_PROCESSOR');
 
 function addShellCommandToGeminiHistory(
@@ -42,10 +41,10 @@ function addShellCommandToGeminiHistory(
   rawQuery: string,
   resultText: string,
 ) {
-  const modelContent = compactStringForHistory(
-    resultText,
-    MAX_MODEL_HISTORY_OUTPUT_LENGTH,
-  );
+  const modelContent =
+    resultText.length > MAX_OUTPUT_LENGTH
+      ? resultText.substring(0, MAX_OUTPUT_LENGTH) + '\n... (truncated)'
+      : resultText;
 
   geminiClient.addHistory({
     role: 'user',
@@ -316,7 +315,7 @@ export const useShellCommandProcessor = (
                 userMessageTimestamp,
               );
 
-              // Add a smaller contextual summary to the LLM's history.
+              // Keep the existing LLM history behavior unchanged.
               addShellCommandToGeminiHistory(
                 geminiClient,
                 rawQuery,
