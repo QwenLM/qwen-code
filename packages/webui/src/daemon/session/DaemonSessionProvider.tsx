@@ -607,6 +607,8 @@ export function DaemonSessionProvider({
 
           let sawEvent = false;
           let resyncRequested = false;
+          let epochReplayUiEvents: DaemonUiEvent[] | undefined;
+          let epochReplaySourceEvents: DaemonEvent[] = [];
           for await (const event of activeSession.events({
             signal: abort.signal,
             maxQueued,
@@ -633,6 +635,79 @@ export function DaemonSessionProvider({
                 normalizedUiEvents,
                 addNotice,
               );
+              if (event.type === 'state_resync_required') {
+                const reason =
+                  typeof event.data === 'object' && event.data !== null
+                    ? (event.data as Record<string, unknown>).reason
+                    : undefined;
+                if (reason === 'epoch_reset') {
+                  setPromptStatus('idle');
+                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                  activeSession.setLastEventId(0);
+                  epochReplayUiEvents = [];
+                  epochReplaySourceEvents = [];
+                  continue;
+                }
+              }
+              if (epochReplayUiEvents) {
+                epochReplaySourceEvents.push(event);
+                epochReplayUiEvents.push(...uiEvents);
+                if (event.type === 'turn_complete') {
+                  const stopReason =
+                    (event.data as DaemonTurnCompleteData | undefined)
+                      ?.stopReason ?? 'end_turn';
+                  epochReplayUiEvents.push({
+                    type: 'assistant.done',
+                    reason: stopReason,
+                  });
+                } else if (event.type === 'turn_error') {
+                  epochReplayUiEvents.push({
+                    type: 'assistant.done',
+                    reason: 'error',
+                  });
+                }
+
+                const replayComplete = uiEvents.some(
+                  (uiEvent) => uiEvent.type === 'session.replay_complete',
+                );
+                if (replayComplete) {
+                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                    epochReplayUiEvents.push({
+                      type: 'assistant.done',
+                      reason: 'replay_complete',
+                    });
+                    setPromptStatus('idle');
+                  }
+                  const replayUiEvents = epochReplayUiEvents;
+                  const replaySourceEvents = epochReplaySourceEvents;
+                  epochReplayUiEvents = undefined;
+                  epochReplaySourceEvents = [];
+                  store.reset();
+                  if (replayUiEvents.length > 0) {
+                    store.dispatch(replayUiEvents);
+                    bumpWorkspaceEventSignals(
+                      replayUiEvents,
+                      setWorkspaceEventSignals,
+                    );
+                  }
+                  for (const replayEvent of replaySourceEvents) {
+                    settleActivePromptFromTurnEvent(
+                      activePromptsRef.current,
+                      activeSession.sessionId,
+                      replayEvent,
+                      store,
+                      setPromptStatus,
+                      passiveAssistantDoneTimerRef,
+                      { requireBoundPromptId: true },
+                    );
+                  }
+                  setConnection((c) => ({ ...c, catchingUp: undefined }));
+                }
+                continue;
+              }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
                 setPromptStatus((current) =>

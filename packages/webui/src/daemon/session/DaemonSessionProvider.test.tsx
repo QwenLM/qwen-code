@@ -2758,6 +2758,8 @@ describe('DaemonSessionProvider', () => {
 
   it('resets stale transcript and accepts replay after epoch-reset resync', async () => {
     const startEpochReset = createDeferred<void>();
+    const epochResetDelivered = createDeferred<void>();
+    const continueReplay = createDeferred<void>();
     const replayDrained = createDeferred<void>();
     const sessionRef: { current?: MockSession } = {};
     const setLastEventId = vi.fn((lastEventId: number | undefined) => {
@@ -2783,6 +2785,9 @@ describe('DaemonSessionProvider', () => {
             earliestAvailableId: 1,
           },
         };
+        epochResetDelivered.resolve();
+        await continueReplay.promise;
+        if (opts.signal?.aborted) return;
         yield {
           id: 1,
           v: 1,
@@ -2834,11 +2839,19 @@ describe('DaemonSessionProvider', () => {
 
     await act(async () => {
       startEpochReset.resolve();
-      await replayDrained.promise;
+      await epochResetDelivered.promise;
       await flushPromises();
     });
 
     expect(setLastEventId).toHaveBeenCalledWith(0);
+    expect(blocks).toMatchObject([{ kind: 'user', text: 'stale local' }]);
+
+    await act(async () => {
+      continueReplay.resolve();
+      await replayDrained.promise;
+      await flushPromises();
+    });
+
     expect(awaitingResync).toBe(false);
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'fresh replayed' },
