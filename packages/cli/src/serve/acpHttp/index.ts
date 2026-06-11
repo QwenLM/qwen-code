@@ -468,10 +468,20 @@ export function mountAcpHttp(
           let messageQueue = Promise.resolve();
           const wsKey = socket.remoteAddress ?? 'ws-unknown';
 
+          ws.on('error', (err) => {
+            writeStderrLine(
+              `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+
           ws.on('message', (rawData: Buffer | string) => {
             messageQueue = messageQueue
               .then(() => handleWsMessage(rawData))
-              .catch(() => {});
+              .catch((err) => {
+                writeStderrLine(
+                  `qwen serve: /acp WS message handler error: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
           });
 
           async function handleWsMessage(
