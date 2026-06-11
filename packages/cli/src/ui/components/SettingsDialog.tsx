@@ -27,7 +27,7 @@ import {
   getNestedValue,
   getEffectiveValue,
 } from '../../utils/settingsUtils.js';
-import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
+import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -384,7 +384,7 @@ export function SettingsDialog({
 
       // Update output language rule file immediately (no restart needed for LLM effect)
       if (key === 'general.outputLanguage' && typeof parsed === 'string') {
-        updateOutputLanguageFile(parsed);
+        writeOutputLanguageAndRegisterPath(parsed, config);
       }
 
       // Mark as needing restart and show prompt

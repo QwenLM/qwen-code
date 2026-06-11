@@ -1,0 +1,371 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { createHash } from 'node:crypto';
+import {
+  context as otelContext,
+  propagation,
+  ROOT_CONTEXT,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+  type Context,
+  type Span,
+} from '@opentelemetry/api';
+import { logs, type LogAttributes } from '@opentelemetry/api-logs';
+import { SERVICE_NAME } from './constants.js';
+import { isTelemetrySdkInitialized } from './sdk.js';
+import { truncateSpanError } from './session-tracing.js';
+
+export const DAEMON_TRACEPARENT_META_KEY = 'qwen.telemetry.traceparent';
+export const DAEMON_TRACESTATE_META_KEY = 'qwen.telemetry.tracestate';
+
+const SPAN_DAEMON_REQUEST = 'qwen-code.daemon.request';
+const SPAN_DAEMON_BRIDGE = 'qwen-code.daemon.bridge';
+const EVENT_DAEMON_ERROR = 'qwen-code.daemon.error';
+
+type DaemonAttributes = Record<string, string | number | boolean>;
+
+interface CapturedDaemonContext {
+  context: Context;
+}
+
+export interface DaemonRequestSpanOptions {
+  method: string;
+  route: string;
+  workspaceHash?: string;
+  sessionId?: string;
+  clientId?: string;
+  permissionRequestId?: string;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function errorType(error: unknown): string {
+  if (error instanceof Error) return error.name || 'Error';
+  return typeof error;
+}
+
+const INVALID_TRACE_ID = '0'.repeat(32);
+const INVALID_SPAN_ID = '0'.repeat(16);
+
+function activeSpanContextIsValid(): boolean {
+  const span = trace.getSpan(otelContext.active());
+  if (!span) return false;
+  const ctx = span.spanContext();
+  return ctx.traceId !== INVALID_TRACE_ID && ctx.spanId !== INVALID_SPAN_ID;
+}
+
+function stripReservedTraceMeta(meta: unknown): Record<string, unknown> {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
+  const record = meta as Record<string, unknown>;
+  if (
+    !(DAEMON_TRACEPARENT_META_KEY in record) &&
+    !(DAEMON_TRACESTATE_META_KEY in record)
+  ) {
+    return { ...record };
+  }
+  const out = { ...record };
+  delete out[DAEMON_TRACEPARENT_META_KEY];
+  delete out[DAEMON_TRACESTATE_META_KEY];
+  return out;
+}
+
+export function hashDaemonWorkspace(workspace: string): string {
+  return createHash('sha256').update(workspace).digest('hex').slice(0, 16);
+}
+
+export async function withDaemonSpan<T>(
+  name: string,
+  attributes: DaemonAttributes,
+  fn: (span: Span) => Promise<T>,
+  options: { autoOkOnSuccess?: boolean } = {},
+): Promise<T> {
+  if (!isTelemetrySdkInitialized()) {
+    return await fn(undefined as unknown as Span);
+  }
+  const autoOkOnSuccess = options.autoOkOnSuccess ?? true;
+  const tracer = trace.getTracer(SERVICE_NAME);
+  return await tracer.startActiveSpan(
+    name,
+    { kind: SpanKind.INTERNAL, attributes },
+    async (span) => {
+      try {
+        const result = await fn(span);
+        if (autoOkOnSuccess) {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
+        return result;
+      } catch (error) {
+        recordDaemonError(span, error);
+        throw error;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
+
+export async function withDaemonRequestSpan<T>(
+  options: DaemonRequestSpanOptions,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  return await withDaemonSpan(
+    SPAN_DAEMON_REQUEST,
+    {
+      'http.request.method': options.method,
+      'http.route': options.route,
+      'qwen-code.daemon.operation': 'http_request',
+      ...(options.workspaceHash
+        ? { 'qwen-code.workspace.hash': options.workspaceHash }
+        : {}),
+      ...(options.sessionId ? { 'session.id': options.sessionId } : {}),
+      ...(options.clientId ? { 'qwen-code.client_id': options.clientId } : {}),
+      ...(options.permissionRequestId
+        ? {
+            'qwen-code.daemon.permission.request_id':
+              options.permissionRequestId,
+          }
+        : {}),
+    },
+    fn,
+    { autoOkOnSuccess: false },
+  );
+}
+
+export async function withDaemonBridgeSpan<T>(
+  operation: string,
+  attributes: DaemonAttributes,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withDaemonSpan(
+    SPAN_DAEMON_BRIDGE,
+    {
+      'qwen-code.daemon.operation': operation,
+      ...attributes,
+    },
+    async () => await fn(),
+  );
+}
+
+export function recordDaemonHttpResponse(
+  span: Span | undefined,
+  statusCode: number,
+): void {
+  try {
+    span?.setAttribute('http.response.status_code', statusCode);
+  } catch {
+    // Telemetry must not affect request handling.
+  }
+}
+
+export function addDaemonRequestAttribute(
+  key: string,
+  value: string | number | boolean,
+): void {
+  try {
+    trace.getSpan(otelContext.active())?.setAttribute(key, value);
+  } catch {
+    // Telemetry must not affect request handling.
+  }
+}
+
+export function recordDaemonError(
+  span: Span | undefined,
+  error: unknown,
+  attributes: DaemonAttributes = {},
+): void {
+  const target = span ?? trace.getSpan(otelContext.active());
+  if (!target) return;
+  try {
+    const message = truncateSpanError(errorMessage(error));
+    target.recordException(error instanceof Error ? error : new Error(message));
+    target.setAttributes({
+      'error.type': errorType(error),
+      'error.message': message,
+      ...attributes,
+    });
+    target.setStatus({ code: SpanStatusCode.ERROR, message });
+  } catch {
+    // Telemetry must not affect request handling.
+  }
+}
+
+export function emitDaemonLog(
+  body: string,
+  attributes: LogAttributes = {},
+  options?: { eventName?: string; severityNumber?: number },
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  try {
+    logs.getLogger(SERVICE_NAME).emit({
+      body,
+      timestamp: new Date(),
+      attributes: {
+        'event.name': options?.eventName ?? EVENT_DAEMON_ERROR,
+        ...attributes,
+      },
+      ...(options?.severityNumber != null
+        ? { severityNumber: options.severityNumber }
+        : {}),
+    });
+  } catch {
+    // Telemetry must not affect daemon behavior.
+  }
+}
+
+export function captureDaemonTelemetryContext(): CapturedDaemonContext {
+  return { context: otelContext.active() };
+}
+
+export async function runWithDaemonTelemetryContext<T>(
+  captured: unknown,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const ctx =
+    captured &&
+    typeof captured === 'object' &&
+    'context' in captured &&
+    (captured as CapturedDaemonContext).context
+      ? (captured as CapturedDaemonContext).context
+      : undefined;
+  if (!ctx) return await fn();
+  return await otelContext.with(ctx, fn);
+}
+
+export function injectDaemonTraceContext<T extends object>(request: T): T {
+  const currentMeta = (request as { _meta?: unknown })._meta;
+
+  if (!activeSpanContextIsValid()) {
+    return currentMeta
+      ? { ...request, _meta: stripReservedTraceMeta(currentMeta) }
+      : request;
+  }
+
+  const nextMeta = stripReservedTraceMeta(currentMeta);
+  try {
+    const carrier: Record<string, string> = {};
+    propagation.inject(otelContext.active(), carrier);
+    if (carrier['traceparent']) {
+      nextMeta[DAEMON_TRACEPARENT_META_KEY] = carrier['traceparent'];
+    }
+    if (carrier['tracestate']) {
+      nextMeta[DAEMON_TRACESTATE_META_KEY] = carrier['tracestate'];
+    }
+  } catch {
+    // Telemetry must not affect prompt forwarding.
+  }
+
+  if (!currentMeta && !nextMeta[DAEMON_TRACEPARENT_META_KEY]) {
+    return request;
+  }
+
+  return {
+    ...request,
+    _meta: nextMeta,
+  };
+}
+
+export function extractDaemonTraceContext(
+  source: unknown,
+): Context | undefined {
+  const meta = (source as { _meta?: unknown } | undefined)?._meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return undefined;
+  }
+  const record = meta as Record<string, unknown>;
+  const traceparent = record[DAEMON_TRACEPARENT_META_KEY];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
+    return undefined;
+  }
+  const carrier: Record<string, string> = { traceparent };
+  const tracestate = record[DAEMON_TRACESTATE_META_KEY];
+  if (typeof tracestate === 'string' && tracestate.length > 0) {
+    carrier['tracestate'] = tracestate;
+  }
+  const extracted = propagation.extract(ROOT_CONTEXT, carrier);
+  if (trace.getSpanContext(extracted)) return extracted;
+
+  const parts = traceparent.split('-');
+  const traceId = parts[1];
+  const spanId = parts[2];
+  const flags = parts[3];
+  if (
+    parts[0] !== '00' ||
+    !traceId?.match(/^[0-9a-f]{32}$/) ||
+    !spanId?.match(/^[0-9a-f]{16}$/) ||
+    !flags?.match(/^[0-9a-f]{2}$/) ||
+    traceId === INVALID_TRACE_ID ||
+    spanId === INVALID_SPAN_ID
+  ) {
+    return undefined;
+  }
+  return trace.setSpan(
+    ROOT_CONTEXT,
+    trace.wrapSpanContext({
+      traceId,
+      spanId,
+      traceFlags: Number.parseInt(flags, 16),
+      isRemote: true,
+    }),
+  );
+}
+
+export interface DaemonBridgeTelemetryMetrics {
+  sessionLifecycle(action: 'spawn' | 'close' | 'die'): void;
+  channelLifecycle(action: 'spawn' | 'exit', expected?: boolean): void;
+  promptQueueWait(durationMs: number): void;
+  promptDuration(durationMs: number): void;
+  cancelled(): void;
+}
+
+export function createDaemonBridgeTelemetry(): {
+  captureContext(): unknown;
+  runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
+  withSpan<T>(
+    operation: string,
+    attributes: DaemonAttributes,
+    fn: () => Promise<T>,
+  ): Promise<T>;
+  event(name: string, attributes: DaemonAttributes): void;
+  injectPromptContext<T extends object>(request: T): T;
+  metrics?: DaemonBridgeTelemetryMetrics;
+} {
+  return {
+    captureContext: captureDaemonTelemetryContext,
+    runWithContext: runWithDaemonTelemetryContext,
+    withSpan: withDaemonBridgeSpan,
+    event(name, attributes) {
+      if (!isTelemetrySdkInitialized()) return;
+      try {
+        const activeSpan = trace.getSpan(otelContext.active());
+        if (activeSpan) {
+          activeSpan.addEvent(name, attributes);
+          return;
+        }
+        const span = trace
+          .getTracer(SERVICE_NAME)
+          .startSpan(SPAN_DAEMON_BRIDGE, {
+            kind: SpanKind.INTERNAL,
+            attributes: {
+              'event.name': name,
+              'qwen-code.daemon.operation': `event.${name}`,
+              ...attributes,
+            },
+          });
+        span.addEvent(name, attributes);
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
+      } catch {
+        // Telemetry must not affect bridge behavior.
+      }
+    },
+    injectPromptContext: injectDaemonTraceContext,
+  };
+}

@@ -130,6 +130,13 @@ export enum SendMessageType {
   Cron = 'cron',
   /** Background agent notification. Display item is added by the drain loop. */
   Notification = 'notification',
+  /**
+   * A message delivered to the leader from a teammate. Behaves like a
+   * fresh top-level interaction (loop-detector reset + interaction span)
+   * but is not a user prompt — it does not bump commit attribution or get
+   * recorded as a user message.
+   */
+  Teammate = 'teammate',
 }
 
 export interface SendMessageOptions {
@@ -242,7 +249,7 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation);
+      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
@@ -1420,7 +1427,7 @@ export class GeminiClient {
       // submission, lastPrompt === fr parts) closes the pair via the real
       // `functionResponse` before we synthesize an error one. Doing the
       // repair here would happen pre-push and race against the user
-      // content's own pairing — see PR #4176 review for the corner.
+      // content's own pairing.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1430,6 +1437,11 @@ export class GeminiClient {
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
       messageType !== SendMessageType.Notification &&
+      // Teammate envelopes are machine-driven re-entries like Cron /
+      // Notification, not user prompts: user-authored UserPromptSubmit
+      // hooks must not fire on (or be able to block) internal team
+      // coordination traffic.
+      messageType !== SendMessageType.Teammate &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -1474,7 +1486,15 @@ export class GeminiClient {
       }
     }
 
-    if (messageType === SendMessageType.Notification) {
+    if (
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      // Teammate envelopes record like notifications: the UI rendered
+      // them as a compact `●` line (the displayText) and the envelope
+      // is the model-bound payload, so a resumed session restores the
+      // same info item. Without this they were the one top-level
+      // interaction missing from chat recording entirely.
       this.config
         .getChatRecordingService()
         ?.recordNotification(request, options?.notificationDisplayText);
@@ -1486,7 +1506,8 @@ export class GeminiClient {
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification;
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate;
     if (isTopLevelInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -1699,7 +1720,7 @@ export class GeminiClient {
       // Prevent context updates from being sent while a tool call is
       // waiting for a response. The Qwen API requires that a functionResponse
       // part from the user immediately follows a functionCall part from the model
-      // in the conversation history . The IDE context is not discarded; it will
+      // in the conversation history. The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
       const historyLength = this.getHistoryLength();
       const lastMessage = this.peekLastHistoryEntry();
@@ -2369,7 +2390,7 @@ export class GeminiClient {
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
-      // Re-send a full IDE context blob on the next regular message —
+      // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;

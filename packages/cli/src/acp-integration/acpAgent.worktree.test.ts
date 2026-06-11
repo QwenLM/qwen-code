@@ -109,18 +109,55 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     YOLO: 'yolo',
     PLAN: 'plan',
   },
+  Kind: {
+    Read: 'read',
+    Edit: 'edit',
+    Delete: 'delete',
+    Move: 'move',
+    Search: 'search',
+    Execute: 'execute',
+    Think: 'think',
+    Fetch: 'fetch',
+    Other: 'other',
+  },
   AuthType: {},
   clearCachedCredentialFile: vi.fn(),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
+  MCP_BUDGET_WARN_FRACTION: 0.75,
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
     _args: args,
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
   tokenLimit: vi.fn(),
+  getMCPDiscoveryState: vi.fn(() => 'not_started'),
+  getMCPServerStatus: vi.fn(() => 'disconnected'),
+  MCPDiscoveryState: {
+    NOT_STARTED: 'not_started',
+    IN_PROGRESS: 'in_progress',
+    COMPLETED: 'completed',
+  },
+  MCPServerStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+  },
+  McpTransportPool: vi.fn().mockImplementation(() => ({
+    acquire: vi.fn(),
+    release: vi.fn(),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    off: vi.fn(),
+  })),
+  POOLED_TRANSPORTS_DEFAULT: new Set<string>(),
   SessionStartSource: { Startup: 'startup', Resume: 'resume' },
   SessionEndReason: { PromptInputExit: 'prompt_input_exit', Other: 'other' },
+  WorkspaceMcpBudget: vi.fn().mockImplementation(() => ({
+    register: vi.fn(),
+    unregister: vi.fn(),
+    snapshot: vi.fn(() => ({})),
+  })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
   HookEventName: {
     PreToolUse: 'PreToolUse',
@@ -268,6 +305,13 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue([]),
+        addDirectory: vi.fn(),
+      }),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      setMcpBudgetEventCallback: vi.fn(),
     };
   }
 
@@ -305,6 +349,13 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue([]),
+        addDirectory: vi.fn(),
+      }),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      setMcpBudgetEventCallback: vi.fn(),
     } as unknown as Config;
 
     processExitSpy = vi

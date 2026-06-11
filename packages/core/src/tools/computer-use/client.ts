@@ -56,7 +56,7 @@ export class ComputerUseClient {
       // inline `?? 'open-computer-use@latest'` fallback meant the actual
       // MCP server could run a newer upstream than the schemas.ts pin
       // was generated against — DragonnZhang flagged the schema-drift
-      // window in PR #4590 review.
+      // window in PR review.
       ComputerUseClient.singleton = new ComputerUseClient({
         packageSpec: resolveComputerUsePackageSpec(),
       });
@@ -196,9 +196,9 @@ export class ComputerUseClient {
  * (e.g. the upstream child process was killed by macOS after a TCC permission
  * grant). The patterns below cover all observed SDK error messages:
  *
- *   "Connection closed"          – StdioClientTransport stream closed
- *   "MCP error -32000: ..."      – JSON-RPC internal error, often wraps the above
- *   "Not connected"              – Client.callTool guard before transport is open
+ *   "Connection closed" – StdioClientTransport stream closed
+ *   "MCP error -32000: ..." – JSON-RPC internal error, often wraps the above
+ *   "Not connected" – Client.callTool guard before transport is open
  */
 export function isTransportClosedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);

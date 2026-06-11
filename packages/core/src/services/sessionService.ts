@@ -1307,8 +1307,13 @@ export function buildApiHistoryFromConversation(
  */
 export function replayUiTelemetryFromConversation(
   conversation: ConversationRecord,
+  sessionId?: string,
 ): void {
-  uiTelemetryService.reset();
+  if (sessionId) {
+    uiTelemetryService.resetSession(sessionId);
+  } else {
+    uiTelemetryService.reset();
+  }
 
   for (const record of conversation.messages) {
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
@@ -1319,7 +1324,7 @@ export function replayUiTelemetryFromConversation(
       | undefined;
     const uiEvent = payload?.uiEvent;
     if (uiEvent) {
-      uiTelemetryService.addEvent(uiEvent);
+      uiTelemetryService.addEvent(uiEvent, sessionId);
     }
   }
 
@@ -1360,4 +1365,28 @@ export function getResumePromptTokenCount(
   }
 
   return undefined;
+}
+
+const MAX_BRANCH_COLLISION_SCAN = 99;
+
+export async function computeUniqueBranchTitle(
+  baseName: string,
+  sessionService: SessionService,
+): Promise<string> {
+  const maxSuffixLen = ' (Branch 1234567890123)'.length;
+  const trimmed = baseName
+    .trim()
+    .slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
+  const taken = new Set(
+    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
+      (t) => t.toLowerCase().trim(),
+    ),
+  );
+  const first = `${trimmed} (Branch)`;
+  if (!taken.has(first.toLowerCase())) return first;
+  for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
+    const candidate = `${trimmed} (Branch ${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${trimmed} (Branch ${Date.now()})`;
 }

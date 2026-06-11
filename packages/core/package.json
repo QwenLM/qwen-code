@@ -65,6 +65,7 @@
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
+    "proper-lockfile": "^4.1.2",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
     "strip-ansi": "^7.1.0",

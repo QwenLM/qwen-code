@@ -14,7 +14,12 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/daemon": ["../sdk-typescript/src/daemon/index.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist", "**/*.stories.tsx"]
