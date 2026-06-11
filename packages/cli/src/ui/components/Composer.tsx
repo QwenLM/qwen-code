@@ -16,11 +16,6 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
-import {
-  interpolateColor,
-  resolveColor,
-  supportsTrueColor,
-} from '../themes/color-utils.js';
 import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
@@ -96,22 +91,8 @@ export const Composer = () => {
     [uiActions],
   );
 
-  const composerWidth = uiState.terminalWidth - 4;
-  const separatorColor = supportsTrueColor()
-    ? interpolateColor(
-        resolveColor(theme.background.primary || 'black') || 'black',
-        resolveColor(theme.text.secondary) || theme.text.secondary,
-        0.15,
-      )
-    : undefined;
-
   return (
-    <Box flexDirection="column" marginTop={separatorColor ? 0 : 1}>
-      {separatorColor && (
-        <Text color={separatorColor}>
-          {'▄'.repeat(Math.max(0, composerWidth))}
-        </Text>
-      )}
+    <Box flexDirection="column" marginTop={1}>
       {!uiState.embeddedShellFocused && !suppressBottomLoadingIndicator && (
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.

@@ -16,6 +16,12 @@ import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
+import {
+  resolveColor,
+  subtleBandColor,
+  supportsTrueColor,
+} from '../../themes/color-utils.js';
+
 interface UserMessageProps {
   text: string;
   width?: number;
@@ -186,7 +192,7 @@ const ContinuationMarkdownMessage: React.FC<
 };
 
 export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
-  const content = (
+  const fallback = (
     <PrefixedTextMessage
       text={text}
       prefix=">"
@@ -197,15 +203,41 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
     />
   );
 
-  if (width === undefined) {
-    return content;
+  if (width === undefined || !supportsTrueColor()) {
+    return fallback;
   }
+
+  const bg = resolveColor(theme.background.primary || 'black') || 'black';
+  const bandColor = subtleBandColor(bg);
+  if (!bandColor) {
+    return fallback;
+  }
+
+  const prefix = '> ';
+  const lines = text.split('\n');
 
   return (
     <Box flexDirection="column" width={width}>
-      <Text dimColor>{'▄'.repeat(width)}</Text>
-      {content}
-      <Text dimColor>{'▀'.repeat(width)}</Text>
+      <Text color={bandColor}>{'▄'.repeat(width)}</Text>
+      {lines.map((line, i) => {
+        const linePrefix = i === 0 ? prefix : '  ';
+        const contentWidth = stringWidth(linePrefix + line);
+        const pad = Math.max(0, width - contentWidth);
+        return (
+          <Text
+            key={i}
+            backgroundColor={bandColor}
+            aria-label={i === 0 ? SCREEN_READER_USER_PREFIX : undefined}
+          >
+            <Text color={theme.text.accent}>
+              {linePrefix}
+              {line}
+            </Text>
+            {pad > 0 ? ' '.repeat(pad) : ''}
+          </Text>
+        );
+      })}
+      <Text color={bandColor}>{'▀'.repeat(width)}</Text>
     </Box>
   );
 };

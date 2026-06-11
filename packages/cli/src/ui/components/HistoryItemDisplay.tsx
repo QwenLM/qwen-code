@@ -90,6 +90,7 @@ interface HistoryItemDisplayProps {
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
+      return 1;
     case 'gemini_content':
     case 'gemini_thought':
     case 'gemini_thought_content':
@@ -182,7 +183,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {!compactMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
@@ -192,7 +193,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight

@@ -307,6 +307,26 @@ export function interpolateColor(
 }
 
 /**
+ * Computes a subtle band color by shifting the background brightness toward
+ * white (dark themes) or black (light themes) by `factor` (default 0.06).
+ * No hue change — just a brightness nudge, so the band is nearly invisible.
+ * Automatically detects dark/light from the background color luminance.
+ * Returns '' if the background color cannot be resolved.
+ */
+export function subtleBandColor(bgColor: string, factor = 0.06): string {
+  const hex = toHex(bgColor);
+  if (!hex) {
+    return '';
+  }
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const isDark = (r * 299 + g * 587 + b * 114) / 1000 < 128;
+  const target = isDark ? '#ffffff' : '#000000';
+  return interpolateColor(hex, target, factor);
+}
+
+/**
  * Detects whether the terminal supports 24-bit (true) color, required for the
  * blended half-line background band.
  */

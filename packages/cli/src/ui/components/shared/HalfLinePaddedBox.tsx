@@ -17,15 +17,15 @@ import {
 export interface HalfLinePaddedBoxProps {
   /**
    * Base accent color blended onto the terminal background at low opacity
-   * to produce a subtle half-block line color.
+   * to produce the band color.
    */
   bandColor: string;
   /**
    * Blend factor (0–1) from terminal background toward bandColor.
-   * Lower = more subtle. Default 0.35.
+   * Lower = more subtle. Default 0.15.
    */
   bandOpacity?: number;
-  /** Width, in columns, of the band lines. */
+  /** Width, in columns, of the band lines and content background. */
   width: number;
   /** When false, renders children without the band. */
   useBackgroundColor?: boolean;
@@ -33,11 +33,18 @@ export interface HalfLinePaddedBoxProps {
 }
 
 /**
- * Renders two thin half-block accent lines (▄ above, ▀ below) around content.
- * The line color is `bandColor` blended at low opacity onto
- * `theme.background.primary`, so it stays subtle on both light and dark
- * themes. The content area has no backgroundColor — it inherits the terminal's
- * real background.
+ * Renders a smooth half-line accent band around content, matching gemini-cli's
+ * technique:
+ *
+ *   ▄▄▄▄  foreground = bandColor (bottom half colored, top half = terminal bg)
+ *   content  backgroundColor = bandColor (full row colored)
+ *   ▀▀▀▀  foreground = bandColor (top half colored, bottom half = terminal bg)
+ *
+ * The ▄/▀ lines have NO explicit backgroundColor set, so the terminal's real
+ * background naturally fills the un-colored half of each cell. This avoids
+ * color mismatches when theme.background.primary doesn't perfectly match the
+ * real terminal background. The content area uses backgroundColor for a
+ * seamless band.
  */
 export const HalfLinePaddedBox: React.FC<HalfLinePaddedBoxProps> = (props) => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
@@ -55,13 +62,13 @@ const HalfLinePaddedBoxInternal: React.FC<HalfLinePaddedBoxProps> = ({
 }) => {
   const terminalBg = theme.background.primary || 'black';
 
-  const lineColor = useMemo(() => {
+  const blendedColor = useMemo(() => {
     const bg = resolveColor(terminalBg) || terminalBg;
     const accent = resolveColor(bandColor) || bandColor;
     return interpolateColor(bg, accent, bandOpacity);
   }, [bandColor, bandOpacity, terminalBg]);
 
-  if (!lineColor) {
+  if (!blendedColor) {
     return <>{children}</>;
   }
 
@@ -77,13 +84,15 @@ const HalfLinePaddedBoxInternal: React.FC<HalfLinePaddedBoxProps> = ({
       minHeight={1}
       flexShrink={0}
     >
-      <Box width={width} flexDirection="row">
-        <Text color={lineColor}>{'▄'.repeat(width)}</Text>
+      {/* Top half-line: foreground = band color, background = terminal default */}
+      <Text color={blendedColor}>{'▄'.repeat(width)}</Text>
+      {/* Content area: full backgroundColor for seamless band */}
+      <Box width={width} flexDirection="column">
+        <Text backgroundColor={blendedColor}>{' '.repeat(width)}</Text>
+        <Box marginTop={-1}>{children}</Box>
       </Box>
-      {children}
-      <Box width={width} flexDirection="row">
-        <Text color={lineColor}>{'▀'.repeat(width)}</Text>
-      </Box>
+      {/* Bottom half-line: foreground = band color, background = terminal default */}
+      <Text color={blendedColor}>{'▀'.repeat(width)}</Text>
     </Box>
   );
 };

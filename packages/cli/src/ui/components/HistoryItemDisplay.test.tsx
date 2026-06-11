@@ -58,7 +58,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('/theme');
   });
 
-  it('renders assistant replies without a leading spacer row', () => {
+  it('renders assistant replies with a leading spacer row', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini',
@@ -69,7 +69,7 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     const output = lastFrame() ?? '';
-    expect(output.startsWith('\n')).toBe(false);
+    expect(output.startsWith('\n')).toBe(true);
     expect(output).toContain('✦ Hello');
   });
 
