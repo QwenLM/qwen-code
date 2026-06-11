@@ -559,7 +559,7 @@ export function createDaemonWorkspaceService(
           await deps.reloadDaemonEnv(boundWorkspace);
         } catch (err) {
           writeStderrLine(
-            `qwen serve: daemon env reload failed: ${err instanceof Error ? err.message : String(err)}`,
+            `qwen serve: daemon reload failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
