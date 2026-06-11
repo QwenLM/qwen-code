@@ -5,6 +5,7 @@
  * Not part of the test suite; run with: node scripts/rc-gateway-e2e.mjs
  */
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import {
   mkdtempSync,
@@ -771,6 +772,89 @@ try {
       nr.status === 403
         ? ok('lineage GET as non-owner -> 403')
         : bad(`lineage non-owner expected 403, got ${nr.status}`);
+    }
+
+    // Owner event stream (cycle 49): an OWNER token opens GET /rc/events; an
+    // audited action (minting a token) must arrive LIVE as a data frame. Uses
+    // the raw http client (node fetch batches SSE chunks until close). Bounded
+    // by a hard timeout so it can never hang the suite.
+    {
+      const { code: ec } = pairing.mint([SESSION_READ, OWNER]);
+      const err_ = await fetch(`${gw}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: ec, label: 'events-owner' }),
+      });
+      const eventsToken = (await err_.json()).token;
+      const u = new URL(`${gw}/rc/events`);
+
+      const result = await new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => {
+          if (!settled) {
+            settled = true;
+            resolve(v);
+          }
+        };
+        const req = http.get(
+          {
+            hostname: u.hostname,
+            port: u.port,
+            path: u.pathname,
+            headers: { Authorization: `Bearer ${eventsToken}` },
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              done({ ok: false, why: `status ${res.statusCode}` });
+              return;
+            }
+            res.setEncoding('utf8');
+            let buf = '';
+            let acted = false;
+            res.on('data', (chunk) => {
+              buf += chunk;
+              if (!acted && buf.includes(': ok')) {
+                acted = true;
+                // Mint a token via the owner API -> audits token_minted.
+                fetch(`${gw}/rc/tokens`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${eventsToken}`,
+                  },
+                  body: JSON.stringify({ scopes: ['session:read'] }),
+                }).catch(() => {});
+              }
+              if (
+                buf
+                  .split('\n')
+                  .some(
+                    (l) => l.startsWith('data: ') && l.includes('token_minted'),
+                  )
+              ) {
+                req.destroy();
+                done({ ok: true });
+              }
+            });
+          },
+        );
+        req.on('error', (e) => done({ ok: false, why: e.message }));
+        setTimeout(() => {
+          req.destroy();
+          done({ ok: false, why: 'timeout' });
+        }, 5000);
+      });
+      result.ok
+        ? ok('owner event stream -> live token_minted frame')
+        : bad(`owner event stream: ${result.why}`);
+
+      // A non-owner (session:read) token is rejected at the OWNER gate.
+      const nr = await fetch(`${gw}/rc/events`, {
+        headers: { Authorization: `Bearer ${forkToken}` },
+      });
+      nr.status === 403
+        ? ok('owner event stream as non-owner -> 403')
+        : bad(`owner events non-owner expected 403, got ${nr.status}`);
     }
 
     // Error case: forking an unknown parent -> 404 parent_transcript_not_found.

@@ -30,6 +30,8 @@ import {
 } from './routes/tokens.js';
 import { createShareRouter, createShareWhoamiHandler } from './routes/share.js';
 import { createAuditQueryRoute } from './routes/audit.js';
+import { createOwnerEventsRoute } from './routes/ownerEvents.js';
+import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute } from './routes/search.js';
@@ -84,8 +86,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use(express.json());
 
   const registry = new ConnectionRegistry();
+  // Owner-level event bus (cycle 49): every durably-appended audit record is
+  // fanned out to OWNER subscribers of GET /rc/events. Internal to the app — the
+  // enforcer/reloader broadcast for free because they share this `audit`
+  // instance, so policy_decision/policy_reloaded/policy_reload_failed all stream.
+  const ownerEvents = new OwnerEventBus();
   const audit = new AuditLog(
     deps.auditPath ?? join(homedir(), '.qwen', 'rc', 'audit.log'),
+    undefined,
+    { onRecord: (record) => ownerEvents.publish({ type: 'audit', record }) },
   );
   // Process-local activity tracker: feeds the notifier's working-device
   // suppression and is touched by recordActivity on the human-action POSTs.
@@ -201,6 +210,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/audit',
     requireScope(OWNER, audit),
     createAuditQueryRoute(audit),
+  );
+  // Live owner-only stream of audit records (incl. policy_decision / reload
+  // frames). OWNER-scoped — it surfaces token/scope/session ids across the
+  // whole gateway, never for a session-locked guest.
+  app.get(
+    '/rc/events',
+    requireScope(OWNER, audit),
+    createOwnerEventsRoute(ownerEvents),
   );
   // Guest redemption endpoint — SHARE-scoped, mounted BEFORE the owner-gated
   // share router so a share token reaches it (the owner router would 403 it).
