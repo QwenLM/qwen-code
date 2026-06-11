@@ -5,12 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import {
-  clipboardHasImage,
-  saveClipboardImage,
-  cleanupOldClipboardImages,
-  writeOsc52,
-} from './clipboardUtils.js';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
@@ -144,7 +138,10 @@ function setupX11Env() {
 const originalPlatform = process.platform;
 
 describe('clipboardUtils', () => {
-  let resetTool: () => void;
+  let clipboardHasImage: () => Promise<boolean>;
+  let saveClipboardImage: (dir?: string) => Promise<string | null>;
+  let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
+  let writeOsc52: (text: string) => boolean;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -156,13 +153,17 @@ describe('clipboardUtils', () => {
       );
     await realFs.rm('/tmp/test', { recursive: true, force: true });
 
-    // Dynamically import to get a fresh module instance's reset function reference
-    // (vi.resetModules() clears the module cache, so the top-level import of
-    // resetLinuxClipboardTool would point to a stale module instance)
-    const mod = await import('./clipboardUtils.js');
-    resetTool = mod.resetLinuxClipboardTool;
-    resetTool();
+    vi.resetModules();
     vi.clearAllMocks();
+
+    // Dynamic import after resetModules gives a fresh module instance.
+    // Top-level import would be stale after resetModules.
+    const mod = await import('./clipboardUtils.js');
+    clipboardHasImage = mod.clipboardHasImage;
+    saveClipboardImage = mod.saveClipboardImage;
+    cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
+    writeOsc52 = mod.writeOsc52;
+    mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
     vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
@@ -216,7 +217,6 @@ describe('clipboardUtils', () => {
 
   describe('xclip / X11 path', () => {
     beforeEach(() => {
-      resetTool();
       setupX11Env();
     });
 
@@ -276,10 +276,6 @@ describe('clipboardUtils', () => {
   // ─── BMP-to-PNG conversion tests ──────────────────────────────
 
   describe('BMP-to-PNG conversion (wl-paste)', () => {
-    beforeEach(() => {
-      resetTool();
-    });
-
     // Note: BMP-to-PNG conversion success path requires saveFromCommand to resolve,
     // which is blocked by the createWriteStream mocking issue.
     // The "prefer PNG over BMP" test below verifies the correct branching logic,
