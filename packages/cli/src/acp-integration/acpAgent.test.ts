@@ -428,7 +428,35 @@ vi.mock('../utils/acpModelUtils.js', () => ({
 }));
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
+  writeOutputLanguageAndRegisterPath: vi.fn(
+    (
+      _value: string,
+      config?: {
+        getOutputLanguageFilePath(): string | undefined;
+        setOutputLanguageFilePath(p: string): void;
+      } | null,
+    ) => {
+      const p = config?.getOutputLanguageFilePath();
+      if (!p) {
+        config?.setOutputLanguageFilePath('/mock/.qwen/output-language.md');
+      }
+    },
+  ),
+  getOutputLanguageFilePath: vi
+    .fn()
+    .mockReturnValue('/mock/.qwen/output-language.md'),
+  resolveOutputLanguage: vi.fn((v: string) => v),
+  isAutoLanguage: vi.fn(() => false),
+  OUTPUT_LANGUAGE_AUTO: 'auto',
 }));
+vi.mock('../i18n/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../i18n/index.js')>();
+  return {
+    ...actual,
+    setLanguageAsync: vi.fn().mockResolvedValue(undefined),
+    getCurrentLanguage: vi.fn().mockReturnValue('zh'),
+  };
+});
 
 import {
   runAcpAgent,
@@ -466,7 +494,10 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '../serve/status.js';
-import { updateOutputLanguageFile } from '../utils/languageUtils.js';
+import {
+  updateOutputLanguageFile,
+  writeOutputLanguageAndRegisterPath,
+} from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
@@ -5388,5 +5419,211 @@ describe('fetchAllowedGitHub', () => {
     expect(fetchMock.mock.calls[1]![0]).toBe(
       'https://raw.githubusercontent.com/a/b/SKILL.md',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-session language propagation
+// ---------------------------------------------------------------------------
+
+describe('sessionLanguage multi-session propagation', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        newSession: (args: Record<string, unknown>) => Promise<unknown>;
+        extMethod: (
+          method: string,
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      })
+    | undefined;
+
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+
+  const mockArgv = {} as CliArgs;
+  const mockConnectionState = {
+    promise: undefined as unknown as Promise<void>,
+    resolve: undefined as unknown as () => void,
+    reset() {
+      this.promise = new Promise<void>((r) => {
+        this.resolve = r;
+      });
+    },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+  });
+
+  function makeConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getModel: vi.fn().mockReturnValue('m'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+        syncAfterAuthRefresh: vi.fn(),
+      }),
+      reloadModelProvidersConfig: vi.fn(),
+      refreshAuth: vi.fn().mockResolvedValue(undefined),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getAvailableModels: vi.fn().mockReturnValue([]),
+      getModes: vi.fn().mockReturnValue([]),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getSessionId: vi.fn().mockReturnValue('sid'),
+      getAuthType: vi.fn().mockReturnValue('api-key'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
+      }),
+      getFileSystemService: vi.fn().mockReturnValue(undefined),
+      setFileSystemService: vi.fn(),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+      setOutputLanguageFilePath: vi.fn(),
+      refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      ...overrides,
+    };
+  }
+
+  it('propagates language write and refresh to all sessions with varying paths', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-a/.qwen/output-language.md'),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-b/.qwen/output-language.md'),
+    });
+    const cfgC = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-c'),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+    });
+
+    const sessionConfigs = [cfgA, cfgB, cfgC];
+    let sessionIdx = 0;
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+
+    vi.mocked(loadCliConfig).mockImplementation(async () => sessionConfigs[sessionIdx]! as unknown as Config);
+
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx]!;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      const mock = {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        dispose: vi.fn(),
+      };
+      sessionIdx++;
+      return mock as unknown as InstanceType<typeof Session>;
+    });
+
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const bootConfig = makeConfig();
+    const agentPromise = runAcpAgent(
+      bootConfig as unknown as Config,
+      { merged: { mcpServers: {} } } as unknown as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-c', mcpServers: [] });
+
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    await agent.extMethod('qwen/control/session/language', {
+      sessionId: 's-a',
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
+
+    // Session A (initiator): writeOutputLanguageAndRegisterPath called
+    expect(writeOutputLanguageAndRegisterPath).toHaveBeenCalledWith('zh', cfgA);
+
+    // Session B (different project path): updateOutputLanguageFile called
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith(
+      'zh',
+      '/proj-b/.qwen/output-language.md',
+    );
+
+    // Session C (no path): writeOutputLanguageAndRegisterPath called
+    expect(writeOutputLanguageAndRegisterPath).toHaveBeenCalledWith('zh', cfgC);
+
+    // All sessions refreshed
+    expect(cfgA.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgC.refreshHierarchicalMemory).toHaveBeenCalled();
+
+    // All sessions' system instruction refreshed
+    expect(cfgA.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgB.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgC.getGeminiClient().refreshSystemInstruction).toHaveBeenCalled();
+
+    // Session C registered the global path
+    expect(cfgC.setOutputLanguageFilePath).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 });
