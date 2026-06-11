@@ -154,23 +154,30 @@ function truncateLine(line: string, max: number): string {
 }
 
 function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
+  const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
-  const displayText = useMemo(
-    () =>
-      isLong
-        ? // Match CLI behavior: long shell output shows a fixed tail preview.
-          [
-            `... first ${hiddenLinesCount} lines hidden ...`,
-            ...lines
-              .slice(-MAX_BASH_LINES)
-              .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
-          ].join('\n')
-        : lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n'),
-    [hiddenLinesCount, isLong, lines],
+  const hasTruncatedLine = useMemo(
+    () => lines.some((l) => l.length > MAX_BASH_LINE_CHARS),
+    [lines],
   );
+  const expandable = isLong || hasTruncatedLine;
+  const displayText = useMemo(() => {
+    if (showAll) return output;
+    if (isLong) {
+      // Match CLI behavior: long shell output shows a fixed tail preview.
+      return [
+        `... first ${hiddenLinesCount} lines hidden ...`,
+        ...lines
+          .slice(-MAX_BASH_LINES)
+          .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
+      ].join('\n');
+    }
+    return lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n');
+  }, [hiddenLinesCount, isLong, lines, output, showAll]);
   const ansiSegments = useMemo(
     () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
     [displayText],
@@ -194,6 +201,16 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
             ))
           : displayText}
       </pre>
+      {expandable && (
+        <button
+          className={styles.expandBtn}
+          onClick={() => setShowAll(!showAll)}
+        >
+          {showAll
+            ? t('tool.showLess')
+            : t('tool.showAll', { count: lines.length })}
+        </button>
+      )}
     </div>
   );
 }
