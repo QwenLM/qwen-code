@@ -639,7 +639,21 @@ async function startAutoImprove(
   const active = await readActiveAutoImproveLoop(repoRoot);
   if (active) {
     const state = await readAutoImproveLoopState(repoRoot, active.activeLoopId);
-    if (state && ['running', 'stopping'].includes(state.status)) {
+    if (!state) {
+      // The active pointer references a loop whose state.json is missing or
+      // corrupt. readAutoImproveLoopState only returns null for ENOENT /
+      // SyntaxError (it rethrows transient FS errors), so this is genuinely
+      // unrecoverable — remove the orphaned loop dir and clear the dangling
+      // pointer so a fresh loop can start cleanly instead of leaking
+      // directories under .qwen/auto-improve/loops/.
+      await fs
+        .rm(getAutoImproveLoopDir(repoRoot, active.activeLoopId), {
+          recursive: true,
+          force: true,
+        })
+        .catch(() => undefined);
+      await clearActiveAutoImproveLoop(repoRoot);
+    } else if (['running', 'stopping'].includes(state.status)) {
       const scheduler = config.isCronEnabled()
         ? config.getCronScheduler()
         : null;
