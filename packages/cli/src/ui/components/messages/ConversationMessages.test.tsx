@@ -50,7 +50,7 @@ describe('<ThinkMessage />', () => {
     expect(output).not.toContain('Analyzing the code structure');
   });
 
-  it('should show duration in seconds when collapsed', () => {
+  it('should show past-tense duration when collapsed', () => {
     const { lastFrame } = render(
       <ThinkMessage
         {...defaultProps}
@@ -60,17 +60,19 @@ describe('<ThinkMessage />', () => {
       />,
     );
     const output = lastFrame();
-    expect(output).toContain('Thinking 15s');
+    expect(output).toContain('Thought for');
+    expect(output).toContain('15s');
     expect(output).toContain('ctrl+o to expand');
   });
 
-  it('should show duration while pending (streaming)', () => {
+  it('should show present-tense duration while pending (streaming)', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={true} durationMs={8000} />,
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
     expect(output).toContain('8s');
+    expect(output).not.toContain('Thought for');
   });
 
   it('should format minutes and seconds for long durations', () => {
@@ -83,6 +85,7 @@ describe('<ThinkMessage />', () => {
       />,
     );
     const output = lastFrame();
+    expect(output).toContain('Thought for');
     expect(output).toContain('2m 5s');
   });
 });

@@ -370,13 +370,17 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   contentWidth,
   durationMs,
 }) => {
-  const durationStr =
+  const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
 
   if (!isPending && !expanded) {
+    const label =
+      durationMs != null
+        ? `∴ ${t('Thought for')} ${formatDuration(durationMs)} `
+        : `∴ ${t('Thinking')} `;
     return (
       <Text dimColor italic>
-        {`∴ ${t('Thinking')}${durationStr} `}
+        {label}
         <Text dimColor>{`(${t('ctrl+o to expand')})`}</Text>
       </Text>
     );
@@ -392,7 +396,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          ∴ {t('Thinking')}…{durationStr}
+          ∴ {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate">
@@ -403,10 +407,14 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     );
   }
 
+  const expandedLabel =
+    durationMs != null
+      ? `∴ ${t('Thought for')} ${formatDuration(durationMs)}`
+      : `∴ ${t('Thinking')}…`;
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        ∴ {t('Thinking')}…{durationStr}
+        {expandedLabel}
       </Text>
       <Box paddingLeft={2} flexDirection="column">
         <MarkdownDisplay
