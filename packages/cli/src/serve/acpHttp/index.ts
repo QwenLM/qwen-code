@@ -224,6 +224,32 @@ export function mountAcpHttp(
       return;
     }
 
+    // Rate limit ACP HTTP POST (mirrors the WS checkRate path).
+    if (opts.checkRate && isRequest(message)) {
+      const m = message.method;
+      if (!WS_EXEMPT_METHODS.has(m)) {
+        const tier: RateLimitTier =
+          m === 'session/prompt' || m === '_qwen/session/prompt'
+            ? 'prompt'
+            : WS_READ_METHODS.has(m)
+              ? 'read'
+              : 'mutation';
+        const httpKey = (req.socket?.remoteAddress ?? 'http-unknown').replace(
+          /^::ffff:/,
+          '',
+        );
+        if (!opts.checkRate(httpKey, tier)) {
+          res.setHeader('Retry-After', '5');
+          res.status(429).json({
+            error: 'Rate limit exceeded',
+            code: 'rate_limit_exceeded',
+            tier,
+          });
+          return;
+        }
+      }
+    }
+
     // Per RFD: non-initialize POST acks 202; the reply rides an SSE stream.
     res.status(202).end();
     // Response already sent — `handle` delivers everything else over SSE, so

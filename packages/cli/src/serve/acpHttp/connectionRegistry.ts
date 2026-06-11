@@ -276,7 +276,13 @@ export class AcpConnection {
     this.destroyed = true;
     this.clearGraceTimer();
     for (const binding of this.sessions.values()) {
-      this.teardownBinding(binding);
+      try {
+        this.teardownBinding(binding);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: /acp teardownBinding(${logSafe(binding.sessionId)}) failed during destroy: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     this.sessions.clear();
     this.ownedSessions.clear();
