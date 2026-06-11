@@ -149,7 +149,9 @@ import {
   resolveOutputLanguage,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
-} from '../utils/languageUtils.js';
+
+  getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -158,14 +160,6 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import {
-  resolveOutputLanguage,
-  updateOutputLanguageFile,
-  getOutputLanguageFilePath,
-  writeOutputLanguageAndRegisterPath,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
-} from '../utils/languageUtils.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
@@ -6582,7 +6576,13 @@ class QwenAgent implements Agent {
             const authType = config.getAuthType();
 
             if (changed.has('modelProviders')) {
-              config.reloadModelProvidersConfig(newMerged.modelProviders);
+              try {
+                config.reloadModelProvidersConfig(newMerged.modelProviders);
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
+                );
+              }
             }
 
             const newModelName = newMerged.model?.name;
