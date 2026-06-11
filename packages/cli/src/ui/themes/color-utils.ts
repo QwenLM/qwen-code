@@ -328,19 +328,22 @@ export function subtleBandColor(bgColor: string, factor = 0.06): string {
 
 /**
  * Detects whether the terminal supports 24-bit (true) color, required for the
- * blended half-line background band.
+ * blended half-line background band. Result is cached at module scope since
+ * terminal color capability does not change during the process lifetime.
  */
+let _supportsTrueColor: boolean | undefined;
 export function supportsTrueColor(): boolean {
+  if (_supportsTrueColor !== undefined) return _supportsTrueColor;
   const colorterm = process.env['COLORTERM'];
   if (
     colorterm === 'truecolor' ||
     colorterm === '24bit' ||
     colorterm === 'kmscon'
   ) {
-    return true;
+    return (_supportsTrueColor = true);
   }
   if (process.stdout.getColorDepth && process.stdout.getColorDepth() >= 24) {
-    return true;
+    return (_supportsTrueColor = true);
   }
-  return false;
+  return (_supportsTrueColor = false);
 }

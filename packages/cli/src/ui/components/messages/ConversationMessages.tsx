@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import stringWidth from 'string-width';
 import {
   MarkdownDisplay,
@@ -192,6 +192,8 @@ const ContinuationMarkdownMessage: React.FC<
 };
 
 export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
+  const isScreenReaderEnabled = useIsScreenReaderEnabled();
+
   const fallback = (
     <PrefixedTextMessage
       text={text}
@@ -203,7 +205,12 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
     />
   );
 
-  if (width === undefined || !supportsTrueColor()) {
+  if (
+    width === undefined ||
+    width <= 0 ||
+    isScreenReaderEnabled ||
+    !supportsTrueColor()
+  ) {
     return fallback;
   }
 
@@ -221,8 +228,8 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
       <Text color={bandColor}>{'▄'.repeat(width)}</Text>
       {lines.map((line, i) => {
         const linePrefix = i === 0 ? prefix : '  ';
-        const contentWidth = stringWidth(linePrefix + line);
-        const pad = Math.max(0, width - contentWidth);
+        const lineWidth = stringWidth(linePrefix + line);
+        const pad = Math.max(0, width - lineWidth);
         return (
           <Text
             key={i}
