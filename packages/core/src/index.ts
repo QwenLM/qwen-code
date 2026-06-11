@@ -68,6 +68,7 @@ export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';
+export * from './core/turnInterruption.js';
 
 // ============================================================================
 // Tools

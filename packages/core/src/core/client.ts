@@ -33,7 +33,12 @@ import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, ORPHAN_TOOL_USE_REPAIR_REASON } from './geminiChat.js';
+import {
+  buildSyntheticToolResponseParts,
+  detectTurnInterruption,
+  type TurnInterruption,
+} from './turnInterruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
@@ -1533,6 +1538,64 @@ export class GeminiClient {
         `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
+    }
+  }
+
+  /**
+   * Continue the most recent unfinished turn of this session without adding
+   * any synthetic user message to the transcript.
+   *
+   * Detection runs on persisted chat history rather than in-memory request
+   * refs, so it works after a process restart + resume — where the Ctrl+Y
+   * retry path (which needs `lastPromptRef` from the same process) cannot.
+   * The continuation rides the regular {@link sendMessageStream} machinery:
+   *  - `interrupted_prompt` → re-submits the orphaned trailing user content
+   *    with Retry semantics (strip + re-push under the same logical turn).
+   *  - `interrupted_turn` → closes each dangling tool call with a
+   *    synthesized error functionResponse submitted as a ToolResult, the
+   *    same continuation signal a real tool completion would have sent.
+   *  - `none` → `stream` is null; nothing to continue. Idempotent no-op.
+   *
+   * The generator is returned un-started: nothing is sent (and Retry's
+   * history strip does not run) until the caller pulls the first event.
+   *
+   * @param signal - Abort signal forwarded to the underlying send.
+   * @param prompt_id - Logical prompt id for the continued turn. Callers
+   *   that track the interrupted turn's id should reuse it.
+   * @returns The detection result plus the event stream to consume, or a
+   *   null stream when the last turn ended cleanly.
+   */
+  continueInterruptedTurn(
+    signal: AbortSignal,
+    prompt_id: string,
+  ): {
+    detection: TurnInterruption;
+    stream: AsyncGenerator<ServerGeminiStreamEvent, Turn> | null;
+  } {
+    const detection = detectTurnInterruption(this.getChat().getHistoryTail(1));
+    switch (detection.kind) {
+      case 'interrupted_prompt':
+        return {
+          detection,
+          stream: this.sendMessageStream(detection.parts, signal, prompt_id, {
+            type: SendMessageType.Retry,
+          }),
+        };
+      case 'interrupted_turn':
+        return {
+          detection,
+          stream: this.sendMessageStream(
+            buildSyntheticToolResponseParts(
+              detection.danglingCalls,
+              ORPHAN_TOOL_USE_REPAIR_REASON,
+            ),
+            signal,
+            prompt_id,
+            { type: SendMessageType.ToolResult },
+          ),
+        };
+      default:
+        return { detection, stream: null };
     }
   }
 

@@ -962,7 +962,7 @@ export class InvalidStreamError extends Error {
  * `onAllToolCallsComplete` was a single-shot that already fired into an
  * `isResponding` early-return).
  */
-const ORPHAN_TOOL_USE_REPAIR_REASON =
+export const ORPHAN_TOOL_USE_REPAIR_REASON =
   'Tool execution result was not recorded — likely interrupted by network ' +
   'failure, abort, or process exit. Treat as failure and retry if needed.';
 
