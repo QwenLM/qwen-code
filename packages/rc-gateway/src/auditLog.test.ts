@@ -178,3 +178,38 @@ describe('AuditLog', () => {
     expect(new Set(rows.map((r) => r.target)).size).toBe(10);
   });
 });
+
+describe('AuditLog onRecord sink (cycle 49)', () => {
+  it('fires onRecord once per durably-appended record, with the stamped ts', async () => {
+    const dir = freshDir();
+    const path = join(dir, 'audit.log');
+    const seen: Array<{ ts: number; action: string }> = [];
+    const audit = new AuditLog(path, () => 4242, {
+      onRecord: (r) => seen.push({ ts: r.ts, action: r.action }),
+    });
+    await audit.record({ action: 'token_minted', actorTokenId: 'a' });
+    await audit.record({ action: 'token_revoked', actorTokenId: 'a' });
+    // The sink saw both records, in order, stamped with the same ts as on disk.
+    expect(seen).toEqual([
+      { ts: 4242, action: 'token_minted' },
+      { ts: 4242, action: 'token_revoked' },
+    ]);
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    expect(JSON.parse(lines[0]).ts).toBe(4242);
+  });
+
+  it('a throwing onRecord never breaks record() (never-throws preserved)', async () => {
+    const dir = freshDir();
+    const path = join(dir, 'audit.log');
+    const audit = new AuditLog(path, () => 1, {
+      onRecord: () => {
+        throw new Error('sink boom');
+      },
+    });
+    await expect(
+      audit.record({ action: 'auth_failed' }),
+    ).resolves.toBeUndefined();
+    // The record was still persisted despite the sink throwing.
+    expect(readFileSync(path, 'utf8')).toContain('auth_failed');
+  });
+});

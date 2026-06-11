@@ -151,13 +151,21 @@ export class AuditLog implements AuditRecorder, AuditReader {
   /** Serializes writes so concurrent records can't interleave through rotation. */
   private writeChain: Promise<void> = Promise.resolve();
 
+  /** Optional live sink, invoked once per durably-appended record. */
+  private readonly onRecord?: (record: AuditRecord) => void;
+
   constructor(
     private readonly filePath: string,
     private readonly nowFn: () => number = Date.now,
-    opts: { maxBytes?: number; maxFiles?: number } = {},
+    opts: {
+      maxBytes?: number;
+      maxFiles?: number;
+      onRecord?: (record: AuditRecord) => void;
+    } = {},
   ) {
     this.maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
     this.maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
+    this.onRecord = opts.onRecord;
   }
 
   async record(entry: AuditEntry): Promise<void> {
@@ -173,8 +181,21 @@ export class AuditLog implements AuditRecorder, AuditReader {
     try {
       await mkdir(dirname(this.filePath), { recursive: true });
       await this.rotateIfNeeded();
-      const line = JSON.stringify({ ts: this.nowFn(), ...entry }) + '\n';
-      await appendFile(this.filePath, line, { mode: 0o600 });
+      // Capture ts ONCE and reuse it for both the written line and the live
+      // sink payload, so the streamed record matches the persisted one exactly.
+      const record: AuditRecord = { ts: this.nowFn(), ...entry };
+      await appendFile(this.filePath, JSON.stringify(record) + '\n', {
+        mode: 0o600,
+      });
+      // Broadcast ONLY after a successful append (the stream reflects durably
+      // recorded events). Wrapped so a throwing sink can't break never-throws.
+      if (this.onRecord) {
+        try {
+          this.onRecord(record);
+        } catch {
+          // A sink failure is non-fatal to the audit write.
+        }
+      }
     } catch (err) {
       // Best-effort: audit failure must not affect the request path.
       // eslint-disable-next-line no-console
