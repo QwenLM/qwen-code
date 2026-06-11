@@ -81,9 +81,12 @@ export {
 } from './policy/loader.js';
 export {
   evaluate,
+  explainPolicy,
   type PolicyDecision,
   type ToolCallContext,
   type QuotaOracle,
+  type RuleTrace,
+  type PolicyExplanation,
 } from './policy/evaluator.js';
 export { PolicyEnforcer } from './policy/enforcer.js';
 export {

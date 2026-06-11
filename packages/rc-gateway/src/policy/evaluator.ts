@@ -98,34 +98,49 @@ function specificity(rule: PolicyRule): number {
   return w;
 }
 
+/**
+ * Why a rule's STATIC match fails, or `null` when it matches. The single source
+ * of truth for both {@link ruleMatches} (the hot-path boolean — a `null` check,
+ * with NO string allocation on the matching branch) and {@link explainPolicy}'s
+ * SKIPPED reason token, so the two can never disagree.
+ */
+function matchReason(
+  rule: PolicyRule,
+  ctx: ToolCallContext,
+  argString: string,
+  paths: string[],
+): string | null {
+  const m = rule.match;
+  // tool glob (absent → no constraint).
+  if (m.tool !== undefined && !globMatch(m.tool, ctx.tool)) {
+    return 'tool-mismatch';
+  }
+  // argsGlob (undefined → matchesAny returns true).
+  if (!matchesAny(m.argsGlob, argString)) return 'args-mismatch';
+  // pathGlob: present but zero candidate paths → no match.
+  if (m.pathGlob !== undefined) {
+    if (paths.length === 0) return 'no-path-candidates';
+    if (!paths.some((p) => matchesAny(m.pathGlob, p))) return 'path-mismatch';
+  }
+  // originScope / sessionTag exact (absent → no constraint).
+  if (m.originScope !== undefined && m.originScope !== ctx.originScope) {
+    return 'origin-scope-mismatch';
+  }
+  if (m.sessionTag !== undefined && m.sessionTag !== ctx.sessionTag) {
+    return 'session-tag-mismatch';
+  }
+  // timeOfDay/expiresAt/maxPerWindow are handled by classifyConditions, after
+  // this static match passes.
+  return null;
+}
+
 function ruleMatches(
   rule: PolicyRule,
   ctx: ToolCallContext,
   argString: string,
   paths: string[],
 ): boolean {
-  const m = rule.match;
-  // tool glob (absent → no constraint).
-  if (m.tool !== undefined && !globMatch(m.tool, ctx.tool)) {
-    return false;
-  }
-  // argsGlob (undefined → matchesAny returns true).
-  if (!matchesAny(m.argsGlob, argString)) return false;
-  // pathGlob: present but zero candidate paths → no match.
-  if (m.pathGlob !== undefined) {
-    if (paths.length === 0) return false;
-    if (!paths.some((p) => matchesAny(m.pathGlob, p))) return false;
-  }
-  // originScope / sessionTag exact (absent → no constraint).
-  if (m.originScope !== undefined && m.originScope !== ctx.originScope) {
-    return false;
-  }
-  if (m.sessionTag !== undefined && m.sessionTag !== ctx.sessionTag) {
-    return false;
-  }
-  // timeOfDay/expiresAt/maxPerWindow are handled by classifyConditions, after
-  // this static match passes.
-  return true;
+  return matchReason(rule, ctx, argString, paths) === null;
 }
 
 /**
@@ -145,20 +160,35 @@ function ruleMatches(
  * out-of-window rule is skipped even if it also carries a malformed sibling
  * field, so we never prompt for a rule that does not actually apply.
  */
-function classifyConditions(
+/** A condition classification plus a short reason token (for explain). */
+interface ConditionResult {
+  kind: 'no-match' | 'match' | 'unevaluable';
+  /** Reason token; `''` when `kind === 'match'`. */
+  reason: string;
+}
+
+/**
+ * The detailed form of {@link classifyConditions}: also reports WHY (a token),
+ * for the explain trace. The FIRST unevaluable cause wins the reason; a
+ * definitive `no-match` (well-formed-but-unsatisfied) still short-circuits and
+ * wins over any unevaluable sibling.
+ */
+function classifyConditionsDetailed(
   rule: PolicyRule,
   now: Date,
   quota?: QuotaOracle,
-): 'no-match' | 'match' | 'unevaluable' {
+): ConditionResult {
   let unevaluable = false;
+  let unevaluableReason = 'condition-unevaluable';
 
   // 1. expiresAt — definitively dead when in the past.
   if (rule.expiresAt !== undefined) {
     const expiresMs = parseExpiresAt(rule.expiresAt);
     if (expiresMs === null) {
       unevaluable = true;
+      unevaluableReason = 'malformed-expiresAt';
     } else if (isExpired(expiresMs, now)) {
-      return 'no-match';
+      return { kind: 'no-match', reason: 'expired' };
     }
   }
 
@@ -168,9 +198,10 @@ function classifyConditions(
   if (rule.match.timeOfDay !== undefined) {
     const parsed = parseTimeOfDay(rule.match.timeOfDay);
     if (parsed === null) {
+      if (!unevaluable) unevaluableReason = 'malformed-timeOfDay';
       unevaluable = true;
     } else if (!isWithinTimeOfDay(parsed, now)) {
-      return 'no-match';
+      return { kind: 'no-match', reason: 'outside-time-window' };
     }
   }
 
@@ -182,19 +213,31 @@ function classifyConditions(
       const q = quota.state(rule.id, now.getTime());
       if (q === 'exhausted') {
         // An exhausted rule does NOT apply — wins over any unevaluable sibling.
-        return 'no-match';
+        return { kind: 'no-match', reason: 'quota-exhausted' };
       }
       if (q === 'untracked') {
+        if (!unevaluable) unevaluableReason = 'quota-not-evaluated';
         unevaluable = true;
       }
       // 'room' → the quota condition is satisfied; do NOT clear a prior
       // unevaluable (a malformed expiresAt sibling must still force prompt).
     } else {
+      if (!unevaluable) unevaluableReason = 'quota-not-evaluated';
       unevaluable = true;
     }
   }
 
-  return unevaluable ? 'unevaluable' : 'match';
+  return unevaluable
+    ? { kind: 'unevaluable', reason: unevaluableReason }
+    : { kind: 'match', reason: '' };
+}
+
+function classifyConditions(
+  rule: PolicyRule,
+  now: Date,
+  quota?: QuotaOracle,
+): 'no-match' | 'match' | 'unevaluable' {
+  return classifyConditionsDetailed(rule, now, quota).kind;
 }
 
 /**
@@ -206,15 +249,12 @@ function classifyConditions(
  * deferred maxPerWindow) is downgraded to prompt (the safety invariant); a
  * well-formed-but-unsatisfied condition makes the rule not match (fall through).
  */
-export function evaluate(
-  policy: Policy,
-  ctx: ToolCallContext,
-  now: Date = new Date(),
-  quota?: QuotaOracle,
-): PolicyDecision {
-  const argString = canonicalArgString(ctx.args);
-  const paths = candidatePaths(ctx.args);
-
+/**
+ * Rule indices in evaluation order: `priority desc, specificity desc, index
+ * asc`. Shared by {@link evaluate} and {@link explainPolicy} so the trace order
+ * is provably the evaluation order.
+ */
+function orderedRuleIndices(policy: Policy): number[] {
   const order = policy.rules.map((_, i) => i);
   order.sort((a, b) => {
     const ra = policy.rules[a];
@@ -227,8 +267,19 @@ export function evaluate(
     if (wa !== wb) return wb - wa;
     return a - b;
   });
+  return order;
+}
 
-  for (const idx of order) {
+export function evaluate(
+  policy: Policy,
+  ctx: ToolCallContext,
+  now: Date = new Date(),
+  quota?: QuotaOracle,
+): PolicyDecision {
+  const argString = canonicalArgString(ctx.args);
+  const paths = candidatePaths(ctx.args);
+
+  for (const idx of orderedRuleIndices(policy)) {
     const rule = policy.rules[idx];
     if (!ruleMatches(rule, ctx, argString, paths)) continue;
 
@@ -266,4 +317,99 @@ export function evaluate(
     requireScope: policy.defaults.requireScope,
     usedDeferredField: false,
   };
+}
+
+/** One rule's annotation in a {@link PolicyExplanation} trace. */
+export interface RuleTrace {
+  /** Original index in `policy.rules` (the trace array itself is in eval order). */
+  index: number;
+  id?: string;
+  status: 'matched' | 'skipped' | 'not-reached';
+  /**
+   * Short reason token. For `skipped`: why the rule did not apply
+   * (`tool-mismatch`, `args-mismatch`, `path-mismatch`, `no-path-candidates`,
+   * `origin-scope-mismatch`, `session-tag-mismatch`, `expired`,
+   * `outside-time-window`, `quota-exhausted`). For `matched`: either `matched`
+   * or the unevaluable cause that downgraded it to prompt (`malformed-expiresAt`,
+   * `malformed-timeOfDay`, `quota-not-evaluated`). For `not-reached`:
+   * `earlier-rule-won`.
+   */
+  reason: string;
+  /** The action this rule contributes as the winner (`matched` only). */
+  action?: PolicyAction;
+  /** True when matched but downgraded to prompt by an unevaluable condition. */
+  downgraded?: boolean;
+}
+
+/** Result of {@link explainPolicy}: the authoritative decision + per-rule trace. */
+export interface PolicyExplanation {
+  /** The REAL decision from {@link evaluate} — can never drift from the trace. */
+  decision: PolicyDecision;
+  /** Rules in evaluation order (priority desc, specificity desc, index asc). */
+  trace: RuleTrace[];
+}
+
+/**
+ * Dry-run a policy and produce a per-rule trace — the `qwen rc policy explain`
+ * inspector. PURE. Walks rules in the SAME order as {@link evaluate} via
+ * {@link orderedRuleIndices}, reusing the SAME {@link matchReason} /
+ * {@link classifyConditionsDetailed} internals, and computes the authoritative
+ * `decision` by CALLING `evaluate` — so the printed decision can never diverge
+ * from what the enforcer would do. Without a {@link QuotaOracle} (the
+ * daemon-free CLI), a `maxPerWindow` rule is `unevaluable` → prompt; pass an
+ * oracle to reflect live quota state.
+ */
+export function explainPolicy(
+  policy: Policy,
+  ctx: ToolCallContext,
+  now: Date = new Date(),
+  quota?: QuotaOracle,
+): PolicyExplanation {
+  const argString = canonicalArgString(ctx.args);
+  const paths = candidatePaths(ctx.args);
+  const trace: RuleTrace[] = [];
+  let winnerFound = false;
+
+  for (const idx of orderedRuleIndices(policy)) {
+    const rule = policy.rules[idx];
+    if (winnerFound) {
+      trace.push({
+        index: idx,
+        id: rule.id,
+        status: 'not-reached',
+        reason: 'earlier-rule-won',
+      });
+      continue;
+    }
+    const mm = matchReason(rule, ctx, argString, paths);
+    if (mm !== null) {
+      trace.push({ index: idx, id: rule.id, status: 'skipped', reason: mm });
+      continue;
+    }
+    const cc = classifyConditionsDetailed(rule, now, quota);
+    if (cc.kind === 'no-match') {
+      trace.push({
+        index: idx,
+        id: rule.id,
+        status: 'skipped',
+        reason: cc.reason,
+      });
+      continue;
+    }
+    // Winner: the first rule that statically matches with a non-no-match
+    // condition. A non-prompt action with an unevaluable condition is
+    // downgraded to prompt — exactly as evaluate() does.
+    const downgraded = cc.kind === 'unevaluable' && rule.action !== 'prompt';
+    trace.push({
+      index: idx,
+      id: rule.id,
+      status: 'matched',
+      reason: cc.kind === 'unevaluable' ? cc.reason : 'matched',
+      action: downgraded ? 'prompt' : rule.action,
+      downgraded,
+    });
+    winnerFound = true;
+  }
+
+  return { decision: evaluate(policy, ctx, now, quota), trace };
 }
