@@ -13,6 +13,7 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  TrustGateError,
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
@@ -2514,17 +2515,28 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
+    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
+    // not just message text. The 403 mapping in `serve/server.ts`
+    // matches `err instanceof TrustGateError`; an accidental revert
+    // to `throw new Error(...)` would silently downgrade to 500
+    // while the message text test kept passing.
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -3254,6 +3266,68 @@ describe('setApprovalMode with folder trust', () => {
   });
 });
 
+describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `disabledTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['Foo', 'Bar'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `disabledTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+
+  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
+    // The daemon's `acpAgent` MCP-restart handler calls
+    // `setDisabledTools(new Set(disabledList))` after re-reading
+    // workspace settings, so a `tools.disabled` toggle applied
+    // since this Config was constructed takes effect on the next
+    // `ToolRegistry.registerTool` call. Pin that contract so a
+    // future regression that drops the setter (or re-freezes the
+    // field) fails this test instead of silently re-enabling
+    // tools the user just disabled.
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
+    config.setDisabledTools(new Set(['B', 'C']));
+    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
+  });
+
+  it('setDisabledTools copies the input — caller mutations do not leak', () => {
+    // The setter constructs a fresh `new Set(disabled)` from the
+    // input, so a caller that holds a reference to the input set
+    // and later mutates it cannot retroactively change the live
+    // Config snapshot. Locks this defensive-copy contract.
+    const config = new Config(baseParams);
+    const liveInput = new Set(['X']);
+    config.setDisabledTools(liveInput);
+    liveInput.add('Y');
+    expect(config.getDisabledTools()).toEqual(new Set(['X']));
+    expect(config.getDisabledTools().has('Y')).toBe(false);
+  });
+
+  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    config.setDisabledTools(new Set());
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -3628,6 +3702,90 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
+    });
+  });
+
+  describe('Config runtime MCP overlay', () => {
+    it('addRuntimeMcpServer does not mutate this.mcpServers', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          'settings-server': new MCPServerConfig('cmd-a'),
+        },
+      });
+      // Simulate post-init state
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer(
+        'runtime-server',
+        new MCPServerConfig('cmd-b'),
+      );
+      const settingsLayer = (
+        config as unknown as {
+          mcpServers: Record<string, MCPServerConfig>;
+        }
+      ).mcpServers;
+      expect(Object.keys(settingsLayer)).toEqual(['settings-server']);
+      expect(settingsLayer['runtime-server']).toBeUndefined();
+    });
+
+    it('removeRuntimeMcpServer returns false when name not present', () => {
+      const config = new Config(baseParams);
+      expect(config.removeRuntimeMcpServer('does-not-exist')).toBe(false);
+    });
+
+    it('removeRuntimeMcpServer returns true and drops the entry', () => {
+      const config = new Config(baseParams);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('x', new MCPServerConfig('cmd'));
+      expect(config.removeRuntimeMcpServer('x')).toBe(true);
+      expect(config.removeRuntimeMcpServer('x')).toBe(false);
+    });
+  });
+
+  describe('getMcpServers cascade with runtime overlay', () => {
+    it('runtime layer overlays settings layer (last write wins)', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['shared'].command).toBe('runtime-cmd');
+    });
+
+    it('runtime-only entries appear in cascade', () => {
+      const config = new Config({ ...baseParams, mcpServers: {} });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('only-runtime', new MCPServerConfig('cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['only-runtime']).toBeDefined();
+    });
+
+    it('removing runtime entry restores settings entry', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      expect(config.getMcpServers()!['shared'].command).toBe('runtime-cmd');
+      config.removeRuntimeMcpServer('shared');
+      expect(config.getMcpServers()!['shared'].command).toBe('settings-cmd');
+    });
+
+    it('isMcpServerDisabled still flags runtime entries when excluded', () => {
+      const config = new Config({ ...baseParams });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('blocked', new MCPServerConfig('cmd'));
+      config.setExcludedMcpServers(['blocked']);
+      // The entry appears in getMcpServers (UI layer filters via isMcpServerDisabled)
+      expect(config.getMcpServers()!['blocked']).toBeDefined();
+      expect(config.isMcpServerDisabled('blocked')).toBe(true);
     });
   });
 

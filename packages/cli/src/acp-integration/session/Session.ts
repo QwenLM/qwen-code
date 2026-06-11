@@ -25,6 +25,7 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
+  GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -35,11 +36,15 @@ import {
   DiscoveredMCPTool,
   StreamEventType,
   ToolConfirmationOutcome,
+  generatePromptSuggestion,
+  logPromptSuggestion,
   logToolCall,
   logUserPrompt,
+  PromptSuggestionEvent,
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
+  clampInlineMediaPart,
   Storage,
   ToolNames,
   fireNotificationHook,
@@ -65,19 +70,32 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
-  formatDenialStateLog,
   getAutoModePermissionDeniedReason,
   isApproveOutcome,
   isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
+  formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
+  extractDaemonTraceContext,
+  withInteractionSpan,
+  startToolSpan,
+  endToolSpan,
+  runInToolSpanContext,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  logConversationFinishedEvent,
+  ConversationFinishedEvent,
   acquireSleepInhibitor,
+  clearGoalTerminalObserver,
+  setGoalTerminalObserver,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
+import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -133,6 +151,13 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+function maskApiKeyForDisplay(apiKey: string | undefined): string {
+  const trimmed = apiKey?.trim() ?? '';
+  if (trimmed.length === 0) return '(not set)';
+  if (trimmed.length <= 6) return '***';
+  return `${trimmed.slice(0, 3)}...${trimmed.slice(-4)}`;
+}
 
 type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
@@ -379,7 +404,15 @@ export class Session implements SessionContext {
    * process termination is slow.
    */
   private pendingPromptCompletion: Promise<void> | null = null;
+  /**
+   * Per-turn AbortController for the fire-and-forget follow-up suggestion
+   * generation. Aborted on the top of the next `prompt()` and on
+   * `cancelPendingPrompt()` so a stale suggestion never lands after the
+   * user has moved on. Null when no suggestion generation is in flight.
+   */
+  private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private readonly createdAt: number = Date.now();
   private readonly runtimeBaseDir: string;
 
   // Cron scheduling state
@@ -449,6 +482,7 @@ export class Session implements SessionContext {
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
 
+    this.#installGoalTerminalObserver();
     this.#registerBackgroundNotificationCallbacks();
   }
 
@@ -458,6 +492,25 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  isIdle(): boolean {
+    return (
+      !this.pendingPrompt &&
+      !this.pendingPromptCompletion &&
+      !this.cronProcessing &&
+      !this.cronAbortController &&
+      !this.notificationProcessing &&
+      !this.notificationAbortController
+    );
+  }
+
+  getTurnCount(): number {
+    return this.turn;
+  }
+
+  getCreatedAt(): number {
+    return this.createdAt;
   }
 
   dispose(): void {
@@ -479,6 +532,7 @@ export class Session implements SessionContext {
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    clearGoalTerminalObserver(this.sessionId);
   }
 
   /**
@@ -495,6 +549,16 @@ export class Session implements SessionContext {
         (update) => this.sendUpdate(update),
       );
     }
+  }
+
+  #installGoalTerminalObserver(): void {
+    setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
+      void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
+        debugLogger.warn(
+          `Failed to emit goal terminal update: ${this.#formatError(error)}`,
+        );
+      });
+    });
   }
 
   /**
@@ -633,8 +697,12 @@ export class Session implements SessionContext {
     const hadNotification =
       !!this.notificationAbortController || this.notificationProcessing;
 
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
     if (!hadPrompt && !hadCron && !hadNotification) {
-      throw new Error('Not currently generating');
+      throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
     if (this.pendingPrompt) {
@@ -677,6 +745,14 @@ export class Session implements SessionContext {
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
+    // Abort the previous turn's in-flight follow-up suggestion
+    // generation (if any). Mirrors `pendingPrompt?.abort()` above —
+    // a fresh prompt arriving means any pending suggestion would be
+    // stale before it could ever render.
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
     // Abort any in-progress cron execution (user prompt takes priority)
     if (this.cronAbortController) {
       this.cronAbortController.abort();
@@ -734,16 +810,124 @@ export class Session implements SessionContext {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
-      // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
+      this.#maybeEmitFollowupSuggestion(result);
       return result;
     } finally {
+      this.pendingPrompt = null;
       resolveCompletion();
+      this.pendingPromptCompletion = null;
     }
   }
 
+  /**
+   * Generate a server-side follow-up suggestion for the just-completed
+   * turn and push it to attached clients via the daemon's
+   * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
+   * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
+   * call, same `enableCacheSharing` flag forwarding, same curated
+   * history slice (`getHistory(true).slice(-40)`).
+   *
+   * Differences from the CLI:
+   *   - Triggers only on `stopReason === 'end_turn'` (the daemon
+   *     equivalent of "the assistant finished cleanly"). Cancelled /
+   *     errored turns don't get a suggestion.
+   *   - Aborted via `this.followupAbort`, which is reset on the next
+   *     `prompt()` and on `cancelPendingPrompt()`.
+   *   - Filter-reason logging only — accept / dismiss telemetry stays
+   *     client-side (the CLI hook owns it).
+   *
+   * Fire-and-forget by design: an unawaited IIFE that swallows its own
+   * errors. A failed suggestion is invisible to the user; a thrown
+   * error here would propagate up through `prompt()` and break the
+   * primary response path.
+   */
+  #maybeEmitFollowupSuggestion(result: PromptResponse): void {
+    if (result.stopReason !== 'end_turn') return;
+    if (this.settings.merged.ui?.enableFollowupSuggestions !== true) return;
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
+
+    const chat = this.config.getGeminiClient()?.getChat();
+    if (!chat) return;
+
+    const ac = new AbortController();
+    this.followupAbort = ac;
+    const promptId =
+      this.config.getSessionId() + '########' + String(this.turn);
+
+    void (async () => {
+      try {
+        const fullHistory = chat.getHistory(true);
+        const lastEntry = fullHistory[fullHistory.length - 1];
+        if (!lastEntry || lastEntry.role !== 'model') {
+          debugLogger.debug(
+            'Skipping followup suggestion: last history entry is not model',
+          );
+          return;
+        }
+        const conversationHistory =
+          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+
+        const r = await generatePromptSuggestion(
+          this.config,
+          conversationHistory,
+          ac.signal,
+          {
+            enableCacheSharing:
+              this.settings.merged.ui?.enableCacheSharing === true,
+          },
+        );
+        if (ac.signal.aborted) return;
+        if (r.suggestion) {
+          await this.client.extNotification(
+            'qwen/notify/session/prompt-suggestion',
+            {
+              v: 1,
+              sessionId: this.sessionId,
+              suggestion: r.suggestion,
+              promptId,
+            },
+          );
+        } else if (r.filterReason) {
+          // Mirror the CLI's suppression analytics path so server-side
+          // generations are observable in the same telemetry stream.
+          logPromptSuggestion(
+            this.config,
+            new PromptSuggestionEvent({
+              outcome: 'suppressed',
+              reason: r.filterReason,
+            }),
+          );
+        }
+      } catch (error) {
+        if (ac.signal.aborted) {
+          debugLogger.debug('Follow-up suggestion generation aborted');
+        } else {
+          debugLogger.warn('Follow-up suggestion generation failed', error);
+        }
+      } finally {
+        if (this.followupAbort === ac) {
+          this.followupAbort = null;
+        }
+      }
+    })();
+  }
+
   async #executePrompt(
+    params: PromptRequest,
+    pendingSend: AbortController,
+  ): Promise<PromptResponse> {
+    // Bind this turn to the session's ID via AsyncLocalStorage so shell
+    // subprocesses (and hooks) read the CURRENT session's ID instead of
+    // the process-global env slot, which in daemon mode only ever holds
+    // the first session created in this process.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executePromptInner(params, pendingSend),
+    );
+  }
+
+  async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
@@ -755,276 +939,317 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        const parentContext = extractDaemonTraceContext(params);
 
-        // Extract text from all text blocks to construct the full prompt text for logging
-        const promptText = params.prompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Log user prompt
-        logUserPrompt(
+        return await withInteractionSpan(
           this.config,
-          new UserPromptEvent(
-            promptText.length,
+          {
             promptId,
-            this.config.getContentGeneratorConfig()?.authType,
-            promptText,
-          ),
-        );
+            model: this.config.getModel(),
+            messageType: 'acp_prompt',
+            ...(parentContext ? { parentContext } : {}),
+          },
+          async () => {
+            // Extract text from all text blocks to construct the full prompt text for logging
+            const promptText = params.prompt
+              .filter((block) => block.type === 'text')
+              .map((block) => (block.type === 'text' ? block.text : ''))
+              .join(' ');
 
-        // record user message for session management
-        this.config.getChatRecordingService()?.recordUserMessage(promptText);
-
-        // Check if the input contains a slash command
-        // Extract text from the first text block if present
-        const firstTextBlock = params.prompt.find(
-          (block) => block.type === 'text',
-        );
-        const inputText = firstTextBlock?.text || '';
-
-        let parts: Part[] | null;
-
-        if (isSlashCommand(inputText)) {
-          // Handle slash command in ACP mode using capability-based filtering
-          const slashCommandResult = await handleSlashCommand(
-            inputText,
-            pendingSend,
-            this.config,
-            this.settings,
-          );
-
-          parts = await this.#processSlashCommandResult(
-            slashCommandResult,
-            params.prompt,
-          );
-
-          // If parts is null, the command was fully handled (e.g., /summary completed)
-          // Return early without sending to the model
-          if (parts === null) {
-            return { stopReason: 'end_turn' };
-          }
-        } else {
-          // Normal processing for non-slash commands
-          parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
-        }
-
-        // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-        const hooksEnabled = !this.config.getDisableAllHooks?.();
-        const messageBus = this.config.getMessageBus?.();
-        if (
-          hooksEnabled &&
-          messageBus &&
-          this.config.hasHooksForEvent?.('UserPromptSubmit')
-        ) {
-          const response = await messageBus.request<
-            HookExecutionRequest,
-            HookExecutionResponse
-          >(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'UserPromptSubmit',
-              input: {
-                prompt: promptText,
-              },
-              signal: pendingSend.signal,
-            },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-          );
-          const hookOutput = response.output
-            ? createHookOutput('UserPromptSubmit', response.output)
-            : undefined;
-
-          if (
-            hookOutput?.isBlockingDecision() ||
-            hookOutput?.shouldStopExecution()
-          ) {
-            // Hook blocked the prompt - send notification to UI and return
-            const blockReason =
-              hookOutput?.getEffectiveReason() || 'No reason provided';
-            await this.messageEmitter.emitAgentMessage(
-              `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+            // Log user prompt
+            logUserPrompt(
+              this.config,
+              new UserPromptEvent(
+                promptText.length,
+                promptId,
+                this.config.getContentGeneratorConfig()?.authType,
+                promptText,
+              ),
             );
-            return { stopReason: 'end_turn' };
-          }
 
-          // Add additional context from hooks to the request
-          const additionalContext = hookOutput?.getAdditionalContext();
-          if (additionalContext) {
-            parts = [...parts, { text: additionalContext }];
-          }
-        }
+            // record user message for session management
+            this.config
+              .getChatRecordingService()
+              ?.recordUserMessage(promptText);
 
-        // Prepend session-level system reminders (plan mode / subagent /
-        // arena) so the model sees them, matching the behaviour of
-        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
-        // plan mode in ACP has no effect because the model never learns it
-        // should avoid edits (#1151).
-        const systemReminders = await this.#buildInitialSystemReminders();
-        if (systemReminders.length > 0) {
-          parts = [...systemReminders, ...parts];
-        }
-
-        // Phase C: one-shot worktree restore notice, set by acpAgent on
-        // --resume / loadSession when the session's worktree is still alive.
-        // Prepended exactly once, then cleared so it doesn't repeat on
-        // subsequent turns.
-        if (this.pendingWorktreeNotice) {
-          parts = [
-            {
-              text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-            },
-            ...parts,
-          ];
-          this.pendingWorktreeNotice = null;
-        }
-
-        let nextMessage: Content | null = { role: 'user', parts };
-
-        while (nextMessage !== null) {
-          if (pendingSend.signal.aborted) {
-            this.#getCurrentChat().addHistory(nextMessage);
-            return { stopReason: 'cancelled' };
-          }
-
-          const functionCalls: FunctionCall[] = [];
-          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-          const streamStartTime = Date.now();
-
-          try {
-            const sendResult = await this.#sendMessageStreamWithAutoCompression(
-              promptId,
-              nextMessage?.parts ?? [],
-              pendingSend.signal,
+            // Check if the input contains a slash command
+            // Extract text from the first text block if present
+            const firstTextBlock = params.prompt.find(
+              (block) => block.type === 'text',
             );
-            if (!sendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
+            const inputText = firstTextBlock?.text || '';
+
+            let parts: Part[] | null;
+
+            if (isSlashCommand(inputText)) {
+              // Handle slash command in ACP mode using capability-based filtering
+              const slashCommandResult = await handleSlashCommand(
+                inputText,
+                pendingSend,
+                this.config,
+                this.settings,
               );
-              return { stopReason: sendResult.stopReason };
-            }
-            const responseStream = sendResult.responseStream;
-            nextMessage = null;
 
-            for await (const resp of responseStream) {
-              if (pendingSend.signal.aborted) {
-                return { stopReason: 'cancelled' };
+              parts = await this.#processSlashCommandResult(
+                slashCommandResult,
+                params.prompt,
+              );
+
+              // If parts is null, the command was fully handled (e.g., /summary completed)
+              // Return early without sending to the model
+              if (parts === null) {
+                return { stopReason: 'end_turn' };
               }
+            } else {
+              // Normal processing for non-slash commands
+              parts = await this.#resolvePrompt(
+                params.prompt,
+                pendingSend.signal,
+              );
+            }
+
+            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            const messageBus = this.config.getMessageBus?.();
+            if (
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent?.('UserPromptSubmit')
+            ) {
+              const response = await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'UserPromptSubmit',
+                  input: {
+                    prompt: promptText,
+                  },
+                  signal: pendingSend.signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+              const hookOutput = response.output
+                ? createHookOutput('UserPromptSubmit', response.output)
+                : undefined;
 
               if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
+                hookOutput?.isBlockingDecision() ||
+                hookOutput?.shouldStopExecution()
               ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) {
-                    continue;
+                // Hook blocked the prompt - send notification to UI and return
+                const blockReason =
+                  hookOutput?.getEffectiveReason() || 'No reason provided';
+                await this.messageEmitter.emitAgentMessage(
+                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                );
+                return { stopReason: 'end_turn' };
+              }
+
+              // Add additional context from hooks to the request
+              const additionalContext = hookOutput?.getAdditionalContext();
+              if (additionalContext) {
+                parts = [...parts, { text: additionalContext }];
+              }
+            }
+
+            // Prepend session-level system reminders (plan mode / subagent /
+            // arena) so the model sees them, matching the behaviour of
+            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // plan mode in ACP has no effect because the model never learns it
+            // should avoid edits.
+            const systemReminders = await this.#buildInitialSystemReminders();
+            if (systemReminders.length > 0) {
+              parts = [...systemReminders, ...parts];
+            }
+
+            // Phase C: one-shot worktree restore notice, set by acpAgent on
+            // --resume / loadSession when the session's worktree is still alive.
+            // Prepended exactly once, then cleared so it doesn't repeat on
+            // subsequent turns.
+            if (this.pendingWorktreeNotice) {
+              parts = [
+                {
+                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                },
+                ...parts,
+              ];
+              this.pendingWorktreeNotice = null;
+            }
+
+            let nextMessage: Content | null = { role: 'user', parts };
+            let turnCount = 0;
+
+            // conversation_finished must fire on every terminal path of the
+            // turn — the loop below has cancel/abort/no-stream early-returns
+            // and API-error throws — so the emission lives in a finally that
+            // wraps the whole turn, not just the stop-hook loop. Daemon turns
+            // run autonomously in all approval modes (approvals are mediated by
+            // the ACP client rather than by gating this loop), so unlike the
+            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
+            // is intentionally emitted for every mode.
+            try {
+              while (nextMessage !== null) {
+                turnCount++;
+                if (pendingSend.signal.aborted) {
+                  this.#getCurrentChat().addHistory(nextMessage);
+                  return { stopReason: 'cancelled' };
+                }
+
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
+
+                try {
+                  const sendResult =
+                    await this.#sendMessageStreamWithAutoCompression(
+                      promptId,
+                      nextMessage?.parts ?? [],
+                      pendingSend.signal,
+                    );
+                  if (!sendResult.responseStream) {
+                    this.#preserveUnsentMessageHistory(
+                      nextMessage,
+                      sendResult.stopReason === 'cancelled',
+                    );
+                    return { stopReason: sendResult.stopReason };
+                  }
+                  const responseStream = sendResult.responseStream;
+                  nextMessage = null;
+
+                  for await (const resp of responseStream) {
+                    if (pendingSend.signal.aborted) {
+                      return { stopReason: 'cancelled' };
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) {
+                          continue;
+                        }
+
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
+                      }
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
+                    }
+                  }
+                } catch (error) {
+                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  const errorStatus = getErrorStatus(error);
+                  const errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                  const errorType = classifyApiError({
+                    message: errorMessage,
+                    status: errorStatus,
+                  });
+
+                  const hookSystem = this.config.getHookSystem?.();
+                  const hooksEnabledForStopFailure =
+                    !this.config.getDisableAllHooks?.();
+                  if (
+                    hooksEnabledForStopFailure &&
+                    hookSystem &&
+                    this.config.hasHooksForEvent?.('StopFailure')
+                  ) {
+                    // Fire-and-forget: don't wait for hook to complete
+                    hookSystem
+                      .fireStopFailureEvent(errorType, errorMessage)
+                      .catch((err) => {
+                        debugLogger.warn(`StopFailure hook failed: ${err}`);
+                      });
                   }
 
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
+                  if (errorStatus === 429) {
+                    throw new RequestError(
+                      429,
+                      'Rate limit exceeded. Try again later.',
+                    );
+                  }
+
+                  throw error;
+                }
+
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  // Kick off rewrite in background (non-blocking, runs parallel to tools)
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(pendingSend.signal);
+                  }
+
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
                   );
+                }
+
+                if (functionCalls.length > 0) {
+                  const toolResponseParts = await this.runToolCalls(
+                    pendingSend.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  nextMessage = {
+                    role: 'user',
+                    parts: [
+                      ...toolResponseParts,
+                      ...(await this.#drainMidTurnUserMessages()),
+                    ],
+                  };
                 }
               }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
+              // Wait for any pending rewrite before returning
+              if (this.messageRewriter) {
+                await this.messageRewriter.waitForPendingRewrites();
               }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
-              }
-            }
-          } catch (error) {
-            // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-            // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
-            const errorStatus = getErrorStatus(error);
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            const errorType = classifyApiError({
-              message: errorMessage,
-              status: errorStatus,
-            });
-
-            const hookSystem = this.config.getHookSystem?.();
-            const hooksEnabledForStopFailure =
-              !this.config.getDisableAllHooks?.();
-            if (
-              hooksEnabledForStopFailure &&
-              hookSystem &&
-              this.config.hasHooksForEvent?.('StopFailure')
-            ) {
-              // Fire-and-forget: don't wait for hook to complete
-              hookSystem
-                .fireStopFailureEvent(errorType, errorMessage)
-                .catch((err) => {
-                  debugLogger.warn(`StopFailure hook failed: ${err}`);
-                });
-            }
-
-            if (errorStatus === 429) {
-              throw new RequestError(
-                429,
-                'Rate limit exceeded. Try again later.',
+              // Fire Stop hook loop (aligned with core path in client.ts)
+              // This is triggered after model response completes with no pending tool calls
+              return await this.#handleStopHookLoop(
+                pendingSend,
+                promptId,
+                hooksEnabled,
+                messageBus,
+              );
+            } finally {
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
+                ),
               );
             }
-
-            throw error;
-          }
-
-          if (usageMetadata) {
-            this.#recordPromptTokenCount(usageMetadata);
-            // Kick off rewrite in background (non-blocking, runs parallel to tools)
-            if (this.messageRewriter) {
-              this.messageRewriter.flushTurn(pendingSend.signal);
-            }
-
-            const durationMs = Date.now() - streamStartTime;
-            await this.messageEmitter.emitUsageMetadata(
-              usageMetadata,
-              '',
-              durationMs,
-            );
-          }
-
-          if (functionCalls.length > 0) {
-            const toolResponseParts = await this.runToolCalls(
-              pendingSend.signal,
-              promptId,
-              functionCalls,
-            );
-            nextMessage = {
-              role: 'user',
-              parts: [
-                ...toolResponseParts,
-                ...(await this.#drainMidTurnUserMessages()),
-              ],
-            };
-          }
-        }
-
-        // Wait for any pending rewrite before returning
-        if (this.messageRewriter) {
-          await this.messageRewriter.waitForPendingRewrites();
-        }
-
-        // Fire Stop hook loop (aligned with core path in client.ts)
-        // This is triggered after model response completes with no pending tool calls
-        return this.#handleStopHookLoop(
-          pendingSend,
-          promptId,
-          hooksEnabled,
-          messageBus,
+          },
+          (result: { stopReason: PromptResponse['stopReason'] }) =>
+            result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
       },
     );
@@ -1681,6 +1906,13 @@ export class Session implements SessionContext {
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
   async #executeCronPrompt(prompt: string): Promise<void> {
+    // Same session-ID binding rationale as #executePrompt.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executeCronPromptInner(prompt),
+    );
+  }
+
+  async #executeCronPromptInner(prompt: string): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -1690,121 +1922,148 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
 
-        try {
-          // Echo the cron prompt as a user message so the client sees it
-          await this.sendUpdate({
-            sessionUpdate: 'user_message_chunk',
-            content: { type: 'text', text: prompt },
-            _meta: { source: 'cron' },
-          });
+        let cronHadError = false;
+        await withInteractionSpan(
+          this.config,
+          {
+            promptId,
+            model: this.config.getModel(),
+            messageType: 'cron',
+          },
+          async () => {
+            let turnCount = 0;
+            try {
+              // Echo the cron prompt as a user message so the client sees it
+              await this.sendUpdate({
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: prompt },
+                _meta: { source: 'cron' },
+              });
 
-          // Prepend session-level system reminders (same rationale as the
-          // user-query path in #executePrompt).
-          const cronReminders = await this.#buildInitialSystemReminders();
-          let nextMessage: Content | null = {
-            role: 'user',
-            parts: [...cronReminders, { text: prompt }],
-          };
+              // Prepend session-level system reminders (same rationale as the
+              // user-query path in #executePrompt).
+              const cronReminders = await this.#buildInitialSystemReminders();
+              let nextMessage: Content | null = {
+                role: 'user',
+                parts: [...cronReminders, { text: prompt }],
+              };
 
-          while (nextMessage !== null) {
-            if (ac.signal.aborted) return;
+              while (nextMessage !== null) {
+                turnCount++;
+                if (ac.signal.aborted) return;
 
-            const functionCalls: FunctionCall[] = [];
-            let usageMetadata: GenerateContentResponseUsageMetadata | null =
-              null;
-            const streamStartTime = Date.now();
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
 
-            const sendResult = await this.#sendMessageStreamWithAutoCompression(
-              promptId,
-              nextMessage.parts ?? [],
-              ac.signal,
-            );
-            if (!sendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
-              );
-              if (sendResult.stopReason === 'max_tokens') {
-                this.#stopCronAfterTokenLimit();
-              }
-              return;
-            }
-            const responseStream = sendResult.responseStream;
-            nextMessage = null;
+                const sendResult =
+                  await this.#sendMessageStreamWithAutoCompression(
+                    promptId,
+                    nextMessage.parts ?? [],
+                    ac.signal,
+                  );
+                if (!sendResult.responseStream) {
+                  this.#preserveUnsentMessageHistory(
+                    nextMessage,
+                    sendResult.stopReason === 'cancelled',
+                  );
+                  if (sendResult.stopReason === 'max_tokens') {
+                    this.#stopCronAfterTokenLimit();
+                  }
+                  return;
+                }
+                const responseStream = sendResult.responseStream;
+                nextMessage = null;
 
-            for await (const resp of responseStream) {
-              if (ac.signal.aborted) return;
+                for await (const resp of responseStream) {
+                  if (ac.signal.aborted) return;
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.candidates &&
+                    resp.value.candidates.length > 0
+                  ) {
+                    const candidate = resp.value.candidates[0];
+                    for (const part of candidate.content?.parts ?? []) {
+                      if (!part.text) continue;
+                      this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        part.thought,
+                      );
+                    }
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.usageMetadata
+                  ) {
+                    usageMetadata = resp.value.usageMetadata;
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.functionCalls
+                  ) {
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(ac.signal);
+                  }
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
                   );
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
+                if (functionCalls.length > 0) {
+                  const toolResponseParts = await this.runToolCalls(
+                    ac.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  nextMessage = {
+                    role: 'user',
+                    parts: [
+                      ...toolResponseParts,
+                      ...(await this.#drainMidTurnUserMessages()),
+                    ],
+                  };
+                }
               }
-
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+            } catch (error) {
+              if (ac.signal.aborted) return;
+              cronHadError = true;
+              debugLogger.error('Error processing cron prompt:', error);
+              const msg =
+                error instanceof Error ? error.message : String(error);
+              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+            } finally {
+              if (this.cronAbortController === ac) {
+                this.cronAbortController = null;
               }
-            }
-
-            if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
-              // Kick off rewrite in background (non-blocking)
-              if (this.messageRewriter) {
-                this.messageRewriter.flushTurn(ac.signal);
-              }
-              const durationMs = Date.now() - streamStartTime;
-              await this.messageEmitter.emitUsageMetadata(
-                usageMetadata,
-                '',
-                durationMs,
+              // Mirror the user-query path: emit conversation_finished on every
+              // terminal cron path (clean finish, abort, or caught error) so
+              // cron turns are not silently missing from conversation metrics.
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
+                ),
               );
             }
-
-            if (functionCalls.length > 0) {
-              const toolResponseParts = await this.runToolCalls(
-                ac.signal,
-                promptId,
-                functionCalls,
-              );
-              nextMessage = {
-                role: 'user',
-                parts: [
-                  ...toolResponseParts,
-                  ...(await this.#drainMidTurnUserMessages()),
-                ],
-              };
-            }
-          }
-        } catch (error) {
-          if (ac.signal.aborted) return;
-          debugLogger.error('Error processing cron prompt:', error);
-          const msg = error instanceof Error ? error.message : String(error);
-          await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
-        } finally {
-          if (this.cronAbortController === ac) {
-            this.cronAbortController = null;
-          }
-        }
+          },
+          () =>
+            ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
+        );
       },
     );
   }
@@ -1919,6 +2178,15 @@ export class Session implements SessionContext {
   }
 
   async #executeBackgroundNotificationPrompt(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    // Same session-ID binding rationale as #executePrompt.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executeBackgroundNotificationPromptInner(item),
+    );
+  }
+
+  async #executeBackgroundNotificationPromptInner(
     item: BackgroundNotificationQueueItem,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
@@ -2045,7 +2313,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
 
@@ -2195,8 +2469,34 @@ export class Session implements SessionContext {
       yolo: ApprovalMode.YOLO,
     };
 
+    // `modeId` arrives over the wire (ACP `session/set_mode`, or
+    // `setSessionConfigOption` casting an unknown `value` to string), so
+    // validate at this boundary. An unknown id would otherwise call
+    // `setApprovalMode(undefined)` — leaving the permission system in an
+    // undefined state — and the A2 broadcast below would fan the bogus id
+    // out to every attached SSE client.
     const approvalMode = modeMap[params.modeId as ApprovalModeValue];
+    if (approvalMode === undefined) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Unknown approval mode: ${params.modeId}`,
+      );
+    }
     this.config.setApprovalMode(approvalMode);
+
+    // A2 (#4511): notify attached clients of an in-session mode switch.
+    // Mirrors the model-update extNotification in `setModel`.
+    void this.client
+      .extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModeId: params.modeId,
+      })
+      .catch((error) => {
+        // Advisory only; a failed notification must not fail the mode
+        // switch. Matches the model-update extNotification in `setModel`.
+        debugLogger.debug('mode-update extNotification failed', error);
+      });
   }
 
   /**
@@ -2233,6 +2533,31 @@ export class Session implements SessionContext {
         : undefined,
     );
 
+    const after = this.config.getContentGeneratorConfig?.();
+    const effectiveAuthType = after?.authType ?? selectedAuthType;
+    const effectiveModelId = after?.model ?? parsed.modelId;
+
+    // Notify attached clients of an in-session model switch so a
+    // `/model` slash command or plan-mode change reaches the bus (today only
+    // the HTTP `POST /session/:id/model` path publishes `model_switched`).
+    // `current_model_update` is NOT an ACP `SessionUpdate` variant (the type
+    // is the external @agentclientprotocol/sdk union, which has
+    // `current_mode_update` but not a model equivalent), so this goes over
+    // the agent→bridge `extNotification` side-channel. The bridge demuxes it
+    // to `model_switched` and SUPPRESSES it when the bridge itself is driving
+    // the change (the HTTP path also flows through this method), avoiding a
+    // double publish. Fire-and-forget, matching the MCP-budget extNotification.
+    void this.client
+      .extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId: effectiveModelId,
+      })
+      .catch((error) => {
+        // Advisory only; a failed notification must not fail the model switch.
+        debugLogger.debug('model-update extNotification failed', error);
+      });
+
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(persistScope, 'model.name', parsed.modelId);
@@ -2242,6 +2567,18 @@ export class Session implements SessionContext {
         selectedAuthType,
       );
     }
+
+    return {
+      _meta: {
+        qwenModelSwitch: {
+          authType: effectiveAuthType,
+          modelId: effectiveModelId,
+          baseUrl: after?.baseUrl ?? '(default)',
+          apiKey: maskApiKeyForDisplay(after?.apiKey),
+          isRuntime: rawModelId.startsWith('$runtime|'),
+        },
+      },
+    };
   }
 
   /**
@@ -2274,6 +2611,29 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
+
+    // A2 (#4511): promote the mode change to the bridge side-channel so
+    // it reaches `approval_mode_changed` on the SSE bus, matching the
+    // extNotification in `setMode`.
+    //
+    // Unlike `setMode`, this path already published the legacy
+    // `session_update{current_mode_update}` frame via `sendUpdate` above
+    // (BridgeClient.sessionUpdate fans it onto the bus). Tell the demux to
+    // skip its compat dual-emit so the IDE companion sees exactly one
+    // legacy frame for this change, not two. `setMode` omits the flag, so
+    // its dual-emit still fires (it has no `sendUpdate`).
+    void this.client
+      .extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModeId: newModeId,
+        legacyFrameSent: true,
+      })
+      .catch((error) => {
+        // Advisory only; a failed notification must not fail the mode
+        // change. Matches the model-update extNotification in `setModel`.
+        debugLogger.debug('mode-update extNotification failed', error);
+      });
   }
 
   /**
@@ -2354,7 +2714,7 @@ export class Session implements SessionContext {
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
    * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
-   * silently inert (#1151) and subagent/arena sessions lose context.
+   * silently inert and subagent/arena sessions lose context.
    *
    * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
    * included here. Managed auto-memory requires a prefetch pipeline that
@@ -2393,6 +2753,7 @@ export class Session implements SessionContext {
     let args = (fc.args ?? {}) as Record<string, unknown>;
 
     const startTime = Date.now();
+    let spanError: string | undefined;
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -2403,7 +2764,8 @@ export class Session implements SessionContext {
         function_name: fc.name ?? '',
         function_args: args,
         duration_ms: durationMs,
-        status: 'error',
+        // An aborted signal means the call was cancelled, not a genuine error.
+        status: abortSignal.aborted ? 'cancelled' : 'error',
         success: false,
         error: error.message,
         tool_type:
@@ -2427,6 +2789,7 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
     ) => {
+      spanError = error.message;
       if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
@@ -2446,657 +2809,741 @@ export class Session implements SessionContext {
       return earlyErrorResponse(new Error('Missing function name'));
     }
 
+    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(fc.name as string);
+    const tool = toolRegistry.getTool(toolName);
 
     if (!tool) {
       return earlyErrorResponse(
-        new Error(`Tool "${fc.name}" not found in registry.`),
+        new Error(`Tool "${toolName}" not found in registry.`),
       );
     }
 
-    // ---- L1: Tool enablement check ----
-    const pm = this.config.getPermissionManager?.();
-    if (pm && !(await pm.isToolEnabled(fc.name as string))) {
-      return earlyErrorResponse(
-        new Error(
-          `Qwen Code requires permission to use "${fc.name}", but that permission was declined.`,
-        ),
-        fc.name,
-      );
-    }
-
-    // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
-    const isAgentTool = tool.name === ToolNames.AGENT;
-    const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
-
-    // Track cleanup functions for sub-agent event listeners
-    let subAgentCleanupFunctions: Array<() => void> = [];
-
-    // Generate tool_use_id for hook tracking (aligned with core path)
-    const toolUseId = generateToolUseId();
-
-    // Get approval mode for hook context (defined outside try for catch block access)
-    const approvalMode = this.config.getApprovalMode();
+    const toolSpan = startToolSpan(toolName, {
+      'tool.call_id': callId,
+      // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
+      // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
+      // matching daemon/ACP tool spans during the migration window.
+      call_id: callId,
+      tool_name: toolName,
+    });
+    let spanSuccess = false;
 
     try {
-      const invocation = tool.build(args);
-
-      // Production AgentTool always initializes `eventEmitter` on its
-      // invocation (`agent.ts:392`). Be defensive about the `undefined`
-      // case too so an incomplete/custom AgentTool invocation degrades
-      // gracefully (no sub-agent event forwarding) instead of throwing
-      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
-      // key-presence check passed for `{ eventEmitter: undefined }` and
-      // the ensuing `eventEmitter.on(...)` blew up.
-      const taskEventEmitter = (
-        invocation as {
-          eventEmitter?: AgentEventEmitter;
-        }
-      ).eventEmitter;
-      if (isAgentTool && taskEventEmitter) {
-        // Extract subagent metadata from AgentTool call
-        const parentToolCallId = callId;
-        const subagentType = (args['subagent_type'] as string) ?? '';
-
-        // Create a SubAgentTracker for this tool execution
-        const subSubAgentTracker = new SubAgentTracker(
-          this,
-          this.client,
-          parentToolCallId,
-          subagentType,
-        );
-
-        // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subSubAgentTracker.setup(
-          taskEventEmitter,
-          abortSignal,
-        );
-      }
-
-      // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
-      //
-      // L3: Tool's intrinsic default permission
-      // L4: PermissionManager rule override
-      // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
-      //
-      // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
-      // The VS Code extension is just a UI layer for requestPermission.
-      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
-
-      // ---- L3→L4: Shared permission flow ----
-      const toolParams = invocation.params as Record<string, unknown>;
-      const flowResult = await evaluatePermissionFlow(
-        this.config,
-        invocation,
-        fc.name,
-        toolParams,
-      );
-      const { finalPermission, pmForcedAsk, pmCtx, denyMessage } = flowResult;
-
-      // ---- L5: ApprovalMode overrides ----
-      const isPlanMode = approvalMode === ApprovalMode.PLAN;
-
-      if (finalPermission === 'deny') {
-        return earlyErrorResponse(
-          new Error(denyMessage ?? `Tool "${fc.name}" is denied.`),
-          fc.name,
-        );
-      }
-
-      // Explicit allow (user rule matched, or tool's L3 default is 'allow')
-      // is authoritative for ordinary calls. In AUTO, protected
-      // self-modification writes must still reach the classifier/fail-closed
-      // path so allow rules cannot bypass AUTO mode's safety boundary.
-      // Also resets the denialTracking streak so a following
-      // classifier-eligible call doesn't surprise the user with a manual
-      // prompt right after an allow-rule call just worked.
-      const forceAutoReviewForAllow =
-        approvalMode === ApprovalMode.AUTO &&
-        shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
-      const confirmationPermission = getEffectivePermissionForConfirmation(
-        finalPermission,
-        forceAutoReviewForAllow,
-      );
-      if (finalPermission === 'allow' && forceAutoReviewForAllow) {
-        debugLogger.info(
-          `Auto mode: L4 allow overridden by protected-write guard for ${fc.name}`,
-        );
-      }
-      let autoModeAllowed =
-        finalPermission === 'allow' && !forceAutoReviewForAllow;
-      if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
-        this.config.setAutoModeDenialState(
-          recordAllow(this.config.getAutoModeDenialState()),
-        );
-      }
-      let wasAutoModeDenialFallback = false;
-
-      // ── L5: AUTO mode three-layer filter (duplicated from
-      // coreToolScheduler.ts; ACP routes through this Session path).
-      // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
-      // allowed skips requestPermission; fallback drops through to the
-      // existing manual-approval flow below.
-      if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
-        const denialState = this.config.getAutoModeDenialState();
-        const fallback = shouldFallback(denialState);
-        // `buildClassifierContents` retains only the most recent
-        // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
-        // exactly that tail rather than triggering a `structuredClone`
-        // of the whole session on every non-fast-path AUTO call.
-        // Parallels coreToolScheduler.ts.
-        const messages =
-          this.config
-            .getGeminiClient?.()
-            ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-        const decision = await evaluateAutoMode({
-          ctx: pmCtx,
-          pmForcedAsk,
-          toolParams,
-          messages,
-          config: this.config,
-          signal: abortSignal,
-          skipClassifierReason: fallback.fallback ? fallback.reason : undefined,
-        });
-
-        // Apply decision via shared helper — eliminates ~40 lines of
-        // line-for-line duplication with coreToolScheduler.ts and makes
-        // the CLI / ACP paths share one source of truth for the
-        // switch + denial-tracking state updates + exhaustiveness
-        // guard.
-        const outcome = applyAutoModeDecision(
-          decision,
-          this.config,
-          denialState,
-        );
-        await fireSessionPermissionDeniedForAutoMode(
-          this.config,
-          decision,
-          outcome,
-          fc.name,
-          toolParams,
-          callId,
-          abortSignal,
-        );
-        switch (outcome.kind) {
-          case 'approved':
-            autoModeAllowed = true;
-            break;
-          case 'blocked':
-            debugLogger.warn(
-              `Auto mode blocked (${outcome.reason}): tool=${fc.name}, ` +
-                formatDenialStateLog(denialState),
-            );
-            return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
-          case 'fallback':
-            // Drop through to the manual-approval flow below.
-            wasAutoModeDenialFallback = isDenialFallbackReason(outcome.reason);
-            if (wasAutoModeDenialFallback) {
-              debugLogger.warn(
-                `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                  formatDenialStateLog(denialState),
-              );
-            }
-            break;
-          default: {
-            const _exhaustive: never = outcome;
-            void _exhaustive;
-          }
-        }
-      }
-
-      let didRequestPermission = false;
-      let confirmationDetails: ToolCallConfirmationDetails | undefined;
-      const recordAutoModeFallbackResolution = (
-        outcome: ToolConfirmationOutcome,
-      ) => {
-        // Reset AUTO-mode fallback counters when approval resolves a prompt
-        // raised because denialTracking forced fallback. This covers both ACP
-        // requestPermission and PermissionRequest hook approvals.
-        if (
-          approvalMode === ApprovalMode.AUTO &&
-          wasAutoModeDenialFallback &&
-          isApproveOutcome(outcome)
-        ) {
-          const before = this.config.getAutoModeDenialState();
-          const after = recordFallbackApprove(before);
-          if (after === before) {
-            debugLogger.warn(
-              `Auto mode denial counters already clear after fallback approval: ` +
-                formatDenialStateLog(before),
-            );
-            return;
-          }
-          debugLogger.warn(
-            `Auto mode denial counters reset after fallback approval: ` +
-              `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
-          );
-          this.config.setAutoModeDenialState(after);
-        }
-      };
-
-      if (
-        !autoModeAllowed &&
-        needsConfirmation(confirmationPermission, approvalMode, fc.name)
-      ) {
-        confirmationDetails =
-          await invocation.getConfirmationDetails(abortSignal);
-
-        // Centralised rule injection (for display and persistence)
-        injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
-
-        if (
-          isPlanModeBlocked(
-            isPlanMode,
-            isExitPlanModeTool,
-            isAskUserQuestionTool,
-            confirmationDetails,
-          )
-        ) {
+      return await runInToolSpanContext(toolSpan, async () => {
+        // ---- L1: Tool enablement check ----
+        const pm = this.config.getPermissionManager?.();
+        if (pm && !(await pm.isToolEnabled(toolName))) {
           return earlyErrorResponse(
-            new Error(
-              `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
-                'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
-            ),
-            fc.name,
+            new Error(`Tool "${toolName}" is disabled.`),
+            toolName,
           );
         }
 
-        const messageBus = this.config.getMessageBus?.();
-        const hooksEnabled = !this.config.getDisableAllHooks?.();
-        let hookHandled = false;
+        // Detect TodoWriteTool early - route to plan updates instead of tool_call events
+        const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+        const isAgentTool = tool.name === ToolNames.AGENT;
+        const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
 
-        if (hooksEnabled && messageBus) {
-          const hookResult = await firePermissionRequestHook(
-            messageBus,
-            fc.name,
-            args,
-            String(approvalMode),
+        // Track cleanup functions for sub-agent event listeners
+        let subAgentCleanupFunctions: Array<() => void> = [];
+
+        // Generate tool_use_id for hook tracking (aligned with core path)
+        const toolUseId = generateToolUseId();
+
+        // Get approval mode for hook context (defined outside try for catch block access)
+        const approvalMode = this.config.getApprovalMode();
+
+        try {
+          const invocation = tool.build(args);
+
+          // Production AgentTool always initializes `eventEmitter` on its
+          // invocation (`agent.ts:392`). Be defensive about the `undefined`
+          // case too so an incomplete/custom AgentTool invocation degrades
+          // gracefully (no sub-agent event forwarding) instead of throwing
+          // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+          // key-presence check passed for `{ eventEmitter: undefined }` and
+          // the ensuing `eventEmitter.on(...)` blew up.
+          const taskEventEmitter = (
+            invocation as {
+              eventEmitter?: AgentEventEmitter;
+            }
+          ).eventEmitter;
+          if (isAgentTool && taskEventEmitter) {
+            // Extract subagent metadata from AgentTool call
+            const parentToolCallId = callId;
+            const subagentType = (args['subagent_type'] as string) ?? '';
+
+            // Create a SubAgentTracker for this tool execution
+            const subSubAgentTracker = new SubAgentTracker(
+              this,
+              this.client,
+              parentToolCallId,
+              subagentType,
+            );
+
+            // Set up sub-agent tool tracking
+            subAgentCleanupFunctions = subSubAgentTracker.setup(
+              taskEventEmitter,
+              abortSignal,
+            );
+          }
+
+          // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
+          //
+          // L3: Tool's intrinsic default permission
+          // L4: PermissionManager rule override
+          // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
+          //
+          // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
+          // The VS Code extension is just a UI layer for requestPermission.
+          const isAskUserQuestionTool =
+            toolName === ToolNames.ASK_USER_QUESTION;
+
+          // ---- L3→L4: Shared permission flow ----
+          const toolParams = invocation.params as Record<string, unknown>;
+          const flowResult = await evaluatePermissionFlow(
+            this.config,
+            invocation,
+            toolName,
+            toolParams,
           );
+          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
+            flowResult;
 
-          if (hookResult.hasDecision) {
-            hookHandled = true;
-            if (hookResult.shouldAllow) {
-              if (hookResult.updatedInput) {
-                args = hookResult.updatedInput;
-                invocation.params =
-                  hookResult.updatedInput as typeof invocation.params;
+          // ---- L5: ApprovalMode overrides ----
+          const isPlanMode = approvalMode === ApprovalMode.PLAN;
+
+          if (finalPermission === 'deny') {
+            return earlyErrorResponse(
+              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              toolName,
+            );
+          }
+
+          // Explicit allow (user rule matched, or tool's L3 default is 'allow')
+          // is authoritative for ordinary calls. In AUTO, protected
+          // self-modification writes must still reach the classifier/fail-closed
+          // path so allow rules cannot bypass AUTO mode's safety boundary.
+          // Also resets the denialTracking streak so a following
+          // classifier-eligible call doesn't surprise the user with a manual
+          // prompt right after an allow-rule call just worked.
+          const forceAutoReviewForAllow =
+            approvalMode === ApprovalMode.AUTO &&
+            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          const confirmationPermission = getEffectivePermissionForConfirmation(
+            finalPermission,
+            forceAutoReviewForAllow,
+          );
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: L4 allow overridden by protected-write guard for ${toolName}`,
+            );
+          }
+          let autoModeAllowed =
+            finalPermission === 'allow' && !forceAutoReviewForAllow;
+          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            this.config.setAutoModeDenialState(
+              recordAllow(this.config.getAutoModeDenialState()),
+            );
+          }
+          let wasAutoModeDenialFallback = false;
+
+          // ── L5: AUTO mode three-layer filter (duplicated from
+          // coreToolScheduler.ts; ACP routes through this Session path).
+          // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
+          // allowed skips requestPermission; fallback drops through to the
+          // existing manual-approval flow below.
+          if (
+            !autoModeAllowed &&
+            shouldRunAutoModeForCall(approvalMode, toolName)
+          ) {
+            const denialState = this.config.getAutoModeDenialState();
+            const fallback = shouldFallback(denialState);
+            // `buildClassifierContents` retains only the most recent
+            // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+            // exactly that tail rather than triggering a `structuredClone`
+            // of the whole session on every non-fast-path AUTO call.
+            // Parallels coreToolScheduler.ts.
+            const messages =
+              this.config
+                .getGeminiClient?.()
+                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const decision = await evaluateAutoMode({
+              ctx: pmCtx,
+              pmForcedAsk,
+              toolParams,
+              messages,
+              config: this.config,
+              signal: abortSignal,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
+            });
+
+            // Apply decision via shared helper — eliminates ~40 lines of
+            // line-for-line duplication with coreToolScheduler.ts and makes
+            // the CLI / ACP paths share one source of truth for the
+            // switch + denial-tracking state updates + exhaustiveness
+            // guard.
+            const outcome = applyAutoModeDecision(
+              decision,
+              this.config,
+              denialState,
+            );
+            await fireSessionPermissionDeniedForAutoMode(
+              this.config,
+              decision,
+              outcome,
+              toolName,
+              toolParams,
+              callId,
+              abortSignal,
+            );
+            switch (outcome.kind) {
+              case 'approved':
+                autoModeAllowed = true;
+                break;
+              case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${toolName}, ` +
+                    formatDenialStateLog(denialState),
+                );
+                return earlyErrorResponse(
+                  new Error(outcome.errorMessage),
+                  toolName,
+                );
+              case 'fallback':
+                // Drop through to the manual-approval flow below.
+                wasAutoModeDenialFallback = isDenialFallbackReason(
+                  outcome.reason,
+                );
+                if (wasAutoModeDenialFallback) {
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                      formatDenialStateLog(denialState),
+                  );
+                }
+                break;
+              default: {
+                const _exhaustive: never = outcome;
+                void _exhaustive;
               }
+            }
+          }
 
-              await confirmationDetails.onConfirm(
-                ToolConfirmationOutcome.ProceedOnce,
+          let didRequestPermission = false;
+          let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const recordAutoModeFallbackResolution = (
+            outcome: ToolConfirmationOutcome,
+          ) => {
+            // Reset AUTO-mode fallback counters when approval resolves a prompt
+            // raised because denialTracking forced fallback. This covers both ACP
+            // requestPermission and PermissionRequest hook approvals.
+            if (
+              approvalMode === ApprovalMode.AUTO &&
+              wasAutoModeDenialFallback &&
+              isApproveOutcome(outcome)
+            ) {
+              const before = this.config.getAutoModeDenialState();
+              const after = recordFallbackApprove(before);
+              if (after === before) {
+                debugLogger.warn(
+                  `Auto mode denial counters already clear after fallback approval: ` +
+                    formatDenialStateLog(before),
+                );
+                return;
+              }
+              debugLogger.warn(
+                `Auto mode denial counters reset after fallback approval: ` +
+                  `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
               );
-              recordAutoModeFallbackResolution(
-                ToolConfirmationOutcome.ProceedOnce,
-              );
-            } else {
+              this.config.setAutoModeDenialState(after);
+            }
+          };
+
+          if (
+            !autoModeAllowed &&
+            needsConfirmation(confirmationPermission, approvalMode, toolName)
+          ) {
+            confirmationDetails =
+              await invocation.getConfirmationDetails(abortSignal);
+
+            // Centralised rule injection (for display and persistence)
+            injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+            if (
+              isPlanModeBlocked(
+                isPlanMode,
+                isExitPlanModeTool,
+                isAskUserQuestionTool,
+                confirmationDetails,
+              )
+            ) {
               return earlyErrorResponse(
                 new Error(
-                  hookResult.denyMessage ||
-                    `Permission denied by hook for "${fc.name}"`,
+                  `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+                    'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
                 ),
-                fc.name,
+                toolName,
+              );
+            }
+
+            const messageBus = this.config.getMessageBus?.();
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            let hookHandled = false;
+
+            if (hooksEnabled && messageBus) {
+              const hookResult = await firePermissionRequestHook(
+                messageBus,
+                toolName,
+                args,
+                String(approvalMode),
+              );
+
+              if (hookResult.hasDecision) {
+                hookHandled = true;
+                if (hookResult.shouldAllow) {
+                  if (hookResult.updatedInput) {
+                    args = hookResult.updatedInput;
+                    invocation.params =
+                      hookResult.updatedInput as typeof invocation.params;
+                  }
+
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  recordAutoModeFallbackResolution(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                } else {
+                  return earlyErrorResponse(
+                    new Error(
+                      hookResult.denyMessage ||
+                        `Permission denied by hook for "${toolName}"`,
+                    ),
+                    toolName,
+                  );
+                }
+              }
+            }
+
+            // AUTO_EDIT mode: auto-approve edit and info tools
+            // (same as coreToolScheduler L5 — NOT delegated to the extension)
+            if (
+              approvalMode === ApprovalMode.AUTO_EDIT &&
+              (confirmationDetails.type === 'edit' ||
+                confirmationDetails.type === 'info')
+            ) {
+              // Auto-approve, skip requestPermission.
+              // didRequestPermission stays false → emitStart below.
+            } else if (!hookHandled) {
+              // Show permission dialog via ACP requestPermission
+              didRequestPermission = true;
+              const content =
+                buildPermissionRequestContent(confirmationDetails);
+
+              // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
+              const mappedKind = this.toolCallEmitter.mapToolKind(
+                tool.kind,
+                toolName,
+              );
+
+              if (hooksEnabled && messageBus) {
+                this.fireNotificationHookWithTerminalSequence(
+                  messageBus,
+                  `Qwen Code needs your permission to use ${toolName}`,
+                  NotificationType.PermissionPrompt,
+                  'Permission needed',
+                );
+              }
+
+              const params: RequestPermissionRequest = {
+                sessionId: this.sessionId,
+                options: toPermissionOptions(confirmationDetails, pmForcedAsk),
+                toolCall: {
+                  toolCallId: callId,
+                  status: 'pending',
+                  title: invocation.getDescription(),
+                  content,
+                  locations: invocation.toolLocations(),
+                  kind: mappedKind,
+                  rawInput: args,
+                },
+              };
+
+              const output = (await this.client.requestPermission(
+                params,
+              )) as RequestPermissionResponse & {
+                answers?: Record<string, string>;
+              };
+              const outcome =
+                output.outcome.outcome === 'cancelled'
+                  ? ToolConfirmationOutcome.Cancel
+                  : z
+                      .nativeEnum(ToolConfirmationOutcome)
+                      .parse(output.outcome.optionId);
+
+              recordAutoModeFallbackResolution(outcome);
+
+              await confirmationDetails.onConfirm(outcome, {
+                answers: output.answers,
+              });
+
+              // Persist permission rules when user explicitly chose "Always Allow".
+              // This branch is only reached for tools that went through
+              // requestPermission (user saw dialog and made a choice).
+              // AUTO_EDIT auto-approved tools never reach here.
+              if (
+                outcome === ToolConfirmationOutcome.ProceedAlways ||
+                outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+                outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+              ) {
+                await persistPermissionOutcome(
+                  outcome,
+                  confirmationDetails,
+                  this.config.getOnPersistPermissionRule?.(),
+                  this.config.getPermissionManager?.(),
+                  { answers: output.answers },
+                );
+              }
+
+              // After exit_plan_mode confirmation, send current_mode_update
+              if (
+                isExitPlanModeTool &&
+                outcome !== ToolConfirmationOutcome.Cancel
+              ) {
+                await this.sendCurrentModeUpdateNotification(outcome);
+              }
+
+              // After edit tool ProceedAlways, notify the client about mode change
+              if (
+                confirmationDetails.type === 'edit' &&
+                outcome === ToolConfirmationOutcome.ProceedAlways
+              ) {
+                await this.sendCurrentModeUpdateNotification(outcome);
+              }
+
+              switch (outcome) {
+                case ToolConfirmationOutcome.Cancel:
+                  // Route through earlyErrorResponse so spanError carries the
+                  // cancellation reason (plain errorResponse leaves it unset,
+                  // which makes endToolSpan fall back to the generic 'tool
+                  // error' message) and the declined call is still recorded.
+                  return earlyErrorResponse(
+                    new Error(`Tool "${toolName}" was canceled by the user.`),
+                    toolName,
+                  );
+                case ToolConfirmationOutcome.ProceedOnce:
+                case ToolConfirmationOutcome.ProceedAlways:
+                case ToolConfirmationOutcome.ProceedAlwaysProject:
+                case ToolConfirmationOutcome.ProceedAlwaysUser:
+                case ToolConfirmationOutcome.ProceedAlwaysServer:
+                case ToolConfirmationOutcome.ProceedAlwaysTool:
+                case ToolConfirmationOutcome.ModifyWithEditor:
+                case ToolConfirmationOutcome.RestorePrevious:
+                  break;
+                default: {
+                  const resultOutcome: never = outcome;
+                  throw new Error(`Unexpected: ${resultOutcome}`);
+                }
+              }
+            }
+          }
+
+          if (!didRequestPermission && !isTodoWriteTool) {
+            // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
+            // → emit tool_call start notification
+            const startParams: ToolCallStartParams = {
+              callId,
+              toolName,
+              args,
+              status: 'in_progress',
+            };
+            await this.toolCallEmitter.emitStart(startParams);
+          }
+
+          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+          const messageBusForTool = this.config.getMessageBus?.();
+          const permissionMode = String(approvalMode);
+
+          if (hooksEnabledForTool && messageBusForTool) {
+            const preHookResult = await firePreToolUseHook(
+              messageBusForTool,
+              toolName,
+              args,
+              toolUseId,
+              permissionMode,
+              abortSignal,
+            );
+
+            if (!preHookResult.shouldProceed) {
+              // Hook blocked the tool execution - send notification to UI
+              const blockReason =
+                preHookResult.blockReason || 'Blocked by PreToolUse hook';
+              await this.messageEmitter.emitAgentMessage(
+                `🚫 **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              );
+              return earlyErrorResponse(new Error(blockReason), toolName);
+            }
+
+            // Add additional context from PreToolUse hook if provided
+            // Note: This context would need to be passed to the tool invocation
+            // For now, we just log it as the tool execution proceeds
+            if (preHookResult.additionalContext) {
+              debugLogger.debug(
+                `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
               );
             }
           }
-        }
 
-        // AUTO_EDIT mode: auto-approve edit and info tools
-        // (same as coreToolScheduler L5 — NOT delegated to the extension)
-        if (
-          approvalMode === ApprovalMode.AUTO_EDIT &&
-          (confirmationDetails.type === 'edit' ||
-            confirmationDetails.type === 'info')
-        ) {
-          // Auto-approve, skip requestPermission.
-          // didRequestPermission stays false → emitStart below.
-        } else if (!hookHandled) {
-          // Show permission dialog via ACP requestPermission
-          didRequestPermission = true;
-          const content = buildPermissionRequestContent(confirmationDetails);
-
-          // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
-          const mappedKind = this.toolCallEmitter.mapToolKind(
-            tool.kind,
-            fc.name,
-          );
-
-          if (hooksEnabled && messageBus) {
-            this.fireNotificationHookWithTerminalSequence(
-              messageBus,
-              `Qwen Code needs your permission to use ${fc.name}`,
-              NotificationType.PermissionPrompt,
-              'Permission needed',
+          const execSpan = startToolExecutionSpan();
+          let toolResult: ToolResult;
+          try {
+            const sleepInhibitorHandle = acquireSleepInhibitor(
+              this.config,
+              `Qwen Code is executing tool ${toolName}`,
             );
+            try {
+              toolResult = await invocation.execute(abortSignal);
+            } finally {
+              sleepInhibitorHandle.release();
+            }
+            const aborted = abortSignal.aborted;
+            endToolExecutionSpan(execSpan, {
+              success: !toolResult.error && !aborted,
+              error: aborted
+                ? 'tool_cancelled'
+                : toolResult.error
+                  ? 'tool_error'
+                  : undefined,
+              cancelled: aborted,
+            });
+          } catch (execError) {
+            endToolExecutionSpan(execSpan, {
+              success: false,
+              error: abortSignal.aborted ? 'tool_cancelled' : 'tool_exception',
+              cancelled: abortSignal.aborted,
+            });
+            throw execError;
           }
 
-          const params: RequestPermissionRequest = {
-            sessionId: this.sessionId,
-            options: toPermissionOptions(confirmationDetails, pmForcedAsk),
-            toolCall: {
-              toolCallId: callId,
-              status: 'pending',
-              title: invocation.getDescription(),
-              content,
-              locations: invocation.toolLocations(),
-              kind: mappedKind,
-              rawInput: args,
-            },
-          };
+          // Clean up event listeners
+          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
 
-          const output = (await this.client.requestPermission(
-            params,
-          )) as RequestPermissionResponse & {
-            answers?: Record<string, string>;
-          };
-          const outcome =
-            output.outcome.outcome === 'cancelled'
-              ? ToolConfirmationOutcome.Cancel
-              : z
-                  .nativeEnum(ToolConfirmationOutcome)
-                  .parse(output.outcome.optionId);
+          // Create response parts first (needed for emitResult and recordToolResult)
+          const responseParts = convertToFunctionResponse(
+            toolName,
+            callId,
+            toolResult.llmContent,
+          );
 
-          recordAutoModeFallbackResolution(outcome);
+          // Fire PostToolUse hook on successful execution (aligned with core path)
+          if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+            // Use the same response shape as core (llmContent/returnDisplay)
+            const toolResponse = {
+              llmContent: toolResult.llmContent,
+              returnDisplay: toolResult.returnDisplay,
+            };
+            const postHookResult = await firePostToolUseHook(
+              messageBusForTool,
+              toolName,
+              args,
+              toolResponse,
+              toolUseId,
+              permissionMode,
+              abortSignal,
+            );
 
-          await confirmationDetails.onConfirm(outcome, {
-            answers: output.answers,
+            // If hook indicates to stop, return an error response
+            if (postHookResult.shouldStop) {
+              const stopMessage =
+                postHookResult.stopReason ||
+                'Execution stopped by PostToolUse hook';
+              debugLogger.info(
+                `PostToolUse hook requested stop for ${toolName}: ${stopMessage}`,
+              );
+              return earlyErrorResponse(new Error(stopMessage), toolName);
+            }
+
+            // Add additional context from PostToolUse hook if provided
+            if (postHookResult.additionalContext) {
+              // Append additional context to the tool response
+              const contextPart = { text: postHookResult.additionalContext };
+              responseParts.push(contextPart);
+            }
+          } else if (
+            hooksEnabledForTool &&
+            messageBusForTool &&
+            toolResult.error
+          ) {
+            // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+            const failureHookResult = await firePostToolUseFailureHook(
+              messageBusForTool,
+              toolUseId,
+              toolName,
+              args,
+              toolResult.error.message,
+              false, // not an interrupt
+              permissionMode,
+              abortSignal,
+            );
+
+            // Log additional context if provided
+            if (failureHookResult.additionalContext) {
+              debugLogger.debug(
+                `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
+              );
+            }
+          }
+
+          // A tool can fail "softly" by returning toolResult.error without
+          // throwing, and can be cancelled mid-flight. Compute the real outcome
+          // once and reflect it on the client-facing emitResult as well as
+          // logToolCall / recordToolResult / the tool span, instead of
+          // hardcoding success — otherwise failed/cancelled daemon/ACP tools
+          // are mislabeled as successful in telemetry, session replay, and the
+          // client UI.
+          const aborted = abortSignal.aborted;
+          const status: 'success' | 'error' | 'cancelled' = aborted
+            ? 'cancelled'
+            : toolResult.error
+              ? 'error'
+              : 'success';
+          const succeeded = status === 'success';
+
+          // Handle TodoWriteTool: extract todos and send plan update
+          if (isTodoWriteTool) {
+            const todos = this.planEmitter.extractTodos(
+              toolResult.returnDisplay,
+              args,
+            );
+
+            // Match original logic: emit plan if todos.length > 0 OR if args had todos
+            if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
+              await this.planEmitter.emitPlan(todos ?? []);
+            }
+
+            // Skip tool_call_update event for TodoWriteTool
+            // Still log and return function response for LLM
+          } else {
+            // Normal tool handling: emit result using ToolCallEmitter
+            const error = toolResult.error
+              ? new Error(toolResult.error.message)
+              : aborted
+                ? new Error('Tool execution was cancelled')
+                : undefined;
+
+            await this.toolCallEmitter.emitResult({
+              callId,
+              toolName,
+              args,
+              message: responseParts,
+              resultDisplay: toolResult.returnDisplay,
+              error,
+              success: succeeded,
+            });
+          }
+
+          const durationMs = Date.now() - startTime;
+          logToolCall(this.config, {
+            'event.name': 'tool_call',
+            'event.timestamp': new Date().toISOString(),
+            function_name: toolName,
+            function_args: args,
+            duration_ms: durationMs,
+            status,
+            success: succeeded,
+            error: toolResult.error?.message,
+            error_type: toolResult.error?.type,
+            prompt_id: promptId,
+            tool_type:
+              typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
+                ? 'mcp'
+                : 'native',
           });
 
-          // Persist permission rules when user explicitly chose "Always Allow".
-          // This branch is only reached for tools that went through
-          // requestPermission (user saw dialog and made a choice).
-          // AUTO_EDIT auto-approved tools never reach here.
-          if (
-            outcome === ToolConfirmationOutcome.ProceedAlways ||
-            outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
-            outcome === ToolConfirmationOutcome.ProceedAlwaysUser
-          ) {
-            await persistPermissionOutcome(
-              outcome,
-              confirmationDetails,
-              this.config.getOnPersistPermissionRule?.(),
-              this.config.getPermissionManager?.(),
-              { answers: output.answers },
+          // Record tool result for session management
+          this.config
+            .getChatRecordingService()
+            ?.recordToolResult(responseParts, {
+              callId,
+              status,
+              resultDisplay: toolResult.returnDisplay,
+              error: toolResult.error
+                ? new Error(toolResult.error.message)
+                : undefined,
+              errorType: toolResult.error?.type,
+            });
+
+          spanSuccess = succeeded;
+          if (toolResult.error) {
+            spanError = toolResult.error.message;
+          } else if (aborted) {
+            spanError = 'Tool execution was cancelled';
+          }
+          return responseParts;
+        } catch (e) {
+          // Ensure cleanup on error
+          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          const error = e instanceof Error ? e : new Error(String(e));
+          spanError = error.message;
+
+          // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
+          const hooksEnabledForError = !this.config.getDisableAllHooks?.();
+          const messageBusForError = this.config.getMessageBus?.();
+          const isInterrupt = abortSignal.aborted;
+
+          if (hooksEnabledForError && messageBusForError) {
+            const failureHookResult = await firePostToolUseFailureHook(
+              messageBusForError,
+              toolUseId,
+              toolName,
+              args,
+              error.message,
+              isInterrupt,
+              String(approvalMode),
+              abortSignal,
             );
-          }
 
-          // After exit_plan_mode confirmation, send current_mode_update
-          if (
-            isExitPlanModeTool &&
-            outcome !== ToolConfirmationOutcome.Cancel
-          ) {
-            await this.sendCurrentModeUpdateNotification(outcome);
-          }
-
-          // After edit tool ProceedAlways, notify the client about mode change
-          if (
-            confirmationDetails.type === 'edit' &&
-            outcome === ToolConfirmationOutcome.ProceedAlways
-          ) {
-            await this.sendCurrentModeUpdateNotification(outcome);
-          }
-
-          switch (outcome) {
-            case ToolConfirmationOutcome.Cancel:
-              return errorResponse(
-                new Error(`Tool "${fc.name}" was canceled by the user.`),
+            // Log additional context if provided
+            if (failureHookResult.additionalContext) {
+              debugLogger.debug(
+                `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
-            case ToolConfirmationOutcome.ProceedOnce:
-            case ToolConfirmationOutcome.ProceedAlways:
-            case ToolConfirmationOutcome.ProceedAlwaysProject:
-            case ToolConfirmationOutcome.ProceedAlwaysUser:
-            case ToolConfirmationOutcome.ProceedAlwaysServer:
-            case ToolConfirmationOutcome.ProceedAlwaysTool:
-            case ToolConfirmationOutcome.ModifyWithEditor:
-            case ToolConfirmationOutcome.RestorePrevious:
-              break;
-            default: {
-              const resultOutcome: never = outcome;
-              throw new Error(`Unexpected: ${resultOutcome}`);
             }
           }
+
+          // Use ToolCallEmitter for error handling
+          await this.toolCallEmitter.emitError(callId, toolName, error);
+
+          // Record tool error for session management
+          const errorParts = [
+            {
+              functionResponse: {
+                id: callId,
+                name: toolName,
+                response: { error: error.message },
+              },
+            },
+          ];
+          this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+            callId,
+            // A throw caused by abort (e.g. AbortError) is a cancellation, not
+            // a genuine tool error — keep it consistent with the success path.
+            status: abortSignal.aborted ? 'cancelled' : 'error',
+            resultDisplay: undefined,
+            error,
+            errorType: undefined,
+          });
+
+          return errorResponse(error);
         }
-      }
-
-      if (!didRequestPermission && !isTodoWriteTool) {
-        // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
-        // → emit tool_call start notification
-        const startParams: ToolCallStartParams = {
-          callId,
-          toolName: fc.name,
-          args,
-          status: 'in_progress',
-        };
-        await this.toolCallEmitter.emitStart(startParams);
-      }
-
-      // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-      const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-      const messageBusForTool = this.config.getMessageBus?.();
-      const permissionMode = String(approvalMode);
-
-      if (hooksEnabledForTool && messageBusForTool) {
-        const preHookResult = await firePreToolUseHook(
-          messageBusForTool,
-          fc.name,
-          args,
-          toolUseId,
-          permissionMode,
-          abortSignal,
-        );
-
-        if (!preHookResult.shouldProceed) {
-          // Hook blocked the tool execution - send notification to UI
-          const blockReason =
-            preHookResult.blockReason || 'Blocked by PreToolUse hook';
-          await this.messageEmitter.emitAgentMessage(
-            `🚫 **PreToolUse blocked**: ${fc.name} - ${blockReason}`,
-          );
-          return earlyErrorResponse(new Error(blockReason), fc.name);
-        }
-
-        // Add additional context from PreToolUse hook if provided
-        // Note: This context would need to be passed to the tool invocation
-        // For now, we just log it as the tool execution proceeds
-        if (preHookResult.additionalContext) {
-          debugLogger.debug(
-            `PreToolUse hook additional context for ${fc.name}: ${preHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      const sleepInhibitorHandle = acquireSleepInhibitor(
-        this.config,
-        `Qwen Code is executing tool ${fc.name}`,
-      );
-      let toolResult: ToolResult;
-      try {
-        toolResult = await invocation.execute(abortSignal);
-      } finally {
-        sleepInhibitorHandle.release();
-      }
-
-      // Clean up event listeners
-      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-
-      // Create response parts first (needed for emitResult and recordToolResult)
-      const responseParts = convertToFunctionResponse(
-        fc.name,
-        callId,
-        toolResult.llmContent,
-      );
-
-      // Fire PostToolUse hook on successful execution (aligned with core path)
-      if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
-        // Use the same response shape as core (llmContent/returnDisplay)
-        const toolResponse = {
-          llmContent: toolResult.llmContent,
-          returnDisplay: toolResult.returnDisplay,
-        };
-        const postHookResult = await firePostToolUseHook(
-          messageBusForTool,
-          fc.name,
-          args,
-          toolResponse,
-          toolUseId,
-          permissionMode,
-          abortSignal,
-        );
-
-        // If hook indicates to stop, return an error response
-        if (postHookResult.shouldStop) {
-          const stopMessage =
-            postHookResult.stopReason ||
-            'Execution stopped by PostToolUse hook';
-          debugLogger.info(
-            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
-          );
-          return earlyErrorResponse(new Error(stopMessage), fc.name);
-        }
-
-        // Add additional context from PostToolUse hook if provided
-        if (postHookResult.additionalContext) {
-          // Append additional context to the tool response
-          const contextPart = { text: postHookResult.additionalContext };
-          responseParts.push(contextPart);
-        }
-      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
-        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
-        const failureHookResult = await firePostToolUseFailureHook(
-          messageBusForTool,
-          toolUseId,
-          fc.name ?? 'unknown_tool',
-          args,
-          toolResult.error.message,
-          false, // not an interrupt
-          permissionMode,
-          abortSignal,
-        );
-
-        // Log additional context if provided
-        if (failureHookResult.additionalContext) {
-          debugLogger.debug(
-            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      // Handle TodoWriteTool: extract todos and send plan update
-      if (isTodoWriteTool) {
-        const todos = this.planEmitter.extractTodos(
-          toolResult.returnDisplay,
-          args,
-        );
-
-        // Match original logic: emit plan if todos.length > 0 OR if args had todos
-        if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
-          await this.planEmitter.emitPlan(todos ?? []);
-        }
-
-        // Skip tool_call_update event for TodoWriteTool
-        // Still log and return function response for LLM
-      } else {
-        // Normal tool handling: emit result using ToolCallEmitter
-        // Convert toolResult.error to Error type if present
-        const error = toolResult.error
-          ? new Error(toolResult.error.message)
-          : undefined;
-
-        await this.toolCallEmitter.emitResult({
-          callId,
-          toolName: fc.name,
-          args,
-          message: responseParts,
-          resultDisplay: toolResult.returnDisplay,
-          error,
-          success: !toolResult.error,
-        });
-      }
-
-      const durationMs = Date.now() - startTime;
-      logToolCall(this.config, {
-        'event.name': 'tool_call',
-        'event.timestamp': new Date().toISOString(),
-        function_name: fc.name,
-        function_args: args,
-        duration_ms: durationMs,
-        status: 'success',
-        success: true,
-        prompt_id: promptId,
-        tool_type:
-          typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
-            ? 'mcp'
-            : 'native',
-      });
-
-      // Record tool result for session management
-      this.config.getChatRecordingService()?.recordToolResult(responseParts, {
-        callId,
-        status: 'success',
-        resultDisplay: toolResult.returnDisplay,
-        error: undefined,
-        errorType: undefined,
-      });
-
-      return responseParts;
-    } catch (e) {
-      // Ensure cleanup on error
-      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-
-      const error = e instanceof Error ? e : new Error(String(e));
-
-      // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
-      const hooksEnabledForError = !this.config.getDisableAllHooks?.();
-      const messageBusForError = this.config.getMessageBus?.();
-      const isInterrupt = abortSignal.aborted;
-
-      if (hooksEnabledForError && messageBusForError) {
-        const failureHookResult = await firePostToolUseFailureHook(
-          messageBusForError,
-          toolUseId,
-          fc.name ?? 'unknown_tool',
-          args,
-          error.message,
-          isInterrupt,
-          String(approvalMode),
-          abortSignal,
-        );
-
-        // Log additional context if provided
-        if (failureHookResult.additionalContext) {
-          debugLogger.debug(
-            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      // Use ToolCallEmitter for error handling
-      await this.toolCallEmitter.emitError(
-        callId,
-        fc.name ?? 'unknown_tool',
-        error,
-      );
-
-      // Record tool error for session management
-      const errorParts = [
-        {
-          functionResponse: {
-            id: callId,
-            name: fc.name ?? '',
-            response: { error: error.message },
-          },
-        },
-      ];
-      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
-        callId,
-        status: 'error',
-        resultDisplay: undefined,
-        error,
-        errorType: undefined,
-      });
-
-      return errorResponse(error);
+      }); // end runInToolSpanContext
+    } finally {
+      endToolSpan(toolSpan, { success: spanSuccess, error: spanError });
     }
   }
 
@@ -3223,12 +3670,12 @@ export class Session implements SessionContext {
           return { text: part.text };
         case 'image':
         case 'audio':
-          return {
+          return clampInlineMediaPart({
             inlineData: {
               mimeType: part.mimeType,
               data: part.data,
             },
-          };
+          });
         case 'resource_link': {
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
@@ -3262,7 +3709,7 @@ export class Session implements SessionContext {
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
     // since this is user-triggered behavior, not LLM-triggered
     const pathSpecsToRead: string[] = atPathCommandParts.map(
-      (part) => part.fileData!.fileUri,
+      (part) => part.fileData!.fileUri!,
     );
 
     // Construct the initial part of the query for the LLM
@@ -3305,14 +3752,10 @@ export class Session implements SessionContext {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
         } else {
-          processedQueryParts.push(part);
+          processedQueryParts.push(clampInlineMediaPart(part));
         }
       }
-    } else if (embeddedContext.length > 0) {
-      // No @path files to read, but we have embedded context
-      processedQueryParts.push({ text: initialQueryText.trim() });
     } else {
-      // No @path files found
       processedQueryParts.push({ text: initialQueryText.trim() });
     }
 
@@ -3326,12 +3769,14 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
-        processedQueryParts.push({
-          inlineData: {
-            mimeType: contextPart.mimeType ?? 'application/octet-stream',
-            data: contextPart.blob,
-          },
-        });
+        processedQueryParts.push(
+          clampInlineMediaPart({
+            inlineData: {
+              mimeType: contextPart.mimeType ?? 'application/octet-stream',
+              data: contextPart.blob,
+            },
+          }),
+        );
       }
     }
 
