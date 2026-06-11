@@ -249,8 +249,10 @@ export interface PolicyLintResult {
   /** Number of rules (valid files only). */
   ruleCount?: number;
   /**
-   * Rule id (or `[index]`) of each rule that uses the still-deferred
-   * `maxPerWindow` field — these downgrade to prompt at runtime (valid files).
+   * Rule id (or `[index]`) of each rule that uses a NOT-YET-EVALUATED field
+   * (would downgrade to prompt at runtime). As of cycle 43 every policy field is
+   * honored (maxPerWindow joined timeOfDay/expiresAt), so this is currently always
+   * empty — kept as a forward-compat hook for any field a future cycle defers.
    */
   deferred?: string[];
   /** Human-readable reason (invalid files only). */
@@ -285,9 +287,9 @@ export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  const deferred = policy.rules
-    .map((r, i) => (r.maxPerWindow !== undefined ? (r.id ?? `[${i}]`) : null))
-    .filter((x): x is string => x !== null);
+  // No policy field is currently deferred (maxPerWindow is honored as of cycle 43),
+  // so a valid file lints clean. Left as a hook for any future deferred field.
+  const deferred: string[] = [];
   return { ok: true, ruleCount: policy.rules.length, deferred };
 }
 
@@ -297,8 +299,8 @@ export function formatPolicyLint(path: string, r: PolicyLintResult): string {
   const lines = [`✓ ${path}: valid (${r.ruleCount} rule(s))`];
   if (r.deferred && r.deferred.length > 0) {
     lines.push(
-      `  note: ${r.deferred.length} rule(s) use the still-deferred ` +
-        `maxPerWindow field (will downgrade to prompt): ${r.deferred.join(', ')}`,
+      `  note: ${r.deferred.length} rule(s) use a not-yet-evaluated field ` +
+        `(will downgrade to prompt): ${r.deferred.join(', ')}`,
     );
   }
   return lines.join('\n');

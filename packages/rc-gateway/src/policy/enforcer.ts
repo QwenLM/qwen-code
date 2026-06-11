@@ -7,7 +7,12 @@
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import type { Policy } from './loader.js';
-import { evaluate, type ToolCallContext } from './evaluator.js';
+import {
+  evaluate,
+  type ToolCallContext,
+  type QuotaOracle,
+} from './evaluator.js';
+import type { QuotaStore } from './quotas.js';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
 
 /** Safe optional read of a string field from an unknown record. */
@@ -52,6 +57,16 @@ export class PolicyEnforcer {
     private readonly daemon: DaemonClient,
     private policy: Policy,
     private readonly audit?: AuditRecorder,
+    /**
+     * Optional rolling-window quota store (cycle 43). When present, a matched
+     * `maxPerWindow` rule with room auto-allows (and is consumed after a
+     * successful vote); exhausted falls through; absent → maxPerWindow stays a
+     * prompt (the pre-quota behavior). The store's `limitsFor` must reflect the
+     * active policy (hot-reload, Phase 3, would rebuild it on `setPolicy`).
+     */
+    private readonly quota?: QuotaStore,
+    /** Injected clock (epoch-ms) for deterministic tests. */
+    private readonly nowFn: () => number = Date.now,
   ) {}
 
   /** Swap the active policy (for a future hot-reload). */
@@ -91,8 +106,16 @@ export class PolicyEnforcer {
     // bypass of all future gateway evaluation. Absent → we do NOT vote (below).
     const approveOptionId = selectAllowOnceOptionId(data['options']);
 
+    // One instant for the whole decision: the quota CHECK (in evaluate) and the
+    // post-vote CONSUME prune against the SAME window boundary.
+    const nowMs = this.nowFn();
+    const now = new Date(nowMs);
+    const oracle: QuotaOracle | undefined = this.quota
+      ? { state: (id, ms) => this.quota!.state(id, ms) }
+      : undefined;
+
     const ctx: ToolCallContext = { tool, args };
-    const d = evaluate(this.policy, ctx);
+    const d = evaluate(this.policy, ctx, now, oracle);
 
     if (d.action === 'allow') {
       if (requestId && approveOptionId) {
@@ -103,6 +126,18 @@ export class PolicyEnforcer {
             { outcome: { outcome: 'selected', optionId: approveOptionId } },
           );
           if (ok) {
+            // Consume the quota ONLY now — after a successful vote (the gateway's
+            // commit-to-invoke, design.md:68) — and ONLY for a tracked quota rule
+            // (remaining !== undefined), so non-quota allows don't churn the WAL.
+            let quotaRemaining: number | undefined;
+            if (
+              this.quota &&
+              d.ruleId &&
+              this.quota.remaining(d.ruleId, nowMs) !== undefined
+            ) {
+              await this.quota.consume(d.ruleId, nowMs);
+              quotaRemaining = this.quota.remaining(d.ruleId, nowMs);
+            }
             void this.audit?.record({
               action: 'policy_decision',
               target: sessionId,
@@ -112,6 +147,7 @@ export class PolicyEnforcer {
                 ruleId: d.ruleId,
                 voted: true,
                 decisionSource: d.source,
+                ...(quotaRemaining !== undefined ? { quotaRemaining } : {}),
               },
             });
             return true;

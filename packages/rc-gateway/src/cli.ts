@@ -25,6 +25,7 @@ import {
   formatPolicyLint,
 } from './policy/loader.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
+import { QuotaStore, FileQuotaWal } from './policy/quotas.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 export interface ServeOptions {
@@ -90,8 +91,32 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // eslint-disable-next-line no-console
     (msg) => console.warn(msg),
   );
+  // Per-rule quota store (cycle 43): limits keyed by rule id from the active
+  // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
+  // when the enforcer runs. limitsFor reflects the boot policy (hot-reload, a
+  // future cycle, would rebuild it).
+  const quotaLimits = new Map<string, { count: number; windowSec: number }>();
+  for (const r of policy.rules) {
+    if (
+      r.id !== undefined &&
+      r.maxPerWindow !== undefined &&
+      !quotaLimits.has(r.id)
+    ) {
+      quotaLimits.set(r.id, r.maxPerWindow);
+    }
+  }
+  const quota = notifier
+    ? await QuotaStore.create(
+        new FileQuotaWal(
+          join(homedir(), '.qwen', 'rc', 'quotas.wal'),
+          // eslint-disable-next-line no-console
+          (msg) => console.warn(msg),
+        ),
+        (id) => quotaLimits.get(id),
+      )
+    : undefined;
   const enforcer = notifier
-    ? new PolicyEnforcer(handle.daemon, policy, audit)
+    ? new PolicyEnforcer(handle.daemon, policy, audit, quota)
     : undefined;
 
   const port = opts.gatewayPort ?? 4170;

@@ -70,23 +70,25 @@ describe('lintPolicyFile', () => {
     expect(r.error).not.toMatch(/file not found/);
   });
 
-  it('lists rules using the still-deferred maxPerWindow field', async () => {
+  it('lints a maxPerWindow rule clean — honored at runtime, not deferred (cycle 43)', async () => {
     const p = await write(
-      'deferred.yaml',
+      'quota.yaml',
       `rules:\n  - id: quota\n    match: { tool: bash }\n    action: allow\n    maxPerWindow: { count: 5, windowSec: 60 }\n  - id: plain\n    match: { tool: git }\n    action: allow\n`,
     );
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(true);
-    expect(r.deferred).toEqual(['quota']);
+    expect(r.ruleCount).toBe(2);
+    expect(r.deferred).toEqual([]); // no longer deferred
   });
 
-  it('falls back to [index] for a deferred rule with no id', async () => {
+  it('rejects a malformed maxPerWindow (now validated, fail-closed)', async () => {
     const p = await write(
-      'noid.yaml',
-      `rules:\n  - match: { tool: bash }\n    action: allow\n    maxPerWindow: { count: 1, windowSec: 1 }\n`,
+      'badquota.yaml',
+      `rules:\n  - id: q\n    match: { tool: bash }\n    action: allow\n    maxPerWindow: 5\n`,
     );
     const r = await lintPolicyFile(p);
-    expect(r.deferred).toEqual(['[0]']);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/maxPerWindow must be a mapping/);
   });
 });
 
@@ -104,7 +106,7 @@ describe('formatPolicyLint', () => {
       deferred: ['quota'],
     });
     expect(out).toContain('✓ /p.yaml: valid (2 rule(s))');
-    expect(out).toContain('maxPerWindow');
+    expect(out).toContain('not-yet-evaluated field');
     expect(out).toContain('quota');
   });
 
