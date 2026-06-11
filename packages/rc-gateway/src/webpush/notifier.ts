@@ -175,9 +175,17 @@ export class PushNotifier {
         // the transition into the rate-limited state (firstDrop) so a storm
         // produces one row, not thousands. No limiter wired → no cap.
         if (this.rateLimiter) {
+          // Defensive clamp upholds the FAIL-OPEN invariant: a stored cap that
+          // is absent/0/negative/NaN (only reachable via a hand-edited store —
+          // the route validates [1,240]) must fall back to the default, never
+          // become a 0-cap that silently drops EVERY push.
+          const cap =
+            typeof r.maxPerHour === 'number' && r.maxPerHour > 0
+              ? r.maxPerHour
+              : DEFAULT_MAX_PER_HOUR;
           const { allowed, firstDrop } = this.rateLimiter.tryConsume(
             r.id,
-            r.maxPerHour ?? DEFAULT_MAX_PER_HOUR,
+            cap,
             now.getTime(),
           );
           if (!allowed) {

@@ -894,6 +894,30 @@ describe('PushNotifier rate limit (cycle 46)', () => {
     expect(sent).toHaveLength(2); // maxPerHour ignored without a limiter
   });
 
+  it('FAIL-OPEN: a corrupt stored maxPerHour:0 falls back to the default (not a 0-cap lockout)', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    // Only reachable via a hand-edited store (the route forbids 0); must NOT
+    // silently drop every push.
+    await store.setMaxPerHour(sub.id, 0);
+    const rl = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      rl,
+    );
+    await notifier.notify(PERM, { sessionId: 's1' }, NOW);
+    expect(sent).toHaveLength(1); // sent, not locked out
+  });
+
   it('applies the default cap (30) when the subscription sets none', async () => {
     const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
     await store.add(approver.id, {
