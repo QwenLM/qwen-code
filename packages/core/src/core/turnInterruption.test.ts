@@ -48,7 +48,10 @@ describe('detectTurnInterruption', () => {
     });
   });
 
-  it('drops per-turn reminder parts from the re-submission', () => {
+  it('preserves per-turn reminder parts verbatim in the re-submission', () => {
+    // The Retry send path does not re-inject per-turn reminders, so the
+    // captured entry must keep them — the resumed request has to be
+    // byte-identical to the original.
     const history: Content[] = [
       {
         role: 'user',
@@ -58,7 +61,7 @@ describe('detectTurnInterruption', () => {
     const result = detectTurnInterruption(history);
     expect(result).toEqual({
       kind: 'interrupted_prompt',
-      parts: [{ text: 'real prompt' }],
+      parts: [reminder('plan mode is on'), { text: 'real prompt' }],
     });
   });
 
@@ -148,9 +151,7 @@ describe('detectTurnInterruption', () => {
     expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
   });
 
-  it('returns none for a user tail whose parts are all reminders after filtering', () => {
-    // Not "pure" by isSystemReminderContent (empty-after-filter edge), but
-    // there is nothing meaningful to re-submit.
+  it('returns none for a user tail with no parts', () => {
     const history: Content[] = [{ role: 'user', parts: [] }];
     expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
   });

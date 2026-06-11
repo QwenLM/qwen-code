@@ -5,11 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import {
-  isSystemReminderContent,
-  SYSTEM_REMINDER_OPEN,
-  SYSTEM_REMINDER_CLOSE,
-} from '../utils/environmentContext.js';
+import { isSystemReminderContent } from '../utils/environmentContext.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -47,20 +43,6 @@ export type TurnInterruption =
     };
 
 /**
- * True for a text part wrapped in `<system-reminder>…</system-reminder>`.
- * Part-level analogue of {@link isSystemReminderContent}'s per-part check —
- * the close-tag-at-end requirement mirrors that function (see its doc for
- * why "ends with", not "contains").
- */
-function isSystemReminderPart(part: Part): boolean {
-  return (
-    typeof part.text === 'string' &&
-    part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
-    part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
-  );
-}
-
-/**
  * Detect whether the last turn of `history` was left unfinished, and if so
  * what kind of continuation applies. Pure read — never mutates `history`.
  *
@@ -83,13 +65,12 @@ export function detectTurnInterruption(history: Content[]): TurnInterruption {
     if (isSystemReminderContent(last)) {
       return { kind: 'none' };
     }
-    // Per-turn reminders ride in the SAME Content as the prompt
-    // ([reminder, prompt]). Drop them from the re-submission: the send
-    // pipeline injects fresh reminders, so replaying stale ones would
-    // double-inject.
-    const parts = (last.parts ?? []).filter(
-      (part) => !isSystemReminderPart(part),
-    );
+    // Capture the entry VERBATIM, including any per-turn system-reminder
+    // parts riding alongside the prompt ([reminder, prompt]). The Retry
+    // send path does not re-inject per-turn reminders, so replaying them
+    // keeps the resumed request byte-identical to the original — the
+    // continuation is the same turn, not a fresh one.
+    const parts = last.parts ?? [];
     if (parts.length === 0) {
       return { kind: 'none' };
     }
