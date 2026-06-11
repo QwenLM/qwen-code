@@ -1362,6 +1362,7 @@ export async function runNonInteractive(
                       }) => Promise<void>)
                     | undefined;
                   let slashOnCompleteErrored = false;
+                  let slashOnCompleteCancelled = false;
                   if (isSlashCommand(job.prompt)) {
                     const slashCommandResult = await handleSlashCommand(
                       job.prompt,
@@ -1407,7 +1408,14 @@ export async function runNonInteractive(
                     });
                     await drainLocalQueue();
                   } catch (error) {
-                    slashOnCompleteErrored = true;
+                    // Distinguish cancellation (SIGINT → AbortError) from a real
+                    // failure so a Ctrl+C'd tick is recorded as 'cancelled', not
+                    // 'failed'. Mirrors the Session.ts cron path.
+                    if (abortController.signal.aborted) {
+                      slashOnCompleteCancelled = true;
+                    } else {
+                      slashOnCompleteErrored = true;
+                    }
                     throw error;
                   } finally {
                     // Fire onComplete from submit_prompt (e.g. markRunCompleted)
@@ -1415,9 +1423,11 @@ export async function runNonInteractive(
                     if (slashOnComplete) {
                       try {
                         await slashOnComplete(
-                          slashOnCompleteErrored
-                            ? { errored: true }
-                            : undefined,
+                          slashOnCompleteCancelled
+                            ? { cancelled: true }
+                            : slashOnCompleteErrored
+                              ? { errored: true }
+                              : undefined,
                         );
                       } catch (e) {
                         // swallow — markRunCompleted is idempotent

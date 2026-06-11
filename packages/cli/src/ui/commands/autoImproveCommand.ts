@@ -227,13 +227,13 @@ async function getRepoRoot(config: Config): Promise<string> {
 }
 
 async function getCurrentBranch(repoRoot: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', [
-    '-C',
-    repoRoot,
-    'symbolic-ref',
-    '--short',
-    'HEAD',
-  ]);
+  const { stdout } = await execFileAsync(
+    'git',
+    ['-C', repoRoot, 'symbolic-ref', '--short', 'HEAD'],
+    // Bound the call for the same reason as getRepoRoot: a blocking git
+    // config (credential helper / core.sshCommand) must not hang the CLI.
+    { timeout: 10_000 },
+  );
   return stdout.trim();
 }
 

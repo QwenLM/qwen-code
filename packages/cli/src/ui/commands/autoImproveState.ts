@@ -641,7 +641,11 @@ export async function compactAutoImproveRunIndex(
     // an empty index).
     return;
   }
-  if (rawCount <= MAX_RUN_INDEX_RECORDS) return;
+  // Hysteresis: compaction truncates to exactly MAX_RUN_INDEX_RECORDS, so a
+  // bare `> MAX` check would re-fire every tick once the cap is reached (each
+  // tick appends one record → cap+1). Only rewrite once the raw file has grown
+  // to twice the cap, amortizing the read+parse+write to once per ~MAX ticks.
+  if (rawCount <= MAX_RUN_INDEX_RECORDS * 2) return;
   const normalized = await readAutoImproveRunIndex(repoRoot, loopId);
   const indexPath = getAutoImproveRunIndexPath(repoRoot, loopId);
   const tmpPath = `${indexPath}.tmp`;

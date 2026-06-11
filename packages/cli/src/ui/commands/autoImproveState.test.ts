@@ -590,11 +590,11 @@ describe('autoImproveState', () => {
   });
 
   describe('compactAutoImproveRunIndex', () => {
-    it('rewrites the on-disk index to the cap when it exceeds MAX', async () => {
+    it('rewrites the on-disk index to the cap once it exceeds 2×MAX (hysteresis)', async () => {
       const loopId = 'test-loop-compact';
       const indexPath = getAutoImproveRunIndexPath(tempDir, loopId);
       await fs.mkdir(path.dirname(indexPath), { recursive: true });
-      const runs = Array.from({ length: 150 }, (_, i) => ({
+      const runs = Array.from({ length: 250 }, (_, i) => ({
         runId: `r${i}`,
         status: 'success',
         updatedAt: '2026-05-25T00:00:00.000Z',
@@ -611,9 +611,28 @@ describe('autoImproveState', () => {
         runs: Array<{ runId: string }>;
       };
       expect(after.runs).toHaveLength(100);
-      // Most recent 100 kept (r50..r149).
-      expect(after.runs[0]!.runId).toBe('r50');
-      expect(after.runs[99]!.runId).toBe('r149');
+      // Most recent 100 kept (r150..r249).
+      expect(after.runs[0]!.runId).toBe('r150');
+      expect(after.runs[99]!.runId).toBe('r249');
+    });
+
+    it('leaves a raw index between MAX and 2×MAX unchanged (hysteresis)', async () => {
+      const loopId = 'test-loop-hysteresis';
+      const indexPath = getAutoImproveRunIndexPath(tempDir, loopId);
+      await fs.mkdir(path.dirname(indexPath), { recursive: true });
+      const runs = Array.from({ length: 150 }, (_, i) => ({
+        runId: `r${i}`,
+        status: 'success',
+        updatedAt: '2026-05-25T00:00:00.000Z',
+      }));
+      const raw = JSON.stringify({ version: 1, runs });
+      await fs.writeFile(indexPath, raw, 'utf8');
+
+      await compactAutoImproveRunIndex(tempDir, loopId);
+
+      // Within the hysteresis band (MAX < raw <= 2×MAX): not rewritten, so the
+      // on-disk file still holds all 150 records (reads truncate to 100).
+      expect(await fs.readFile(indexPath, 'utf8')).toBe(raw);
     });
 
     it('leaves an index at/below the cap byte-for-byte unchanged', async () => {
