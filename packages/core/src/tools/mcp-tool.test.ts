@@ -879,7 +879,7 @@ describe('DiscoveredMCPTool', () => {
     } as any;
 
     it('should truncate large text results from direct client execution', async () => {
-      const largeText = 'Line of text content\n'.repeat(200); // ~4200 chars, well over THRESHOLD
+      const largeText = 'Line of text content\n'.repeat(25000); // ~525k chars, over the 500k MCP char budget
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(async () => ({
           content: [{ type: 'text', text: largeText }],
@@ -912,7 +912,7 @@ describe('DiscoveredMCPTool', () => {
     });
 
     it('should truncate large text results from callable tool execution', async () => {
-      const largeText = 'Line of text content\n'.repeat(200);
+      const largeText = 'Line of text content\n'.repeat(25000);
       const mockMcpToolResponseParts: Part[] = [
         {
           functionResponse: {
@@ -1011,7 +1011,7 @@ describe('DiscoveredMCPTool', () => {
     });
 
     it('should truncate only text parts in mixed content', async () => {
-      const largeText = 'Line of text content\n'.repeat(200);
+      const largeText = 'Line of text content\n'.repeat(25000);
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(async () => ({
           content: [
