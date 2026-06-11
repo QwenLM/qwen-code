@@ -375,7 +375,7 @@ Ask Permissions Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Ask Perm
 // User-level: ~/.qwen/settings.json
 {
   "tools": {
-    "approvalMode": "auto-edit"  // or "plan", "auto", "yolo"
+    "approvalMode": "auto-edit"  // or "plan", "default", "auto", "yolo"
   }
 }
 ```
