@@ -398,6 +398,27 @@ describe('CronScheduler', () => {
     });
   });
 
+  // Removing a scheduler's temp dir while its fire-and-forget writes
+  // (fire stamps, removals, lock release) are still in flight makes rm
+  // race a file creation inside .qwen → ENOTEMPTY. Settle the chains
+  // first; keep rm retries for writes launched outside them (e.g. a
+  // probe takeover's lock write).
+  async function removeTmpDir(tmpDir: string): Promise<void> {
+    scheduler.destroy();
+    const internals = scheduler as unknown as {
+      pendingPersist: Promise<void>;
+      pendingRelease: Promise<void> | null;
+    };
+    await internals.pendingPersist;
+    await internals.pendingRelease;
+    await fs.rm(tmpDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 20,
+    });
+  }
+
   describe('durable lock lifecycle', () => {
     let tmpDir: string;
 
@@ -407,7 +428,7 @@ describe('CronScheduler', () => {
     });
 
     afterEach(async () => {
-      await fs.rm(tmpDir, { recursive: true, force: true });
+      await removeTmpDir(tmpDir);
     });
 
     // stop() releases the lock fire-and-forget, so tests wait for the
@@ -539,7 +560,7 @@ describe('CronScheduler', () => {
     });
 
     afterEach(async () => {
-      await fs.rm(tmpDir, { recursive: true, force: true });
+      await removeTmpDir(tmpDir);
     });
 
     function diskTask(id: string): DurableCronTask {
