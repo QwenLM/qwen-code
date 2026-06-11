@@ -804,6 +804,9 @@ export interface DaemonSettingsReloadedData {
   changedKeys: string[];
   childReloaded: boolean;
   sessionsRefreshed?: string[];
+  sessionsSkipped?: string[];
+  childError?: string;
+  [key: string]: unknown;
 }
 export type DaemonSettingsReloadedEvent = DaemonEventEnvelope<
   'settings_reloaded',
