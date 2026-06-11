@@ -20,10 +20,12 @@ oldest_; `design.md` D4; `tasks.md` 2.4). Spreads off `add-policy-engine` after
 ## What ships
 
 1. `webpush/rateLimiter.ts` — pure in-memory `PushRateLimiter`:
-   - `tryConsume(subId, maxPerHour, nowMs): boolean` — prune the subscription's
-     send-instants to the last 3600 s; if `>= maxPerHour` return `false` (caller
-     drops); else record `nowMs` and return `true`. Atomic check+consume (push
-     has no two-phase vote). Never throws.
+   - `tryConsume(subId, maxPerHour, nowMs): { allowed, firstDrop }` — prune the
+     subscription's send-instants to the last 3600 s; if `>= maxPerHour` →
+     `{ allowed: false, firstDrop }` (caller drops), where `firstDrop` is true
+     ONLY on the transition from under-cap to at-cap; else record `nowMs`,
+     clear the dropping flag, and return `{ allowed: true, firstDrop: false }`.
+     Atomic check+consume (push has no two-phase vote). Never throws.
    - `forget(subId)` — drop a subscription's window (for unsubscribe cleanup).
    - `DEFAULT_MAX_PER_HOUR = 30`.
 2. `pushStore.ts` — `PushSubscriptionRecord.maxPerHour?: number` +
@@ -50,20 +52,29 @@ oldest_; `design.md` D4; `tasks.md` 2.4). Spreads off `add-policy-engine` after
    session-lock, routing-drop, prefs, quiet-hours, working-device) count toward
    the cap, matching the spec's "pushable events". Counted at the send DECISION
    (an attempt) — a subsequent 410 still counts (and removes the sub anyway).
-3. **Fail-OPEN seam.** `rateLimiter` is an OPTIONAL ctor arg → every existing
+3. **Audit the TRANSITION, not every drop** (advisor). The threat model is a
+   1000-event/sec storm; a `push_rate_limited` row per dropped push would just
+   move the flood into the audit log (unbounded JSONL). So `tryConsume` reports
+   `firstDrop` only when a subscription crosses INTO the rate-limited state, and
+   the gate audits only then. This passes the scenario as written (it asserts
+   the 6th event audits and the 7th is "also dropped" — NOT that the 7th
+   audits) and matches the codebase's once-per-lifetime audit patterns
+   (`warnedCollisions`). The flag clears when the window next has room, so a
+   later storm episode re-audits.
+4. **Fail-OPEN seam.** `rateLimiter` is an OPTIONAL ctor arg → every existing
    `new PushNotifier(...)` site + test is unchanged (no limiter ⇒ no cap). Only
    `server.ts` (the real boot) wires it on.
-4. **Atomic check+consume** (`tryConsume`) — no TOCTOU: push has no external
+5. **Atomic check+consume** (`tryConsume`) — no TOCTOU: push has no external
    await between deciding and sending, so unlike the policy quota there is no
    check/consume split. (The send itself is async + best-effort, but the count
    is committed at the decision.)
-5. **No critical-kind bypass (spec-literal).** Quiet hours bypasses
+6. **No critical-kind bypass (spec-literal).** Quiet hours bypasses
    `policy.deny`/`session.died` (cycle 29 honored that), but the rate-limit
    requirement states NO bypass — so the cap applies uniformly. The default 30
    is generous enough that a critical event is only ever dropped in an extreme
    storm where the device is already flooded. A critical bypass is unspecified;
    left as a future refinement (noted, not built).
-6. **Default 30, range [1, 240]** (spec). PATCH rejects out-of-range/non-integer
+7. **Default 30, range [1, 240]** (spec). PATCH rejects out-of-range/non-integer
    with `400 invalid_max_per_hour`; `null` clears (→ effective default).
 
 ## Deferred (NOT this cycle)

@@ -61,6 +61,11 @@ export {
 } from './webpush/sender.js';
 export { PushNotifier } from './webpush/notifier.js';
 export {
+  PushRateLimiter,
+  DEFAULT_MAX_PER_HOUR,
+  type RateLimitResult,
+} from './webpush/rateLimiter.js';
+export {
   SessionEventPump,
   type SessionEventPumpOptions,
   type PumpNotifier,
