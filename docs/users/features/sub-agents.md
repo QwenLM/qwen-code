@@ -275,6 +275,45 @@ disallowedTools:
 ---
 ```
 
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
+
+| Field            | Type             | Notes                                                                                                                                                                                                                                         |
+| ---------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                        |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins.                                                                                                                       |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is also preserved for backward compatibility. Other values are silently dropped on parse. |
+
+Example:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with a turn cap
+permissionMode: plan
+maxTurns: 50
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation`, `mcpServers`, `hooks` — are documented in the
+declarative-agent design doc and land in follow-up PRs once the prerequisite
+infrastructure exists (`effort` needs a model-layer parameter; `memory`
+needs a scoped memory subsystem; `mcpServers` / `hooks` need a nested-aware
+YAML parser; `--agent` CLI flag enables `initialPrompt`; etc.).
+
 #### Example Usage
 
 ```

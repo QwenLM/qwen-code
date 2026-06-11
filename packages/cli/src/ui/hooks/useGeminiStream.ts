@@ -843,6 +843,20 @@ export const useGeminiStream = (
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
 
+        // Teammate envelopes are model-authored text already rendered
+        // as a `● …` notification by the teammate drain. They must NOT
+        // enter the slash/shell/@ preprocessing below: with `!` shell
+        // mode active a teammate report would be EXECUTED as a shell
+        // command, and a leading `/` or an `@path` would be
+        // reinterpreted against the leader's session. Pass the
+        // envelope straight through to the model, like Notification.
+        if (submitType === SendMessageType.Teammate) {
+          onDebugMessage(
+            `Received teammate message (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
@@ -898,9 +912,11 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        // Cron prompts are already rendered as a `● Cron: …` notification by
-        // the queue drain, so skip the user-message history item to avoid
-        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
+        // Cron prompts are already rendered as a `● …` notification by
+        // their queue drain, so skip the user-message history item to
+        // avoid a duplicate `> …` line. Preprocessing (@/slash/shell)
+        // still runs for Cron. (Teammate envelopes returned earlier
+        // and never reach this point.)
         if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
             {
@@ -1897,7 +1913,8 @@ export const useGeminiStream = (
         // Check image format support for non-continuations
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
@@ -1917,7 +1934,8 @@ export const useGeminiStream = (
 
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
@@ -2719,9 +2737,13 @@ export const useGeminiStream = (
   }, [config]);
 
   // When idle, drain the unified queue one item at a time.
+  // Skip when another submission is in flight (e.g. the teammate
+  // drain effect won this render) — the queue stays intact and
+  // the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
       const item = notificationQueueRef.current.shift()!;
@@ -2734,6 +2756,96 @@ export const useGeminiStream = (
       });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);
+
+  // ─── Teammate message integration ─────────────────────────
+  // Each entry carries the full nonce-tagged envelope (`modelText`,
+  // sent to the leader's model) and a compact `display` line (shown
+  // to the user in its place) — the same two-text split the unified
+  // notification queue uses, so teammate reports no longer dump the
+  // whole raw envelope into the conversation as a user bubble.
+  const teammateQueueRef = useRef<
+    Array<{ modelText: string; display: string }>
+  >([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
+
+  // Subscribe to TeamManager's leader message callback.
+  // Track the bound manager so we can detach the callback
+  // before a new manager replaces it (and on unmount) —
+  // otherwise a stale TeamManager could keep pushing into
+  // the active queue ref after team recreation/remount.
+  useEffect(() => {
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
+    const handleManagerChange = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      if (boundManager && boundManager !== manager) {
+        boundManager.setLeaderMessageCallback(null);
+        // Drop any messages the old team's teammates queued but that
+        // weren't drained before the swap — they belong to a team that
+        // no longer exists and must not be submitted into the new
+        // team's session. Only fires on a genuine manager swap; a React
+        // remount re-binds the same manager (boundManager is null here)
+        // and preserves the queue.
+        teammateQueueRef.current.length = 0;
+      }
+      boundManager = manager;
+      if (manager) {
+        manager.setLeaderMessageCallback(
+          (modelText: string, display: string) => {
+            teammateQueueRef.current.push({ modelText, display });
+            setTeammateTrigger((n) => n + 1);
+          },
+        );
+      }
+    };
+
+    config.onTeamManagerChange(handleManagerChange);
+
+    // Catch manager that was set before this effect ran
+    const current = config.getTeamManager();
+    if (current) {
+      handleManagerChange(current);
+    }
+
+    return () => {
+      config.onTeamManagerChange(null, handleManagerChange);
+      if (boundManager) {
+        boundManager.setLeaderMessageCallback(null);
+        boundManager = null;
+      }
+    };
+  }, [config]);
+
+  // When idle, drain teammate messages one batch at a time.
+  // Skip when another submission is in flight (e.g. the
+  // notification effect won this render and called submitQuery
+  // synchronously, flipping isSubmittingQueryRef). Without this
+  // guard the splice would drain the queue and submitQuery
+  // would early-return, permanently losing those messages.
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      !isSubmittingQueryRef.current &&
+      teammateQueueRef.current.length > 0
+    ) {
+      const batch = teammateQueueRef.current.splice(0);
+      // Render one compact `● …` line per teammate report; the full
+      // envelope goes only to the model (the USER bubble is suppressed
+      // for SendMessageType.Teammate in prepareQueryForGemini).
+      for (const entry of batch) {
+        addItem(
+          { type: 'notification' as const, text: entry.display },
+          Date.now(),
+        );
+      }
+      const modelText = batch.map((e) => e.modelText).join('\n\n');
+      const display = batch.map((e) => e.display).join('; ');
+      submitQuery(modelText, SendMessageType.Teammate, undefined, {
+        notificationDisplayText: display,
+      });
+    }
+  }, [streamingState, submitQuery, teammateTrigger, addItem]);
 
   return {
     streamingState,
