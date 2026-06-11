@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -13,6 +13,14 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
+
+const stdioMocks = vi.hoisted(() => ({
+  writeStderrLine: vi.fn(),
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: stdioMocks.writeStderrLine,
+}));
 
 /**
  * End-to-end transport test: boots a real Express server with the ACP
@@ -379,6 +387,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   let bridge: FakeBridge;
 
   beforeEach(async () => {
+    stdioMocks.writeStderrLine.mockClear();
     bridge = new FakeBridge();
     const app = express();
     app.use(express.json());
@@ -1699,6 +1708,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it('_qwen/session/shell returns result', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
+      const command = 'ls\nFAKE\r\x1b[31m';
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1711,12 +1721,19 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 54,
         method: '_qwen/session/shell',
-        params: { sessionId: 'sess-1', command: 'ls' },
+        params: { sessionId: 'sess-1', command },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
-        result: { exitCode: 0, output: '$ ls' },
+        result: { exitCode: 0, output: `$ ${command}` },
       });
+      const shellLog = stdioMocks.writeStderrLine.mock.calls
+        .map(([line]) => line)
+        .find((line) => line.includes('session/shell'));
+      expect(shellLog).toContain('cmd=ls FAKE  [31m');
+      expect(shellLog).not.toContain('\n');
+      expect(shellLog).not.toContain('\r');
+      expect(shellLog).not.toContain('\x1b');
     });
 
     it('_qwen/session/detach succeeds', async () => {

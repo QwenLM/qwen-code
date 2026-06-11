@@ -1081,8 +1081,11 @@ export class AcpDispatcher {
             return;
           }
 
+          const logSessionId = logSafe(sessionId.slice(0, 8));
+          const logClientId = logSafe(String(conn.clientId?.slice(0, 8)));
+          const logCommand = logSafe(rawCmd.slice(0, 120));
           writeStderrLine(
-            `qwen serve: /acp session/shell session=${sessionId.slice(0, 8)} client=${conn.clientId?.slice(0, 8)} cmd=${rawCmd.slice(0, 120)}`,
+            `qwen serve: /acp session/shell session=${logSessionId} client=${logClientId} cmd=${logCommand}`,
           );
           const result = await this.bridge.executeShellCommand(
             sessionId,
