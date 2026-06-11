@@ -1714,6 +1714,22 @@ describe('MemoryPressureMonitor', () => {
       expect(mockRecordCpuUsage).not.toHaveBeenCalled();
     });
 
+    it('does not throw and skips metric reporting when memory usage cannot be read', () => {
+      mockIsPerformanceMonitoringActive.mockReturnValue(true);
+      vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+        throw new Error('memory API unavailable');
+      });
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+
+      expect(() => monitor.performCheck()).not.toThrow();
+      expect(mockRecordMemoryUsage).not.toHaveBeenCalled();
+      expect(mockRecordCpuUsage).not.toHaveBeenCalled();
+      // readMemoryUsage() logs the failure once; getPressureLevel() must be
+      // skipped (mem is undefined) so it doesn't fire a second failing syscall
+      // and log the same error twice on this cycle.
+      expect(mockDebugLogger.error).toHaveBeenCalledTimes(1);
+    });
+
     it('passes runtime samples to the diagnostics dumper on hard pressure', async () => {
       const dumpSpy = vi
         .spyOn(MemoryDiagnosticsDumper.prototype, 'dump')

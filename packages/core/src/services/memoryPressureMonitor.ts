@@ -320,7 +320,10 @@ export class MemoryPressureMonitor extends EventEmitter {
     // determination and runtime sampling to avoid a redundant syscall
     // (process.memoryUsage() reads /proc/self/status on Linux).
     const mem = this.readMemoryUsage();
-    const pressure = this.getPressureLevel(mem);
+    // Guard on `mem`: passing undefined into getPressureLevel() would make it
+    // call readMemoryUsage() a second time (its memSnapshot fallback), firing a
+    // redundant failing syscall and logging the same error twice on this cycle.
+    const pressure = mem ? this.getPressureLevel(mem) : 'normal';
     if (pressure !== 'critical') {
       this.consecutiveIneffectiveAggressiveCleanups = 0;
     }
