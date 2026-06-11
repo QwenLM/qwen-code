@@ -78,7 +78,7 @@ export function useCompletion(
   // Clear dismissed flag when the completion query changes (user typed more).
   // Skip the clear on the render immediately following a dismiss, since
   // accepting a suggestion also changes the query.
-  const prevQueryRef = useRef<string | undefined>(undefined);
+  const prevQueryRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
     if (options.query !== prevQueryRef.current) {
       if (skipNextClearRef.current) {
