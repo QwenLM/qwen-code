@@ -205,10 +205,13 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
         <button
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
+          aria-expanded={showAll}
         >
           {showAll
             ? t('tool.showLess')
-            : t('tool.showAll', { count: lines.length })}
+            : isLong
+              ? t('tool.showAll', { count: lines.length })
+              : t('tool.showFullLines')}
         </button>
       )}
     </div>
@@ -234,6 +237,7 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
         <button
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
+          aria-expanded={showAll}
         >
           {showAll
             ? t('tool.showLess')
