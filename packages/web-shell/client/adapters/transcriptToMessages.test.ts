@@ -181,7 +181,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps TodoWrite blocks as tool messages and does not aggregate tools', () => {
+  it('keeps each TodoWrite call as a distinct tool entry with its own todos', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('todo-1', 'todo-call-1', 'completed', 1, {
         title: 'Update Todos',
@@ -211,6 +211,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
+    // Adjacent tool blocks share one tool_group (Native CLI batch parity),
+    // but each TodoWrite call keeps its own tool entry and todo payload.
     expect(messages).toEqual([
       {
         id: 'tg-todo-1',
@@ -220,18 +222,107 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'todo-call-1',
             toolName: 'TodoWrite',
           }),
-        ],
-      },
-      {
-        id: 'tg-todo-2',
-        role: 'tool_group',
-        tools: [
           expect.objectContaining({
             callId: 'todo-call-2',
             toolName: 'TodoWrite',
           }),
         ],
       },
+    ]);
+  });
+
+  it('merges adjacent top-level tool blocks into one tool_group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      toolBlock('t2', 'tc2', 'completed', 2, { toolName: 'Grep' }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'tg-t1',
+        role: 'tool_group',
+        tools: [
+          expect.objectContaining({ callId: 'tc1', toolName: 'Read' }),
+          expect.objectContaining({ callId: 'tc2', toolName: 'Grep' }),
+        ],
+      },
+    ]);
+  });
+
+  it('starts a new tool_group after intervening assistant text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      textBlock('a1', 'assistant', 'found it, editing now', 2),
+      toolBlock('t2', 'tc2', 'completed', 3, { toolName: 'Edit' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'assistant', content: 'found it, editing now' },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('starts a new tool_group after an intervening thought block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      textBlock('th1', 'thought', 'next I should grep', 2),
+      toolBlock('t2', 'tc2', 'completed', 3, { toolName: 'Grep' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'assistant', thinking: 'next I should grep' },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('keeps merged groups intact when a member tool completes later', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'in_progress', 1, { toolName: 'Read' }),
+      toolBlock('t2', 'tc2', 'in_progress', 2, { toolName: 'Grep' }),
+      toolBlock('t1-done', 'tc1', 'completed', 3, {
+        toolName: 'Read',
+        updatedAt: 4,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools).toHaveLength(2);
+    expect(tools?.[0]).toMatchObject({ callId: 'tc1', status: 'completed' });
+    expect(tools?.[1]).toMatchObject({ callId: 'tc2', status: 'in_progress' });
+  });
+
+  it('never merges subagent calls into or after a regular tool_group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'Read' }),
+      toolBlock('agent-1', 'agent-call-1', 'in_progress', 2, {
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('t2', 'tc2', 'completed', 3, { toolName: 'Grep' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'tool_group', tools: [{ callId: 'agent-call-1' }] },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+    ]);
+  });
+
+  it('does not merge real tool calls into synthetic raw-shell groups', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('u1', 'user', 'run it', 1),
+      shellBlock('sh1', 'raw shell output\n', 2),
+      toolBlock('t1', 'tc1', 'completed', 3, { toolName: 'Read' }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'user', content: 'run it' },
+      { id: 'sh1', role: 'tool_group', tools: [{ toolName: 'shell' }] },
+      { id: 'tg-t1', role: 'tool_group', tools: [{ callId: 'tc1' }] },
     ]);
   });
 
@@ -807,6 +898,73 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'tool_group',
       tools: [{ rawOutput: 'chunk1\nchunk2\n' }],
     });
+  });
+
+  it('attaches shell output to the running execute tool in a merged group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash', 'running', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      toolBlock('t2', 'tc-read', 'completed', 2, { toolName: 'Read' }),
+      shellBlock('sh1', 'bash output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash',
+      rawOutput: 'bash output',
+    });
+    expect(tools?.[1]?.rawOutput).toBeUndefined();
+  });
+
+  it('attaches shell output to the most recent running execute tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash-1', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+        rawOutput: 'first output',
+      }),
+      toolBlock('t2', 'tc-bash-2', 'running', 2, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      shellBlock('sh1', 'second output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash-1',
+      rawOutput: 'first output',
+    });
+    expect(tools?.[1]).toMatchObject({
+      callId: 'tc-bash-2',
+      rawOutput: 'second output',
+    });
+  });
+
+  it('falls back to the last execute tool when every status is terminal', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc-bash', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      toolBlock('t2', 'tc-read', 'completed', 2, { toolName: 'Read' }),
+      shellBlock('sh1', 'replayed output', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]).toMatchObject({
+      callId: 'tc-bash',
+      rawOutput: 'replayed output',
+    });
+    expect(tools?.[1]?.rawOutput).toBeUndefined();
   });
 
   it('merges thought across interleaved tool blocks but splits content after tools', () => {
@@ -1936,15 +2094,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('t3', 'tc3', 'completed', 3, { toolName: 'mygrep' }),
     ]);
 
-    const tool1 =
-      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    const tool2 =
-      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
-    const tool3 =
-      messages[2].role === 'tool_group' ? messages[2].tools[0] : undefined;
-    expect(tool1?.kind).toBe('search');
-    expect(tool2?.kind).toBe('search');
-    expect(tool3?.kind).toBeUndefined();
+    expect(messages).toHaveLength(1);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
+    expect(tools?.[0]?.kind).toBe('search');
+    expect(tools?.[1]?.kind).toBe('search');
+    expect(tools?.[2]?.kind).toBeUndefined();
   });
 
   it('getToolRawOutput fallback returns rawOutput ?? details for non-cancelled', () => {
@@ -2138,17 +2293,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    const tool1 =
-      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    const tool2 =
-      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
-    const tool3 =
-      messages[2].role === 'tool_group' ? messages[2].tools[0] : undefined;
+    // tc1-tc3 are adjacent regular tools and share one group; the trailing
+    // subagent call stays in its own single-tool group.
+    expect(messages).toHaveLength(2);
+    const tools =
+      messages[0].role === 'tool_group' ? messages[0].tools : undefined;
     const tool4 =
-      messages[3].role === 'tool_group' ? messages[3].tools[0] : undefined;
-    expect(tool1?.status).toBe('in_progress');
-    expect(tool2?.status).toBe('pending');
-    expect(tool3?.status).toBe('failed');
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(tools?.[0]?.status).toBe('in_progress');
+    expect(tools?.[1]?.status).toBe('pending');
+    expect(tools?.[2]?.status).toBe('failed');
     expect(tool4?.status).toBe('completed');
     expect(tool4?.endTime).toBe(5);
   });

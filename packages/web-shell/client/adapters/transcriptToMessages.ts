@@ -242,20 +242,27 @@ export function transcriptBlocksToDaemonMessages(
         const shellBlock = block as DaemonShellTranscriptBlock;
         const lastMsg = messages[messages.length - 1];
         if (lastMsg && lastMsg.role === 'tool_group') {
-          const lastTool = lastMsg.tools[lastMsg.tools.length - 1];
-          if (lastTool) {
+          const targetIdx = findShellOutputTargetIndex(lastMsg.tools);
+          const targetTool = lastMsg.tools[targetIdx];
+          if (targetTool) {
             const previousOutput =
-              typeof lastTool.rawOutput === 'string' ? lastTool.rawOutput : '';
+              typeof targetTool.rawOutput === 'string'
+                ? targetTool.rawOutput
+                : '';
             const nextTool = {
-              ...lastTool,
+              ...targetTool,
               rawOutput: previousOutput + shellBlock.text,
             };
             messages[messages.length - 1] = {
               ...lastMsg,
-              tools: [...lastMsg.tools.slice(0, -1), nextTool],
+              tools: [
+                ...lastMsg.tools.slice(0, targetIdx),
+                nextTool,
+                ...lastMsg.tools.slice(targetIdx + 1),
+              ],
             };
-            if (toolsByCallId.get(lastTool.callId) === lastTool) {
-              toolsByCallId.set(lastTool.callId, nextTool);
+            if (toolsByCallId.get(targetTool.callId) === targetTool) {
+              toolsByCallId.set(targetTool.callId, nextTool);
             }
           }
         } else {
@@ -416,11 +423,62 @@ function appendToolCallMessage(
   blockId: string,
   toolCall: DaemonMessageToolCall,
 ): void {
+  // Native CLI groups every tool call of one scheduler batch into a single
+  // bordered tool_group (mapToDisplay in useReactToolScheduler). The daemon
+  // transcript carries no batch marker, so the replay-stable equivalent is
+  // adjacency: a tool block arriving while a tool_group is still the latest
+  // visible message joins that group instead of opening a new box.
+  //
+  // Sub-agent calls stay in their own single-tool groups — MessageList's
+  // groupParallelAgents relies on that shape to render consecutive agent
+  // launches as ParallelAgentsGroup.
+  //
+  // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
+  // bare block id without the `tg-` prefix and never absorb real tool calls.
+  const last = messages[messages.length - 1];
+  if (
+    last &&
+    last.role === 'tool_group' &&
+    last.id.startsWith('tg-') &&
+    !isSubAgentToolCall(toolCall) &&
+    !last.tools.some(isSubAgentToolCall)
+  ) {
+    last.tools.push(toolCall);
+    return;
+  }
   messages.push({
     id: `tg-${blockId}`,
     role: 'tool_group',
     tools: [toolCall],
   });
+}
+
+/**
+ * Pick which tool in a group should receive a raw shell output chunk.
+ *
+ * Shell transcript blocks carry no toolCallId, so attachment is heuristic.
+ * Single-tool groups (the only shape before adjacent-merge) keep the old
+ * "last tool" behavior. In merged groups, prefer the most recent `execute`
+ * tool that is still running — the scheduler executes one tool at a time, so
+ * that is the tool producing output. On replay every status is already
+ * terminal; fall back to the most recent `execute` tool, then to the last
+ * tool so groups without kind metadata behave exactly as before.
+ */
+function findShellOutputTargetIndex(
+  tools: readonly DaemonMessageToolCall[],
+): number {
+  for (let i = tools.length - 1; i >= 0; i--) {
+    const tool = tools[i];
+    if (tool.kind === 'execute' && tool.status === 'in_progress') {
+      return i;
+    }
+  }
+  for (let i = tools.length - 1; i >= 0; i--) {
+    if (tools[i].kind === 'execute') {
+      return i;
+    }
+  }
+  return tools.length - 1;
 }
 
 function mergeToolCall(
