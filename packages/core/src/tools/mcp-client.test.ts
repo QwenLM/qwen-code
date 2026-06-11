@@ -309,6 +309,7 @@ describe('mcp-client', () => {
           prompts: [{ name: 'pure-prompt', description: 'p' }],
         }),
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -358,6 +359,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({}),
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -432,6 +434,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({}),
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -500,6 +503,7 @@ describe('mcp-client', () => {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockResolvedValue({ prompts: [] }),
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -570,6 +574,7 @@ describe('mcp-client', () => {
           prompts: [{ name: 'p1' }, { name: 'p2' }],
         }),
         listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
