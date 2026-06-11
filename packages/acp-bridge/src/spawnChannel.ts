@@ -26,8 +26,10 @@ export function getAcpMemoryArgs(): string[] {
   const currentLimitMB = Math.floor(
     getHeapStatistics().heap_size_limit / (1024 * 1024),
   );
-  cachedMemoryArgs =
-    targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : [];
+  cachedMemoryArgs = [
+    ...(targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : []),
+    '--expose-gc',
+  ];
   return cachedMemoryArgs;
 }
 
@@ -123,11 +125,18 @@ export function createSpawnChannelFactory(
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
 
     const memoryArgs = getAcpMemoryArgs();
-    const child = spawn(process.execPath, [...memoryArgs, cliEntry, '--acp'], {
-      cwd: workspaceCwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: childEnv,
-    });
+    const execArgs = process.execArgv.filter(
+      (a) => !/^--inspect(-brk)?($|=)/.test(a),
+    );
+    const child = spawn(
+      process.execPath,
+      [...execArgs, ...memoryArgs, cliEntry, '--acp'],
+      {
+        cwd: workspaceCwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv,
+      },
+    );
 
     // Forward child stderr to the daemon's stderr line-by-line, with a
     // `[serve pid=… cwd=…]` prefix on each line so operators can
