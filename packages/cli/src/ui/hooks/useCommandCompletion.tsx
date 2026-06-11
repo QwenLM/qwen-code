@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useRef } from 'react';
+import { useCallback, useMemo, useEffect } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -64,29 +64,6 @@ export function useCommandCompletion(
   active: boolean = true,
   recentCommands?: RecentSlashCommands,
 ): UseCommandCompletionReturn {
-  const {
-    suggestions,
-    activeSuggestionIndex,
-    visibleStartIndex,
-    showSuggestions,
-    isLoadingSuggestions,
-    isPerfectMatch,
-    dismissed,
-
-    setSuggestions,
-    setShowSuggestions,
-    setActiveSuggestionIndex,
-    setIsLoadingSuggestions,
-    setIsPerfectMatch,
-    setVisibleStartIndex,
-
-    resetCompletionState,
-    dismissCompletion,
-    clearDismissed,
-    navigateUp,
-    navigateDown,
-  } = useCompletion();
-
   const cursorRow = buffer.cursor[0];
   const cursorCol = buffer.cursor[1];
 
@@ -151,6 +128,28 @@ export function useCommandCompletion(
       };
     }, [cursorRow, cursorCol, buffer.lines]);
 
+  const {
+    suggestions,
+    activeSuggestionIndex,
+    visibleStartIndex,
+    showSuggestions,
+    isLoadingSuggestions,
+    isPerfectMatch,
+    dismissed,
+
+    setSuggestions,
+    setShowSuggestions,
+    setActiveSuggestionIndex,
+    setIsLoadingSuggestions,
+    setIsPerfectMatch,
+    setVisibleStartIndex,
+
+    resetCompletionState,
+    dismissCompletion,
+    navigateUp,
+    navigateDown,
+  } = useCompletion({ query });
+
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
     pattern: query || '',
@@ -175,15 +174,6 @@ export function useCommandCompletion(
     setActiveSuggestionIndex(suggestions.length > 0 ? 0 : -1);
     setVisibleStartIndex(0);
   }, [suggestions, setActiveSuggestionIndex, setVisibleStartIndex]);
-
-  // Clear dismissed flag when the completion query changes (user typed more).
-  const prevQueryRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (query !== prevQueryRef.current) {
-      clearDismissed();
-      prevQueryRef.current = query;
-    }
-  }, [query, clearDismissed]);
 
   useEffect(() => {
     if (
