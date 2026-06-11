@@ -26,6 +26,9 @@ describe('EnterPlanModeTool', () => {
         }
         approvalMode = mode;
       }),
+      isInteractive: vi.fn(() => true),
+      getExperimentalZedIntegration: vi.fn(() => false),
+      getInputFormat: vi.fn(() => undefined),
     } as unknown as Config;
 
     tool = new EnterPlanModeTool(mockConfig);
