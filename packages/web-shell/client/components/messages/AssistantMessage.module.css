@@ -70,6 +70,15 @@
   word-break: break-word;
 }
 
+/* Streaming variant: same 5-line window, but scrolled to the tail via JS
+   so the newest thinking stays in view while it streams. */
+.thinkingPreviewTail {
+  max-height: calc(5 * 1.5em);
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .expandToggle {
   display: block;
   background: none;

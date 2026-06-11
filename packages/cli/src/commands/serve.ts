@@ -46,9 +46,12 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
+  'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
+  'session-reap-interval-ms'?: number;
+  'session-idle-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -163,6 +166,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         array: true,
         description: 'Cross-origin allowlist for browser webui clients.',
       })
+      .option('allow-private-auth-base-url', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Allow /workspace/auth/provider to install localhost/private-network baseUrl values. ' +
+          'Use only for local development with trusted clients.',
+      })
       .option('prompt-deadline-ms', {
         type: 'number',
         description:
@@ -180,6 +190,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
           '0 or unset = immediate kill (default).',
+      })
+      .option('session-reap-interval-ms', {
+        type: 'number',
+        description:
+          'Session reaper scan interval (ms). 0 = disabled. Default: 60000.',
+      })
+      .option('session-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'Idle timeout before a disconnected session is reaped (ms). ' +
+          '0 = disabled. Default: 1800000 (30 min).',
       })
       .option('rate-limit', {
         type: 'boolean',
@@ -366,6 +387,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
+        allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
@@ -379,6 +401,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['channel-idle-timeout-ms'] !== undefined
           ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-reap-interval-ms'] !== undefined
+          ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }
+          : {}),
+        ...(argv['session-idle-timeout-ms'] !== undefined
+          ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),
         ...(rateLimitPrompt !== undefined ? { rateLimitPrompt } : {}),

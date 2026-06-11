@@ -128,6 +128,11 @@ export interface SessionMetadataUpdate {
   displayName?: string;
 }
 
+export interface CloseSessionOpts {
+  /** Override the default `'client_close'` reason in the `session_closed` event. */
+  reason?: string;
+}
+
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
@@ -258,6 +263,7 @@ export interface AcpSessionBridge {
   closeSession(
     sessionId: string,
     context?: BridgeClientRequestContext,
+    opts?: CloseSessionOpts,
   ): Promise<void>;
 
   /**
@@ -375,6 +381,18 @@ export interface AcpSessionBridge {
 
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+
+  /** Cancel a background task in a live session. */
+  cancelSessionTask(
+    sessionId: string,
+    taskId: string,
+    taskKind: 'agent' | 'shell' | 'monitor',
+  ): Promise<{ cancelled: boolean }>;
+
+  /** Clear an active goal in a live session without cancelling the running prompt. */
+  clearSessionGoal(
+    sessionId: string,
+  ): Promise<{ cleared: boolean; condition?: string }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
   getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;

@@ -6,6 +6,16 @@
     <title>Qwen Code Web terminal</title>
   </head>
   <body>
+    <!--
+      Prevent React 19 dev-mode OOM crash: logComponentRender() calls
+      performance.measure() with component props as structured-clone detail.
+      Large transcript data exceeds the clone memory limit. This patch
+      silently drops the failing measure call; production builds are unaffected
+      because logComponentRender only exists in react-dom development bundles.
+    -->
+    <script>
+      !function(){if(typeof performance==='undefined'||!performance.measure)return;var m=performance.measure.bind(performance);performance.measure=function(){try{return m.apply(this,arguments)}catch(e){if(e instanceof DOMException&&e.name==='DataCloneError')return;throw e}}}();
+    </script>
     <div id="root"></div>
     <script type="module" src="/main.tsx"></script>
   </body>

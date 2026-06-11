@@ -7,7 +7,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
+import {
+  detachDaemonClient,
+  getStableClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 
 describe('getStableClientId', () => {
   beforeEach(() => {
@@ -18,21 +22,64 @@ describe('getStableClientId', () => {
     expect(getStableClientId('custom-id')).toBe('custom-id');
   });
 
-  it('generates and persists client ID in sessionStorage', () => {
+  it('generates a client ID without session storage compatibility fallback', () => {
     const id = getStableClientId(undefined);
     expect(id).toMatch(/^webui_/);
-    expect(window.sessionStorage.getItem('qwen-code-webui-client-id')).toBe(id);
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
   });
 
-  it('returns the same ID on subsequent calls (per-tab stable)', () => {
+  it('does not reuse the old tab-level client ID key', () => {
+    window.sessionStorage.setItem('qwen-code-webui-client-id', 'old-client');
+
     const id1 = getStableClientId(undefined);
-    const id2 = getStableClientId(undefined);
-    expect(id1).toBe(id2);
+
+    expect(id1).toMatch(/^webui_/);
+    expect(id1).not.toBe('old-client');
+  });
+
+  it('prefers a session-specific client ID when available', () => {
+    persistStableClientId('client-session-a', 'session-a');
+
+    expect(getStableClientId(undefined, 'session-a')).toBe('client-session-a');
+    expect(getStableClientId(undefined, 'session-b')).toMatch(/^webui_/);
   });
 
   it('does not use localStorage (multi-tab isolation)', () => {
     getStableClientId(undefined);
     expect(window.localStorage.getItem('qwen-code-webui-client-id')).toBeNull();
+  });
+});
+
+describe('persistStableClientId', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  it('does not persist daemon-issued client ID without a session', () => {
+    persistStableClientId('client-daemon');
+
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
+    expect(getStableClientId(undefined)).toMatch(/^webui_/);
+  });
+
+  it('persists daemon-issued client IDs per session', () => {
+    persistStableClientId('client-a', 'session-a');
+    persistStableClientId('client-b', 'session-b');
+
+    expect(getStableClientId(undefined, 'session-a')).toBe('client-a');
+    expect(getStableClientId(undefined, 'session-b')).toBe('client-b');
+    expect(getStableClientId(undefined)).toMatch(/^webui_/);
+  });
+
+  it('ignores missing client ID', () => {
+    persistStableClientId(undefined);
+    expect(
+      window.sessionStorage.getItem('qwen-code-webui-client-id'),
+    ).toBeNull();
   });
 });
 

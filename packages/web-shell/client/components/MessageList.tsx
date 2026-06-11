@@ -11,7 +11,10 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
-import { isSubAgentToolCall } from '../adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
 import { MessageItem } from './MessageItem';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
@@ -28,11 +31,14 @@ interface MessageListProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  /** Run /context detail, exactly like typing it (context-usage panels). */
+  onShowContextDetail?: () => void;
   catchingUp?: boolean;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
   tailContent?: ReactNode;
   tailKey?: string;
+  virtualScrollThreshold?: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
@@ -79,6 +85,23 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
     msg.tools.length === 1 &&
     isSubAgentToolCall(msg.tools[0])
   );
+}
+
+function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    msg.tools.length === 1 &&
+    isBackgroundSubAgentToolCall(msg.tools[0])
+  );
+}
+
+function isBackgroundLaunchNarration(msg: Message): boolean {
+  // The daemon often streams short main-agent thought text between background
+  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
+  // those as internal launch narration and shows a single Parallel agents box.
+  // Only skip thought-only messages here; any user-facing assistant content
+  // still breaks the group and remains visible.
+  return msg.role === 'assistant' && Boolean(msg.thinking) && !msg.content;
 }
 
 function isForceExpandGroup(
@@ -166,6 +189,46 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   const items: DisplayItem[] = [];
   let i = 0;
   while (i < messages.length) {
+    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
+      const grouped: Message[] = [];
+      let j = i;
+      while (j < messages.length) {
+        const current = messages[j];
+        if (isBackgroundAgentOnlyToolGroup(current)) {
+          grouped.push(current);
+          j++;
+          continue;
+        }
+        if (isBackgroundLaunchNarration(current)) {
+          let nextAgentIdx = j + 1;
+          while (
+            nextAgentIdx < messages.length &&
+            isBackgroundLaunchNarration(messages[nextAgentIdx])
+          ) {
+            nextAgentIdx++;
+          }
+          if (
+            nextAgentIdx < messages.length &&
+            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
+          ) {
+            j = nextAgentIdx;
+            continue;
+          }
+        }
+        break;
+      }
+
+      if (grouped.length >= 2) {
+        items.push({
+          type: 'parallel_agents',
+          key: `par-${grouped[0].id}`,
+          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+        });
+        i = j;
+        continue;
+      }
+    }
+
     if (isAgentOnlyToolGroup(messages[i])) {
       const start = i;
       while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
@@ -195,21 +258,37 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   return items;
 }
 
+export function getDisplayItemVirtualKey(item: DisplayItem): string {
+  return item.type === 'parallel_agents'
+    ? `group:${item.key}`
+    : `msg:${item.key}`;
+}
+
 const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_APPROVAL = 200;
 const ESTIMATE_TAIL = 240;
+export const VIRTUAL_SCROLL_THRESHOLD = 200;
+
+export function shouldUseVirtualScroll(
+  totalCount: number,
+  threshold = VIRTUAL_SCROLL_THRESHOLD,
+): boolean {
+  return totalCount > threshold;
+}
 
 export function MessageList({
   messages,
   pendingApproval,
   onConfirm,
+  onShowContextDetail,
   catchingUp,
   welcomeHeader,
   workspaceCwd,
   tailContent,
   tailKey = 'tail',
+  virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
   autoScrollTailIntoView = false,
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
@@ -294,6 +373,37 @@ export function MessageList({
   const tailApprovalIndex = headerOffset + displayItems.length;
   const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
   const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
+  const useVirtualScroll = shouldUseVirtualScroll(
+    totalCount,
+    virtualScrollThreshold,
+  );
+
+  const getItemKey = useCallback(
+    (index: number) => {
+      if (hasHeader && index === HEADER_INDEX) return 'slot:header';
+      if (hasTailApproval && index === tailApprovalIndex) {
+        return pendingApproval
+          ? `slot:approval:${pendingApproval.id}`
+          : 'slot:approval';
+      }
+      if (hasTailContent && index === tailContentIndex) {
+        return `slot:tail:${tailKey}`;
+      }
+      const item = displayItems[index - headerOffset];
+      return item ? getDisplayItemVirtualKey(item) : `slot:row:${index}`;
+    },
+    [
+      hasHeader,
+      hasTailApproval,
+      tailApprovalIndex,
+      pendingApproval,
+      hasTailContent,
+      tailContentIndex,
+      tailKey,
+      displayItems,
+      headerOffset,
+    ],
+  );
 
   // Rule 6: skip if content doesn't overflow (no scrollbar).
   const scrollToBottom = useCallback(() => {
@@ -314,16 +424,9 @@ export function MessageList({
 
   const virtualizer = useVirtualizer({
     count: totalCount,
+    enabled: useVirtualScroll,
     getScrollElement: () => containerRef.current,
-    getItemKey: (index) => {
-      if (hasHeader && index === HEADER_INDEX) return 'header';
-      if (hasTailApproval && index === tailApprovalIndex) {
-        return pendingApproval ? `approval-${pendingApproval.id}` : 'approval';
-      }
-      if (hasTailContent && index === tailContentIndex) return tailKey;
-      const item = displayItems[index - headerOffset];
-      return item?.key ?? `row-${index}`;
-    },
+    getItemKey,
     estimateSize: (index) => {
       if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
       if (hasTailApproval && index === tailApprovalIndex) {
@@ -333,6 +436,7 @@ export function MessageList({
       return ESTIMATE_MESSAGE;
     },
     overscan: 20,
+    useFlushSync: false,
     useAnimationFrameWithResizeObserver: true,
   });
 
@@ -481,7 +585,9 @@ export function MessageList({
           message={item.message}
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
+          onShowContextDetail={onShowContextDetail}
           workspaceCwd={workspaceCwd}
+          isLatest={itemIndex === displayItems.length - 1}
         />
       );
     },
@@ -495,6 +601,7 @@ export function MessageList({
       tailApprovalIndex,
       pendingApproval,
       onConfirm,
+      onShowContextDetail,
       headerOffset,
       displayItems,
       workspaceCwd,
@@ -520,34 +627,42 @@ export function MessageList({
     if (shouldFollow.current) {
       scrollToBottom();
     }
-  }, [totalVirtualSize, catchingUp, scrollToBottom]);
+  }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
   return (
     <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
-      <div
-        style={{
-          height: totalVirtualSize,
-          width: '100%',
-          position: 'relative',
-        }}
-      >
-        {virtualItems.map((virtualRow) => (
-          <div
-            key={virtualRow.key}
-            data-index={virtualRow.index}
-            ref={virtualizer.measureElement}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              transform: `translateY(${virtualRow.start}px)`,
-            }}
-          >
-            {renderVirtualItem(virtualRow.index)}
+      {useVirtualScroll ? (
+        <div
+          style={{
+            height: totalVirtualSize,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualItems.map((virtualRow) => (
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={virtualizer.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+            >
+              {renderVirtualItem(virtualRow.index)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        Array.from({ length: totalCount }, (_, index) => (
+          <div key={getItemKey(index)} data-index={index}>
+            {renderVirtualItem(index)}
           </div>
-        ))}
-      </div>
+        ))
+      )}
     </div>
   );
 }

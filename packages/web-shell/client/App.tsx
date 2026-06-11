@@ -10,19 +10,27 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
   useWorkspaceActions,
+  type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
+import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
-import { StatusBar } from './components/StatusBar';
+import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  ToastHost,
+  type ToastTone,
+  type WebShellToast,
+} from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
@@ -45,8 +53,15 @@ import {
   ModelMessage,
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
+import {
+  AUTH_ACTIVE_EVENT,
+  AuthMessage,
+} from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { SettingsDialog } from './components/dialogs/SettingsDialog';
+import {
+  SETTINGS_ACTIVE_EVENT,
+  SettingsMessage,
+} from './components/messages/SettingsMessage';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
   ThemeDialog,
@@ -73,7 +88,15 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  TasksStatusMessage,
+  type SerializedTasksMessage,
+} from './components/messages/TasksStatusMessage';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from './adapters/toolClassification';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -92,6 +115,11 @@ import {
   parseMcpStatusMessage,
   serializeMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
+import {
+  GOAL_STATUS_ACTIVE_EVENT,
+  serializeGoalStatusMessage,
+} from './components/messages/GoalStatusMessage';
+import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type {
   ACPToolCall,
@@ -115,6 +143,7 @@ export const CompactModeContext = createContext(false);
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
+const MAX_TOASTS = 4;
 const COMPACT_MODE_STORAGE_KEY = 'web-shell:compact-mode';
 
 function loadCompactMode(): boolean {
@@ -140,10 +169,33 @@ function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
 }
 
+// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
+const GOAL_CLEAR_KEYWORDS = new Set([
+  'clear',
+  'stop',
+  'off',
+  'reset',
+  'none',
+  'cancel',
+]);
+
+function isGoalClearCommand(text: string): boolean {
+  const goalArg = text
+    .replace(/^\/goal\b/i, '')
+    .trim()
+    .toLowerCase();
+  return GOAL_CLEAR_KEYWORDS.has(goalArg);
+}
+
 interface QueuedPrompt {
   id: number;
   text: string;
   images?: PromptImage[];
+}
+
+interface ActiveGoalStatus {
+  condition: string;
+  setAt: number;
 }
 
 interface LocalAnchoredMessage {
@@ -198,8 +250,12 @@ export interface WebShellProps {
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
+  /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
+  virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
+  /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
+  onToast?: (tone: ToastTone, message: string) => void;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -225,12 +281,15 @@ function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-interface AlreadyDispatchedError extends Error {
-  _alreadyDispatched: true;
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }
 
-function markAlreadyDispatched(error: Error): AlreadyDispatchedError {
-  return Object.assign(error, { _alreadyDispatched: true as const });
+interface AlreadyDispatchedError extends Error {
+  _alreadyDispatched: true;
 }
 
 function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
@@ -239,6 +298,26 @@ function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
     error !== null &&
     (error as AlreadyDispatchedError)._alreadyDispatched === true
   );
+}
+
+function logSessionNoticesHook(notices: readonly DaemonSessionNotice[]): void {
+  if (notices.length > 0) {
+    console.info('[web-shell] useSessionNotices()', { notices });
+  }
+}
+
+function shouldToastNotice(notice: DaemonSessionNotice): boolean {
+  return (
+    notice.category === 'validation' ||
+    notice.category === 'user_action' ||
+    notice.category === 'system'
+  );
+}
+
+function toastToneFromNotice(notice: DaemonSessionNotice): ToastTone {
+  if (notice.severity === 'warning') return 'warning';
+  if (notice.severity === 'info') return 'info';
+  return 'error';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -356,14 +435,38 @@ function parseRenameArgument(
 }
 
 function isAgentTool(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  return (
-    name === 'agent' || name === 'task' || Boolean(tool.args?.subagent_type)
-  );
+  return isSubAgentToolCall(tool);
 }
 
 function isActiveTool(tool: ACPToolCall): boolean {
   return tool.status === 'pending' || tool.status === 'in_progress';
+}
+
+function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
+  if (tool.args?.is_background !== true) return false;
+  const name = tool.toolName.toLowerCase();
+  return (
+    name === 'shell' ||
+    name === 'bash' ||
+    name === 'run_shell_command' ||
+    name === 'exec'
+  );
+}
+
+function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (
+        isBackgroundSubAgentToolCall(tool) ||
+        isBackgroundShellToolCall(tool)
+      ) {
+        parts.push(`${tool.callId}:${tool.status}`);
+      }
+    }
+  }
+  return parts.join('|');
 }
 
 interface FloatingPanels {
@@ -391,7 +494,11 @@ function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
       if (nextTodos) {
         todos = hasActiveTodos(nextTodos) ? nextTodos : [];
       }
-      if (isAgentTool(tool) && isActiveTool(tool)) {
+      if (
+        isAgentTool(tool) &&
+        isActiveTool(tool) &&
+        !isBackgroundSubAgentToolCall(tool)
+      ) {
         agents.push(tool);
       }
     }
@@ -506,7 +613,9 @@ export function App({
   renderToolHeaderExtra,
   renderWelcomeHeader,
   compactThinking = false,
+  virtualScrollThreshold,
   markdown,
+  onToast,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -528,9 +637,34 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
+  const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
+  const toastIdRef = useRef(0);
+  const [toasts, setToasts] = useState<WebShellToast[]>([]);
+  const dismissToast = useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+  const pushToast = useCallback((tone: ToastTone, message: string) => {
+    if (onToastRef.current) {
+      onToastRef.current(tone, message);
+      return;
+    }
+    const toast: WebShellToast = {
+      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
+      tone,
+      message,
+    };
+    setToasts((current) => {
+      const withoutDuplicate = current.filter(
+        (item) => item.tone !== tone || item.message !== message,
+      );
+      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
+    });
+  }, []);
 
-  const messages = useMessages();
+  const messages = useMessages(t);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
@@ -600,8 +734,16 @@ export function App({
     (a) =>
       `${a.callId}:${a.status}:${a.subTools?.length ?? 0}:${getAgentPanelVersion(a)}`,
   );
+  const backgroundTaskActivityKey = useMemo(
+    () => getBackgroundTaskActivityKey(messages),
+    [messages],
+  );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
+  const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
+  const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
+  activeGoalRef.current = activeGoal;
   const {
     followupState,
     onAcceptFollowup,
@@ -619,16 +761,10 @@ export function App({
       opts?: { optimisticUserMessage?: boolean },
     ) => {
       clearFollowup();
-      return sessionActions
-        .sendPrompt(text, {
-          images,
-          optimisticUserMessage: opts?.optimisticUserMessage,
-        })
-        .catch((error: unknown) => {
-          throw markAlreadyDispatched(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        });
+      return sessionActions.sendPrompt(text, {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+      });
     },
     [clearFollowup, sessionActions],
   );
@@ -659,8 +795,9 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
+  const [authInlineOpen, setAuthInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
@@ -675,10 +812,15 @@ export function App({
   const escPressCountRef = useRef(0);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
+  const [tasksPanelMessage, setTasksPanelMessage] =
+    useState<SerializedTasksMessage | null>(null);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
+  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
+  const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
+  const authPanelActive = usePanelActive(AUTH_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
@@ -686,6 +828,7 @@ export function App({
   currentModelRef.current = currentModel;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -697,28 +840,49 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog ||
-    showSettingsDialog;
+    showToolsDialog;
   const bottomHidden =
     dialogOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
+    tasksPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
-    modelPanelActive;
+    modelPanelActive ||
+    settingsPanelActive ||
+    authPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
+      if (isAbortError(error)) return;
+      if (isDaemonTurnError(error)) {
+        console.debug('[web-shell] turn error rendered in transcript', error);
+        return;
+      }
       if (isAlreadyDispatched(error)) {
-        console.error('[web-shell] error already dispatched', error);
+        console.debug('[web-shell] error already handled by notice', error);
         return;
       }
       const message = formatError(error, fallback);
       console.error('[web-shell]', message, error);
-      store.dispatch([{ type: 'error', text: message }]);
+      pushToast('error', message);
     },
-    [store],
+    [pushToast],
   );
+
+  useEffect(() => {
+    logSessionNoticesHook(notices);
+    for (const notice of notices) {
+      if (shouldToastNotice(notice)) {
+        pushToast(toastToneFromNotice(notice), notice.message);
+      } else if (notice.category === 'lifecycle') {
+        console.debug('[web-shell] daemon notice', notice);
+      } else {
+        console.warn('[web-shell] daemon notice', notice);
+      }
+      dismissNotice(notice.id);
+    }
+  }, [dismissNotice, notices, pushToast]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -729,6 +893,7 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
+    setTasksPanelMessage(null);
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
@@ -765,17 +930,10 @@ export function App({
       },
       (error: unknown) => {
         if (activeSessionIdRef.current !== sessionId) return;
-        console.error('[recap] failed:', error);
-        setRecapMessage({
-          anchorAfterId,
-          anchorIndex,
-          message: {
-            id: messageId,
-            role: 'system',
-            content: formatError(error, t('recap.failed')),
-            variant: 'error',
-          },
-        });
+        setRecapMessage(null);
+        if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+          console.warn('[web-shell] unhandled recap failure', error);
+        }
       },
     );
   }, [connection.sessionId, messages, sessionActions, t]);
@@ -784,12 +942,7 @@ export function App({
     (rawQuestion: string) => {
       const question = rawQuestion.trim();
       if (!question) {
-        store.dispatch([
-          {
-            type: 'error',
-            text: t('btw.empty'),
-          },
-        ]);
+        pushToast('error', t('btw.empty'));
         return;
       }
 
@@ -825,17 +978,14 @@ export function App({
             if (activeSessionIdRef.current !== sessionId) return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
-            setBtwMessage({
-              id: messageId,
-              role: 'btw',
-              question,
-              answer: formatError(error, t('btw.failed')),
-              isPending: false,
-            });
+            setBtwMessage(null);
+            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+              console.warn('[web-shell] unhandled btw failure', error);
+            }
           },
         );
     },
-    [connection.sessionId, sessionActions, store, t],
+    [connection.sessionId, pushToast, sessionActions, t],
   );
 
   const dismissBtwMessage = useCallback(() => {
@@ -1037,7 +1187,8 @@ export function App({
 
   useEffect(() => {
     if (connection.error) {
-      onError?.(new Error(connection.error));
+      const error = new Error(connection.error);
+      onError?.(error);
     }
   }, [connection.error, onError]);
 
@@ -1055,12 +1206,38 @@ export function App({
 
   useEffect(() => {
     if (connection.sessionId) {
+      setActiveGoal(null);
       onSessionIdChange?.(connection.sessionId);
       if (!onSessionIdChange) {
         replaceSessionUrl(connection.sessionId);
       }
     }
   }, [connection.sessionId, onSessionIdChange]);
+
+  useEffect(() => {
+    const onGoalStatusActive = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          active?: boolean;
+          condition?: string;
+          setAt?: number;
+        }>
+      ).detail;
+      if (!detail?.active) {
+        setActiveGoal(null);
+        return;
+      }
+      if (!detail.condition) return;
+      setActiveGoal({
+        condition: detail.condition,
+        setAt: detail.setAt ?? Date.now(),
+      });
+    };
+
+    window.addEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+    return () =>
+      window.removeEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+  }, []);
 
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
@@ -1112,6 +1289,149 @@ export function App({
     handleSetMode(next);
   }, [currentMode, handleSetMode]);
 
+  // Shared by the /context slash command and the status-bar context
+  // indicator. Echoes the command as a local user message first — that also
+  // makes the transcript follow the tail (MessageList Rule 4), so the panel
+  // is revealed even when the click comes while scrolled up.
+  const showContextUsage = useCallback(
+    (commandText: string, detail: boolean) => {
+      store.appendLocalUserMessage(commandText);
+      sessionActions
+        .getContextUsage({ detail })
+        .then((result) => {
+          store.dispatch([
+            {
+              type: 'status',
+              text: serializeContextUsageMessage(result),
+            },
+          ]);
+        })
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to load context usage');
+        });
+    },
+    [store, sessionActions, reportError],
+  );
+
+  // Stable reference: this travels through the memoized MessageList →
+  // MessageItem chain, so an inline closure would defeat their memo.
+  const handleShowContextDetail = useCallback(() => {
+    showContextUsage('/context detail', true);
+  }, [showContextUsage]);
+
+  const openTasksPanel = useCallback(() => {
+    sessionActions
+      .getTasks()
+      .then((snapshot) => {
+        setTasksPanelMessage({ snapshot });
+      })
+      .catch((error: unknown) => {
+        reportError(error, 'Failed to load tasks');
+      });
+  }, [reportError, sessionActions]);
+
+  const dispatchGoalSet = useCallback(
+    (condition: string, setAt: number) => {
+      setActiveGoal({ condition, setAt });
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'set',
+            condition,
+            setAt,
+          }),
+        },
+      ]);
+    },
+    [store],
+  );
+
+  const dispatchGoalCleared = useCallback(
+    (goal: ActiveGoalStatus | null) => {
+      if (!goal) return;
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'cleared',
+            condition: goal.condition,
+            durationMs: Date.now() - goal.setAt,
+          }),
+        },
+      ]);
+      setActiveGoal(null);
+    },
+    [store],
+  );
+
+  const handleBusyGoalClear = useCallback(
+    (text: string) => {
+      const goalToClear = activeGoalRef.current;
+      store.appendLocalUserMessage(text);
+      dispatchGoalCleared(goalToClear);
+      sessionActions.clearGoal().catch((error: unknown) => {
+        if (goalToClear) {
+          dispatchGoalSet(goalToClear.condition, goalToClear.setAt);
+        }
+        reportError(error, 'Failed to clear /goal');
+      });
+      return true;
+    },
+    [dispatchGoalCleared, dispatchGoalSet, reportError, sessionActions, store],
+  );
+
+  const handleGoalSlashCommand = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      opts?: { sendToDaemon?: boolean },
+    ) => {
+      const goalArg = text.replace(/^\/goal\b/i, '').trim();
+      const lowerGoalArg = goalArg.toLowerCase();
+      const sendToDaemon = opts?.sendToDaemon ?? true;
+
+      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+        if (!sendToDaemon) {
+          store.appendLocalUserMessage(text);
+          dispatchGoalCleared(activeGoalRef.current);
+          return true;
+        }
+        return handleBusyGoalClear(text);
+      } else if (goalArg) {
+        const optimisticGoal = { condition: goalArg, setAt: Date.now() };
+        store.appendLocalUserMessage(text);
+        dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
+        if (!sendToDaemon) {
+          return true;
+        }
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) => {
+            reportError(error, 'Failed to send /goal command');
+          },
+        );
+        return true;
+      }
+
+      store.appendLocalUserMessage(text);
+      if (sendToDaemon) {
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) =>
+            reportError(error, 'Failed to send /goal command'),
+        );
+      }
+      return true;
+    },
+    [
+      dispatchGoalCleared,
+      dispatchGoalSet,
+      handleBusyGoalClear,
+      reportError,
+      sendPrompt,
+      store,
+    ],
+  );
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1123,16 +1443,28 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
-          if (
+          if (cmd === 'tasks') {
+            store.appendLocalUserMessage(text);
             handleTasksSlashCommand({
               cmd,
-              promptBlocked,
               getTasks: sessionActions.getTasks,
-              dispatch: store.dispatch,
+              dispatch: (events) => store.dispatch(events),
               reportError,
-            })
-          ) {
+            });
             return true;
+          }
+          if (cmd === 'goal') {
+            if (promptBlocked) {
+              if (isGoalClearCommand(text)) {
+                return handleBusyGoalClear(text);
+              }
+              const goalArg = text.replace(/^\/goal\b/i, '').trim();
+              if (goalArg) {
+                setActiveGoal({ condition: goalArg, setAt: Date.now() });
+              }
+              return enqueuePrompt(text, images);
+            }
+            return handleGoalSlashCommand(text, images);
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -1141,12 +1473,7 @@ export function App({
             } else if (!themeArg) {
               setShowThemeDialog(true);
             } else {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('error.unsupportedTheme'),
-                },
-              ]);
+              pushToast('error', t('error.unsupportedTheme'));
             }
             return true;
           }
@@ -1193,9 +1520,7 @@ export function App({
                 normalizedArg,
               );
               if (!valid) {
-                store.dispatch([
-                  { type: 'error', text: t('language.invalid') },
-                ]);
+                pushToast('error', t('language.invalid'));
                 return true;
               }
               const nextLanguage = normalizeLanguage(languageArg);
@@ -1233,6 +1558,11 @@ export function App({
           }
           if (cmd === 'release') {
             setShowReleaseDialog(true);
+            return true;
+          }
+          if (cmd === 'auth') {
+            store.appendLocalUserMessage(text);
+            setAuthInlineOpen(true);
             return true;
           }
           if (cmd === 'model') {
@@ -1400,7 +1730,8 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
-            setShowSettingsDialog(true);
+            store.appendLocalUserMessage(text);
+            setSettingsInlineOpen(true);
             return true;
           }
           if (cmd === 'context') {
@@ -1410,22 +1741,10 @@ export function App({
               contextArg === 'detail' ||
               contextArg === '-d'
             ) {
-              store.appendLocalUserMessage(text);
-              sessionActions
-                .getContextUsage({
-                  detail: contextArg === 'detail' || contextArg === '-d',
-                })
-                .then((result) => {
-                  store.dispatch([
-                    {
-                      type: 'status',
-                      text: serializeContextUsageMessage(result),
-                    },
-                  ]);
-                })
-                .catch((error: unknown) => {
-                  reportError(error, 'Failed to load context usage');
-                });
+              showContextUsage(
+                text,
+                contextArg === 'detail' || contextArg === '-d',
+              );
               return true;
             }
           }
@@ -1491,12 +1810,7 @@ export function App({
             }
             const displayName = renameArg.displayName;
             if (!displayName) {
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('rename.empty'),
-                },
-              ]);
+              pushToast('error', t('rename.empty'));
               return true;
             }
             sessionActions
@@ -1510,15 +1824,7 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text:
-                      error instanceof Error
-                        ? error.message
-                        : 'Failed to rename session',
-                  },
-                ]);
+                reportError(error, 'Failed to rename session');
               });
             return true;
           }
@@ -1667,9 +1973,7 @@ export function App({
                       { type: 'status', text: t('bug.submitted') },
                     ]);
                   } else {
-                    store.dispatch([
-                      { type: 'error', text: t('bug.popupBlocked') },
-                    ]);
+                    pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
@@ -1706,13 +2010,17 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      handleBusyGoalClear,
+      handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       onLanguageChange,
+      pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
       selectedLanguage,
+      showContextUsage,
       t,
       workspaceActions,
     ],
@@ -1763,15 +2071,10 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
-    sessionActions
-      .cancel()
-      .then(() => {
-        store.dispatch([{ type: 'status', text: t('request.cancelled') }]);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to cancel request');
-      });
-  }, [sessionActions, store, t, reportError]);
+    sessionActions.cancel().catch((error: unknown) => {
+      reportError(error, 'Failed to cancel request');
+    });
+  }, [sessionActions, reportError]);
 
   const handleFocusActiveAgents = useCallback((): boolean => {
     if (floatingAgents.length === 0) return false;
@@ -1782,6 +2085,16 @@ export function App({
     return true;
   }, [floatingAgents.length]);
 
+  const handleFocusTaskPill = useCallback((): boolean => {
+    if (bottomHidden) return false;
+    return statusBarRef.current?.focusTaskPill() ?? false;
+  }, [bottomHidden]);
+
+  const handleFocusFooterFromEditor = useCallback((): boolean => {
+    if (handleFocusActiveAgents()) return true;
+    return handleFocusTaskPill();
+  }, [handleFocusActiveAgents, handleFocusTaskPill]);
+
   const handleReturnToEditor = useCallback((text?: string) => {
     if (text) {
       editorRef.current?.insertText(text);
@@ -1789,7 +2102,6 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
       if (bottomHidden) return;
@@ -1841,6 +2153,15 @@ export function App({
 
       if (pendingApproval || bottomHidden) return;
 
+      if (tasksPanelMessage) {
+        e.preventDefault();
+        e.stopPropagation();
+        setTasksPanelMessage(null);
+        handleReturnToEditor();
+        resetEscapeState();
+        return;
+      }
+
       if (clearQueuedPrompts()) {
         e.preventDefault();
         resetEscapeState();
@@ -1889,6 +2210,8 @@ export function App({
     handleCycleMode,
     pendingApproval,
     bottomHidden,
+    tasksPanelMessage,
+    handleReturnToEditor,
     clearQueuedPrompts,
   ]);
 
@@ -1979,6 +2302,7 @@ export function App({
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
         <div className={appClassName} style={externalStyle} data-web-shell-root>
+          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
           {dialogOpen && (
             <div className={styles.dialogOverlay} data-keyboard-scope>
               {showResumeDialog && (
@@ -2009,14 +2333,10 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('delete.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('delete.failed', { reason }));
                   }}
                   onClose={() => setShowDeleteDialog(false)}
                 />
@@ -2032,14 +2352,10 @@ export function App({
                     ]);
                   }}
                   onError={(error) => {
+                    if (isAlreadyDispatched(error)) return;
                     const reason =
                       error instanceof Error ? error.message : String(error);
-                    store.dispatch([
-                      {
-                        type: 'error',
-                        text: t('release.failed', { reason }),
-                      },
-                    ]);
+                    pushToast('error', t('release.failed', { reason }));
                   }}
                   onClose={() => setShowReleaseDialog(false)}
                 />
@@ -2060,18 +2376,6 @@ export function App({
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
               )}
-              {showSettingsDialog && (
-                <SettingsDialog
-                  onClose={() => setShowSettingsDialog(false)}
-                  onSubDialog={(key) => {
-                    setShowSettingsDialog(false);
-                    if (key === 'ui.theme') setShowThemeDialog(true);
-                    else if (key === 'fastModel') setModelInlineMode('fast');
-                    else if (key === 'tools.approvalMode')
-                      setApprovalModeInlineOpen(true);
-                  }}
-                />
-              )}
             </div>
           )}
 
@@ -2089,6 +2393,7 @@ export function App({
                   messages={displayMessages}
                   pendingApproval={pendingApproval}
                   onConfirm={handleConfirm}
+                  onShowContextDetail={handleShowContextDetail}
                   catchingUp={connection.catchingUp}
                   workspaceCwd={connection.workspaceCwd || ''}
                   welcomeHeader={welcomeHeader}
@@ -2096,8 +2401,22 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen ? (
+                    authInlineOpen ||
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen ? (
                       <>
+                        {authInlineOpen && (
+                          <AuthMessage
+                            onMessage={(text, type = 'status') => {
+                              store.dispatch([
+                                type === 'error'
+                                  ? { type: 'error', text }
+                                  : { type: 'status', text },
+                              ]);
+                            }}
+                            onClose={() => setAuthInlineOpen(false)}
+                          />
+                        )}
                         {approvalModeInlineOpen && (
                           <ApprovalModeMessage
                             currentMode={currentMode}
@@ -2137,6 +2456,19 @@ export function App({
                             onClose={() => setMemoryInlineOpen(false)}
                           />
                         )}
+                        {settingsInlineOpen && (
+                          <SettingsMessage
+                            onClose={() => setSettingsInlineOpen(false)}
+                            onSubDialog={(key) => {
+                              setSettingsInlineOpen(false);
+                              if (key === 'ui.theme') setShowThemeDialog(true);
+                              else if (key === 'fastModel')
+                                setModelInlineMode('fast');
+                              else if (key === 'tools.approvalMode')
+                                setApprovalModeInlineOpen(true);
+                            }}
+                          />
+                        )}
                       </>
                     ) : undefined
                   }
@@ -2144,17 +2476,22 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
-                    approvalModeInlineOpen
-                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
+                    authInlineOpen ||
+                    approvalModeInlineOpen ||
+                    settingsInlineOpen
+                      ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
-                  // The approval-mode and model pickers are reachable by mouse
-                  // from the status bar, so they reveal themselves when opened
-                  // while the user is scrolled up; the agents/memory panels
-                  // keep the user's scroll position.
+                  // The approval-mode/model pickers and the settings panel are
+                  // reachable by mouse from the status bar, so they reveal
+                  // themselves when opened while the user is scrolled up; the
+                  // agents/memory panels keep the user's scroll position.
                   autoScrollTailIntoView={
-                    approvalModeInlineOpen || modelInlineMode !== null
+                    approvalModeInlineOpen ||
+                    modelInlineMode !== null ||
+                    settingsInlineOpen
                   }
+                  virtualScrollThreshold={virtualScrollThreshold}
                 />
 
                 {btwMessage?.role === 'btw' && (
@@ -2180,7 +2517,7 @@ export function App({
                 : styles.footer
             }
           >
-            {floatingTodos.length > 0 && (
+            {floatingTodos.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <TodoPanel todos={floatingTodos} />
               </div>
@@ -2198,11 +2535,12 @@ export function App({
                   skills={loadedSkills}
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
-                  onFocusActiveAgents={handleFocusActiveAgents}
+                  onFocusActiveAgents={handleFocusFooterFromEditor}
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
-                  dialogOpen={bottomHidden}
+                  sessionName={sessionDisplayName}
+                  dialogOpen={bottomHidden || tasksPanelMessage !== null}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
@@ -2216,7 +2554,20 @@ export function App({
                 />
               </div>
             )}
+            {tasksPanelMessage && (
+              <div className={styles.tasksBottomPanel}>
+                <TasksStatusMessage
+                  message={tasksPanelMessage}
+                  manageActiveEvent={false}
+                  onClose={() => {
+                    setTasksPanelMessage(null);
+                    handleReturnToEditor();
+                  }}
+                />
+              </div>
+            )}
             {!shouldHideComposer &&
+              !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel />
               ) : (
@@ -2226,14 +2577,22 @@ export function App({
                   onSelectModel={() =>
                     setModelInlineMode((v) => (v ? null : 'main'))
                   }
+                  onShowContext={() => showContextUsage('/context', false)}
+                  onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
+                  ref={statusBarRef}
+                  onOpenTasks={() => openTasksPanel()}
+                  onReturnToInput={handleReturnToEditor}
+                  taskActivityKey={backgroundTaskActivityKey}
+                  activeGoal={activeGoal}
                 />
               ))}
 
-            {floatingAgents.length > 0 && (
+            {floatingAgents.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <ActiveAgentsPanel
                   ref={activeAgentsPanelRef}
                   agents={floatingAgents}
+                  onFocusTaskPill={handleFocusTaskPill}
                   onReturnToInput={handleReturnToEditor}
                 />
               </div>

@@ -130,6 +130,13 @@ export enum SendMessageType {
   Cron = 'cron',
   /** Background agent notification. Display item is added by the drain loop. */
   Notification = 'notification',
+  /**
+   * A message delivered to the leader from a teammate. Behaves like a
+   * fresh top-level interaction (loop-detector reset + interaction span)
+   * but is not a user prompt — it does not bump commit attribution or get
+   * recorded as a user message.
+   */
+  Teammate = 'teammate',
 }
 
 export interface SendMessageOptions {
@@ -224,6 +231,8 @@ export class GeminiClient {
    * so the idle check is skipped until the first API call completes.
    */
   private lastApiCompletionTimestamp: number | null = null;
+  /** Cleanup checkpoint for long-running Hook continuations such as /goal. */
+  private lastHookMicrocompactionTimestamp: number | null = null;
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
@@ -240,7 +249,7 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation);
+      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
@@ -589,6 +598,7 @@ export class GeminiClient {
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
+    this.lastHookMicrocompactionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
@@ -1328,6 +1338,78 @@ export class GeminiClient {
     this.toolCallCount += 1;
   }
 
+  private async microcompactIdleHistory(
+    lastCompletionTimestamp: number | null,
+  ): Promise<boolean> {
+    try {
+      const mcResult = microcompactHistory(
+        this.getHistoryShallow(),
+        lastCompletionTimestamp,
+        this.config.getClearContextOnIdle(),
+      );
+      if (!mcResult.meta) {
+        return false;
+      }
+
+      const m = mcResult.meta;
+      this.getChat().setHistory(mcResult.history);
+      // Disarm only the blanked files' fast-path, keeping
+      // read-before-write state intact (issue #4239; rationale on
+      // FileReadEntry.readResidentInHistory). Any blanked read we
+      // can't disarm surgically forces the old blanket wipe so a
+      // later Read can't get a dangling file_unchanged placeholder.
+      const fileReadCache = this.config.getFileReadCache();
+      if (m.unresolvedEvictedReads > 0) {
+        debugLogger.debug(
+          `[FILE_READ_CACHE] clear after microcompaction ` +
+            `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+        );
+        fileReadCache.clear();
+      } else {
+        // Concurrent stats — don't serialize N FS round-trips
+        // before the next turn.
+        const statResults = await Promise.all(
+          m.evictedReadPaths.map((p) =>
+            fsPromises.stat(p).catch(() => undefined),
+          ),
+        );
+        // A path is surgically disarmed only if it stats AND its
+        // inode matches the recorded entry. A failed stat or inode
+        // miss could leave a stale entry armed, so fall back to the
+        // blanket wipe if any path is unresolvable.
+        let fullyDisarmed = true;
+        for (const stats of statResults) {
+          if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+            fullyDisarmed = false;
+          }
+        }
+        if (fullyDisarmed) {
+          debugLogger.debug(
+            `[FILE_READ_CACHE] disarmed fast-path for ` +
+              `${m.evictedReadPaths.length} file(s) after microcompaction`,
+          );
+        } else {
+          debugLogger.debug(
+            '[FILE_READ_CACHE] clear after microcompaction ' +
+              '(an evicted path was unresolvable)',
+          );
+          fileReadCache.clear();
+        }
+      }
+      debugLogger.debug(
+        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+          `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+          `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+      );
+      return true;
+    } catch (err) {
+      debugLogger.error(
+        `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     signal: AbortSignal,
@@ -1355,6 +1437,11 @@ export class GeminiClient {
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
       messageType !== SendMessageType.Notification &&
+      // Teammate envelopes are machine-driven re-entries like Cron /
+      // Notification, not user prompts: user-authored UserPromptSubmit
+      // hooks must not fire on (or be able to block) internal team
+      // coordination traffic.
+      messageType !== SendMessageType.Teammate &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -1399,7 +1486,15 @@ export class GeminiClient {
       }
     }
 
-    if (messageType === SendMessageType.Notification) {
+    if (
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate
+    ) {
+      // Teammate envelopes record like notifications: the UI rendered
+      // them as a compact `●` line (the displayText) and the envelope
+      // is the model-bound payload, so a resumed session restores the
+      // same info item. Without this they were the one top-level
+      // interaction missing from chat recording entirely.
       this.config
         .getChatRecordingService()
         ?.recordNotification(request, options?.notificationDisplayText);
@@ -1411,7 +1506,8 @@ export class GeminiClient {
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification;
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate;
     if (isTopLevelInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -1527,84 +1623,25 @@ export class GeminiClient {
         }
       }
 
-      // Idle cleanup: clear old tool results when idle > threshold.
-      // Runs on UserQuery, Cron, and Hook messages. Hook is required
-      // for goal-mode loops where the model drives continuation without
-      // user input — without this, tool results accumulate indefinitely
-      // and cause OOM (old_space exhaustion).
-      // ToolResult, Retry, Notification are excluded: ToolResult fires
-      // on every tool-call return (O(history) overhead per call), and
-      // mid-loop compaction could blank results the model still needs.
-      const shouldCompact =
+      if (
         messageType === SendMessageType.UserQuery ||
-        messageType === SendMessageType.Cron ||
-        messageType === SendMessageType.Hook;
-      if (shouldCompact) {
-        try {
-          const mcResult = microcompactHistory(
-            this.getHistoryShallow(),
-            this.lastApiCompletionTimestamp,
-            this.config.getClearContextOnIdle(),
-          );
-          if (mcResult.meta) {
-            const m = mcResult.meta;
-            this.getChat().setHistory(mcResult.history);
-            // Disarm only the blanked files' fast-path, keeping
-            // read-before-write state intact (issue #4239; rationale on
-            // FileReadEntry.readResidentInHistory). Any blanked read we
-            // can't disarm surgically forces the old blanket wipe so a
-            // later Read can't get a dangling file_unchanged placeholder.
-            const fileReadCache = this.config.getFileReadCache();
-            if (m.unresolvedEvictedReads > 0) {
-              debugLogger.debug(
-                `[FILE_READ_CACHE] clear after microcompaction ` +
-                  `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-              );
-              fileReadCache.clear();
-            } else {
-              // Concurrent stats — don't serialize N FS round-trips
-              // before the next turn.
-              const statResults = await Promise.all(
-                m.evictedReadPaths.map((p) =>
-                  fsPromises.stat(p).catch(() => undefined),
-                ),
-              );
-              // A path is surgically disarmed only if it stats AND its
-              // inode matches the recorded entry. A failed stat or inode
-              // miss could leave a stale entry armed, so fall back to the
-              // blanket wipe if any path is unresolvable.
-              let fullyDisarmed = true;
-              for (const stats of statResults) {
-                if (
-                  !stats ||
-                  !fileReadCache.markReadEvictedFromHistory(stats)
-                ) {
-                  fullyDisarmed = false;
-                }
-              }
-              if (fullyDisarmed) {
-                debugLogger.debug(
-                  `[FILE_READ_CACHE] disarmed fast-path for ` +
-                    `${m.evictedReadPaths.length} file(s) after microcompaction`,
-                );
-              } else {
-                debugLogger.debug(
-                  '[FILE_READ_CACHE] clear after microcompaction ' +
-                    '(an evicted path was unresolvable)',
-                );
-                fileReadCache.clear();
-              }
-            }
-            debugLogger.debug(
-              `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-                `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-                `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
-            );
-          }
-        } catch (err) {
-          debugLogger.error(
-            `[TIME-BASED MC] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+        messageType === SendMessageType.Cron
+      ) {
+        // Idle cleanup: clear old tool results when idle > threshold.
+        // Runs on user and cron messages. ToolResult and Retry are
+        // excluded; Hook continuations use a separate checkpoint below.
+        const compacted = await this.microcompactIdleHistory(
+          this.lastApiCompletionTimestamp,
+        );
+        if (messageType === SendMessageType.UserQuery || compacted) {
+          this.lastHookMicrocompactionTimestamp = Date.now();
+        }
+      } else if (messageType === SendMessageType.Hook) {
+        this.lastHookMicrocompactionTimestamp ??=
+          this.lastApiCompletionTimestamp ?? Date.now();
+        const checkpoint = this.lastHookMicrocompactionTimestamp;
+        if (await this.microcompactIdleHistory(checkpoint)) {
+          this.lastHookMicrocompactionTimestamp = Date.now();
         }
       }
 

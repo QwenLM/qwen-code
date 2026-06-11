@@ -135,8 +135,11 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   // Runtime MCP server mutation ext-methods
+  sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalClear: 'qwen/control/session/goal/clear',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  workspaceReloadEnv: 'qwen/control/workspace/reload_env',
 } as const;
 
 export type ServeStatus =
@@ -475,6 +478,9 @@ export interface ServeSessionAgentTaskStatus {
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
 }
 
 export interface ServeSessionShellTaskStatus {
@@ -674,7 +680,9 @@ export type ServeHookMatcherKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'commandName'
+  | 'filePath';
 
 export interface ServeHookEventMeta {
   description: string;
@@ -792,6 +800,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     matcherKind: 'notificationType',
   },
   UserPromptSubmit: { description: 'When the user submits a prompt' },
+  UserPromptExpansion: {
+    description: 'When a slash command expands into a prompt',
+    matcherKind: 'commandName',
+  },
   SessionStart: {
     description: 'When a new session is started',
     matcherKind: 'sessionTrigger',
@@ -831,6 +843,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   },
   TodoCreated: { description: 'When a new todo item is created' },
   TodoCompleted: { description: 'When a todo item is marked as completed' },
+  InstructionsLoaded: {
+    description: 'When an instruction or context file is loaded',
+    matcherKind: 'filePath',
+  },
 };
 
 // ---------------------------------------------------------------------------

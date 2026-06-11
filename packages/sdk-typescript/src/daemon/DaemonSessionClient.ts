@@ -26,6 +26,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -361,6 +362,22 @@ export class DaemonSessionClient {
 
   async tasks(): Promise<DaemonSessionTasksStatus> {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  async cancelTask(
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+  ): Promise<{ cancelled: boolean }> {
+    return await this.client.sessionTaskCancel(
+      this.sessionId,
+      taskId,
+      kind,
+      this.clientId,
+    );
+  }
+
+  async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.client.sessionGoalClear(this.sessionId, this.clientId);
   }
 
   async stats(): Promise<DaemonSessionStatsStatus> {

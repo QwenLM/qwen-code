@@ -57,6 +57,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  unregisterGoalHook,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -123,7 +124,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
-import { loadSettings, SettingScope } from '../config/settings.js';
+import {
+  loadSettings,
+  reloadEnvironment,
+  SettingScope,
+} from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
@@ -139,7 +144,6 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
-import { updateOutputLanguageFile } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -150,6 +154,9 @@ import {
 } from '../i18n/index.js';
 import {
   resolveOutputLanguage,
+  updateOutputLanguageFile,
+  getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
 } from '../utils/languageUtils.js';
@@ -2568,7 +2575,9 @@ class QwenAgent implements Agent {
       );
     }
 
+    unregisterGoalHook(session.getConfig(), sessionId);
     this.mcpPool?.releaseSession(sessionId);
+    uiTelemetryService.removeSession(sessionId);
     this.sessions.delete(sessionId);
   }
 
@@ -4233,8 +4242,7 @@ class QwenAgent implements Agent {
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
-    // TODO: uiTelemetryService is process-wide; multi-session stats are cumulative
-    const metrics = uiTelemetryService.getMetrics();
+    const metrics = uiTelemetryService.getMetricsForSession(sessionId);
     const now = Date.now();
     const createdAt = session.getCreatedAt();
 
@@ -5504,7 +5512,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        this.sessionOrThrow(sessionId);
+        const session = this.sessionOrThrow(sessionId);
 
         try {
           await setLanguageAsync(language);
@@ -5539,7 +5547,10 @@ class QwenAgent implements Agent {
 
           let fileWriteOk = false;
           try {
-            updateOutputLanguageFile(settingValue);
+            writeOutputLanguageAndRegisterPath(
+              settingValue,
+              session.getConfig(),
+            );
             fileWriteOk = true;
           } catch (err) {
             debugLogger.warn('Failed to write output-language.md:', err);
@@ -5558,10 +5569,28 @@ class QwenAgent implements Agent {
                 err,
               );
             }
+            const writtenPath =
+              session.getConfig().getOutputLanguageFilePath() ??
+              getOutputLanguageFilePath();
             const allSessions = [...this.sessions.values()];
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
                 const cfg = s.getConfig();
+                let sessionPath: string | undefined;
+                try {
+                  sessionPath = cfg.getOutputLanguageFilePath();
+                  if (sessionPath && sessionPath !== writtenPath) {
+                    updateOutputLanguageFile(settingValue, sessionPath);
+                  }
+                  if (!sessionPath) {
+                    writeOutputLanguageAndRegisterPath(settingValue, cfg);
+                  }
+                } catch (err) {
+                  debugLogger.warn(
+                    `Failed to write output-language.md for session ${s.getId()} (path=${sessionPath ?? 'global-default'}):`,
+                    err,
+                  );
+                }
                 await cfg.refreshHierarchicalMemory();
                 await cfg.getGeminiClient()?.refreshSystemInstruction();
               }),
@@ -5687,6 +5716,115 @@ class QwenAgent implements Agent {
           ],
         });
         return { sessionId, injected: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskCancel: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const taskKind = params['taskKind'];
+        if (
+          taskKind !== 'agent' &&
+          taskKind !== 'shell' &&
+          taskKind !== 'monitor'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'taskKind must be "agent", "shell", or "monitor"',
+          );
+        }
+        debugLogger.info(
+          `sessionTaskCancel requested sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind}`,
+        );
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        switch (taskKind) {
+          case 'agent': {
+            const task = config.getBackgroundTaskRegistry().get(taskId);
+            if (
+              !task ||
+              (task.status !== 'running' && task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            if (task.status === 'paused') {
+              config.getBackgroundTaskRegistry().abandon(taskId);
+            } else {
+              config.getBackgroundTaskRegistry().cancel(taskId);
+            }
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          case 'shell': {
+            const task = config.getBackgroundShellRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            config.getBackgroundShellRegistry().requestCancel(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          case 'monitor': {
+            const task = config.getMonitorRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            config.getMonitorRegistry().cancel(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
+          default: {
+            const exhaustive: never = taskKind;
+            throw new Error(`Unhandled task kind: ${exhaustive}`);
+          }
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const cleared = unregisterGoalHook(config, sessionId);
+        debugLogger.info(
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+        );
+        return {
+          cleared: !!cleared,
+          condition: cleared?.condition,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];
@@ -6434,6 +6572,43 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv: {
+        const fresh = loadSettings(cwd, { skipLoadEnvironment: true });
+        const envResult = reloadEnvironment(fresh.merged, cwd);
+
+        const sessions = [...this.sessions.entries()];
+        const refreshed: string[] = [];
+        const skipped: string[] = [];
+
+        const results = await Promise.allSettled(
+          sessions.map(async ([id, session]) => {
+            if (!session.isIdle()) {
+              skipped.push(id);
+              return;
+            }
+            const config = session.getConfig();
+            const authType = config.getAuthType();
+            if (!authType) {
+              skipped.push(id);
+              return;
+            }
+            config.reloadModelProvidersConfig(fresh.merged.modelProviders);
+            await config.refreshAuth(authType);
+            refreshed.push(id);
+          }),
+        );
+        for (let i = 0; i < results.length; i++) {
+          if (results[i]!.status === 'rejected') {
+            skipped.push(sessions[i]![0]);
+          }
+        }
+
+        return {
+          ...envResult,
+          sessionsRefreshed: refreshed,
+          sessionsSkipped: skipped,
+        };
       }
       default:
         throw RequestError.methodNotFound(method);

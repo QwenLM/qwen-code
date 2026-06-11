@@ -23,23 +23,29 @@ interface MessageItemProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  /** Run /context detail, exactly like typing it (context-usage panels). */
+  onShowContextDetail?: () => void;
   workspaceCwd?: string;
+  isLatest?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onConfirm,
+  onShowContextDetail,
   workspaceCwd,
+  isLatest = false,
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
-      return <UserMessage content={message.content} />;
+      return <UserMessage content={message.content} images={message.images} />;
     case 'assistant':
       return (
         <AssistantMessage
           content={message.content}
           thinking={message.thinking}
+          isStreaming={message.isStreaming}
         />
       );
     case 'tool_group':
@@ -55,7 +61,12 @@ export const MessageItem = memo(function MessageItem({
       return <PlanMessage todos={message.todos} />;
     case 'system':
       return (
-        <SystemMessage content={message.content} variant={message.variant} />
+        <SystemMessage
+          content={message.content}
+          variant={message.variant}
+          onShowContextDetail={onShowContextDetail}
+          isLatest={isLatest}
+        />
       );
     case 'user_shell':
       return (
@@ -98,7 +109,9 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
+  if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.isLatest !== next.isLatest) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
@@ -107,7 +120,11 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
     case 'user':
-      return next.role === 'user' && prev.content === next.content;
+      return (
+        next.role === 'user' &&
+        prev.content === next.content &&
+        stableImagesEqual(prev.images, next.images)
+      );
     case 'assistant':
       return (
         next.role === 'assistant' &&
@@ -209,6 +226,17 @@ function areToolListsEqual(
 }
 
 const jsonCache = new WeakMap<object, string>();
+
+function stableImagesEqual(
+  a: Array<{ data: string; mimeType: string }> | undefined,
+  b: Array<{ data: string; mimeType: string }> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every(
+    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+  );
+}
 
 function stableJson(value: unknown): string {
   if (value === undefined) return '';

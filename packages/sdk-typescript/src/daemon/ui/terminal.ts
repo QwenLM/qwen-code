@@ -173,6 +173,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       );
     case 'user.shell.command':
       return '';
+    case 'user.image.delta':
+      return `[image: ${sanitizeTerminalText(event.mimeType)}]`;
     default:
       return assertNever(event);
   }
@@ -216,6 +218,8 @@ export function transcriptBlockToTerminalText(
       return terminalLine(block.kind, block.text, '2');
     case 'error':
       return terminalLine('error', block.text, '31');
+    case 'prompt_cancelled':
+      return terminalLine('cancelled', 'prompt cancelled', '33');
     default:
       return assertNever(block);
   }

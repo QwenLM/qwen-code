@@ -13,6 +13,9 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
+  DaemonAuthProviderCatalog,
+  DaemonAuthProviderInstallRequest,
+  DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -29,6 +32,7 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -54,11 +58,13 @@ import type {
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SetSessionLanguageResult,
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonEnvReloadResponse,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
@@ -190,6 +196,18 @@ export class DaemonHttpError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+export interface DaemonTurnError extends DaemonHttpError {
+  _daemonTurnError: true;
+}
+
+export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
 }
 
 export interface CreateSessionRequest {
@@ -1029,10 +1047,7 @@ export class DaemonClient {
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/branch`,
       {
         method: 'POST',
-        headers: this.headers(
-          { 'Content-Type': 'application/json' },
-          clientId,
-        ),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({ name: req.name }),
       },
       async (res) => {
@@ -1113,6 +1128,51 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionTasksStatus;
+      },
+    );
+  }
+
+  async sessionTaskCancel(
+    sessionId: string,
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ kind }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/tasks/:taskId/cancel',
+          );
+        }
+        return (await res.json()) as { cancelled: boolean };
+      },
+    );
+  }
+
+  async sessionGoalClear(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<{ cleared: boolean; condition?: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/goal/clear');
+        }
+        return (await res.json()) as { cleared: boolean; condition?: string };
       },
     );
   }
@@ -1464,6 +1524,30 @@ export class DaemonClient {
     );
   }
 
+  async reloadEnv(opts?: {
+    clientId?: string;
+    timeoutMs?: number;
+  }): Promise<DaemonEnvReloadResponse> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/reload-env`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/reload-env');
+        }
+        return (await res.json()) as DaemonEnvReloadResponse;
+      },
+      opts?.timeoutMs,
+    );
+  }
+
   async manageMcpServer(
     serverName: string,
     action: DaemonMcpManageAction,
@@ -1613,6 +1697,33 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/model');
         }
         return (await res.json()) as SetModelResult;
+      },
+    );
+  }
+
+  async setSessionLanguage(
+    sessionId: string,
+    language: string,
+    opts?: { syncOutputLanguage?: boolean; clientId?: string },
+  ): Promise<SetSessionLanguageResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/language`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          language,
+          syncOutputLanguage: opts?.syncOutputLanguage ?? false,
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/language');
+        }
+        return (await res.json()) as SetSessionLanguageResult;
       },
     );
   }
@@ -2128,6 +2239,38 @@ export class DaemonClient {
     );
   }
 
+  async getAuthProviders(): Promise<DaemonAuthProviderCatalog> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/providers`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auth/providers');
+        }
+        return (await res.json()) as DaemonAuthProviderCatalog;
+      },
+    );
+  }
+
+  async installAuthProvider(
+    req: DaemonAuthProviderInstallRequest,
+  ): Promise<DaemonAuthProviderInstallResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/provider`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/auth/provider');
+        }
+        return (await res.json()) as DaemonAuthProviderInstallResult;
+      },
+    );
+  }
+
   // -- Session metadata ----------------------------------------------------
 
   /**
@@ -2293,10 +2436,13 @@ export function matchTurnEvent(
       code?: string;
     };
     if (data.promptId === promptId) {
-      throw new DaemonHttpError(
-        500,
-        data.code ?? 'turn_error',
-        data.message ?? 'Prompt failed',
+      throw Object.assign(
+        new DaemonHttpError(
+          500,
+          data.code ?? 'turn_error',
+          data.message ?? 'Prompt failed',
+        ),
+        { _daemonTurnError: true as const },
       );
     }
   }

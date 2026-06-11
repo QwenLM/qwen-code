@@ -37,6 +37,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
+    { name: 'auth', description: t('local.auth') },
     {
       name: 'approval-mode',
       description: t('local.approvalMode'),
@@ -75,6 +76,12 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.agents'),
       argumentHint: 'manage|create',
     },
+    {
+      name: 'goal',
+      description: t('local.goal'),
+      argumentHint: '[<condition> | clear]',
+    },
+    { name: 'tasks', description: t('local.tasks') },
     { name: 'recap', description: t('local.recap') },
     { name: 'clear', description: t('local.clear') },
     { name: 'new', description: t('local.new') },

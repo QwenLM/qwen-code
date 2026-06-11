@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../adapters/types';
-import { groupParallelAgents } from './MessageList';
+import {
+  getDisplayItemVirtualKey,
+  groupParallelAgents,
+  shouldUseVirtualScroll,
+  VIRTUAL_SCROLL_THRESHOLD,
+} from './MessageList';
 
 function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
   return {
@@ -12,6 +17,29 @@ function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
         toolName,
         status: 'completed',
         args: { description: `task ${id}` },
+      },
+    ],
+  };
+}
+
+function makeBackgroundAgentToolGroup(id: string): Message {
+  return {
+    id,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${id}`,
+        toolName: 'Agent',
+        status: 'pending',
+        args: {
+          description: `task ${id}`,
+          run_in_background: true,
+        },
+        rawOutput: {
+          type: 'task_execution',
+          taskDescription: `task ${id}`,
+          status: 'background',
+        },
       },
     ],
   };
@@ -34,6 +62,15 @@ function makeUserMessage(id: string): Message {
 
 function makeAssistantMessage(id: string): Message {
   return { id, role: 'assistant', content: 'response' };
+}
+
+function makeThoughtMessage(id: string): Message {
+  return {
+    id,
+    role: 'assistant',
+    content: '',
+    thinking: 'launching another agent',
+  };
 }
 
 describe('groupParallelAgents', () => {
@@ -151,5 +188,70 @@ describe('groupParallelAgents', () => {
     expect(items[1].type).toBe('parallel_agents');
     expect(items[2].type).toBe('message');
     expect(items[3].type).toBe('message');
+  });
+
+  it('groups background agents separated by thought-only launch narration', () => {
+    const msgs = [
+      makeBackgroundAgentToolGroup('a1'),
+      makeThoughtMessage('t1'),
+      makeBackgroundAgentToolGroup('a2'),
+    ];
+    const items = groupParallelAgents(msgs);
+    expect(items).toHaveLength(1);
+    expect(items[0].type).toBe('parallel_agents');
+    if (items[0].type === 'parallel_agents') {
+      expect(items[0].agents.map((a) => a.callId)).toEqual([
+        'call-a1',
+        'call-a2',
+      ]);
+    }
+  });
+
+  it('preserves background thought narration when it is not between launches', () => {
+    const msgs = [
+      makeBackgroundAgentToolGroup('a1'),
+      makeThoughtMessage('t1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeThoughtMessage('t2'),
+    ];
+    const items = groupParallelAgents(msgs);
+    expect(items).toHaveLength(2);
+    expect(items[0].type).toBe('parallel_agents');
+    expect(items[1].type).toBe('message');
+    if (items[1].type === 'message') {
+      expect(items[1].message.id).toBe('t2');
+    }
+  });
+});
+
+describe('getDisplayItemVirtualKey', () => {
+  it('keeps message and grouped rows in separate key namespaces', () => {
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'message',
+        key: 'header',
+        message: makeUserMessage('header'),
+      }),
+    ).toBe('msg:header');
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'parallel_agents',
+        key: 'header',
+        agents: [makeAgentToolGroup('a').tools[0]],
+      }),
+    ).toBe('group:header');
+  });
+});
+
+describe('shouldUseVirtualScroll', () => {
+  it('enables virtual scrolling only above the default threshold', () => {
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD - 1)).toBe(false);
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD)).toBe(false);
+    expect(shouldUseVirtualScroll(VIRTUAL_SCROLL_THRESHOLD + 1)).toBe(true);
+  });
+
+  it('accepts a custom threshold', () => {
+    expect(shouldUseVirtualScroll(50, 50)).toBe(false);
+    expect(shouldUseVirtualScroll(51, 50)).toBe(true);
   });
 });

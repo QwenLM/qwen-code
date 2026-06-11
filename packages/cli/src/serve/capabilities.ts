@@ -61,6 +61,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  auth_provider_install: { since: 'v1' },
   // Workspace memory CRUD (`GET/POST /workspace/memory`). Daemon exposes
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
@@ -222,6 +223,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
+  workspace_reload_env: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -239,6 +241,7 @@ export interface AdvertiseFeatureToggles {
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
   rateLimit?: boolean;
+  reloadEnvAvailable?: boolean;
 }
 
 /**
@@ -295,6 +298,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
+  ['workspace_reload_env', (toggles) => toggles.reloadEnvAvailable === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

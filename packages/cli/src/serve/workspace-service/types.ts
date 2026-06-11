@@ -140,9 +140,24 @@ export interface DaemonWorkspaceService {
     serverName: string,
     opts?: { entryIndex?: number },
   ): Promise<RestartMcpServerResult>;
+
+  /** Reload environment variables and refresh auth on idle sessions. */
+  reloadEnv(ctx: WorkspaceRequestContext): Promise<EnvReloadResponse>;
 }
 
 // -- Result types for workspace mutations --
+
+import type { EnvReloadResult } from '../../config/settings.js';
+export type { EnvReloadResult };
+
+export interface EnvReloadResponse {
+  updatedKeys: string[];
+  removedKeys: string[];
+  childReloaded: boolean;
+  sessionsRefreshed?: string[];
+  sessionsSkipped?: string[];
+  childError?: string;
+}
 
 /** Discriminated union for MCP server restart outcomes. */
 export type RestartMcpServerResult =
@@ -201,6 +216,9 @@ export interface DaemonWorkspaceServiceDeps {
     toolName: string,
     enabled: boolean,
   ) => Promise<void>;
+
+  /** Reload daemon-side process.env from .env / settings.env. */
+  reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the

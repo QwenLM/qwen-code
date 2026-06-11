@@ -857,6 +857,9 @@ export interface DaemonSessionAgentTaskStatus {
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
 }
 
 export interface DaemonSessionShellTaskStatus {
@@ -960,6 +963,13 @@ export interface DaemonSessionStatsStatus {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/language`. */
+export interface SetSessionLanguageResult {
+  language: string;
+  outputLanguage: string | null;
+  refreshed: boolean;
 }
 
 /**
@@ -1111,6 +1121,15 @@ export interface DaemonShellCommandResult {
  *   total has reached `clientBudget`. Caller should free a slot
  *   (disconnect another server) before retrying.
  */
+export interface DaemonEnvReloadResponse {
+  updatedKeys: string[];
+  removedKeys: string[];
+  childReloaded: boolean;
+  sessionsRefreshed?: string[];
+  sessionsSkipped?: string[];
+  childError?: string;
+}
+
 export type DaemonMcpRestartResult =
   | {
       serverName: string;
@@ -1308,6 +1327,89 @@ export interface DaemonAuthStatusSnapshot {
   supportedDeviceFlowProviders: DaemonAuthProviderId[];
 }
 
+export interface DaemonAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  description?: string;
+}
+
+export interface DaemonAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface DaemonAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: string;
+  protocolOptions?: string[];
+  baseUrl?: string | DaemonAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: DaemonAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface DaemonAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: DaemonAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface DaemonAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: string;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: {
+      image?: boolean;
+      pdf?: boolean;
+      audio?: boolean;
+      video?: boolean;
+    };
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface DaemonAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: string;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
+}
+
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
   /**
@@ -1396,6 +1498,7 @@ export type DaemonHookEventName =
   | 'PostToolBatch'
   | 'Notification'
   | 'UserPromptSubmit'
+  | 'UserPromptExpansion'
   | 'SessionStart'
   | 'Stop'
   | 'SubagentStart'
@@ -1408,6 +1511,7 @@ export type DaemonHookEventName =
   | 'StopFailure'
   | 'TodoCreated'
   | 'TodoCompleted'
+  | 'InstructionsLoaded'
   | (string & {});
 
 export type DaemonHookMatcherKind =
@@ -1416,7 +1520,9 @@ export type DaemonHookMatcherKind =
   | 'trigger'
   | 'sessionTrigger'
   | 'error'
-  | 'notificationType';
+  | 'notificationType'
+  | 'commandName'
+  | 'filePath';
 
 export interface DaemonHookEventMeta {
   description: string;

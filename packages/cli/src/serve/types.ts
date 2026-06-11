@@ -13,6 +13,7 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -146,6 +147,13 @@ export interface ServeOptions {
    */
   allowOrigins?: string[];
   /**
+   * Allow auth provider baseUrl values that point at localhost/private
+   * networks. Off by default because the daemon exposes this as an HTTP
+   * mutation; local development can opt in explicitly for local model
+   * endpoints.
+   */
+  allowPrivateAuthBaseUrl?: boolean;
+  /**
    * Server-side wallclock cap on a single
    * `POST /session/:id/prompt` from receipt to completion.
    */
@@ -156,6 +164,10 @@ export interface ServeOptions {
   writerIdleTimeoutMs?: number;
   /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
   channelIdleTimeoutMs?: number;
+  /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
+  sessionReapIntervalMs?: number;
+  /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
+  sessionIdleTimeoutMs?: number;
   /**
    * Enable per-tier HTTP rate limiting. Off by default. When enabled,
    * requests exceeding per-tier limits receive 429 + Retry-After.
@@ -232,6 +244,85 @@ export interface CapabilitiesEnvelope {
      */
     permission?: PermissionPolicy;
   };
+  /**
+   * Language codes accepted by `POST /session/:id/language`.
+   * Additive — older daemons omit this field; clients should
+   * treat absence as "unknown" rather than "none".
+   */
+  supportedLanguages?: string[];
+}
+
+export interface ServeAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: InputModalities;
+  description?: string;
+}
+
+export interface ServeAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface ServeAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: AuthType;
+  protocolOptions?: AuthType[];
+  baseUrl?: string | ServeAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: ServeAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface ServeAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: ServeAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface ServeAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: AuthType;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: InputModalities;
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface ServeAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: AuthType;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

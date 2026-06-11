@@ -15,6 +15,16 @@ set "MIRROR=auto"
 if defined QWEN_INSTALL_MIRROR set "MIRROR=!QWEN_INSTALL_MIRROR!"
 set "NO_MODIFY_PATH=0"
 if defined QWEN_NO_MODIFY_PATH set "NO_MODIFY_PATH=!QWEN_NO_MODIFY_PATH!"
+set "REPAIR_PATH=0"
+if defined QWEN_INSTALL_REPAIR_PATH set "REPAIR_PATH=!QWEN_INSTALL_REPAIR_PATH!"
+set "PATH_SCOPE=user"
+REM Auto-detect SYSTEM account and default to machine scope so that new sessions
+REM spawned by service processes (SSM agent, WinRM, scheduled tasks) inherit PATH.
+if not defined QWEN_INSTALL_PATH_SCOPE (
+    whoami /user 2>nul | findstr /i "S-1-5-18" >nul 2>&1
+    if !ERRORLEVEL! EQU 0 set "PATH_SCOPE=machine"
+)
+if defined QWEN_INSTALL_PATH_SCOPE set "PATH_SCOPE=!QWEN_INSTALL_PATH_SCOPE!"
 set "BASE_URL="
 if defined QWEN_INSTALL_BASE_URL set "BASE_URL=!QWEN_INSTALL_BASE_URL!"
 set "ARCHIVE_PATH="
@@ -194,6 +204,30 @@ if /i "%~1"=="--no-modify-path" (
     shift
     goto parse_args
 )
+if /i "%~1"=="--repair-path" (
+    set "REPAIR_PATH=1"
+    shift
+    goto parse_args
+)
+if /i "!ARG_KEY!"=="--path-scope" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --path-scope requires a value
+            exit /b 1
+        )
+        set "PATH_SCOPE=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
+    if "%~2"=="" (
+        echo ERROR: --path-scope requires a value
+        exit /b 1
+    )
+    set "PATH_SCOPE=%~2"
+    shift
+    shift
+    goto parse_args
+)
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 
@@ -205,6 +239,13 @@ goto usage_error
 
 call :ValidateOptions
 if %ERRORLEVEL% NEQ 0 exit /b 1
+
+if /i "!REPAIR_PATH!"=="1" (
+    call :RepairPath
+    if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
+    endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"
+    exit /b 0
+)
 
 call :PrintHeader
 
@@ -302,7 +343,9 @@ echo   --base-url URL       Override standalone archive base URL
 echo   --archive PATH       Install from a local standalone archive
 echo   --version VERSION    Release version (default: latest)
 echo   --registry URL       npm registry (default: https://registry.npmmirror.com)
-echo   --no-modify-path     Do not modify user PATH
+echo   --no-modify-path     Do not modify PATH
+echo   --repair-path        Repair PATH for an existing standalone install
+echo   --path-scope SCOPE   PATH scope: user or machine (default: user, auto machine for SYSTEM)
 echo   -s, --source SOURCE  Record installation source
 echo   -h, --help           Show this help message
 exit /b 0
@@ -329,7 +372,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$esc = [char]27; $bar = 
 exit /b 0
 
 :ValidateRawEnvironmentOptions
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); $rawNames = @('QWEN_INSTALL_METHOD','QWEN_INSTALL_MIRROR','QWEN_NO_MODIFY_PATH','QWEN_INSTALL_BASE_URL','QWEN_INSTALL_ARCHIVE','QWEN_INSTALL_VERSION','QWEN_NPM_REGISTRY','QWEN_INSTALL_ROOT','QWEN_INSTALL_LIB_DIR','QWEN_INSTALL_BIN_DIR','QWEN_INSTALL_GITHUB_REPO','QWEN_INSTALL_CURL_EXE'); foreach ($name in $rawNames) { $value = [Environment]::GetEnvironmentVariable($name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); $rawNames = @('QWEN_INSTALL_METHOD','QWEN_INSTALL_MIRROR','QWEN_NO_MODIFY_PATH','QWEN_INSTALL_REPAIR_PATH','QWEN_INSTALL_PATH_SCOPE','QWEN_INSTALL_BASE_URL','QWEN_INSTALL_ARCHIVE','QWEN_INSTALL_VERSION','QWEN_NPM_REGISTRY','QWEN_INSTALL_ROOT','QWEN_INSTALL_LIB_DIR','QWEN_INSTALL_BIN_DIR','QWEN_INSTALL_GITHUB_REPO','QWEN_INSTALL_CURL_EXE'); foreach ($name in $rawNames) { $value = [Environment]::GetEnvironmentVariable($name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }; exit 0"
 if %ERRORLEVEL% EQU 0 exit /b 0
 echo ERROR: installer options contain unsafe command characters.
 exit /b 1
@@ -347,11 +390,12 @@ set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
 set "QWEN_VALIDATE_SOURCE=!SOURCE!"
+set "QWEN_VALIDATE_PATH_SCOPE=!PATH_SCOPE!"
 call :CreateTempFile "qwen-validate-options" ".ps1"
 if !ERRORLEVEL! NEQ 0 exit /b 1
 set "QWEN_VALIDATE_OPTIONS_SCRIPT=!TEMP_FILE!"
 > "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124)
->> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $names = @('METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE')
+>> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $names = @('METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE','PATH_SCOPE')
 >> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo foreach ($name in $names) {
 >> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo   $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name)
 >> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo   if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 }
@@ -371,6 +415,7 @@ set "QWEN_VALIDATE_INSTALL_BASE="
 set "QWEN_VALIDATE_INSTALL_DIR="
 set "QWEN_VALIDATE_INSTALL_BIN_DIR="
 set "QWEN_VALIDATE_SOURCE="
+set "QWEN_VALIDATE_PATH_SCOPE="
 if %PS_STATUS% NEQ 0 (
     echo ERROR: installer options contain unsafe command characters.
     exit /b 1
@@ -421,6 +466,18 @@ echo ERROR: --mirror must be auto, github, or aliyun.
 exit /b 1
 
 :validate_mirror_ok
+if "!REPAIR_PATH!"=="0" goto validate_repair_path_ok
+if "!REPAIR_PATH!"=="1" goto validate_repair_path_ok
+echo ERROR: QWEN_INSTALL_REPAIR_PATH must be 0 or 1.
+exit /b 1
+
+:validate_repair_path_ok
+if /i "!PATH_SCOPE!"=="user" goto validate_path_scope_ok
+if /i "!PATH_SCOPE!"=="machine" goto validate_path_scope_ok
+echo ERROR: --path-scope must be user or machine.
+exit /b 1
+
+:validate_path_scope_ok
 call :ValidateHttpsUrlVar "BASE_URL" "--base-url"
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
@@ -592,17 +649,19 @@ set "GITHUB_FALLBACK_BASE_URL="
 set "MIRROR=github"
 exit /b 0
 
-:MaybeUpdateUserPath
+:MaybeUpdatePath
 rem args: %~1=install_bin_dir
-rem Prepend the install dir to the user-level PATH (HKCU\Environment) via
+rem Prepend the install dir to the selected PATH scope via
 rem [Environment]::SetEnvironmentVariable. Idempotent: skips if the dir is
-rem already on the user PATH. Uses PowerShell rather than `setx` because setx
+rem already on PATH. Uses PowerShell rather than `setx` because setx
 rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
 set "QWEN_NEW_BIN=%~1"
 if "!QWEN_NEW_BIN!"=="" exit /b 0
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = @($userPath -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { $_ -ne $bin }); if ($entries.Count -gt 0 -and $entries[0] -eq $bin -and $remaining.Count -eq ($entries.Count - 1)) { exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); exit 0"
+set "QWEN_PATH_SCOPE=!PATH_SCOPE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $bin = $env:QWEN_NEW_BIN; $scope = $env:QWEN_PATH_SCOPE; $target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }; $pathValue = [Environment]::GetEnvironmentVariable('Path', $target); if ([string]::IsNullOrEmpty($pathValue)) { $pathValue = '' }; $entries = @($pathValue -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { -not [string]::Equals($_, $bin, [StringComparison]::OrdinalIgnoreCase) }); if ($entries.Count -gt 0 -and [string]::Equals($entries[0], $bin, [StringComparison]::OrdinalIgnoreCase) -and $remaining.Count -eq ($entries.Count - 1)) { exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, $target); exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_NEW_BIN="
+set "QWEN_PATH_SCOPE="
 exit /b %PS_STATUS%
 
 :UrlExists
@@ -1014,6 +1073,35 @@ if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 REM Standalone archive installed to !INSTALL_DIR!
 exit /b 0
 
+:RepairPath
+set "INSTALLED_BIN=!INSTALL_BIN_DIR!\qwen.cmd"
+if not exist "!INSTALLED_BIN!" (
+    echo ERROR: Qwen Code standalone wrapper was not found:
+    echo   !INSTALLED_BIN!
+    echo ERROR: Set QWEN_INSTALL_ROOT or QWEN_INSTALL_BIN_DIR to the existing install, or install Qwen Code first.
+    exit /b 1
+)
+
+set "PATH=!INSTALL_BIN_DIR!;!PATH!"
+if /i not "!NO_MODIFY_PATH!"=="1" (
+    call :MaybeUpdatePath "!INSTALL_BIN_DIR!"
+    if !ERRORLEVEL! NEQ 0 (
+        echo ERROR: Failed to update !PATH_SCOPE! PATH. Run as administrator for --path-scope machine, or add this directory manually:
+        echo   !INSTALL_BIN_DIR!
+        exit /b 1
+    )
+)
+
+set "INSTALLED_VERSION=unknown"
+for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
+
+echo.
+echo Qwen Code !INSTALLED_VERSION! is already installed.
+echo PATH repaired for !PATH_SCOPE! scope:
+echo   !INSTALL_BIN_DIR!
+echo.
+exit /b 0
+
 :CreateTempDir
 set "TEMP_DIR="
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = Join-Path $env:TEMP ('qwen-code-install-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null; [Console]::Write($dir)"`) do set "TEMP_DIR=%%I"
@@ -1239,11 +1327,11 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-rem Persist the install bin to user PATH unless --no-modify-path is set.
+rem Persist the install bin to PATH unless --no-modify-path is set.
 if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
-    call :MaybeUpdateUserPath "!EXTRA_BIN!"
+    call :MaybeUpdatePath "!EXTRA_BIN!"
     if !ERRORLEVEL! NEQ 0 (
-        echo WARNING: Failed to update user PATH. Add the directory manually:
+        echo WARNING: Failed to update !PATH_SCOPE! PATH. Add the directory manually:
         echo   !EXTRA_BIN!
     ) else (
         set "PATH_UPDATE_APPLIED=1"
@@ -1256,7 +1344,7 @@ echo.
 echo   cd ^<project^>
 echo   qwen
 echo.
-echo For more information visit https://qwenlm.github.io/qwen-code
+echo For more information visit https://github.com/QwenLM/qwen-code
 
 if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
     REM Final PATH refresh is handled by the PowerShell entrypoint.

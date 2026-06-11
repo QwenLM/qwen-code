@@ -1,86 +1,75 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionTasksStatus } from '@qwen-code/sdk/daemon';
-import { formatTasksSnapshot, handleTasksSlashCommand } from './tasksCommand';
+import {
+  parseTasksStatusMessage,
+  serializeTasksStatusMessage,
+} from '../components/messages/TasksStatusMessage';
+import { handleTasksSlashCommand } from './tasksCommand';
 
-function makeSnapshot(
-  tasks: DaemonSessionTasksStatus['tasks'],
-): DaemonSessionTasksStatus {
+function tasksSnapshot(): DaemonSessionTasksStatus {
   return {
     v: 1,
-    sessionId: 's-1',
-    now: 2_000,
-    tasks,
+    sessionId: 'session-1',
+    now: 1_700_000_000_000,
+    tasks: [],
   };
 }
 
-describe('formatTasksSnapshot', () => {
-  it('renders an empty task snapshot', () => {
-    expect(formatTasksSnapshot(makeSnapshot([]))).toBe('No background tasks.');
+describe('handleTasksSlashCommand', () => {
+  it('returns false for other commands', () => {
+    expect(
+      handleTasksSlashCommand({
+        cmd: 'help',
+        getTasks: vi.fn(),
+        dispatch: vi.fn(),
+        reportError: vi.fn(),
+      }),
+    ).toBe(false);
   });
 
-  it('renders task status without unsafe control characters', () => {
-    const text = formatTasksSnapshot(
-      makeSnapshot([
-        {
-          kind: 'shell',
-          id: 'sh-1',
-          label: 'npm test\u001b[31m',
-          description: 'npm test',
-          status: 'running',
-          startTime: 1_000,
-          runtimeMs: 1_000,
-          outputFile: '/tmp/out.log',
-          command: 'npm test',
-          cwd: '/work',
-          pid: 123,
-        },
-      ]),
-    );
+  it('dispatches a serialized tasks status message', async () => {
+    const snapshot = tasksSnapshot();
+    const dispatch = vi.fn();
 
-    expect(text).toContain('Background tasks (1 total)');
-    expect(text).toContain('[sh-1] running  1s pid=123  npm test[31m');
-    expect(text).toContain('output: /tmp/out.log');
-    expect(text).not.toContain('\u001b');
+    expect(
+      handleTasksSlashCommand({
+        cmd: 'tasks',
+        getTasks: vi.fn().mockResolvedValue(snapshot),
+        dispatch,
+        reportError: vi.fn(),
+      }),
+    ).toBe(true);
+
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1));
+    const event = dispatch.mock.calls[0][0][0];
+    expect(event.type).toBe('status');
+    expect(parseTasksStatusMessage(event.text)).toEqual({ snapshot });
+  });
+
+  it('reports getTasks failures', async () => {
+    const error = new Error('boom');
+    const reportError = vi.fn();
+
+    expect(
+      handleTasksSlashCommand({
+        cmd: 'tasks',
+        getTasks: vi.fn().mockRejectedValue(error),
+        dispatch: vi.fn(),
+        reportError,
+      }),
+    ).toBe(true);
+
+    await vi.waitFor(() =>
+      expect(reportError).toHaveBeenCalledWith(error, 'Failed to load tasks'),
+    );
   });
 });
 
-describe('handleTasksSlashCommand', () => {
-  it('loads tasks locally without forwarding or enqueueing', async () => {
-    const snapshot = makeSnapshot([]);
-    const getTasks = vi.fn().mockResolvedValue(snapshot);
-    const dispatch = vi.fn();
-    const reportError = vi.fn();
-    const sendPrompt = vi.fn();
-    const enqueue = vi.fn();
-
-    const handled = handleTasksSlashCommand({
-      cmd: 'tasks',
-      promptBlocked: true,
-      getTasks,
-      dispatch,
-      reportError,
-    });
-
-    expect(handled).toBe(true);
-    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1));
-    expect(getTasks).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith([
-      { type: 'status', text: 'No background tasks.' },
-    ]);
-    expect(reportError).not.toHaveBeenCalled();
-    expect(sendPrompt).not.toHaveBeenCalled();
-    expect(enqueue).not.toHaveBeenCalled();
-  });
-
-  it('does not claim non-tasks commands', () => {
-    const handled = handleTasksSlashCommand({
-      cmd: 'help',
-      promptBlocked: true,
-      getTasks: vi.fn(),
-      dispatch: vi.fn(),
-      reportError: vi.fn(),
-    });
-
-    expect(handled).toBe(false);
+describe('tasks status message serialization', () => {
+  it('round-trips tasks status snapshots', () => {
+    const snapshot = tasksSnapshot();
+    expect(
+      parseTasksStatusMessage(serializeTasksStatusMessage({ snapshot })),
+    ).toEqual({ snapshot });
   });
 });

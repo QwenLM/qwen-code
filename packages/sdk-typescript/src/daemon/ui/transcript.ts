@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonPromptCancelledTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -93,11 +94,16 @@ const RESYNC_PASSTHROUGH_TYPES: ReadonlySet<string> = new Set([
 export function appendLocalUserTranscriptMessage(
   state: DaemonTranscriptState,
   text: string,
-  opts: DaemonTranscriptReducerOptions = {},
+  opts: DaemonTranscriptReducerOptions & {
+    images?: Array<{ data: string; mimeType: string }>;
+  } = {},
 ): DaemonTranscriptState {
   const next = cloneTranscriptState(state, opts);
   finishAssistant(next);
   const block = createTextBlock(next, 'user', text);
+  if (opts.images && opts.images.length > 0) {
+    (block as DaemonTextTranscriptBlock).images = [...opts.images];
+  }
   appendBlock(next, block);
   next.activeUserBlockId = block.id;
   return trimTranscriptState(next);
@@ -180,6 +186,31 @@ function applyDaemonTranscriptEvent(
       }
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
+    case 'user.image.delta': {
+      if (!next.activeUserBlockId) {
+        const block = createTextBlock(
+          next,
+          'user',
+          '',
+        ) as DaemonTextTranscriptBlock;
+        block.images = [{ data: event.data, mimeType: event.mimeType }];
+        appendBlock(next, block);
+        next.activeUserBlockId = block.id;
+      } else {
+        // Use getWritableBlockById to ensure COW safety when mutating block.images
+        const block = getWritableBlockById(next, next.activeUserBlockId) as
+          | DaemonTextTranscriptBlock
+          | undefined;
+        if (block && block.kind === 'user') {
+          // Use immutable update to avoid mutating a shared array reference
+          block.images = [
+            ...(block.images ?? []),
+            { data: event.data, mimeType: event.mimeType },
+          ];
+        }
+      }
+      break;
+    }
     case 'assistant.text.delta':
       appendTextDelta(
         next,
@@ -273,6 +304,9 @@ function applyDaemonTranscriptEvent(
       // Idempotent — safe if the daemon also later emits terminal
       // tool_call_update frames.
       propagateCancellationToInFlightTools(next);
+      if (event.reason !== 'forward_failed') {
+        appendPromptCancelledBlock(next, event);
+      }
       break;
     case 'followup.suggestion':
       // Sidechannel: latest assist hint replaces any prior one for the
@@ -887,9 +921,36 @@ function appendStatusBlock(
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
+    ...(event?.type === 'error' && event.promptId
+      ? { promptId: event.promptId }
+      : {}),
+    ...(event?.type === 'error' && event.source
+      ? { source: event.source }
+      : {}),
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
+}
+
+function appendPromptCancelledBlock(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
+): void {
+  const block: DaemonPromptCancelledTranscriptBlock = {
+    id: allocateBlockId(state, 'prompt_cancelled'),
+    kind: 'prompt_cancelled',
+    clientReceivedAt: state.now,
+    createdAt: state.now,
+    updatedAt: state.now,
+    ...(event.reason ? { reason: event.reason } : {}),
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+  };
+  appendBlock(state, block);
+  clearActiveText(state);
 }
 
 function createTextBlock(

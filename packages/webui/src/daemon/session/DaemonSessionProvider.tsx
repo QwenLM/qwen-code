@@ -18,6 +18,7 @@ import {
 } from 'react';
 import {
   DaemonClient,
+  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
@@ -31,10 +32,16 @@ import {
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
 import { createDaemonSessionActions } from './actions.js';
-import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
+import {
+  detachDaemonClient,
+  getStableClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
+  getReplayTokenCount,
+  getSessionDisplayName,
   mapProviderStatus,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
@@ -57,10 +64,12 @@ import {
 } from '../followupSidechannel.js';
 import type {
   ActivePrompt,
+  AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
+  DaemonSessionNotice,
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
@@ -71,10 +80,14 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
+  DaemonNoticeCategory,
+  DaemonNoticeOperation,
+  DaemonNoticeSeverity,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
+  DaemonSessionNotice,
   DaemonSessionProviderProps,
   DaemonTodoItem,
   DaemonTodoList,
@@ -96,6 +109,17 @@ const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
+interface SessionNoticesValue {
+  notices: readonly DaemonSessionNotice[];
+  dismissNotice(id: string): void;
+  clearNotices(): void;
+}
+
+type SessionNoticeInput = Parameters<AddDaemonSessionNotice>[0];
+
+const DaemonSessionNoticesContext = createContext<
+  SessionNoticesValue | undefined
+>(undefined);
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
@@ -156,6 +180,10 @@ export function DaemonSessionProvider({
   const resolvedWorkspaceCwd = workspaceCwd ?? workspace?.workspaceCwd;
   const workspaceClientRef = useRef(workspace?.client);
   workspaceClientRef.current = workspace?.client;
+  const workspaceCapabilitiesRef = useRef(workspace?.capabilities);
+  workspaceCapabilitiesRef.current = workspace?.capabilities;
+  const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
+  workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
 
@@ -196,6 +224,31 @@ export function DaemonSessionProvider({
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
   });
+  const noticeIdRef = useRef(0);
+  const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
+  const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
+    const notice: DaemonSessionNotice = {
+      ...input,
+      id: input.id ?? `daemon-notice-${Date.now()}-${++noticeIdRef.current}`,
+      createdAt: input.createdAt ?? Date.now(),
+    };
+    setNotices((current) => [...current.slice(-49), notice]);
+    return notice;
+  }, []);
+  const dismissNotice = useCallback((id: string) => {
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  }, []);
+  const clearNotices = useCallback(() => {
+    setNotices([]);
+  }, []);
+  const noticesValue = useMemo<SessionNoticesValue>(
+    () => ({
+      notices,
+      dismissNotice,
+      clearNotices,
+    }),
+    [clearNotices, dismissNotice, notices],
+  );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
 
@@ -226,15 +279,49 @@ export function DaemonSessionProvider({
 
       while (!disposed && !abort.signal.aborted) {
         try {
+          // ── SSE Reconnection Strategy ────────────────────────────────
+          //
+          // Two reconnection paths depending on whether `session` survived
+          // the previous iteration's error handler:
+          //
+          // PATH A — Incremental (session preserved, retriable errors):
+          //   `session` is non-null → skip this entire `if (!session)` block
+          //   → go straight to `activeSession.events()` which sends
+          //   `Last-Event-ID` → daemon serves only missed events →
+          //   store.dispatch() appends to existing blocks. No reset, no
+          //   load(), minimal re-render.
+          //
+          // PATH B — Full reload (session cleared, terminal/auth errors,
+          //   ring eviction):
+          //   `session` is null → enter this block → DaemonSessionClient
+          //   .load() fetches compactedReplay + liveJournal → deferred
+          //   store.reset() + store.dispatch(replayEvents) rebuilds the
+          //   full transcript in a single synchronous batch.
+          //
+          // The `needsStoreReset` flag defers store.reset() to avoid an
+          // intermediate empty-blocks state that causes virtualizer
+          // removeChild errors (see replay injection section below).
+          // ─────────────────────────────────────────────────────────────
           let isSameSessionReconnect = false;
           let shouldInjectReplaySnapshot = false;
+          let needsStoreReset = false;
+          // Only populated when this attempt (re)loads the session: a reused
+          // session object carries the snapshot from its original load, whose
+          // usage may be older than the in-memory count.
+          let replayTokenCount: number | undefined;
           if (!session) {
             setConnection((current) => ({
               ...current,
               status: 'connecting',
               error: undefined,
             }));
-            const caps = await client.capabilities();
+            const getWorkspaceCapabilities =
+              workspaceGetCapabilitiesRef.current;
+            const caps =
+              workspaceCapabilitiesRef.current ??
+              (getWorkspaceCapabilities
+                ? await getWorkspaceCapabilities()
+                : await client.capabilities());
             if (disposed || abort.signal.aborted) return;
             capabilities = caps;
             heartbeatSupportedRef.current =
@@ -246,19 +333,23 @@ export function DaemonSessionProvider({
               restoreSessionId && restoreMode === 'resume'
                 ? DaemonSessionClient.resume
                 : DaemonSessionClient.load;
+            const targetSessionId = restoreSessionId ?? reconnectSessionId;
+            const requestClientId = clientId
+              ? clientIdRef.current
+              : getStableClientId(undefined, targetSessionId);
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   { workspaceCwd: effectWorkspaceCwd },
-                  clientIdRef.current,
+                  requestClientId,
                 )
               : reconnectSessionId
                 ? await DaemonSessionClient.load(
                     client,
                     reconnectSessionId,
                     { workspaceCwd: effectWorkspaceCwd },
-                    clientIdRef.current,
+                    requestClientId,
                   )
                 : await DaemonSessionClient.createOrAttach(
                     client,
@@ -273,8 +364,15 @@ export function DaemonSessionProvider({
                           : {}),
                       workspaceCwd: effectWorkspaceCwd,
                     },
-                    clientIdRef.current,
+                    requestClientId,
                   );
+            if (!clientId && nextSession.clientId) {
+              clientIdRef.current = nextSession.clientId;
+              persistStableClientId(
+                nextSession.clientId,
+                nextSession.sessionId,
+              );
+            }
             if (disposed || abort.signal.aborted) {
               void detachDaemonClient({
                 baseUrl: resolvedBaseUrl!,
@@ -287,13 +385,22 @@ export function DaemonSessionProvider({
               return;
             }
             const previousSessionId = lastSessionIdRef.current;
+            if (previousSessionId !== nextSession.sessionId) {
+              clearNotices();
+            }
+            // Defer store.reset() until right before replay dispatch
+            // (after the await below) so that reset + dispatch share a
+            // single queueMicrotask notification. Without deferral, the
+            // microtask fires during the await and React sees an
+            // intermediate empty-blocks state, which causes removeChild
+            // errors in the virtualizer.
             if (
               previousSessionId !== undefined &&
               nextSession.sessionId !== previousSessionId
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              store.reset();
+              needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
                 nextSession.replaySnapshot.compactedReplay.length +
@@ -301,7 +408,7 @@ export function DaemonSessionProvider({
               if (replaySnapshotEventCount > 0) {
                 setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.reset();
+                needsStoreReset = true;
               } else {
                 store.dispatch({
                   type: 'assistant.done',
@@ -318,6 +425,10 @@ export function DaemonSessionProvider({
             shouldInjectReplaySnapshot =
               nextSession.replaySnapshot.compactedReplay.length > 0 ||
               nextSession.replaySnapshot.liveJournal.length > 0;
+            replayTokenCount = getReplayTokenCount([
+              ...nextSession.replaySnapshot.compactedReplay,
+              ...nextSession.replaySnapshot.liveJournal,
+            ]);
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -369,10 +480,21 @@ export function DaemonSessionProvider({
             models,
             currentModel,
             currentMode,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
             tokenCount:
-              current.sessionId === activeSession.sessionId
-                ? (current.tokenCount ?? 0)
-                : 0,
+              // A freshly loaded snapshot covers everything up to the SSE
+              // resume point, so its usage supersedes the in-memory count;
+              // without one (or with a usage-less replay) keep the
+              // same-session value and start anything else at 0.
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
             contextWindow,
             providers,
             supportedCommands,
@@ -406,8 +528,20 @@ export function DaemonSessionProvider({
           // Feed replay snapshot (compacted history + live journal) into
           // the store before starting the SSE loop. The SSE stream begins
           // from lastEventId, so only post-snapshot events are delivered.
+          //
+          // The deferred store.reset() runs here — in the same synchronous
+          // block as store.dispatch() — so the queueMicrotask notification
+          // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          if (
+            needsStoreReset &&
+            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
+          ) {
+            // Reset needed but no replay data (e.g. fresh session) — reset
+            // immediately since there is no dispatch to batch with.
+            store.reset();
+          }
           if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
             const replayOpts = {
               ...eventOptionsRef.current,
@@ -416,13 +550,18 @@ export function DaemonSessionProvider({
             const allUiEvents: DaemonUiEvent[] = [];
             for (const replayEvent of replayEvents) {
               try {
+                const replayUiEvents = normalizeAndFilterEvent(
+                  replayEvent,
+                  activeSession.clientId,
+                  replayOpts,
+                  setConnection,
+                  { updateConnection: false },
+                );
                 allUiEvents.push(
-                  ...normalizeAndFilterEvent(
+                  ...filterDaemonUiEventsForTranscript(
                     replayEvent,
-                    activeSession.clientId,
-                    replayOpts,
-                    setConnection,
-                    { updateConnection: false },
+                    replayUiEvents,
+                    addNotice,
                   ),
                 );
                 if (replayEvent.type === 'turn_complete') {
@@ -439,12 +578,23 @@ export function DaemonSessionProvider({
               } catch (error) {
                 const message =
                   error instanceof Error ? error.message : String(error);
-                allUiEvents.push({
-                  type: 'error',
-                  text: `Skipped malformed replay event: ${message}`,
+                addNotice({
+                  severity: 'warning',
+                  category: 'protocol',
+                  operation: 'normalize_event',
+                  code: 'daemon.replay_event_malformed',
+                  message: 'Skipped malformed replay event',
+                  debugMessage: message,
                   recoverable: true,
                 });
+                console.warn(
+                  '[DaemonSessionProvider] skipped malformed replay event:',
+                  error,
+                );
               }
+            }
+            if (needsStoreReset) {
+              store.reset();
             }
             if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -471,6 +621,8 @@ export function DaemonSessionProvider({
 
           let sawEvent = false;
           let resyncRequested = false;
+          let epochReplayUiEvents: DaemonUiEvent[] | undefined;
+          let epochReplaySourceEvents: DaemonEvent[] = [];
           for await (const event of activeSession.events({
             signal: abort.signal,
             maxQueued,
@@ -486,12 +638,90 @@ export function DaemonSessionProvider({
                 publishSidechannelFollowupSuggestion(followupSuggestion);
                 continue;
               }
-              const uiEvents = normalizeAndFilterEvent(
+              const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
                 activeSession.clientId,
                 eventOptionsRef.current,
                 setConnection,
               );
+              const uiEvents = filterDaemonUiEventsForTranscript(
+                event,
+                normalizedUiEvents,
+                addNotice,
+              );
+              if (event.type === 'state_resync_required') {
+                const reason =
+                  typeof event.data === 'object' && event.data !== null
+                    ? (event.data as Record<string, unknown>).reason
+                    : undefined;
+                if (reason === 'epoch_reset') {
+                  setPromptStatus('idle');
+                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                  activeSession.setLastEventId(0);
+                  epochReplayUiEvents = [];
+                  epochReplaySourceEvents = [];
+                  continue;
+                }
+              }
+              if (epochReplayUiEvents) {
+                epochReplaySourceEvents.push(event);
+                epochReplayUiEvents.push(...uiEvents);
+                if (event.type === 'turn_complete') {
+                  const stopReason =
+                    (event.data as DaemonTurnCompleteData | undefined)
+                      ?.stopReason ?? 'end_turn';
+                  epochReplayUiEvents.push({
+                    type: 'assistant.done',
+                    reason: stopReason,
+                  });
+                } else if (event.type === 'turn_error') {
+                  epochReplayUiEvents.push({
+                    type: 'assistant.done',
+                    reason: 'error',
+                  });
+                }
+
+                const replayComplete = uiEvents.some(
+                  (uiEvent) => uiEvent.type === 'session.replay_complete',
+                );
+                if (replayComplete) {
+                  if (!activePromptsRef.current.has(activeSession.sessionId)) {
+                    clearPassiveAssistantDoneTimer(
+                      passiveAssistantDoneTimerRef,
+                    );
+                    epochReplayUiEvents.push({
+                      type: 'assistant.done',
+                      reason: 'replay_complete',
+                    });
+                    setPromptStatus('idle');
+                  }
+                  const replayUiEvents = epochReplayUiEvents;
+                  const replaySourceEvents = epochReplaySourceEvents;
+                  epochReplayUiEvents = undefined;
+                  epochReplaySourceEvents = [];
+                  store.reset();
+                  if (replayUiEvents.length > 0) {
+                    store.dispatch(replayUiEvents);
+                    bumpWorkspaceEventSignals(
+                      replayUiEvents,
+                      setWorkspaceEventSignals,
+                    );
+                  }
+                  for (const replayEvent of replaySourceEvents) {
+                    settleActivePromptFromTurnEvent(
+                      activePromptsRef.current,
+                      activeSession.sessionId,
+                      replayEvent,
+                      store,
+                      setPromptStatus,
+                      passiveAssistantDoneTimerRef,
+                      { requireBoundPromptId: true },
+                    );
+                  }
+                  setConnection((c) => ({ ...c, catchingUp: undefined }));
+                }
+                continue;
+              }
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
                 setPromptStatus((current) =>
@@ -573,6 +803,14 @@ export function DaemonSessionProvider({
                   () => setPromptStatus('idle'),
                 );
               }
+              // ── state_resync_required handling ──────────────────────
+              // Two sub-cases:
+              //   epoch_reset — daemon restarted but ring is intact; reset
+              //     store + rewind lastEventId so subsequent events rebuild
+              //     the transcript from the ring on this same SSE stream.
+              //   ring_evicted — too many events accumulated while we were
+              //     disconnected; the ring lost earlier events, so we must
+              //     break out and do a full session load (PATH B).
               if (event.type === 'state_resync_required') {
                 const reason =
                   typeof event.data === 'object' && event.data !== null
@@ -606,11 +844,19 @@ export function DaemonSessionProvider({
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error);
-              store.dispatch({
-                type: 'error',
-                text: `Skipped malformed daemon event: ${message}`,
+              addNotice({
+                severity: 'warning',
+                category: 'protocol',
+                operation: 'normalize_event',
+                code: 'daemon.event_malformed',
+                message: 'Skipped malformed daemon event',
+                debugMessage: message,
                 recoverable: true,
               });
+              console.warn(
+                '[DaemonSessionProvider] skipped malformed daemon event:',
+                error,
+              );
             }
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -619,7 +865,7 @@ export function DaemonSessionProvider({
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               setPromptStatus('idle');
-              console.warn('[DaemonSessionProvider] SSE stream ended');
+              console.debug('[DaemonSessionProvider] SSE stream ended');
               store.dispatch({
                 type: 'assistant.done',
                 reason: 'stream_ended',
@@ -636,17 +882,13 @@ export function DaemonSessionProvider({
           const message =
             error instanceof Error ? error.message : String(error);
           const failedSessionId = session?.sessionId;
-          if (
-            failedSessionId &&
-            (isAuthFailureHttpError(error) || isTerminalSessionHttpError(error))
-          ) {
+          const isAuthFailure = isAuthFailureHttpError(error);
+          const isTerminal = isTerminalSessionHttpError(error);
+          if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(failedSessionId);
           }
-          store.dispatch({ type: 'error', text: message, recoverable: true });
-          session = undefined;
-          sessionRef.current = undefined;
           clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
           setPromptStatus('idle');
           const pendingLoad = pendingSessionLoadRef.current;
@@ -659,27 +901,36 @@ export function DaemonSessionProvider({
             clearTimeout(pendingLoad.timeout);
             pendingLoad.reject(error);
           }
-          // Auth failures (401 / 403) must NOT retry even when
-          // `autoReconnect: true`. Retrying with the same invalid token
-          // loops forever — the daemon keeps returning 401, each cycle
-          // risks transcript wipes via the sessionId-change branch above,
-          // and the user sees no actionable error state.
-          // Surface as a terminal 'error' connection state regardless of
-          // the autoReconnect setting; the user must update credentials.
-          if (isAuthFailureHttpError(error)) {
-            setConnection({
-              status: 'error',
-              error: message,
-            });
-            return;
-          }
-          if (isTerminalSessionHttpError(error)) {
+          if (isAuthFailure || isTerminal) {
+            // Auth failures (401/403) and terminal session errors (404/410)
+            // must clear the session — the server-side state is gone or
+            // inaccessible, so delta resume is impossible.
+            session = undefined;
+            sessionRef.current = undefined;
+            if (isAuthFailure) {
+              setConnection({ status: 'error', error: message });
+              return;
+            }
             reconnectSessionId = undefined;
             if (restoreSessionId) {
               setRestoreSessionId(undefined);
             }
+          } else {
+            // Retriable error (network failure, timeout, etc.) — preserve
+            // the session so the next iteration skips the full load() and
+            // goes straight to events(). DaemonSessionClient tracks
+            // lastSeenEventId internally; the next SSE subscription sends
+            // Last-Event-ID and the daemon serves only delta events.
+            // The transcript store is NOT reset — new events append to
+            // existing blocks, avoiding a full re-render.
+            console.debug(
+              '[DaemonSessionProvider] retriable SSE error, preserving session for delta resume (sessionId=%s)',
+              session?.sessionId,
+            );
           }
           if (!autoReconnect) {
+            session = undefined;
+            sessionRef.current = undefined;
             setConnection({
               status: 'error',
               error: message,
@@ -728,7 +979,7 @@ export function DaemonSessionProvider({
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
-          new Error('Session load interrupted by cleanup'),
+          new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
@@ -758,6 +1009,9 @@ export function DaemonSessionProvider({
     restoreMode,
     restoreSessionNonce,
     newSessionNonce,
+    clientId,
+    clearNotices,
+    addNotice,
   ]);
 
   useEffect(() => {
@@ -816,6 +1070,7 @@ export function DaemonSessionProvider({
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         passiveAssistantDoneTimerRef,
+        addNotice,
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
@@ -823,19 +1078,21 @@ export function DaemonSessionProvider({
         setRestoreSessionNonce,
         setNewSessionNonce,
       }),
-    [store],
+    [addNotice, store],
   );
   return (
     <DaemonStoreContext.Provider value={store}>
       <DaemonConnectionContext.Provider value={connection}>
         <DaemonPromptStatusContext.Provider value={promptStatus}>
-          <DaemonWorkspaceEventSignalsContext.Provider
-            value={workspaceEventSignals}
-          >
-            <DaemonActionsContext.Provider value={actions}>
-              {children}
-            </DaemonActionsContext.Provider>
-          </DaemonWorkspaceEventSignalsContext.Provider>
+          <DaemonSessionNoticesContext.Provider value={noticesValue}>
+            <DaemonWorkspaceEventSignalsContext.Provider
+              value={workspaceEventSignals}
+            >
+              <DaemonActionsContext.Provider value={actions}>
+                {children}
+              </DaemonActionsContext.Provider>
+            </DaemonWorkspaceEventSignalsContext.Provider>
+          </DaemonSessionNoticesContext.Provider>
         </DaemonPromptStatusContext.Provider>
       </DaemonConnectionContext.Provider>
     </DaemonStoreContext.Provider>
@@ -900,7 +1157,7 @@ function settleActivePromptFromTurnEvent(
 }
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
-  return event.type === 'turn_complete' || event.type === 'turn_error';
+  return event.type === 'turn_complete';
 }
 
 function normalizeAndFilterEvent(
@@ -918,7 +1175,92 @@ function normalizeAndFilterEvent(
     suppressOwnUserEcho: opts.suppressOwnUserEcho,
     includeRawEvent: opts.includeRawEvent,
   });
-  return isPromptLifecycleTurnEvent(event) ? [] : normalized;
+  const goalStatusEvent = normalizeGoalStatusEvent(event);
+  if (isPromptLifecycleTurnEvent(event)) {
+    return goalStatusEvent ? [goalStatusEvent] : [];
+  }
+  return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
+}
+
+function filterDaemonUiEventsForTranscript(
+  sourceEvent: DaemonEvent,
+  events: DaemonUiEvent[],
+  addNotice: AddDaemonSessionNotice,
+): DaemonUiEvent[] {
+  const filtered: DaemonUiEvent[] = [];
+  for (const event of events) {
+    if (event.type !== 'error') {
+      filtered.push(event);
+      continue;
+    }
+    if (sourceEvent.type === 'turn_error') {
+      filtered.push(event);
+      continue;
+    }
+    const notice = addNotice(
+      daemonErrorEventToNotice(sourceEvent, event as DaemonUiErrorEvent),
+    );
+    if (notice.category === 'protocol' || notice.category === 'connection') {
+      console.warn('[DaemonSessionProvider] daemon notice:', notice);
+    }
+  }
+  return filtered;
+}
+
+type DaemonUiErrorEvent = Extract<DaemonUiEvent, { type: 'error' }>;
+
+function daemonErrorEventToNotice(
+  sourceEvent: DaemonEvent,
+  event: DaemonUiErrorEvent,
+): SessionNoticeInput {
+  const base = {
+    message: event.text,
+    debugMessage: event.text,
+    recoverable: event.recoverable,
+  };
+
+  switch (sourceEvent.type) {
+    case 'model_switch_failed':
+      return {
+        ...base,
+        severity: 'error',
+        category: 'user_action',
+        operation: 'switch_model',
+        code: 'daemon.switch_model.failed',
+      };
+    case 'session_died':
+      return {
+        ...base,
+        severity: 'error',
+        category: 'connection',
+        operation: 'stream',
+        code: event.errorKind ?? 'daemon.session_died',
+      };
+    case 'client_evicted':
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'connection',
+        operation: 'stream',
+        code: 'daemon.client_evicted',
+      };
+    case 'stream_error':
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'connection',
+        operation: 'stream',
+        code: event.errorKind ?? 'daemon.stream_error',
+      };
+    default:
+      return {
+        ...base,
+        severity: 'warning',
+        category: 'protocol',
+        operation: 'normalize_event',
+        code: event.code ?? 'daemon.protocol.error',
+      };
+  }
 }
 
 export function useDaemonSession(): DaemonSessionContextValue {
@@ -1019,6 +1361,20 @@ export function useDaemonConnection(): DaemonConnectionState {
   return connection;
 }
 
+export function useDaemonSessionNotices(): {
+  notices: readonly DaemonSessionNotice[];
+  dismissNotice(id: string): void;
+  clearNotices(): void;
+} {
+  const value = useContext(DaemonSessionNoticesContext);
+  if (!value) {
+    throw new Error(
+      'useDaemonSessionNotices must be used within DaemonSessionProvider',
+    );
+  }
+  return value;
+}
+
 function hasActiveGenerationSignal(
   events: ReadonlyArray<{ type: string }>,
 ): boolean {
@@ -1028,6 +1384,88 @@ function hasActiveGenerationSignal(
       event.type === 'thought.text.delta' ||
       event.type === 'tool.update',
   );
+}
+
+function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
+  if (event.type !== 'session_update') return null;
+  const data = isRecord(event.data) ? event.data : undefined;
+  const update = isRecord(data?.['update'])
+    ? data['update']
+    : isRecord(event.data)
+      ? event.data
+      : undefined;
+  if (!update || update['sessionUpdate'] !== 'agent_message_chunk') {
+    return null;
+  }
+  const meta = update['_meta'];
+  if (!isRecord(meta)) return null;
+  const terminal = normalizeGoalTerminal(meta['goalTerminal']);
+  if (terminal) {
+    return createGoalStatusUiEvent(event, terminal);
+  }
+
+  const loop = meta['stopHookLoop'];
+  if (!isRecord(loop)) return null;
+  const goal = loop['goal'];
+  if (!isRecord(goal)) return null;
+  const condition = getString(goal, 'condition');
+  if (!condition) return null;
+
+  // Suppress per-iteration "checking" events from the transcript to avoid
+  // flooding with one card per stop-hook turn. The active goal state is
+  // already visible in the status bar; only terminal events and the initial
+  // "set" event are shown as transcript cards.
+  return null;
+}
+
+function createGoalStatusUiEvent(
+  event: DaemonEvent,
+  status: Record<string, unknown>,
+): DaemonUiEvent {
+  return {
+    type: 'status',
+    ...(event.id !== undefined ? { eventId: event.id } : {}),
+    ...(event.originatorClientId
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
+    text: DAEMON_GOAL_STATUS_SENTINEL_PREFIX + JSON.stringify(status),
+  };
+}
+
+function normalizeGoalTerminal(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const kind = getString(value, 'kind');
+  if (kind !== 'achieved' && kind !== 'failed' && kind !== 'aborted') {
+    return null;
+  }
+  const condition = getString(value, 'condition');
+  if (!condition) return null;
+  const iterations = getNumber(value, 'iterations');
+  const durationMs = getNumber(value, 'durationMs');
+  const lastReason = getString(value, 'lastReason');
+  return {
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(lastReason ? { lastReason } : {}),
+  };
+}
+
+function getString(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const raw = value[key];
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+function getNumber(
+  value: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const raw = value[key];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
 }
 
 function bumpWorkspaceEventSignals(

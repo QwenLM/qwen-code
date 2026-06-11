@@ -14,6 +14,7 @@ import {
   autocompletion,
   closeCompletion,
   completionStatus,
+  moveCompletionSelection,
   startCompletion,
   type CompletionSource,
 } from '@codemirror/autocomplete';
@@ -62,6 +63,7 @@ interface EditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionName?: string;
 }
 
 export interface EditorHandle {
@@ -172,6 +174,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     followupState,
     onAcceptFollowup,
     onDismissFollowup,
+    sessionName,
   },
   ref,
 ) {
@@ -373,7 +376,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return false;
+            return moveCompletionSelection(false)(view);
           }
           if (isBrowsingHistory) {
             closeCompletion(view);
@@ -421,7 +424,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return false;
+            return moveCompletionSelection(true)(view);
           }
           if (isBrowsingHistory) {
             closeCompletion(view);
@@ -1137,7 +1140,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
   return (
     <div className={containerClass} onClick={focus}>
-      <div className={styles.borderTop} />
+      <div className={styles.borderTop}>
+        {sessionName && (
+          <span className={styles.borderTopLabel}>{sessionName}</span>
+        )}
+      </div>
       {searchMode && (
         <div className={styles.searchBar}>
           <span className={styles.searchLabel}>reverse-i-search:</span>

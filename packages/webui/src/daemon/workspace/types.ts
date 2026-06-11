@@ -8,6 +8,9 @@ import type { ReactNode } from 'react';
 import type {
   DaemonAgentMutationResult,
   DaemonAuthProviderId,
+  DaemonAuthProviderCatalog,
+  DaemonAuthProviderInstallRequest,
+  DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonClient,
@@ -84,6 +87,7 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  getCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 
@@ -213,4 +217,8 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonDeviceFlowState>;
   cancelDeviceFlow(deviceFlowId: string): Promise<void>;
   getAuthStatus(): Promise<DaemonAuthStatusSnapshot>;
+  getAuthProviders(): Promise<DaemonAuthProviderCatalog>;
+  installAuthProvider(
+    req: DaemonAuthProviderInstallRequest,
+  ): Promise<DaemonAuthProviderInstallResult>;
 }
