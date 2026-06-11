@@ -945,7 +945,7 @@ export class ChatRecordingService {
    * as a user-visible error or interrupt recording.
    */
   private maybeTriggerAutoTitle(): void {
-    if (this.currentCustomTitle) return;
+    if (this.currentTitleSource === 'manual') return;
     if (this.autoTitleController) return;
     if (this.autoTitleAttempts >= AUTO_TITLE_ATTEMPT_CAP) return;
     // Opt-out env var — lets users silence auto-titling without having to

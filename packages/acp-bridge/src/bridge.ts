@@ -2953,17 +2953,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
           initTimeoutMs,
           'branchSession',
-        )) as { newSessionId: string; title: string };
+        )) as { newSessionId: string; title?: string; displayName?: string };
 
         if (
           !result ||
-          typeof result.newSessionId !== 'string' ||
-          typeof result.title !== 'string'
+          typeof result.newSessionId !== 'string'
         ) {
           throw new Error(
             `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
           );
         }
+        const branchDisplayName = result.displayName ?? result.title ?? result.newSessionId.slice(0, 8);
 
         let restored;
         try {
@@ -2990,12 +2990,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
 
         const newEntry = byId.get(result.newSessionId);
-        if (newEntry) newEntry.displayName = result.title;
+        if (newEntry) newEntry.displayName = branchDisplayName;
 
         const eventData = {
           sourceSessionId: sessionId,
           newSessionId: result.newSessionId,
-          displayName: result.title,
+          displayName: branchDisplayName,
         };
         const branchEnvelope = {
           type: 'session_branched' as const,
@@ -3007,10 +3007,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         return {
           ...restored,
-          title: result.title,
+          displayName: branchDisplayName,
           forkedFrom: {
             sessionId,
-            title: entry.displayName ?? sessionId.slice(0, 8),
+            displayName: entry.displayName ?? sessionId.slice(0, 8),
           },
         };
       });
@@ -3152,6 +3152,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
+          // Persist to session JSONL so it survives daemon restart
+          if (nextDisplayName !== undefined) {
+            entry.connection
+              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+                sessionId,
+                displayName: nextDisplayName,
+                titleSource: 'manual',
+              })
+              .catch((err: unknown) => {
+                writeStderrLine(
+                  `qwen serve: failed to persist displayName for ${sessionId}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              });
+          }
           try {
             entry.events.publish({
               type: 'session_metadata_updated',

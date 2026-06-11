@@ -213,7 +213,7 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd: item.cwd,
       createdAt: item.startTime,
       updatedAt: new Date(item.mtime).toISOString(),
-      title: item.customTitle ?? item.prompt,
+      displayName: item.customTitle ?? item.prompt,
       clientCount: 0,
       hasActivePrompt: false,
     });
@@ -226,7 +226,7 @@ export async function listWorkspaceSessionsForResponse(
         ...existing,
         ...live,
         createdAt: existing?.createdAt ?? live.createdAt,
-        title: live.title ?? existing?.title,
+        displayName: live.displayName ?? existing?.displayName,
         updatedAt: live.updatedAt ?? existing?.updatedAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,
