@@ -40,6 +40,26 @@ export interface SessionUpdateMeta {
   durationMs?: number | null;
   timestamp?: number | null;
   availableSkills?: string[] | null;
+  availableSkillDetails?: Array<{
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+    modelInvocable?: boolean;
+  }> | null;
+  source?: string | null;
+  qwenDiscreteMessage?: boolean | null;
+  // Set on the summary emitted by MessageRewriteMiddleware so consumers can
+  // distinguish the rewritten copy from the original chunk (which carries the
+  // same qwenDiscreteMessage flag) and avoid persisting both.
+  rewritten?: boolean | null;
+  backgroundTask?: {
+    taskId?: string;
+    status?: string;
+    kind?: string;
+    toolUseId?: string;
+  } | null;
 }
 
 export {

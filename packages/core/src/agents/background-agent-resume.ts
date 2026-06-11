@@ -575,7 +575,9 @@ export class BackgroundAgentResumeService {
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
         : [
-            ...(await getInitialChatHistory(bgConfig as Config)),
+            ...(await getInitialChatHistory(bgConfig as Config, undefined, {
+              includeDeferredToolsReminder: false,
+            })),
             ...recovery.history,
           ];
       const promptMessages = [...operation.continuationMessages];

@@ -28,7 +28,10 @@ import {
   getEffectiveValue,
 } from '../../utils/settingsUtils.js';
 import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
@@ -61,7 +64,8 @@ export function SettingsDialog({
   config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
-  const { vimEnabled, toggleVimEnabled } = useVimMode();
+  const { vimEnabled } = useVimModeState();
+  const { toggleVimEnabled } = useVimModeActions();
   // Get compact mode context to sync compact mode changes
   const { compactMode, setCompactMode } = useCompactMode();
   const uiActions = useUIActions();

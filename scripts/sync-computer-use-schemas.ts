@@ -1,19 +1,19 @@
 #!/usr/bin/env tsx
 /**
  * Regenerate packages/core/src/tools/computer-use/schemas.ts from a
- * live upstream open-computer-use MCP server.
+ * live @qwen-code/open-computer-use MCP server.
  *
  * Usage:
  *   npx tsx scripts/sync-computer-use-schemas.ts [packageSpec]
  *
- * The default is the currently-pinned version from
+ * The default is the currently-pinned package + version from
  * `packages/core/src/tools/computer-use/constants.ts`
- * (PINNED_OPEN_COMPUTER_USE_VERSION). Running with no args verifies
- * the current pin is still in sync; pass an explicit version
- * (e.g. `open-computer-use@0.1.52`) to upgrade.
+ * (PINNED_OPEN_COMPUTER_USE_PACKAGE_NAME / _VERSION). Running with no
+ * args verifies the current pin is still in sync; pass an explicit spec
+ * (e.g. `@qwen-code/open-computer-use@0.2.1`) to upgrade.
  *
- * Bumping the upstream pin is a 4-step procedure documented in
- * constants.ts — read that JSDoc first.
+ * Bumping the pin is a 4-step procedure documented in constants.ts —
+ * read that JSDoc first.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -21,15 +21,17 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-// Keep in sync with PINNED_OPEN_COMPUTER_USE_VERSION in
-// packages/core/src/tools/computer-use/constants.ts. Duplicated as a
-// literal here because importing TypeScript from `scripts/` into the
-// package tree adds tooling complexity for a single-string lookup.
-const DEFAULT_PINNED_VERSION = '0.1.51';
+// Keep in sync with PINNED_OPEN_COMPUTER_USE_PACKAGE_NAME /
+// PINNED_OPEN_COMPUTER_USE_VERSION in
+// packages/core/src/tools/computer-use/constants.ts. Duplicated as
+// literals here because importing TypeScript from `scripts/` into the
+// package tree adds tooling complexity for a two-string lookup.
+const DEFAULT_PACKAGE_NAME = '@qwen-code/open-computer-use';
+const DEFAULT_PINNED_VERSION = '0.2.3';
 
 async function main(): Promise<void> {
   const packageSpec =
-    process.argv[2] ?? `open-computer-use@${DEFAULT_PINNED_VERSION}`;
+    process.argv[2] ?? `${DEFAULT_PACKAGE_NAME}@${DEFAULT_PINNED_VERSION}`;
 
   const transport = new StdioClientTransport({
     command: 'npx',

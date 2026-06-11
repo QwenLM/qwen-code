@@ -453,26 +453,6 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
-      checkpointing: {
-        type: 'object',
-        label: 'Checkpointing',
-        category: 'General',
-        requiresRestart: true,
-        default: {},
-        description: 'Session checkpointing settings.',
-        showInDialog: false,
-        properties: {
-          enabled: {
-            type: 'boolean',
-            label: 'Enable Checkpointing',
-            category: 'General',
-            requiresRestart: true,
-            default: false,
-            description: 'Enable session checkpointing for recovery',
-            showInDialog: false,
-          },
-        },
-      },
       debugKeystrokeLogging: {
         type: 'boolean',
         label: 'Debug Keystroke Logging',
@@ -525,6 +505,19 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Play terminal bell sound when response completes or needs approval.',
+        showInDialog: true,
+      },
+      preventSystemSleep: {
+        type: 'boolean',
+        label: 'Prevent System Sleep While Running',
+        category: 'General',
+        // Read once at startup via Config.preventSystemSleep (a readonly field
+        // captured in loadCliConfig), so a runtime toggle only takes effect
+        // after restart.
+        requiresRestart: true,
+        default: true,
+        description:
+          'Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.',
         showInDialog: true,
       },
       chatRecording: {
@@ -857,6 +850,16 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: true,
       },
+      compactInline: {
+        type: 'boolean',
+        label: 'Compact Inline',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.',
+        showInDialog: true,
+      },
       useTerminalBuffer: {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
@@ -1078,7 +1081,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         propagateTraceContext: {
           description:
-            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
           type: 'boolean',
           default: false,
         },
@@ -1513,6 +1516,35 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Configuration for skills (SKILL.md-based capabilities) exposed to ' +
+      'the model.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Skills',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill names to hide. Matched case-insensitively against the skill ' +
+          'name. Hidden skills do not appear in <available_skills> or as ' +
+          '/<name> slash commands. UNION-merged across systemDefaults/user/' +
+          'workspace/system scopes — workspace cannot remove entries defined ' +
+          'in higher scopes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',
@@ -1568,6 +1600,72 @@ const SETTINGS_SCHEMA = {
         description: 'Settings consumed by the AUTO approval mode classifier.',
         showInDialog: false,
         properties: {
+          classifier: {
+            type: 'object',
+            label: 'Auto Mode Classifier',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Runtime controls for the AUTO approval mode classifier.',
+            showInDialog: false,
+            properties: {
+              timeouts: {
+                type: 'object',
+                label: 'Auto Mode Classifier Timeouts',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description:
+                  'Timeouts for the two AUTO classifier stages, in milliseconds.',
+                showInDialog: false,
+                properties: {
+                  stage1Ms: {
+                    type: 'number',
+                    label: 'Auto Mode Stage 1 Timeout',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined as number | undefined,
+                    description:
+                      'Timeout in milliseconds for the fast stage-1 AUTO classifier.',
+                    showInDialog: false,
+                  },
+                  stage2Ms: {
+                    type: 'number',
+                    label: 'Auto Mode Stage 2 Timeout',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined as number | undefined,
+                    description:
+                      'Timeout in milliseconds for the stage-2 AUTO classifier review.',
+                    showInDialog: false,
+                  },
+                },
+              },
+              thinking: {
+                type: 'object',
+                label: 'Auto Mode Classifier Thinking',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description:
+                  'Provider/API-level thinking controls for the AUTO classifier.',
+                showInDialog: false,
+                properties: {
+                  stage2Enabled: {
+                    type: 'boolean',
+                    label: 'Auto Mode Stage 2 Thinking',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: false,
+                    description:
+                      'Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.',
+                    showInDialog: false,
+                  },
+                },
+              },
+            },
+          },
           hints: {
             type: 'object',
             label: 'Classifier Hints',
@@ -1589,14 +1687,45 @@ const SETTINGS_SCHEMA = {
                 showInDialog: false,
                 mergeStrategy: MergeStrategy.UNION,
               },
-              deny: {
+              softDeny: {
                 type: 'array',
-                label: 'Auto Mode Deny Hints',
+                label: 'Auto Mode Soft-Deny Hints',
                 category: 'Tools',
                 requiresRestart: true,
                 default: undefined as string[] | undefined,
                 description:
-                  'Natural-language descriptions of actions AUTO mode should block.',
+                  'Natural-language descriptions of destructive / irreversible ' +
+                  'actions AUTO mode should block unless the user explicitly ' +
+                  'authorised that exact action and scope.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              hardDeny: {
+                type: 'array',
+                label: 'Auto Mode Hard-Deny Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of security-boundary actions ' +
+                  'the AUTO classifier must block even when an autoMode ' +
+                  'allow hint or recent user request would normally ' +
+                  'authorise them. Does not override permissions.allow; use ' +
+                  'permissions.deny for deterministic hard permission rules.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              deny: {
+                type: 'array',
+                label: 'Auto Mode Deny Hints (legacy)',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Deprecated alias for `softDeny`. Entries here are merged ' +
+                  'into the SOFT BLOCK user section so existing settings keep ' +
+                  'working; new configurations should use `softDeny` or ' +
+                  '`hardDeny` instead.',
                 showInDialog: false,
                 mergeStrategy: MergeStrategy.UNION,
               },
@@ -2277,6 +2406,18 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      UserPromptExpansion: {
+        type: 'array',
+        label: 'Prompt Expansion Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a slash command expands into a prompt.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

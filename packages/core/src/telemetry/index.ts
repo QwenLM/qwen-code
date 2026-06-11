@@ -108,6 +108,7 @@ export {
   recordInvalidChunk,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   // Performance monitoring functions
   recordStartupPerformance,
   recordMemoryUsage,
@@ -152,6 +153,9 @@ export {
   endToolBlockedOnUserSpan,
   startHookSpan,
   endHookSpan,
+  startSubagentSpan,
+  endSubagentSpan,
+  runInSubagentSpanContext,
   getActiveInteractionSpan,
   truncateSpanError,
 } from './session-tracing.js';
@@ -166,6 +170,10 @@ export type {
   HookEvent,
   StartHookSpanOptions,
   HookSpanMetadata,
+  SubagentInvocationKind,
+  SubagentStatus,
+  StartSubagentSpanOptions,
+  SubagentSpanMetadata,
 } from './session-tracing.js';
 export type { TelemetryRuntimeConfig } from './runtime-config.js';
 export {
@@ -207,3 +215,5 @@ export {
   addToolResultAttributes,
   truncateContent,
 } from './detailed-span-attributes.js';
+export { getTraceContext, formatTraceparent } from './trace-context.js';
+export type { TraceContext } from './trace-context.js';

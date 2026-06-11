@@ -985,7 +985,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+          // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
+          // mutates the buffer/index. When the suggestion's command opted
+          // into `submitOnAccept` (a leaf command whose bare action takes
+          // no further arg, e.g. `/skills`), submit `/<value>` directly
+          // instead of just filling the buffer and waiting for a second
+          // Enter. This makes `/skil<Enter>` land in the dialog in one
+          // keystroke.
+          const targetIndex =
+            completion.activeSuggestionIndex === -1
+              ? 0
+              : completion.activeSuggestionIndex;
+          const accepted =
+            targetIndex >= 0 && targetIndex < completion.suggestions.length
+              ? completion.suggestions[targetIndex]
+              : undefined;
           acceptActiveCompletionSuggestion();
+          // Only auto-submit on Enter — `Command.ACCEPT_SUGGESTION`
+          // matches BOTH Tab and Enter (see keyBindings.ts and the
+          // identical caveat at lines 861-862). Without the
+          // `key.name === 'return'` gate, `/skil<Tab>` would auto-submit
+          // and open the dialog, breaking the standard shell convention
+          // where Tab means "complete without executing." The implicit
+          // contract `submitOnAccept` was designed for is "press Enter on
+          // the highlighted suggestion, no second Enter needed."
+          if (accepted?.submitOnAccept && key.name === 'return') {
+            handleSubmitAndClear(`/${accepted.value}`);
+          }
           return true;
         }
       }

@@ -108,6 +108,21 @@
   font-style: italic;
 }
 
+.detailCommand {
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent-color);
+  cursor: pointer;
+}
+
+.detailCommand:hover,
+.detailCommand:focus-visible {
+  text-decoration: underline;
+}
+
 .estimateHint {
   margin-bottom: 8px;
   color: var(--warning-color);

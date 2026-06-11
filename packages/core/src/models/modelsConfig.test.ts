@@ -292,6 +292,59 @@ describe('ModelsConfig', () => {
     expect(gc.maxRetries).toBe(1);
   });
 
+  it.each([
+    { kind: 'cli' as const, detail: '--base-url' },
+    { kind: 'env' as const, envKey: 'OPENAI_BASE_URL' },
+    { kind: 'settings' as const, settingsPath: 'model.baseUrl' },
+  ])(
+    'should preserve $kind baseUrl during same-model auth refresh',
+    (baseUrlSource) => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'shared-base-model',
+            name: 'Shared Base Model',
+            baseUrl: 'https://provider-default.example.com/v1',
+            envKey: 'SHARED_BASE_URL_KEY',
+            generationConfig: {
+              timeout: 111,
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+        generationConfig: {
+          model: 'shared-base-model',
+          baseUrl: 'https://shared-proxy.example.com/v1',
+          apiKey: 'resolved-key',
+        },
+        generationConfigSources: {
+          model: { kind: 'settings', settingsPath: 'model.name' },
+          baseUrl: baseUrlSource,
+          apiKey: { kind: 'settings', settingsPath: 'model.apiKey' },
+        },
+      });
+
+      modelsConfig.syncAfterAuthRefresh(
+        AuthType.USE_OPENAI,
+        'shared-base-model',
+      );
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.model).toBe('shared-base-model');
+      expect(gc.baseUrl).toBe('https://shared-proxy.example.com/v1');
+      expect(gc.apiKey).toBe('resolved-key');
+      expect(gc.timeout).toBe(111);
+
+      const sources = modelsConfig.getGenerationConfigSources();
+      expect(sources['baseUrl']).toEqual(baseUrlSource);
+      expect(sources['timeout']?.kind).toBe('modelProviders');
+    },
+  );
+
   it('should preserve settings generationConfig when modelId does not exist in registry', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -2419,6 +2472,81 @@ describe('ModelsConfig', () => {
 
       gc = currentGenerationConfig(geminiConfig);
       expect(gc.samplingParams).toBeUndefined();
+    });
+  });
+
+  describe('getModelDisplayName', () => {
+    it('should return resolved.name when model is found in registry', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4o',
+            name: 'GPT-4o',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      expect(modelsConfig.getModelDisplayName('gpt-4o')).toBe('GPT-4o');
+    });
+
+    it('should return raw modelId when currentAuthType is falsy', () => {
+      const modelsConfig = new ModelsConfig();
+      // currentAuthType is undefined by default
+
+      expect(modelsConfig.getModelDisplayName('some-model')).toBe('some-model');
+    });
+
+    it('should return raw modelId when model is not found in registry', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4o',
+            name: 'GPT-4o',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      // 'unknown-model' is not in the registry
+      expect(modelsConfig.getModelDisplayName('unknown-model')).toBe(
+        'unknown-model',
+      );
+    });
+
+    it('should return raw modelId when model.name equals model.id', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'coder-model',
+            name: 'coder-model',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      // name === id, so registry returns the id as name
+      expect(modelsConfig.getModelDisplayName('coder-model')).toBe(
+        'coder-model',
+      );
     });
   });
 });

@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -89,6 +90,32 @@ const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
 ];
+
+const RELOAD_EXCLUDED_KEYS = new Set([
+  ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  'QWEN_SERVER_TOKEN',
+  'QWEN_CLI_ENTRY',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'BASH_ENV',
+  'ENV',
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+]);
+
+const dotEnvSourcedKeys = new Set<string>();
+const settingsEnvSourcedKeys = new Set<string>();
+const lastReloadSnapshot = new Map<string, string>();
+let lastReloadSnapshotSeeded = false;
 
 // Settings version to track migration state
 export const SETTINGS_VERSION = 4;
@@ -464,6 +491,10 @@ export class LoadedSettings {
   }
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
+    // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+    if (key === 'model.name' && typeof value === 'string') {
+      value = stripRuntimeSnapshotPrefix(value);
+    }
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
@@ -874,6 +905,12 @@ export function loadEnvironment(settings: Settings): void {
 
           if (!Object.hasOwn(process.env, key)) {
             process.env[key] = parsedEnv[key];
+            dotEnvSourcedKeys.add(key);
+          }
+          // Seed snapshot with ALL parsed keys (not just written ones)
+          // so child processes can detect deletions on first reload.
+          if (!lastReloadSnapshotSeeded) {
+            lastReloadSnapshot.set(key, parsedEnv[key]!);
           }
         }
       }
@@ -892,9 +929,158 @@ export function loadEnvironment(settings: Settings): void {
       }
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
+        settingsEnvSourcedKeys.add(key);
+      }
+      if (
+        !lastReloadSnapshotSeeded &&
+        typeof value === 'string' &&
+        !lastReloadSnapshot.has(key)
+      ) {
+        lastReloadSnapshot.set(key, value);
       }
     }
   }
+  lastReloadSnapshotSeeded = true;
+}
+
+export interface EnvReloadResult {
+  updatedKeys: string[];
+  removedKeys: string[];
+}
+
+/**
+ * Only keys previously set by loadEnvironment() are overwritten;
+ * shell-exported variables are never touched.
+ * Fully synchronous — no TOCTOU window between delete and re-add.
+ */
+export function reloadEnvironment(
+  settings: Settings,
+  workspaceCwd: string,
+): EnvReloadResult {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const envFilePath = findEnvFile(settings, workspaceCwd, userLevelPaths);
+
+  if (process.env['CLOUD_SHELL'] === 'true') {
+    setUpCloudShellEnvironment(envFilePath);
+  }
+
+  // Build the set of new keys from .env (higher priority) + settings.env
+  let dotEnvReadFailed = false;
+  const newDotEnvKeys = new Map<string, string>();
+  const newSettingsEnvKeys = new Map<string, string>();
+
+  if (envFilePath) {
+    try {
+      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFileContent);
+      const excludedVars =
+        settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+      const normalizedEnvFilePath = path.normalize(envFilePath);
+      const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
+      const isQwenScopedEnvFile =
+        isHomeScopedEnvFile ||
+        path.basename(path.dirname(normalizedEnvFilePath)) === QWEN_DIR;
+
+      for (const key in parsedEnv) {
+        if (!Object.hasOwn(parsedEnv, key)) continue;
+        if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+        if (
+          !isHomeScopedEnvFile &&
+          PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)
+        ) {
+          continue;
+        }
+        if (!isQwenScopedEnvFile && excludedVars.includes(key)) continue;
+        newDotEnvKeys.set(key, parsedEnv[key]!);
+      }
+    } catch {
+      dotEnvReadFailed = true;
+    }
+  }
+
+  if (settings.env) {
+    for (const [key, value] of Object.entries(settings.env)) {
+      if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
+      if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
+      if (typeof value !== 'string') continue;
+      if (newDotEnvKeys.has(key)) continue;
+      // When .env read failed, use the snapshot as the shadow set so
+      // settings.env keys that were previously shadowed by .env don't
+      // accidentally overwrite the still-live .env values in process.env.
+      if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
+      newSettingsEnvKeys.set(key, value);
+    }
+  }
+
+  // Union of all new keys
+  const allNewKeys = new Set([
+    ...newDotEnvKeys.keys(),
+    ...newSettingsEnvKeys.keys(),
+  ]);
+
+  const updatedKeys: string[] = [];
+  const removedKeys: string[] = [];
+
+  // Delete keys previously known (from tracking Sets OR the boot snapshot)
+  // that are no longer in any source file. The snapshot covers keys that
+  // ACP children inherited from the daemon without tracking.
+  // Skip deletion entirely if the .env file became unreadable — treat as
+  // transient I/O failure rather than intentional key removal.
+  if (!dotEnvReadFailed) {
+    const previouslyKnown = new Set([
+      ...lastReloadSnapshot.keys(),
+      ...dotEnvSourcedKeys,
+      ...settingsEnvSourcedKeys,
+    ]);
+    for (const key of previouslyKnown) {
+      if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
+        delete process.env[key];
+        removedKeys.push(key);
+      }
+    }
+  }
+
+  // Force-write all source keys. RELOAD_EXCLUDED_KEYS are already filtered
+  // at parse time so dangerous keys (PATH, HOME, etc.) never reach here.
+  // This unconditional write is necessary because ACP children inherit
+  // daemon env without tracking, so the tracking-based guard would miss them.
+  for (const [key, value] of newDotEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+  for (const [key, value] of newSettingsEnvKeys) {
+    if (process.env[key] !== value) {
+      updatedKeys.push(key);
+    }
+    process.env[key] = value;
+  }
+
+  // Update tracking sets and snapshot only when the .env file was readable.
+  // A transient read failure must not wipe provenance — the stale tracking
+  // state is needed so the next successful reload can still detect deletions.
+  if (!dotEnvReadFailed) {
+    dotEnvSourcedKeys.clear();
+    for (const key of newDotEnvKeys.keys()) {
+      dotEnvSourcedKeys.add(key);
+    }
+    lastReloadSnapshot.clear();
+    for (const [key, value] of newDotEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+    for (const [key, value] of newSettingsEnvKeys) {
+      lastReloadSnapshot.set(key, value);
+    }
+  }
+  // settings.env is always readable (from settings.json, not a file),
+  // so its tracking set is always updated.
+  settingsEnvSourcedKeys.clear();
+  for (const key of newSettingsEnvKeys.keys()) {
+    settingsEnvSourcedKeys.add(key);
+  }
+
+  return { updatedKeys, removedKeys };
 }
 
 export const CORRUPTED_SUFFIX = '.corrupted';
@@ -903,10 +1089,19 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  * Load and merge settings from all scopes:
  * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
  */
+export interface LoadSettingsOptions {
+  consumeCorruptionEnvVars?: boolean;
+  skipLoadEnvironment?: boolean;
+}
+
 export function loadSettings(
   workspaceDir: string = process.cwd(),
-  consumeCorruptionEnvVars: boolean = true,
+  consumeCorruptionEnvVars: boolean | LoadSettingsOptions = true,
 ): LoadedSettings {
+  const opts: LoadSettingsOptions =
+    typeof consumeCorruptionEnvVars === 'object'
+      ? consumeCorruptionEnvVars
+      : { consumeCorruptionEnvVars };
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
@@ -1047,7 +1242,7 @@ export function loadSettings(
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
-          consumeCorruptionEnvVars &&
+          (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
           scope === SettingScope.User
@@ -1242,7 +1437,9 @@ export function loadSettings(
 
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  loadEnvironment(tempMergedSettings);
+  if (!opts.skipLoadEnvironment) {
+    loadEnvironment(tempMergedSettings);
+  }
 
   // Create LoadedSettings first
 

@@ -57,8 +57,14 @@ vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
 vi.mock('./session-context.js');
+vi.mock('./trace-context.js');
+vi.mock('./tracer.js', () => ({
+  createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
+}));
+
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
+import { setShellTracePropagation } from './trace-context.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 
@@ -1278,5 +1284,56 @@ describe('refreshSessionContext', () => {
     refreshSessionContext('some-session');
 
     expect(setSessionContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('shell trace propagation wiring', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig = {
+      getTelemetryEnabled: () => true,
+      getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
+      getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
+      getTelemetryTarget: () => 'local',
+      getTelemetryOutfile: () => undefined,
+      getTelemetryIncludeSensitiveSpanAttributes: () => false,
+      getTelemetryResourceAttributes: () => ({}),
+      getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
+      getOutboundCorrelationPropagateTraceContext: () => false,
+      isInteractive: () => false,
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await shutdownTelemetry();
+  });
+
+  it('sets shell trace propagation on init based on config', () => {
+    const config = {
+      ...mockConfig,
+      getOutboundCorrelationPropagateTraceContext: () => true,
+    } as unknown as Config;
+
+    initializeTelemetry(config);
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(true);
+  });
+
+  it('resets shell trace propagation on shutdown', async () => {
+    initializeTelemetry(mockConfig);
+    vi.mocked(setShellTracePropagation).mockClear();
+
+    await shutdownTelemetry();
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(false);
   });
 });

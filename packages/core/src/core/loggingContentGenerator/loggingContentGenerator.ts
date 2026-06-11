@@ -62,6 +62,34 @@ import {
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
 import { hasUserVisibleContent } from './streamContentDetection.js';
+import {
+  retryContext,
+  type RetryAttemptContext,
+} from '../../utils/retryContext.js';
+
+/**
+ * Phase 4b — read the active retry context once, default attempt to 1 when
+ * absent (warmup/side-queries/direct calls). Returns the fields in the exact
+ * shape consumed by `endLLMRequestSpan` so callers can spread the result.
+ *
+ * Called in the SYNCHRONOUS PRELUDE of `generateContent` / `generateContentStream`
+ * — before the first await — because the streaming path returns an
+ * AsyncGenerator that's iterated AFTER `retryWithBackoff` has resolved and
+ * the ALS frame has exited. The closure carries this snapshot to all later
+ * endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+ */
+function snapshotRetryMetadata(): {
+  attempt: number;
+  requestSetupMs?: number;
+  retryTotalDelayMs?: number;
+} {
+  const ctx: RetryAttemptContext | undefined = retryContext.getStore();
+  return {
+    attempt: ctx?.attempt ?? 1,
+    requestSetupMs: ctx?.requestSetupMs,
+    retryTotalDelayMs: ctx?.retryTotalDelayMs,
+  };
+}
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -213,6 +241,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
+    // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', false);
@@ -293,6 +325,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           (response.candidates?.[0]?.finishReason as string) || undefined,
         thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
         subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       return response;
     } catch (error) {
@@ -312,6 +345,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         errorType: getErrorType(error),
         errorStatusCode: getErrorStatus(error),
         subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
@@ -334,6 +368,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Phase 4b — snapshot retry context in the synchronous prelude. This is
+    // the only point where the ALS frame from `retryWithBackoff` is guaranteed
+    // to be active for the streaming path: once this function returns the
+    // AsyncGenerator, the caller iterates AFTER `retryWithBackoff` has
+    // resolved and the frame has exited. Threaded as a parameter to
+    // loggingStreamWrapper so its closure carries the snapshot to all later
+    // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', true);
@@ -394,6 +437,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         errorType: getErrorType(error),
         errorStatusCode: getErrorStatus(error),
         subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -427,6 +471,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         llmSpan,
         spanContext,
         req.config?.abortSignal,
+        retrySnapshot,
       ),
     );
   }
@@ -462,6 +507,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     span?: Span,
     spanContext?: Context,
     abortSignal?: AbortSignal,
+    // Phase 4b — snapshot of retry context captured BEFORE the stream wrapper
+    // returned, when the ALS frame from `retryWithBackoff` was still active.
+    // Closure-carried to every endLLMRequestSpan callsite below so the
+    // idle-timeout `setTimeout` callback sees the same values as the
+    // entry-time read.
+    retrySnapshot?: ReturnType<typeof snapshotRetryMetadata>,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -520,6 +571,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               error: 'Stream span timed out (idle)',
               responseId: firstResponseId || undefined,
               subagentName: subagentName || undefined,
+              ...retrySnapshot,
             });
             spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
@@ -653,6 +705,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           subagentName: subagentName || undefined,
           errorType: lastError ? getErrorType(lastError) : undefined,
           errorStatusCode: lastError ? getErrorStatus(lastError) : undefined,
+          ...retrySnapshot,
         });
       }
     }
