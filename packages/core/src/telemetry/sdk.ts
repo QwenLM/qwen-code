@@ -584,7 +584,11 @@ export function initializeTelemetry(config: TelemetryRuntimeConfig): void {
  */
 export function refreshSessionContext(sessionId: string): void {
   if (!telemetryInitialized) return;
-  setSessionContext(undefined, sessionId);
+  try {
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
+  } catch (error) {
+    createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
+  }
 }
 
 export async function shutdownTelemetry(): Promise<void> {
