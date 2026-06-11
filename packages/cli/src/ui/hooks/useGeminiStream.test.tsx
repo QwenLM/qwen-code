@@ -5613,7 +5613,7 @@ describe('useGeminiStream', () => {
     it('renders active goal StopHookLoop as a goal_status checking card', async () => {
       mockGetActiveGoal.mockReturnValue({
         condition: 'finish the refactor',
-        iterations: 2,
+        iterations: 7,
         setAt: 100,
         tokensAtStart: 0,
         hookId: 'goal-hook',
@@ -5644,7 +5644,7 @@ describe('useGeminiStream', () => {
             type: 'goal_status',
             kind: 'checking',
             condition: 'finish the refactor',
-            iterations: 2,
+            iterations: 7,
             lastReason: 'not enough evidence yet',
           }),
           expect.any(Number),

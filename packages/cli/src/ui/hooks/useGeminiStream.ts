@@ -1370,7 +1370,7 @@ export const useGeminiStream = (
             type: MessageType.GOAL_STATUS,
             kind: 'checking',
             condition: activeGoal.condition,
-            iterations: value.iterationCount,
+            iterations: activeGoal.iterations,
             lastReason:
               activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
           } as HistoryItemWithoutId,
