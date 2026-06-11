@@ -78,6 +78,27 @@
   overflow-y: auto;
 }
 
+/* Compact live stream: 5-line window pinned to the tail via JS. */
+.streamCollapsed {
+  max-height: calc(5 * 1.6em);
+  overflow: hidden;
+}
+
+.streamToggle {
+  display: block;
+  margin: 2px 0 0 auto;
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--text-dimmed) 60%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.streamToggle:hover {
+  color: var(--text-dimmed);
+}
+
 .tabBar {
   display: flex;
   gap: 0;

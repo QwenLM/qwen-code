@@ -14,37 +14,53 @@ import styles from './AssistantMessage.module.css';
 interface AssistantMessageProps {
   content: string;
   thinking?: string;
+  isStreaming?: boolean;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   thinking,
+  isStreaming,
 }: AssistantMessageProps) {
   const compactMode = useContext(CompactModeContext);
   const { compactThinking } = useWebShellCustomization();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
-  const thinkingExpandedRef = useRef(thinkingExpanded);
 
   const collapsed = compactThinking && !thinkingExpanded;
-  thinkingExpandedRef.current = thinkingExpanded;
+  // While thinking is still streaming (no content yet), the collapsed
+  // preview follows the tail so the latest thought stays visible.
+  const streamingTail = collapsed && !!isStreaming && !content;
+
+  // Re-check on content growth: the clamped box stops resizing once it
+  // hits 5 lines, so a ResizeObserver alone misses later overflow.
+  useEffect(() => {
+    const el = previewRef.current;
+    if (!el || !collapsed) return;
+    setOverflowing(el.scrollHeight > el.clientHeight);
+  }, [collapsed, thinking]);
 
   useEffect(() => {
     const el = previewRef.current;
-    if (!el || !compactThinking) return;
+    if (!el || !collapsed) return;
 
     const check = () => {
-      if (thinkingExpandedRef.current) return;
       setOverflowing(el.scrollHeight > el.clientHeight);
     };
-
-    check();
 
     const observer = new ResizeObserver(check);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [compactThinking, thinkingExpanded]);
+  }, [collapsed]);
+
+  useEffect(() => {
+    const el = previewRef.current;
+    if (!el || !collapsed) return;
+    // Tail mode pins the newest line into view; when streaming ends the
+    // same element switches back to line-clamp, which needs scrollTop 0.
+    el.scrollTop = streamingTail ? el.scrollHeight : 0;
+  }, [collapsed, streamingTail, thinking]);
 
   const handleToggle = useCallback(() => {
     setThinkingExpanded((v) => !v);
@@ -58,10 +74,17 @@ export const AssistantMessage = memo(function AssistantMessage({
           <div className={styles.thinkingBody}>
             {collapsed ? (
               <div className={styles.thinkingPreviewWrap}>
-                <div ref={previewRef} className={styles.thinkingPreview}>
+                <div
+                  ref={previewRef}
+                  className={
+                    streamingTail
+                      ? styles.thinkingPreviewTail
+                      : styles.thinkingPreview
+                  }
+                >
                   {thinking}
                 </div>
-                {compactThinking && overflowing && (
+                {overflowing && (
                   <button
                     className={styles.expandToggle}
                     onClick={handleToggle}
