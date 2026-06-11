@@ -165,10 +165,7 @@ export function KeypressProvider({
   );
 
   useEffect(() => {
-    const wasRaw = stdin.isRaw;
-    if (wasRaw === false) {
-      setRawMode(true);
-    }
+    setRawMode(true);
 
     // Use pre-drained captured input passed from outside React.
     // Draining happens before render() so StrictMode's mount/cleanup/remount
@@ -196,6 +193,7 @@ export function KeypressProvider({
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+    let swallowingSgrMouse = false;
 
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
@@ -678,6 +676,23 @@ export function KeypressProvider({
         return;
       }
 
+      // SGR mouse sequences (\x1b[<...M or \x1b[<...m) are handled by
+      // useMouseEvents via ink's useInput pipeline. readline's CSI parser
+      // treats the `<` parameter byte as a final byte, splitting the
+      // sequence into a CSI event (\x1b[<) followed by individual character
+      // events (digits, semicolons, M/m). Without this filter, those
+      // trailing characters would appear as typed text in the input box.
+      if (swallowingSgrMouse) {
+        if (key.name === 'm' || key.sequence === 'M') {
+          swallowingSgrMouse = false;
+        }
+        return;
+      }
+      if (key.sequence === `${ESC}[<`) {
+        swallowingSgrMouse = true;
+        return;
+      }
+
       // Ctrl+C is an always-available escape hatch. It MUST be processed
       // before the `isPaste` branch below, otherwise a stuck paste mode
       // (paste-start without paste-end) silently buffers every key —
@@ -1148,10 +1163,7 @@ export function KeypressProvider({
 
       rl.close();
 
-      // Restore the terminal to its original state.
-      if (wasRaw === false) {
-        setRawMode(false);
-      }
+      setRawMode(false);
 
       if (backslashTimeout) {
         clearTimeout(backslashTimeout);
