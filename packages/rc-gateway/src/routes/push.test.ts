@@ -391,6 +391,69 @@ describe('push routes', () => {
     );
   });
 
+  it('PATCH sets maxPerHour -> 200 and GET shows it (cycle 46)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxPerHour: 10 }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { maxPerHour?: unknown };
+    expect(body.maxPerHour).toBe(10);
+    expect(store.get(rec.id)!.maxPerHour).toBe(10);
+    const list = await fetch(`${url}/rc/push/subscriptions`);
+    const lb = (await list.json()) as {
+      subscriptions: Array<{ maxPerHour?: unknown }>;
+    };
+    expect(lb.subscriptions[0].maxPerHour).toBe(10);
+  });
+
+  it('PATCH maxPerHour:null clears the cap', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    await store.setMaxPerHour(rec.id, 5);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxPerHour: null }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.get(rec.id)!.maxPerHour).toBeUndefined();
+  });
+
+  it('PATCH out-of-range / non-integer maxPerHour -> 400 invalid_max_per_hour', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    for (const bad of [0, 241, 1.5, -3, 'x']) {
+      const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxPerHour: bad }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string };
+      expect(body.code).toBe('invalid_max_per_hour');
+    }
+    expect(store.get(rec.id)!.maxPerHour).toBeUndefined(); // never applied
+  });
+
+  it('mixed PATCH valid maxPerHour + malformed quietHours -> 400, maxPerHour NOT partially committed', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        maxPerHour: 12,
+        quietHours: { from: 'nope', to: '07:00', timezone: 'UTC' },
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(store.get(rec.id)!.maxPerHour).toBeUndefined(); // all-or-nothing
+  });
+
   it('PATCH another tokens id as non-owner with a quietHours body -> 404 (existence hidden before validation)', async () => {
     const url = await mount();
     const rec = await store.add('tokB', VALID_SUB);

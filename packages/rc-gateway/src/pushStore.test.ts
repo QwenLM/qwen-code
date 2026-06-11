@@ -120,6 +120,24 @@ describe('PushStore', () => {
     expect(await store.setQuietHours('missing', input)).toBe(false);
   });
 
+  it('setMaxPerHour sets, clears, persists, and reports missing (cycle 46)', async () => {
+    const path = tempPath();
+    const store = await PushStore.open(path);
+    const rec = await store.add('tokA', SUB_A);
+
+    expect(await store.setMaxPerHour(rec.id, 10)).toBe(true);
+    expect(store.get(rec.id)!.maxPerHour).toBe(10);
+
+    // Persists across reopen.
+    const reopened = await PushStore.open(path);
+    expect(reopened.get(rec.id)!.maxPerHour).toBe(10);
+
+    expect(await store.setMaxPerHour(rec.id, undefined)).toBe(true);
+    expect(store.get(rec.id)!.maxPerHour).toBeUndefined();
+
+    expect(await store.setMaxPerHour('missing', 5)).toBe(false);
+  });
+
   it('persists the file at mode 0600', async () => {
     const path = tempPath();
     const store = await PushStore.open(path);

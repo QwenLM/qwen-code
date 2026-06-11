@@ -27,6 +27,12 @@ export interface PushSubscriptionRecord {
    * the window the notifier suppresses this subscription. Absent → never quiet.
    */
   quietHours?: { from: string; to: string; timezone: string };
+  /**
+   * Per-subscription rolling-hour push cap (anti-fatigue). Absent → the notifier
+   * applies `DEFAULT_MAX_PER_HOUR` (30). Validated to an integer in [1, 240] at
+   * the route before being stored.
+   */
+  maxPerHour?: number;
 }
 
 interface PersistShape {
@@ -134,6 +140,26 @@ export class PushStore {
         to: quietHours.to,
         timezone: quietHours.timezone,
       };
+    }
+    await this.persist();
+    return true;
+  }
+
+  /**
+   * Set (or clear) a subscription's `maxPerHour` cap; persists. Returns false if
+   * the id is absent. `undefined` removes the field (→ the notifier's default
+   * cap); otherwise the (already-validated) integer is stored.
+   */
+  async setMaxPerHour(
+    id: string,
+    maxPerHour: number | undefined,
+  ): Promise<boolean> {
+    const rec = this.records.find((r) => r.id === id);
+    if (!rec) return false;
+    if (maxPerHour === undefined) {
+      delete rec.maxPerHour;
+    } else {
+      rec.maxPerHour = maxPerHour;
     }
     await this.persist();
     return true;

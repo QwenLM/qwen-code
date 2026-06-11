@@ -89,6 +89,7 @@ export function createPushRouter(
           tokenId: r.tokenId,
           prefs: r.prefs,
           quietHours: r.quietHours,
+          maxPerHour: r.maxPerHour,
         })),
       });
       return;
@@ -100,6 +101,7 @@ export function createPushRouter(
         createdAt: r.createdAt,
         prefs: r.prefs,
         quietHours: r.quietHours,
+        maxPerHour: r.maxPerHour,
       })),
     });
   });
@@ -148,6 +150,7 @@ export function createPushRouter(
       const body = (req.body ?? {}) as {
         prefs?: unknown;
         quietHours?: unknown;
+        maxPerHour?: unknown;
       };
 
       // Validate BOTH fields up front, then apply — the request is
@@ -195,10 +198,36 @@ export function createPushRouter(
         applyQuiet = true;
       }
 
+      // maxPerHour: an integer in [1, 240] (cycle 46) or null (clear → the
+      // notifier's default cap). Validated up front with the others so a bad
+      // value can't partially apply a sibling field.
+      let applyMax = false;
+      let nextMax: number | undefined;
+      if ('maxPerHour' in body) {
+        const { maxPerHour } = body;
+        if (maxPerHour !== null) {
+          if (
+            typeof maxPerHour !== 'number' ||
+            !Number.isInteger(maxPerHour) ||
+            maxPerHour < 1 ||
+            maxPerHour > 240
+          ) {
+            res.status(400).json({
+              error: 'Invalid maxPerHour',
+              code: 'invalid_max_per_hour',
+            });
+            return;
+          }
+          nextMax = maxPerHour;
+        }
+        applyMax = true;
+      }
+
       if (applyPrefs) await store.setPrefs(rec.id, nextPrefs);
       if (applyQuiet) await store.setQuietHours(rec.id, nextQuiet);
+      if (applyMax) await store.setMaxPerHour(rec.id, nextMax);
 
-      if (applyPrefs || applyQuiet) {
+      if (applyPrefs || applyQuiet || applyMax) {
         void audit?.record({
           action: 'push_prefs_updated',
           actorTokenId: req.rcClient!.id,
@@ -213,6 +242,7 @@ export function createPushRouter(
         id: rec.id,
         prefs: fresh.prefs,
         quietHours: fresh.quietHours,
+        maxPerHour: fresh.maxPerHour,
       });
     } catch {
       if (!res.headersSent) {

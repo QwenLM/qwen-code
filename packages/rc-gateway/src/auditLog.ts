@@ -33,6 +33,7 @@ export type AuditAction =
   | 'policy_reloaded'
   | 'policy_reload_failed'
   | 'push_suppressed'
+  | 'push_rate_limited'
   | 'routing_snoozed'
   | 'routing_unsnoozed'
   | 'push_prefs_updated'
@@ -67,6 +68,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'policy_reloaded',
   'policy_reload_failed',
   'push_suppressed',
+  'push_rate_limited',
   'routing_snoozed',
   'routing_unsnoozed',
   'push_prefs_updated',
