@@ -65,6 +65,7 @@ import {
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
+  getEffectivePermissionForConfirmation,
   abortGoalForStopHookCap,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
@@ -74,8 +75,11 @@ import {
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
+  formatDenialStateLog,
+  isDenialFallbackReason,
   shouldFallback,
   shouldFirePermissionDeniedForAutoMode,
+  shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
@@ -156,6 +160,24 @@ type AutoCompressionSendResult =
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// The drain is served from an in-memory queue, so a conforming client answers
+// near-instantly (or rejects with -32601). No response within this window
+// means the client silently drops unknown methods; without a deadline the
+// await would wedge the prompt turn forever.
+const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
+// Latch the drain off only after this many consecutive timeouts: one slow
+// answer must not permanently disable mid-turn messages for a
+// conforming-but-busy client, while a client that never answers stops
+// costing a stall per tool batch after a few batches.
+const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+
+class MidTurnDrainTimeoutError extends Error {
+  constructor() {
+    super(
+      `mid-turn queue drain got no response within ${MID_TURN_QUEUE_DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+}
 
 interface BackgroundNotificationQueueItem {
   displayText: string;
@@ -398,6 +420,7 @@ export class Session implements SessionContext {
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
+  private midTurnDrainTimeoutStrikes = 0;
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
@@ -1165,7 +1188,13 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  nextMessage = { role: 'user', parts: toolResponseParts };
+                  nextMessage = {
+                    role: 'user',
+                    parts: [
+                      ...toolResponseParts,
+                      ...(await this.#drainMidTurnUserMessages()),
+                    ],
+                  };
                 }
               }
 
@@ -1700,13 +1729,25 @@ export class Session implements SessionContext {
   async #drainMidTurnUserMessages(): Promise<Part[]> {
     if (this.midTurnDrainUnavailable) return [];
 
+    let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
-      const response = await this.client.extMethod(
-        MID_TURN_QUEUE_DRAIN_METHOD,
-        {
-          sessionId: this.sessionId,
-        },
-      );
+      drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: this.sessionId,
+      });
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new MidTurnDrainTimeoutError()),
+          MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+        );
+      });
+      let response: Awaited<typeof drainPromise>;
+      try {
+        response = await Promise.race([drainPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+      this.midTurnDrainTimeoutStrikes = 0;
       // A client may legally resolve with `result: null` (passed through
       // unwrapped by the ACP SDK); guard the object access so that doesn't
       // throw a TypeError and get misclassified as a transient drain error.
@@ -1745,8 +1786,24 @@ export class Session implements SessionContext {
         error && typeof error === 'object' && 'code' in error
           ? (error as { code?: unknown }).code
           : undefined;
+      const isTimeout = error instanceof MidTurnDrainTimeoutError;
+      if (isTimeout) {
+        this.midTurnDrainTimeoutStrikes += 1;
+        // The lost race leaves the request pending; if the client settles it
+        // later, a rejection must not surface as an unhandled rejection.
+        drainPromise?.catch(() => {});
+      }
+      // Repeated timeouts are also permanent: a conforming client answers
+      // (or rejects with -32601) immediately, so sustained silence means the
+      // client drops unknown methods and would stall every subsequent tool
+      // batch the same way. A single timeout is treated as transient so one
+      // slow answer doesn't disable the drain for the whole session.
       const isPermanentError =
-        errorCode === -32601 || /method not found/i.test(errorMessage);
+        errorCode === -32601 ||
+        /method not found/i.test(errorMessage) ||
+        (isTimeout &&
+          this.midTurnDrainTimeoutStrikes >=
+            MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES);
 
       if (isPermanentError) {
         this.midTurnDrainUnavailable = true;
@@ -1938,7 +1995,13 @@ export class Session implements SessionContext {
                     promptId,
                     functionCalls,
                   );
-                  nextMessage = { role: 'user', parts: toolResponseParts };
+                  nextMessage = {
+                    role: 'user',
+                    parts: [
+                      ...toolResponseParts,
+                      ...(await this.#drainMidTurnUserMessages()),
+                    ],
+                  };
                 }
               }
             } catch (error) {
@@ -2207,7 +2270,13 @@ export class Session implements SessionContext {
                 promptId,
                 functionCalls,
               );
-              nextMessage = { role: 'user', parts: toolResponseParts };
+              nextMessage = {
+                role: 'user',
+                parts: [
+                  ...toolResponseParts,
+                  ...(await this.#drainMidTurnUserMessages()),
+                ],
+              };
             }
           }
 
@@ -2810,19 +2879,32 @@ export class Session implements SessionContext {
           }
 
           // Explicit allow (user rule matched, or tool's L3 default is 'allow')
-          // is authoritative — AUTO classifier must not be allowed to override
-          // it. Parallels coreToolScheduler.ts:1337-1366; without this, an ACP
-          // session in AUTO mode could see a user-written `Bash(git push *)`
-          // allow rule reach the classifier and get blocked by a conservative
-          // Stage-1 verdict. Also resets the denialTracking streak so a
-          // following classifier-eligible call doesn't surprise the user with
-          // a manual prompt right after an allow-rule call just worked.
-          let autoModeAllowed = finalPermission === 'allow';
+          // is authoritative for ordinary calls. In AUTO, protected
+          // self-modification writes must still reach the classifier/fail-closed
+          // path so allow rules cannot bypass AUTO mode's safety boundary.
+          // Also resets the denialTracking streak so a following
+          // classifier-eligible call doesn't surprise the user with a manual
+          // prompt right after an allow-rule call just worked.
+          const forceAutoReviewForAllow =
+            approvalMode === ApprovalMode.AUTO &&
+            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          const confirmationPermission = getEffectivePermissionForConfirmation(
+            finalPermission,
+            forceAutoReviewForAllow,
+          );
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: L4 allow overridden by protected-write guard for ${toolName}`,
+            );
+          }
+          let autoModeAllowed =
+            finalPermission === 'allow' && !forceAutoReviewForAllow;
           if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
             this.config.setAutoModeDenialState(
               recordAllow(this.config.getAutoModeDenialState()),
             );
           }
+          let wasAutoModeDenialFallback = false;
 
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
@@ -2834,6 +2916,7 @@ export class Session implements SessionContext {
             shouldRunAutoModeForCall(approvalMode, toolName)
           ) {
             const denialState = this.config.getAutoModeDenialState();
+            const fallback = shouldFallback(denialState);
             // `buildClassifierContents` retains only the most recent
             // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
             // exactly that tail rather than triggering a `structuredClone`
@@ -2850,10 +2933,9 @@ export class Session implements SessionContext {
               messages,
               config: this.config,
               signal: abortSignal,
-              skipClassifierReason: (() => {
-                const fb = shouldFallback(denialState);
-                return fb.fallback ? fb.reason : undefined;
-              })(),
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
             });
 
             // Apply decision via shared helper — eliminates ~40 lines of
@@ -2866,17 +2948,39 @@ export class Session implements SessionContext {
               this.config,
               denialState,
             );
+            await fireSessionPermissionDeniedForAutoMode(
+              this.config,
+              decision,
+              outcome,
+              toolName,
+              toolParams,
+              callId,
+              abortSignal,
+            );
             switch (outcome.kind) {
               case 'approved':
                 autoModeAllowed = true;
                 break;
               case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${toolName}, ` +
+                    formatDenialStateLog(denialState),
+                );
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
                   toolName,
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
+                wasAutoModeDenialFallback = isDenialFallbackReason(
+                  outcome.reason,
+                );
+                if (wasAutoModeDenialFallback) {
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                      formatDenialStateLog(denialState),
+                  );
+                }
                 break;
               default: {
                 const _exhaustive: never = outcome;
@@ -2887,10 +2991,37 @@ export class Session implements SessionContext {
 
           let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const recordAutoModeFallbackResolution = (
+            outcome: ToolConfirmationOutcome,
+          ) => {
+            // Reset AUTO-mode fallback counters when approval resolves a prompt
+            // raised because denialTracking forced fallback. This covers both ACP
+            // requestPermission and PermissionRequest hook approvals.
+            if (
+              approvalMode === ApprovalMode.AUTO &&
+              wasAutoModeDenialFallback &&
+              isApproveOutcome(outcome)
+            ) {
+              const before = this.config.getAutoModeDenialState();
+              const after = recordFallbackApprove(before);
+              if (after === before) {
+                debugLogger.warn(
+                  `Auto mode denial counters already clear after fallback approval: ` +
+                    formatDenialStateLog(before),
+                );
+                return;
+              }
+              debugLogger.warn(
+                `Auto mode denial counters reset after fallback approval: ` +
+                  `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+              );
+              this.config.setAutoModeDenialState(after);
+            }
+          };
 
           if (
             !autoModeAllowed &&
-            needsConfirmation(finalPermission, approvalMode, toolName)
+            needsConfirmation(confirmationPermission, approvalMode, toolName)
           ) {
             confirmationDetails =
               await invocation.getConfirmationDetails(abortSignal);
@@ -2939,6 +3070,9 @@ export class Session implements SessionContext {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  recordAutoModeFallbackResolution(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
                 } else {
                   return earlyErrorResponse(
                     new Error(
@@ -2973,7 +3107,7 @@ export class Session implements SessionContext {
               );
 
               if (hooksEnabled && messageBus) {
-                void fireNotificationHook(
+                this.fireNotificationHookWithTerminalSequence(
                   messageBus,
                   `Qwen Code needs your permission to use ${toolName}`,
                   NotificationType.PermissionPrompt,
@@ -3007,21 +3141,7 @@ export class Session implements SessionContext {
                       .nativeEnum(ToolConfirmationOutcome)
                       .parse(output.outcome.optionId);
 
-              // Reset the AUTO-mode fallback streak when the user manually
-              // approves a prompt that was raised because denialTracking forced
-              // fallback. Without this, a single block-streak permanently
-              // downgrades the rest of the session to manual approval until the
-              // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
-              // Cancel / abort do NOT reset — treating rejection as a signal
-              // the classifier was right to block.
-              if (
-                approvalMode === ApprovalMode.AUTO &&
-                isApproveOutcome(outcome)
-              ) {
-                this.config.setAutoModeDenialState(
-                  recordFallbackApprove(this.config.getAutoModeDenialState()),
-                );
-              }
+              recordAutoModeFallbackResolution(outcome);
 
               await confirmationDetails.onConfirm(outcome, {
                 answers: output.answers,
@@ -3624,5 +3744,37 @@ export class Session implements SessionContext {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
     }
+  }
+
+  /**
+   * Fire a notification hook and forward any terminalSequence to the ACP
+   * client as an extNotification. Fire-and-forget — errors are logged at
+   * debug level.
+   */
+  private fireNotificationHookWithTerminalSequence(
+    messageBus: MessageBus,
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): void {
+    void fireNotificationHook(messageBus, message, notificationType, title)
+      .then((hookResult) => {
+        if (!hookResult.terminalSequence) return;
+        return this.client.extNotification(
+          'qwen/notify/session/terminal-sequence',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence: hookResult.terminalSequence,
+          },
+        );
+      })
+      .catch((err: unknown) => {
+        debugLogger.debug(
+          `ACP terminalSequence notification dropped ` +
+            `(session=${this.sessionId}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 }

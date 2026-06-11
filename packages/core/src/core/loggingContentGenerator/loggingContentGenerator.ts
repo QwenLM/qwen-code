@@ -105,6 +105,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private splitToolMedia?: boolean;
   private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
@@ -113,6 +114,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.splitToolMedia = generatorConfig.splitToolMedia;
     this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
@@ -763,6 +765,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     return {
       model,
       modalities: this.modalities ?? {},
+      // Mirror the pipeline default (see pipeline.ts createRequestContext) so the
+      // --openai-logging fallback reconstruction reflects the same split as the
+      // request actually sent. Opt out via generationConfig.splitToolMedia = false.
+      splitToolMedia: this.splitToolMedia ?? true,
       startTime: 0,
     };
   }

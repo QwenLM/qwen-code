@@ -4,13 +4,157 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
-import type { Config } from '../config/config.js';
 import { ToolErrorType } from './tool-error.js';
+import type { Config } from '../config/config.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
-describe('SendMessageTool', () => {
+function makeTeamConfig(opts?: {
+  teamManager?: {
+    sendMessage: (...args: unknown[]) => Promise<void>;
+    broadcast: (...args: unknown[]) => Promise<void>;
+    requestShutdown?: (...args: unknown[]) => Promise<void>;
+  } | null;
+}) {
+  return {
+    getTeamManager: () => opts?.teamManager ?? null,
+    getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+  } as unknown as Config;
+}
+
+describe('SendMessageTool — team mode', () => {
+  it('has the correct name', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    expect(tool.name).toBe('send_message');
+  });
+
+  it('sends a message via TeamManager', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'alice',
+      message: 'hello',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('alice');
+    expect(sendMessage).toHaveBeenCalledWith(
+      'alice',
+      'hello',
+      'leader',
+      undefined,
+    );
+  });
+
+  it('broadcasts with "*"', async () => {
+    const broadcast = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast,
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: '*',
+      message: 'hey all',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('broadcast');
+    expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
+  });
+
+  it('returns error when no team is active and no task_id given', async () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    const invocation = tool.build({
+      to: 'alice',
+      message: 'hello',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('No active team');
+  });
+
+  it('routes shutdown_request via requestShutdown', async () => {
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast: vi.fn(),
+          requestShutdown,
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'bob',
+      message: 'Please shut down.',
+      type: 'shutdown_request',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Shutdown');
+    expect(result.llmContent).toContain('bob');
+    expect(requestShutdown).toHaveBeenCalledWith('bob');
+  });
+
+  it('rejects shutdown_request from a teammate (leader-only)', async () => {
+    // A teammate calling shutdown_request would impersonate the
+    // leader, since requestShutdown writes the mailbox entry with
+    // `from: LEADER_NAME` and arms shutdown_approved tracking.
+    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi.fn(),
+          broadcast: vi.fn(),
+          requestShutdown,
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'bob',
+      message: 'Please shut down.',
+      type: 'shutdown_request',
+    });
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'attacker',
+        teamName: 'team',
+        agentId: 'attacker@team',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('Only the team leader');
+    expect(requestShutdown).not.toHaveBeenCalled();
+  });
+
+  it('validates required params', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    // `message` is required.
+    expect(() => tool.build({} as never)).toThrow();
+    expect(() => tool.build({ to: 'alice' } as never)).toThrow();
+  });
+});
+
+describe('SendMessageTool — background-task mode', () => {
   let registry: BackgroundTaskRegistry;
   let config: Config;
   let tool: SendMessageTool;
@@ -21,6 +165,7 @@ describe('SendMessageTool', () => {
     resumeBackgroundAgent = vi.fn();
     config = {
       getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () => null,
       resumeBackgroundAgent,
     } as unknown as Config;
     tool = new SendMessageTool(config);

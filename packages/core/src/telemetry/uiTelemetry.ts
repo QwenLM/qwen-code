@@ -149,6 +149,7 @@ export class UiTelemetryService extends EventEmitter {
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
+  #sessionStartTime: Date = new Date();
 
   addEvent(event: UiEvent, sessionId?: string) {
     if (!this.#accumulateEvent(this.#metrics, event)) return;
@@ -186,6 +187,10 @@ export class UiTelemetryService extends EventEmitter {
     });
   }
 
+  getSessionStartTime(): Date {
+    return this.#sessionStartTime;
+  }
+
   getLastCachedContentTokenCount(): number {
     return this.#lastCachedContentTokenCount;
   }
@@ -203,6 +208,7 @@ export class UiTelemetryService extends EventEmitter {
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
+    this.#sessionStartTime = new Date();
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,

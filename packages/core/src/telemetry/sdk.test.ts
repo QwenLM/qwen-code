@@ -65,6 +65,7 @@ vi.mock('./tracer.js', () => ({
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
+import { createSessionRootContext } from './tracer.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 

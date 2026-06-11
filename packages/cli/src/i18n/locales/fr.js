@@ -1466,6 +1466,21 @@ export default {
     "Aucun appel d'outil n'a été effectué dans cette session.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'heure de début de session est indisponible, impossible de calculer les stats.",
+  Activity: 'Activité',
+  Efficiency: 'Efficacité',
+  Today: "Aujourd'hui",
+  'Token Trend': 'Tendance Tokens',
+  'Cache Hit Rate': 'Taux de cache',
+  'Tool Success': 'Succès outils',
+  'Tool Leaderboard': 'Classement outils',
+  Time: 'Temps',
+  Success: 'Succès',
+  Cache: 'Cache',
+  Latency: 'Latence',
+  'Code Impact': 'Impact code',
+  net: 'net',
+  streak: 'série',
+  best: 'record',
 
   // ============================================================================
   // Migration de format de commande
@@ -1958,4 +1973,41 @@ export default {
   Tokens: 'Jetons',
   tokens: 'jetons',
   '中国 (China)': 'Chine',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Carte d'activité",
+  Less: 'Moins',
+  More: 'Plus',
+  Sessions: 'Sessions',
+  Duration: 'Durée',
+  Projects: 'Projets',
+  'Loading stats...': 'Chargement des stats...',
+  '(no data)': '(aucune donnée)',
+  d: 'j',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrée',
+  Models: 'Modèles',
+  'All time': 'Tout le temps',
+  'Last 7 days': '7 derniers jours',
+  'Last 30 days': '30 derniers jours',
+  'Show usage statistics dashboard.':
+    "Afficher le tableau de bord des statistiques d'utilisation.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'Requêtes API',
+  'Tool Calls': "Appels d'outils",
+  'Success rate': 'Taux de réussite',
+  'Code Changes': 'Modifications du code',
+  Tool: 'Outil',
+  reqs: 'req.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
 };

@@ -31,7 +31,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '60'
+        default: '90'
         type: 'number'
 
 concurrency:
@@ -138,7 +138,7 @@ jobs:
        github.event.pull_request.author_association == 'MEMBER' ||
        github.event.pull_request.author_association == 'COLLABORATOR')
     runs-on: 'ubuntu-latest'
-    # Configured in repo settings with a 10-minute wait timer.
+    # Configured in repo settings with a 30-minute wait timer.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false
@@ -256,7 +256,7 @@ jobs:
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR')))
-    timeout-minutes: 60
+    timeout-minutes: 90
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
       contents: 'read'
@@ -303,7 +303,7 @@ jobs:
             exit 1
           fi
 
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '60' }}"
+          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
 
           {
             echo "should_run=true"
@@ -361,8 +361,8 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 60 ]; then
-            fail "timeout_minutes must not exceed the 60 minute job timeout"
+          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
+            fail "timeout_minutes must not exceed the 90 minute job timeout"
           fi
 
           if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then

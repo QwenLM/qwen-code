@@ -3707,8 +3707,8 @@ describe('DaemonSessionProvider', () => {
   it('preserves session and uses delta resume after a retriable SSE error', async () => {
     let callCount = 0;
     const events = vi.fn(async function* retriableEvents(
-      opts: { signal?: AbortSignal } = {},
-    ) {
+      opts: { signal?: AbortSignal; maxQueued?: number } = {},
+    ): AsyncGenerator<DaemonEvent, void, unknown> {
       callCount += 1;
       if (callCount === 1) {
         yield {
