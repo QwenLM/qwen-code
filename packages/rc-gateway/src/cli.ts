@@ -35,6 +35,10 @@ import {
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
 import { PolicyReloader } from './policy/reloader.js';
+import {
+  checkPolicyFilePermissions,
+  formatInsecurePolicyWarning,
+} from './policy/permissions.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 export interface ServeOptions {
@@ -94,12 +98,23 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // specificity). Absent user file → default-prompt; a MALFORMED user file still
   // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
   // malformed workspace file is logged + ignored (fail-closed: keep user policy).
+  const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
   const policy = await loadLayeredPolicy(
-    join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+    userPolicyPath,
     workspaceCwd,
     // eslint-disable-next-line no-console
     (msg) => console.warn(msg),
   );
+  // Boot hygiene (cycle 48): warn if either policy file is group/world-writable
+  // (design threat model — a non-owner could rewrite the tool-permission policy).
+  // Advisory only: the policy still loads. The check never throws (best-effort).
+  for (const insecure of await checkPolicyFilePermissions([
+    userPolicyPath,
+    ...(workspaceCwd ? [join(workspaceCwd, '.qwen', 'policy.yaml')] : []),
+  ])) {
+    // eslint-disable-next-line no-console
+    console.warn(formatInsecurePolicyWarning(insecure));
+  }
   // Per-rule quota store (cycle 43): limits keyed by rule id from the active
   // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
   // when the enforcer runs. The QuotaStore's limitsFor closure reads THIS map by
