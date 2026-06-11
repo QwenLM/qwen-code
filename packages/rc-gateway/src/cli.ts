@@ -12,7 +12,11 @@ import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
 import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
-import { loadLayeredRoutingMatcher } from './routing/rules.js';
+import {
+  loadLayeredRoutingMatcher,
+  loadResolvedRoutingRules,
+  formatResolvedRouting,
+} from './routing/rules.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import {
@@ -153,5 +157,21 @@ if (process.argv[2] === 'serve') {
     // eslint-disable-next-line no-console
     console.log(formatPolicyLint(file, result));
     process.exit(result.ok ? 0 : 1);
+  });
+} else if (process.argv[2] === 'routing' && process.argv[3] === 'rules') {
+  // `qwen-rc routing rules [--resolved]` — print the effective routing ruleset.
+  // Read-only INSPECTOR (always exit 0): a malformed file fail-opens (logged +
+  // omitted), faithfully reflecting the gateway's suppress-only behavior — NOT a
+  // lint. `--resolved` overlays the workspace file from the current directory.
+  const resolved = process.argv.includes('--resolved');
+  loadResolvedRoutingRules(
+    join(homedir(), '.qwen', 'rc', 'routing.yaml'),
+    resolved ? process.cwd() : undefined,
+    // eslint-disable-next-line no-console
+    (msg) => console.warn(msg),
+  ).then((rules) => {
+    // eslint-disable-next-line no-console
+    console.log(formatResolvedRouting(rules));
+    process.exit(0);
   });
 }
