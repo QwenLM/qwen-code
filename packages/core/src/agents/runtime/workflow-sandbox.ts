@@ -532,6 +532,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // index -- it must NOT throw on the whole array and destroy every sibling
       // result, which would defeat errors-as-data for return values. The outer
       // [] is built in-realm here, so the result keeps vm-realm prototypes.
+      //
+      // SECURITY (PR #4947 R1 wenshao): reviveInRealm MUST remain inside this
+      // vm init runInContext block. JSON, Array, Object here are vm-realm
+      // globals; extracting this function to a host-side utility (e.g. a
+      // shared utils/jsonRevive.ts) would resolve those references against
+      // the HOST realm, silently reopening the T1/T8/T14 escape that the
+      // revival is designed to prevent. The textual identity to a host-side
+      // util is exactly the trap.
       function reviveInRealm(hostArr) {
         const out = [];
         for (let i = 0; i < hostArr.length; i++) {

@@ -625,6 +625,21 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
     });
 
+    // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
+    // be clamped, not honored — protects operators from a fat-finger
+    // QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999 silently uncapping the run.
+    it('resolveMaxAgentsPerRun clamps an over-ceiling override to the hard maximum', () => {
+      expect(
+        resolveMaxAgentsPerRun({
+          QWEN_CODE_MAX_WORKFLOW_AGENTS: '999999999',
+        }),
+      ).toBe(10_000);
+      // Just under the ceiling is preserved.
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '9999' }),
+      ).toBe(9999);
+    });
+
     it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
@@ -635,6 +650,21 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       });
       expect(fallback).toBeGreaterThanOrEqual(1);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
+    // be clamped, not honored — a single Node process running 999999
+    // concurrent LLM calls would OOM long before saturating the model.
+    it('resolveConcurrencyLimit clamps an over-ceiling override to the hard maximum', () => {
+      expect(
+        resolveConcurrencyLimit({
+          QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '999999',
+        }),
+      ).toBe(64);
+      // Just under the ceiling is preserved.
+      expect(
+        resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '63' }),
+      ).toBe(63);
     });
 
     it('QWEN_CODE_MAX_WORKFLOW_AGENTS actually lowers the cap at run time', async () => {

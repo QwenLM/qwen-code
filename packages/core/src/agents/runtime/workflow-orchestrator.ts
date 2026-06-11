@@ -28,12 +28,22 @@ const debugLogger = createDebugLogger('WORKFLOW');
  */
 export const DEFAULT_MAX_AGENTS_PER_RUN = 1000;
 export const MAX_WORKFLOW_AGENTS_ENV = 'QWEN_CODE_MAX_WORKFLOW_AGENTS';
+/**
+ * Absolute upper bound on the env-override agent cap. Even an operator who
+ * sets `QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999` cannot exceed this — the
+ * intent is to catch fat-finger / misconfig that would silently uncap a
+ * runaway workflow (1000-agent default × per-agent token cost). 10000 is
+ * 10× the default, generous for legitimate large fan-outs.
+ */
+export const HARD_MAX_AGENTS_PER_RUN_CEILING = 10_000;
 
 /**
  * Resolve the per-run agent cap, honoring `QWEN_CODE_MAX_WORKFLOW_AGENTS`.
  * Mirrors `resolveMaxConcurrentBackgroundAgents` (background-tasks.ts): a
  * non-integer / <1 override is rejected with a debug warning and the default
- * is used.
+ * is used. An override above `HARD_MAX_AGENTS_PER_RUN_CEILING` is clamped
+ * (with a debug warning) — the env knob is operator-facing, not security-
+ * critical, but a misconfigured ceiling shouldn't silently uncap the run.
  */
 export function resolveMaxAgentsPerRun(
   env: Record<string, string | undefined> = process.env,
@@ -50,19 +60,33 @@ export function resolveMaxAgentsPerRun(
     );
     return DEFAULT_MAX_AGENTS_PER_RUN;
   }
+  if (parsed > HARD_MAX_AGENTS_PER_RUN_CEILING) {
+    debugLogger.warn(
+      `${MAX_WORKFLOW_AGENTS_ENV}=${parsed} exceeds hard ceiling ` +
+        `(${HARD_MAX_AGENTS_PER_RUN_CEILING}); clamping.`,
+    );
+    return HARD_MAX_AGENTS_PER_RUN_CEILING;
+  }
   return parsed;
 }
 
 export const MAX_WORKFLOW_CONCURRENCY_ENV =
   'QWEN_CODE_MAX_WORKFLOW_CONCURRENCY';
+/**
+ * Absolute upper bound on the env-override concurrency window. Above this,
+ * a single Node process running N concurrent LLM calls is past the point a
+ * distributed worker is the better tool. 64 ≈ 4× the 16-default ceiling.
+ */
+export const HARD_MAX_CONCURRENCY_CEILING = 64;
 
 /**
  * Maximum agents in flight at once within a single run, shared across all
  * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
  * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
  * produce a deadlocking limit. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides
- * the computed value with an explicit integer (>=1); an invalid override
- * falls back to the cpu-derived default with a debug warning.
+ * the computed value with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`;
+ * an invalid override falls back to the cpu-derived default with a debug
+ * warning, and an over-ceiling override is clamped.
  */
 export function resolveConcurrencyLimit(
   env: Record<string, string | undefined> = process.env,
@@ -71,6 +95,13 @@ export function resolveConcurrencyLimit(
   if (raw !== undefined && raw.trim() !== '') {
     const parsed = Number(raw);
     if (Number.isInteger(parsed) && parsed >= 1) {
+      if (parsed > HARD_MAX_CONCURRENCY_CEILING) {
+        debugLogger.warn(
+          `${MAX_WORKFLOW_CONCURRENCY_ENV}=${parsed} exceeds hard ceiling ` +
+            `(${HARD_MAX_CONCURRENCY_CEILING}); clamping.`,
+        );
+        return HARD_MAX_CONCURRENCY_CEILING;
+      }
       return parsed;
     }
     debugLogger.warn(
@@ -310,6 +341,17 @@ export class WorkflowOrchestrator {
  * an aborted run surfaces a rejection rather than a silent array of nulls.
  * Concurrency is bounded at the dispatch layer (limiter.run in countedDispatch),
  * not here — so nesting a parallel()/pipeline() inside a thunk cannot deadlock.
+ *
+ * Abort responsiveness: this function awaits `Promise.allSettled` which only
+ * settles after every thunk settles. That is NOT a long wait in practice
+ * because the dispatch signal (workflow-orchestrator.ts countedDispatch +
+ * createProductionDispatch) is threaded through to `subagent.execute(ctx,
+ * signal)`, so each in-flight thunk reacts to abort and rejects promptly. The
+ * limiter's separate `addEventListener('abort')` listener drains the
+ * not-yet-started queued thunks instantly. So the apparent "wait for all to
+ * complete" is in reality "wait for all to reach an abort-aware rejection",
+ * which fires immediately after the signal — not after each subagent's full
+ * 10-min internal timeout.
  */
 async function settleToNullArray(
   thunks: Array<() => Promise<unknown>>,
@@ -329,7 +371,21 @@ async function settleToNullArray(
   // consistency choice, not a script-observable one.
   if (signal?.aborted)
     throw new DOMException('Workflow run aborted.', 'AbortError');
-  return settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+  // Errors-as-data: a rejected thunk becomes null at its index. Log the
+  // discarded rejection reason at debug level so operators investigating a
+  // workflow that returned unexpected nulls can disambiguate between (a) a
+  // dispatch failure (rate limit / model outage), (b) the 1000-agent cap,
+  // (c) a pipeline stage exception, and (d) a non-JSON-serializable thunk
+  // return — all of which surface as the same `null` to the script by
+  // design. The log line is the only operator-side signal of which path
+  // fired; the contract to the script stays opaque.
+  return settled.map((r, i) => {
+    if (r.status === 'fulfilled') return r.value;
+    debugLogger.warn(
+      `Workflow thunk at index ${i} rejected: ${String((r.reason as { message?: unknown })?.message ?? r.reason)}`,
+    );
+    return null;
+  });
 }
 
 /**
