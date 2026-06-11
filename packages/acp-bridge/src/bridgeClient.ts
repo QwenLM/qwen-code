@@ -1289,14 +1289,22 @@ export function extractA2uiToolUpdate(
   const grouped = new Map<string, unknown[]>();
   for (const c of commands) {
     const sid = surfaceIdOf(c);
-    if (!sid) continue;
+    if (!sid) {
+      const shape =
+        c && typeof c === 'object'
+          ? Object.keys(c).join(',') || 'empty object'
+          : typeof c;
+      writeStderrLine(
+        `a2ui: dropping command with unrecognized shape (${shape})`,
+      );
+      continue;
+    }
     if (!grouped.has(sid)) {
       grouped.set(sid, []);
       order.push(sid);
     }
     grouped.get(sid)!.push(c);
   }
-  if (order.length === 0) return null;
   const surfaces = order.map((sid) => ({
     surfaceId: sid,
     commands: grouped.get(sid)!,

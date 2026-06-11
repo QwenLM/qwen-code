@@ -179,15 +179,29 @@ describe('extractA2uiToolUpdate', () => {
     );
   });
 
-  it('returns null when no command carries a surfaceId or text is not a2ui', () => {
-    expect(
-      extractA2uiToolUpdate(
-        toolUpdate({
-          serverId: 'a2ui-ui',
-          text: '[{"version":"v0.9","noop":{}}]',
-        }),
-      ),
-    ).toBeNull();
+  it('sanitizes detected a2ui output even when no command carries a surfaceId', () => {
+    const text = '[{"version":"v0.9","noop":{}}]\nfallback summary';
+    const result = extractA2uiToolUpdate(
+      toolUpdate({
+        serverId: 'a2ui-ui',
+        text,
+        rawOutput: text,
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.surfaces).toEqual([]);
+    const sanitized = result!.sanitizedParams as unknown as {
+      update: {
+        content: Array<{ content: { text: string } }>;
+        rawOutput: string;
+      };
+    };
+    expect(sanitized.update.content[0].content.text).toBe('fallback summary');
+    expect(sanitized.update.rawOutput).toBe('fallback summary');
+    expect(sanitized.update.content[0].content.text).not.toContain('noop');
+  });
+
+  it('returns null when text is not a2ui', () => {
     expect(
       extractA2uiToolUpdate(
         toolUpdate({ serverId: 'a2ui-ui', text: 'plain text result' }),

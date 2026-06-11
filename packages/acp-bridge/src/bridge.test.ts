@@ -5589,6 +5589,106 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('splits a2ui tool updates and publishes a sanitized original frame', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const text =
+        '[{"version":"v0.9","createSurface":{"surfaceId":"s1","components":[]}},{"version":"v0.9","updateComponents":{"surfaceId":"s2","components":[]}}]\nfallback summary';
+
+      void capturedConn!.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          _meta: {
+            serverId: 'a2ui-ui',
+            toolName: 'mcp__a2ui-ui__present_ui',
+          },
+          content: [{ type: 'content', content: { type: 'text', text } }],
+          rawOutput: text,
+        },
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 3) break;
+      }
+      expect(collected.map((e) => e.type)).toEqual([
+        'session_update',
+        'session_update',
+        'session_update',
+      ]);
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'a2ui',
+          a2ui: {
+            surfaceId: 's1',
+            callId: 'call-1',
+            commands: [
+              {
+                version: 'v0.9',
+                createSurface: { surfaceId: 's1', components: [] },
+              },
+            ],
+          },
+          _meta: { source: 'a2ui-bridge' },
+        },
+      });
+      expect(collected[1]?.data).toMatchObject({
+        update: {
+          sessionUpdate: 'a2ui',
+          a2ui: {
+            surfaceId: 's2',
+            callId: 'call-1',
+            commands: [
+              {
+                version: 'v0.9',
+                updateComponents: { surfaceId: 's2', components: [] },
+              },
+            ],
+          },
+          _meta: { source: 'a2ui-bridge' },
+        },
+      });
+      expect(collected[2]?.data).toMatchObject({
+        update: {
+          sessionUpdate: 'tool_call_update',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'fallback summary' },
+            },
+          ],
+          rawOutput: 'fallback summary',
+        },
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('shutdown closes live event subscriptions', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({ channelFactory: factory });
