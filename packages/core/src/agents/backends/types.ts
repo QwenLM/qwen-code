@@ -14,11 +14,13 @@
 import type { Content } from '@google/genai';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
+  AgentStatus,
   PromptConfig,
   ModelConfig,
   RunConfig,
   ToolConfig,
 } from '../runtime/agent-types.js';
+import type { AgentEventEmitter } from '../runtime/agent-events.js';
 
 /**
  * Canonical display mode values shared across core and CLI.
@@ -76,6 +78,11 @@ export interface InProcessSpawnConfig {
   agentName: string;
   /** Optional initial task to start working on immediately. */
   initialTask?: string;
+  /**
+   * When true, the agent transitions to COMPLETED instead of IDLE when
+   * its message queue empties. Used for team teammates.
+   */
+  completeOnIdle?: boolean;
   /** Runtime configuration for the AgentCore. */
   runtimeConfig: {
     promptConfig: PromptConfig;
@@ -112,6 +119,26 @@ export type AgentExitCallback = (
 ) => void;
 
 /**
+ * Minimal handle a backend can return for an in-process agent.
+ *
+ * Both `AgentInteractive` (real) and `FakeAgent` (tests) satisfy this
+ * shape. PTY-based backends (tmux, iTerm2) don't expose an agent handle
+ * because the agent runs in a subprocess.
+ */
+export interface TeamAgentHandle {
+  getStatus(): AgentStatus;
+  getEventEmitter(): AgentEventEmitter | undefined;
+  enqueueMessage(msg: string): void;
+  abort(): void;
+  /**
+   * Last fatal error, when the agent failed to start or run.
+   * Optional: both AgentInteractive and FakeAgent provide it; future
+   * handles may not.
+   */
+  getError?(): string | undefined;
+}
+
+/**
  * Backend abstracts the display/pane management layer for multi-agent systems.
  *
  * Each display mode (in-process / tmux / iTerm2) implements this interface. The orchestration
@@ -144,6 +171,13 @@ export interface Backend {
    * Stop a specific agent.
    */
   stopAgent(agentId: string): void;
+
+  /**
+   * Get an in-process agent handle by id, when the backend keeps
+   * agents in the current process. PTY-based backends do not expose
+   * a handle and may omit this method.
+   */
+  getAgent?(agentId: string): TeamAgentHandle | undefined;
 
   /**
    * Stop all running agents.

@@ -195,6 +195,7 @@ import { useSkillsManagerDialog } from './hooks/useSkillsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
@@ -1093,6 +1094,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
+  const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
+    useStatsDialog();
 
   // Ref bridge: the guarded openRewindSelector callback is defined later
   // (after useDoublePress), but slashCommandActions needs it now. The ref
@@ -1140,6 +1143,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       openDiffDialog,
@@ -1169,6 +1173,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openStatsDialog,
       openResumeDialog,
       handleResume,
       handleBranch,
@@ -2337,6 +2342,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSkillsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
+    isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
@@ -2820,6 +2826,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
     closeDiffDialog,
+    isStatsDialogOpen,
+    closeStatsDialog,
     showWorktreeExitDialog,
     closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
@@ -3360,6 +3368,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3488,6 +3497,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3566,6 +3576,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3647,6 +3658,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeStatsDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,

@@ -1883,12 +1883,21 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
 });
 
 describe('computeThresholds', () => {
-  it('32K window — proportional fallback for all tiers, hard degrades to auto', () => {
+  it('32K window — proportional fallback for all tiers, hard = auto + HARD_BUFFER', () => {
     const t = computeThresholds(32_000);
     expect(t.warn).toBe(19_200); // 0.6 * 32K
     expect(t.auto).toBe(22_400); // 0.7 * 32K
-    expect(t.hard).toBe(22_400); // max(window-23K=9K, auto=22.4K) = auto
+    expect(t.hard).toBe(25_400); // auto + HARD_BUFFER = 22.4K + 3K
     expect(t.effectiveWindow).toBe(12_000);
+  });
+
+  it('60K window — hard no longer equals auto (issue #4945)', () => {
+    const t = computeThresholds(60_000);
+    expect(t.warn).toBe(36_000); // 0.6 * 60K
+    expect(t.auto).toBe(42_000); // 0.7 * 60K (pct wins: 42K vs ew-13K=27K)
+    expect(t.hard).toBe(45_000); // auto + HARD_BUFFER = 42K + 3K
+    expect(t.hard).toBeGreaterThan(t.auto);
+    expect(t.effectiveWindow).toBe(40_000);
   });
 
   it('128K window — mixed (warn=pct, auto/hard=abs)', () => {
@@ -1933,11 +1942,13 @@ describe('computeThresholds', () => {
     expect(t.hard).toBe(0);
   });
 
-  it('thresholds always satisfy warn <= auto <= hard', () => {
-    for (const w of [32_000, 64_000, 128_000, 200_000, 256_000, 1_000_000]) {
+  it('thresholds always satisfy warn <= auto < hard for non-zero windows', () => {
+    for (const w of [
+      10_000, 32_000, 60_000, 64_000, 128_000, 200_000, 256_000, 1_000_000,
+    ]) {
       const t = computeThresholds(w);
       expect(t.warn).toBeLessThanOrEqual(t.auto);
-      expect(t.auto).toBeLessThanOrEqual(t.hard);
+      expect(t.auto).toBeLessThan(t.hard);
     }
   });
 });

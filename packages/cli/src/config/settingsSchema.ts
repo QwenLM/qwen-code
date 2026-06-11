@@ -1260,9 +1260,9 @@ const SETTINGS_SCHEMA = {
             label: 'Split Tool Result Media',
             category: 'Generation Configuration',
             requiresRestart: false,
-            default: false,
+            default: true,
             description:
-              'When true, media (images / audio / video / files) returned by MCP tool calls is split into a follow-up user message instead of being embedded in the tool message. Required for strict OpenAI-compatible servers (e.g., LM Studio) that reject non-text content on `role: "tool"` messages with HTTP 400 "Invalid \'messages\' in payload". Default false preserves the prior behavior for permissive providers. See QwenLM/qwen-code#3616.',
+              'When true, media (images / audio / video / files) returned by tool calls — including the built-in read_file and MCP tools — is split into a follow-up user message instead of being embedded in the `role: "tool"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -2514,9 +2514,19 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Cron/Loop Tools',
         category: 'Experimental',
         requiresRestart: true,
+        default: true,
+        description:
+          'Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+      agentTeam: {
+        type: 'boolean',
+        label: 'Enable Agent Team',
+        category: 'Experimental',
+        requiresRestart: true,
         default: false,
         description:
-          'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+          'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
         showInDialog: true,
       },
       emitToolUseSummaries: {

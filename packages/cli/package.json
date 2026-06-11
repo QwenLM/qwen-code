@@ -62,7 +62,7 @@
     "fzf": "^0.5.2",
     "glob": "^10.5.0",
     "highlight.js": "^11.11.1",
-    "ink": "7.0.3",
+    "ink": "^7.0.3",
     "ink-gradient": "^3.0.0",
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",

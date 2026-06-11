@@ -25,6 +25,8 @@ import type { ShellExecutionConfig } from '../services/shellExecutionService.js'
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
+import type { TeamManager } from '../agents/team/TeamManager.js';
+import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -640,6 +642,11 @@ export interface AgentsCollabSettings {
     /** Total timeout in seconds for the Arena session. No limit if unset. */
     timeoutSeconds?: number;
   };
+  /** Team-specific settings */
+  team?: {
+    /** Maximum number of teammates (default: 10). */
+    maxTeammates?: number;
+  };
 }
 
 export interface ConfigParameters {
@@ -760,6 +767,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  agentTeamEnabled?: boolean;
   forkSubagentEnabled?: boolean;
   workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
@@ -1146,7 +1154,8 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly cronEnabled: boolean = false;
+  private readonly cronEnabled: boolean = true;
+  private readonly agentTeamEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
@@ -1168,6 +1177,11 @@ export class Config {
     | ((manager: ArenaManager | null) => void)
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
+  private teamManager: TeamManager | null = null;
+  private teamManagerChangeCallbacks = new Set<
+    (manager: TeamManager | null) => void
+  >();
+  private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
@@ -1334,7 +1348,8 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.cronEnabled = params.cronEnabled ?? false;
+    this.cronEnabled = params.cronEnabled ?? true;
+    this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -2624,6 +2639,7 @@ export class Config {
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -2940,6 +2956,57 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  // ─── Team Manager ──────────────────────────────────────────
+
+  getTeamManager(): TeamManager | null {
+    return this.teamManager;
+  }
+
+  setTeamManager(manager: TeamManager | null): void {
+    this.teamManager = manager;
+    for (const cb of this.teamManagerChangeCallbacks) {
+      cb(manager);
+    }
+  }
+
+  /**
+   * Register a callback invoked whenever the team manager changes.
+   * Pass `null` to unsubscribe a previously registered callback.
+   * Multiple subscribers are supported.
+   */
+  onTeamManagerChange(
+    cb: ((manager: TeamManager | null) => void) | null,
+    previous?: (manager: TeamManager | null) => void,
+  ): void {
+    if (previous) {
+      this.teamManagerChangeCallbacks.delete(previous);
+    }
+    if (cb) {
+      this.teamManagerChangeCallbacks.add(cb);
+    }
+  }
+
+  getTeamContext(): TeamContext | null {
+    return this.teamContext;
+  }
+
+  setTeamContext(ctx: TeamContext | null): void {
+    this.teamContext = ctx;
+  }
+
+  /**
+   * Clean up Team runtime — stops all teammates and clears state.
+   */
+  async cleanupTeamRuntime(): Promise<void> {
+    const manager = this.teamManager;
+    if (!manager) {
+      return;
+    }
+    await manager.cleanup();
+    this.setTeamManager(null);
+    this.setTeamContext(null);
   }
 
   /**
@@ -3318,9 +3385,14 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
-    // Cron is experimental and opt-in: enabled via settings or env var
-    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
+  }
+
+  isAgentTeamEnabled(): boolean {
+    // Agent team is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
+    return this.agentTeamEnabled;
   }
 
   isForkSubagentEnabled(): boolean {
@@ -4263,6 +4335,32 @@ export class Config {
       await registerLazy(ToolNames.CRON_DELETE, async () => {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
+      });
+    }
+
+    // Register team collaboration tools (experimental). The team-specific
+    // tools (team_create/team_delete/task_create/task_update/task_list)
+    // are gated on this flag.
+    if (this.isAgentTeamEnabled()) {
+      await registerLazy(ToolNames.TEAM_CREATE, async () => {
+        const { TeamCreateTool } = await import('../tools/team-create.js');
+        return new TeamCreateTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_DELETE, async () => {
+        const { TeamDeleteTool } = await import('../tools/team-delete.js');
+        return new TeamDeleteTool(this);
+      });
+      await registerLazy(ToolNames.TASK_CREATE, async () => {
+        const { TaskCreateTool } = await import('../tools/task-create.js');
+        return new TaskCreateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_UPDATE, async () => {
+        const { TaskUpdateTool } = await import('../tools/task-update.js');
+        return new TaskUpdateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_LIST, async () => {
+        const { TaskListTool } = await import('../tools/task-list.js');
+        return new TaskListTool(this);
       });
     }
 
