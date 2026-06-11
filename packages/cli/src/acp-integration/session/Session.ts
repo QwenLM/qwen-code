@@ -90,6 +90,7 @@ import {
   acquireSleepInhibitor,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -892,6 +893,19 @@ export class Session implements SessionContext {
   }
 
   async #executePrompt(
+    params: PromptRequest,
+    pendingSend: AbortController,
+  ): Promise<PromptResponse> {
+    // Bind this turn to the session's ID via AsyncLocalStorage so shell
+    // subprocesses (and hooks) read the CURRENT session's ID instead of
+    // the process-global env slot, which in daemon mode only ever holds
+    // the first session created in this process.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executePromptInner(params, pendingSend),
+    );
+  }
+
+  async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
@@ -1836,6 +1850,13 @@ export class Session implements SessionContext {
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
   async #executeCronPrompt(prompt: string): Promise<void> {
+    // Same session-ID binding rationale as #executePrompt.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executeCronPromptInner(prompt),
+    );
+  }
+
+  async #executeCronPromptInner(prompt: string): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -2095,6 +2116,15 @@ export class Session implements SessionContext {
   }
 
   async #executeBackgroundNotificationPrompt(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    // Same session-ID binding rationale as #executePrompt.
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      this.#executeBackgroundNotificationPromptInner(item),
+    );
+  }
+
+  async #executeBackgroundNotificationPromptInner(
     item: BackgroundNotificationQueueItem,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
