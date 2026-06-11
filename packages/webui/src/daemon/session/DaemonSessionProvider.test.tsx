@@ -32,6 +32,7 @@ import {
   type DaemonSessionNotice,
   type DaemonWorkspaceEventSignals,
 } from './DaemonSessionProvider.js';
+import { DaemonWorkspaceProvider } from '../workspace/DaemonWorkspaceProvider.js';
 
 interface MockSession {
   sessionId: string;
@@ -334,6 +335,36 @@ describe('DaemonSessionProvider', () => {
       error: 'GET /capabilities: HTTP 400',
     });
     expect(blocks).toEqual([]);
+  });
+
+  it('reuses the workspace capabilities request when nested in a workspace provider', async () => {
+    sdkMocks.sessions.push(createMockSession());
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170">
+          <DaemonSessionProvider suppressOwnUserEcho>
+            <Harness />
+          </DaemonSessionProvider>
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.status).toBe('connected');
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
   });
 
   it('publishes action error notices when no session is connected', async () => {

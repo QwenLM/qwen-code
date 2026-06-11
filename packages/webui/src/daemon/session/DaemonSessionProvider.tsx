@@ -180,6 +180,8 @@ export function DaemonSessionProvider({
   workspaceClientRef.current = workspace?.client;
   const workspaceCapabilitiesRef = useRef(workspace?.capabilities);
   workspaceCapabilitiesRef.current = workspace?.capabilities;
+  const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
+  workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
 
@@ -311,8 +313,13 @@ export function DaemonSessionProvider({
               status: 'connecting',
               error: undefined,
             }));
+            const getWorkspaceCapabilities =
+              workspaceGetCapabilitiesRef.current;
             const caps =
-              workspaceCapabilitiesRef.current ?? (await client.capabilities());
+              workspaceCapabilitiesRef.current ??
+              (getWorkspaceCapabilities
+                ? await getWorkspaceCapabilities()
+                : await client.capabilities());
             if (disposed || abort.signal.aborted) return;
             capabilities = caps;
             heartbeatSupportedRef.current =
