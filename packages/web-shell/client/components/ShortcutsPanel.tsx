@@ -21,12 +21,20 @@ function getPasteImagesShortcut(): string {
   return isMacPlatform() ? 'cmd+v' : 'ctrl+v';
 }
 
+function getNewlineShortcut(): string {
+  // Alt+Enter is labeled Option (⌥) on macOS; Mod+Enter resolves to
+  // Cmd+Enter on macOS and Ctrl+Enter elsewhere.
+  return isMacPlatform()
+    ? 'shift+enter / ctrl+j / opt+enter'
+    : 'shift+enter / ctrl+j / alt+enter';
+}
+
 const SHORTCUTS: Shortcut[] = [
   { key: '/', descriptionKey: 'help.shortcut.commandMenu' },
   { key: '@', descriptionKey: 'help.shortcut.addContext' },
   { key: 'shift+tab', descriptionKey: 'help.shortcut.approvals' },
   { key: 'esc', descriptionKey: 'help.shortcut.cancel' },
-  { key: 'shift+enter / ctrl+j', descriptionKey: 'help.shortcut.newline' },
+  { key: getNewlineShortcut(), descriptionKey: 'help.shortcut.newline' },
   { key: 'ctrl+l', descriptionKey: 'help.shortcut.clear' },
   { key: 'ctrl+y', descriptionKey: 'help.shortcut.retry' },
   { key: 'ctrl+o', descriptionKey: 'help.shortcut.compact' },
