@@ -6592,7 +6592,11 @@ class QwenAgent implements Agent {
               newModelName !== config.getModel() &&
               authType
             ) {
-              await config.switchModel(authType, newModelName);
+              try {
+                await config.switchModel(authType, newModelName);
+              } catch {
+                // Model switch failure — continue with other refreshes
+              }
             } else if (
               (changed.has('modelProviders') || envChanged) &&
               authType
