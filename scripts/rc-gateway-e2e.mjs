@@ -739,6 +739,40 @@ try {
       }
     }
 
+    // (d) Lineage (cycle 47): an OWNER token walks the fork's chain to root.
+    //     Reuses the REAL parent+fork on disk above; chain = [fork, parent].
+    if (newId) {
+      const { code: lc } = pairing.mint([SESSION_READ, OWNER]);
+      const lrr = await fetch(`${gw}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: lc, label: 'lineage-owner' }),
+      });
+      const lineageToken = (await lrr.json()).token;
+
+      const lr = await fetch(`${gw}/rc/session/${newId}/lineage`, {
+        headers: { Authorization: `Bearer ${lineageToken}` },
+      });
+      const lb = await lr.json().catch(() => ({}));
+      lr.status === 200 &&
+      lb.sessionId === newId &&
+      Array.isArray(lb.chain) &&
+      lb.chain.length === 2 &&
+      lb.chain[0]?.sessionId === newId &&
+      lb.chain[1]?.sessionId === parentId &&
+      lb.truncated === false
+        ? ok('lineage GET -> 200 chain [fork, parent] to root')
+        : bad(`lineage GET ${lr.status} ${JSON.stringify(lb)}`);
+
+      // A WRITE-but-not-OWNER token is 403 (topology is owner-only).
+      const nr = await fetch(`${gw}/rc/session/${newId}/lineage`, {
+        headers: { Authorization: `Bearer ${forkToken}` },
+      });
+      nr.status === 403
+        ? ok('lineage GET as non-owner -> 403')
+        : bad(`lineage non-owner expected 403, got ${nr.status}`);
+    }
+
     // Error case: forking an unknown parent -> 404 parent_transcript_not_found.
     {
       const ur = await fetch(`${gw}/rc/session/${randomUUID()}/fork`, {

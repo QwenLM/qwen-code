@@ -21,6 +21,7 @@ import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute } from './routes/prompt.js';
 import { createForkRoute } from './routes/fork.js';
+import { createLineageRoute } from './routes/lineage.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import {
   createListTokensRoute,
@@ -155,6 +156,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
       { audit },
     ),
+  );
+  // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
+  // enumerates ancestor session ids, which a confined share token must not see.
+  app.get(
+    '/rc/session/:id/lineage',
+    requireScope(OWNER, audit),
+    createLineageRoute(async () => {
+      try {
+        return (await deps.daemon.capabilities()).workspaceCwd;
+      } catch {
+        return undefined;
+      }
+    }, audit),
   );
   app.post(
     '/rc/session/:id/command/:name',
