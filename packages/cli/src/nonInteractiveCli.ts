@@ -1371,13 +1371,25 @@ export async function runNonInteractive(
                       settings,
                     );
                     if (slashCommandResult.type === 'submit_prompt') {
-                      // Capture onComplete BEFORE partListToText: if the latter
-                      // throws on an unexpected content shape, the throw happens
-                      // outside the try below, so the finally that fires
-                      // slashOnComplete never runs — leaving currentRun stuck at
-                      // 'implementing' until the 2h stale reclaim.
+                      // Capture onComplete BEFORE partListToText, and fire it
+                      // here if partListToText throws: it runs outside the
+                      // try/finally below, so an unhandled throw would skip the
+                      // finally that fires slashOnComplete and strand currentRun
+                      // at 'implementing' until the 2h stale reclaim.
                       slashOnComplete = slashCommandResult.onComplete;
-                      modelText = partListToText(slashCommandResult.content);
+                      try {
+                        modelText = partListToText(slashCommandResult.content);
+                      } catch (e) {
+                        if (slashOnComplete) {
+                          await slashOnComplete(
+                            abortController.signal.aborted
+                              ? { cancelled: true }
+                              : { errored: true },
+                          ).catch(() => {});
+                          slashOnComplete = undefined;
+                        }
+                        throw e;
+                      }
                     } else if (slashCommandResult.type === 'message') {
                       // Terminal response — emit and skip model submission.
                       // Run checkCronDone() in finally so an emit failure can't
@@ -1562,11 +1574,15 @@ export async function runNonInteractive(
 
       // Fire the captured onComplete on the error path before handleError
       // (which exits the process) so e.g. a failed `-p /auto-improve start`
-      // still records the run as errored instead of stranding currentRun.
+      // still records the run instead of stranding currentRun. Distinguish a
+      // SIGINT-aborted run (cancelled) from a real failure (errored) — mirrors
+      // the cron-tick path's abort check.
       if (slashOnComplete) {
-        await slashOnComplete({ errored: true }).catch((e: unknown) =>
-          debugLogger.warn('slashOnComplete (errored) threw:', e),
-        );
+        await slashOnComplete(
+          abortController.signal.aborted
+            ? { cancelled: true }
+            : { errored: true },
+        ).catch((e: unknown) => debugLogger.warn('slashOnComplete threw:', e));
         slashOnComplete = undefined;
       }
 
