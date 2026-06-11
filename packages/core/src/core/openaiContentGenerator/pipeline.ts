@@ -20,6 +20,12 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PIPELINE');
+
+/** Delay in ms before retrying after a model-unloaded error, to allow JIT loading. */
+const MODEL_UNLOADED_RETRY_DELAY_MS = 2000;
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -574,9 +580,101 @@ export class ContentGenerationPipeline {
       const result = await executor(openaiRequest, context);
       return result;
     } catch (error) {
+      // Retry once for model-unloaded errors.
+      // Local model servers like LM Studio support Just-In-Time (JIT) model
+      // loading: they load the model into memory when they receive the actual
+      // chat completion request. If the model is not currently loaded, the
+      // server returns an error (e.g. "Model is unloaded") instead of loading
+      // it. A single retry gives the server a second chance to load the model.
+      if (this.isModelUnloadedError(error)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          'Qwen Code: Model unloaded error, retrying once after delay...',
+        );
+        debugLogger.warn(
+          'Retrying request after model-unloaded error:',
+          error instanceof Error ? error.message : String(error),
+        );
+        await this.delayWithAbortCheck(
+          request.config?.abortSignal,
+          'initial-retry',
+        );
+
+        const retryContext = this.createRequestContext(request, isStreaming);
+        try {
+          const openaiRequest = await this.buildRequest(
+            request,
+            userPromptId,
+            retryContext,
+            isStreaming,
+          );
+          openaiRequestCaptureContext.getStore()?.(openaiRequest);
+          runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+
+          const result = await executor(openaiRequest, retryContext);
+          debugLogger.info('Retry succeeded after model-unloaded error');
+          return result;
+        } catch (retryError) {
+          debugLogger.warn(
+            'Retry failed after model-unloaded error:',
+            retryError instanceof Error
+              ? retryError.message
+              : String(retryError),
+          );
+          return await this.handleError(
+            redactProxyError(retryError),
+            retryContext,
+            request,
+          );
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
+  }
+
+  private async delayWithAbortCheck(
+    signal: AbortSignal | undefined,
+    label: string,
+  ): Promise<void> {
+    if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+    // Add jitter to avoid thundering herd if multiple requests fail at once.
+    // Use AbortSignal cleanup to avoid leaking the timer on abort.
+    const delay = MODEL_UNLOADED_RETRY_DELAY_MS + Math.random() * 1000;
+    debugLogger.info(`Waiting ${Math.round(delay)}ms for ${label}...`);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delay);
+      if (signal) {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(signal.reason ?? new Error('Aborted'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+    if (signal?.aborted) throw signal.reason ?? new Error('Aborted');
+  }
+
+  /**
+   * Check if an error indicates that the model is not currently loaded in memory.
+   *
+   * Local model servers like LM Studio may return an error when the requested
+   * model is not loaded, instead of loading it on demand. This method detects
+   * such errors so the pipeline can retry the request.
+   */
+  private isModelUnloadedError(error: unknown): boolean {
+    if (!error) return false;
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message.toLowerCase()
+        : String(error).toLowerCase();
+
+    // Only match known JIT-loading error patterns from local model servers
+    // (LM Studio, llama.cpp). Avoid matching permanent errors like
+    // "model not found" or "model not loaded" which can indicate
+    // misconfiguration, not a transient unloaded state.
+    return errorMessage.includes('model is unloaded');
   }
 
   /**
