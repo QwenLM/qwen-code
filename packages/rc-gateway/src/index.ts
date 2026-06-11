@@ -83,6 +83,7 @@ export {
   evaluate,
   type PolicyDecision,
   type ToolCallContext,
+  type QuotaOracle,
 } from './policy/evaluator.js';
 export { PolicyEnforcer } from './policy/enforcer.js';
 export {

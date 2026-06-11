@@ -21,6 +21,16 @@ export interface ToolCallContext {
   sessionTag?: string;
 }
 
+/**
+ * A READ-ONLY view of the quota store for the evaluator: does rule `ruleId` have
+ * room within its rolling window at `nowMs`? `untracked` = no known limit (no
+ * store entry / id-less). The evaluator must NEVER mutate quota state — consuming
+ * happens in the enforcer AFTER a successful allow vote (design.md:68).
+ */
+export interface QuotaOracle {
+  state(ruleId: string, nowMs: number): 'room' | 'exhausted' | 'untracked';
+}
+
 export interface PolicyDecision {
   action: PolicyAction;
   /**
@@ -138,6 +148,7 @@ function ruleMatches(
 function classifyConditions(
   rule: PolicyRule,
   now: Date,
+  quota?: QuotaOracle,
 ): 'no-match' | 'match' | 'unevaluable' {
   let unevaluable = false;
 
@@ -163,9 +174,24 @@ function classifyConditions(
     }
   }
 
-  // 3. maxPerWindow — still deferred (Phase 2b).
+  // 3. maxPerWindow — consult the quota oracle when one is supplied (the enforcer
+  //    path). Without an oracle, or for an id-less rule (can't be tracked), it
+  //    stays unevaluable → prompt (the backward-compatible default).
   if (rule.maxPerWindow !== undefined) {
-    unevaluable = true;
+    if (quota && rule.id !== undefined) {
+      const q = quota.state(rule.id, now.getTime());
+      if (q === 'exhausted') {
+        // An exhausted rule does NOT apply — wins over any unevaluable sibling.
+        return 'no-match';
+      }
+      if (q === 'untracked') {
+        unevaluable = true;
+      }
+      // 'room' → the quota condition is satisfied; do NOT clear a prior
+      // unevaluable (a malformed expiresAt sibling must still force prompt).
+    } else {
+      unevaluable = true;
+    }
   }
 
   return unevaluable ? 'unevaluable' : 'match';
@@ -184,6 +210,7 @@ export function evaluate(
   policy: Policy,
   ctx: ToolCallContext,
   now: Date = new Date(),
+  quota?: QuotaOracle,
 ): PolicyDecision {
   const argString = canonicalArgString(ctx.args);
   const paths = candidatePaths(ctx.args);
@@ -207,7 +234,7 @@ export function evaluate(
 
     // Evaluate time/quota conditions. A definitive 'no-match' (expired /
     // out-of-window, well-formed) skips the rule BEFORE we decide an action.
-    const status = classifyConditions(rule, now);
+    const status = classifyConditions(rule, now, quota);
     if (status === 'no-match') continue;
 
     const unevaluable = status === 'unevaluable';
