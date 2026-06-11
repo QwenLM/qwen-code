@@ -15,7 +15,10 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
 import { AcpDispatcher } from './dispatch.js';
-import { ConnectionRegistry } from './connectionRegistry.js';
+import {
+  ConnectionRegistry,
+  type AcpConnection,
+} from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
 import { WsStream } from './wsStream.js';
 import type { RateLimitTier } from '../rateLimit.js';
@@ -414,13 +417,18 @@ export function mountAcpHttp(
 
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
-  let upgradeListener: ((...args: unknown[]) => void) | undefined;
+  let upgradeListener:
+    | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
+    | undefined;
   let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
     if (wss) return;
     wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
     upgradeServer = httpServer;
+    const expectedTokenHash = opts.token
+      ? createHash('sha256').update(opts.token).digest()
+      : undefined;
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       let url: URL;
@@ -499,9 +507,12 @@ export function mountAcpHttp(
         const credentials = authHeader
           .slice(authHeader.indexOf(' ') + 1)
           .trim();
-        const expected = createHash('sha256').update(opts.token).digest();
         const actual = createHash('sha256').update(credentials).digest();
-        if (scheme !== 'bearer' || !timingSafeEqual(expected, actual)) {
+        if (
+          scheme !== 'bearer' ||
+          !expectedTokenHash ||
+          !timingSafeEqual(expectedTokenHash, actual)
+        ) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
@@ -516,12 +527,14 @@ export function mountAcpHttp(
         let initialized = false;
         const initTimer = setTimeout(() => {
           if (!initialized) {
+            writeStderrLine(
+              `qwen serve: /acp WS initialize timeout (30s) from ${rawAddr}`,
+            );
             ws.close(1002, 'Initialize timeout');
           }
         }, 30_000);
         initTimer.unref?.();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let connRef: any;
+        let connRef: AcpConnection | undefined;
         let messageQueue = Promise.resolve();
         const rawAddr =
           (socket as unknown as { remoteAddress?: string }).remoteAddress ??
@@ -749,8 +762,7 @@ export function mountAcpHttp(
         }
       });
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    httpServer.on('upgrade', upgradeListener as any);
+    httpServer.on('upgrade', upgradeListener!);
 
     writeStderrLine(`qwen serve: /acp WebSocket transport enabled on ${path}`);
   }
