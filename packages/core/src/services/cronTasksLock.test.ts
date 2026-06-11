@@ -45,7 +45,7 @@ describe('cronTasksLock', () => {
   describe('getLockFilePath', () => {
     it('returns path under .qwen/', () => {
       expect(getLockFilePath('/project')).toBe(
-        '/project/.qwen/scheduled_tasks.lock',
+        path.join('/project', '.qwen', 'scheduled_tasks.lock'),
       );
     });
   });
@@ -65,12 +65,14 @@ describe('cronTasksLock', () => {
     });
 
     it('fails when another live process holds the lock', async () => {
-      // Write a lock file with PID 1 (init/launchd, always alive)
+      // Own pid: alive on every platform (PID 1 doesn't exist on
+      // Windows, so it would read as a stale lock there). The foreign
+      // sessionId keeps it from counting as this session's own lock.
       const lockPath = getLockFilePath(tmpDir);
       await fs.mkdir(path.dirname(lockPath), { recursive: true });
       await fs.writeFile(
         lockPath,
-        JSON.stringify({ pid: 1, sessionId: 'other' }),
+        JSON.stringify({ pid: process.pid, sessionId: 'other' }),
       );
       expect(await tryAcquireLock(tmpDir, 'session-1')).toBe(false);
     });

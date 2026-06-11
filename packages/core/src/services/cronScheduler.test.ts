@@ -32,6 +32,14 @@ const updateGate = vi.hoisted(() => ({
   onHit: null as (() => void) | null,
 }));
 
+// Failure injection for removeCronTasks: the real on-disk failure modes
+// are platform-divergent (POSIX surfaces ENOTDIR for a corrupted .qwen,
+// Windows reads it as ENOENT → "nothing to remove"), so tests assert the
+// scheduler's contract against an injected rejection instead.
+const removeGate = vi.hoisted(() => ({
+  fail: null as Error | null,
+}));
+
 vi.mock('./cronTasksFile.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./cronTasksFile.js')>();
   return {
@@ -56,6 +64,12 @@ vi.mock('./cronTasksFile.js', async (importOriginal) => {
       }
       return actual.updateCronTasks(...args);
     },
+    removeCronTasks: async (
+      ...args: Parameters<typeof actual.removeCronTasks>
+    ) => {
+      if (removeGate.fail) throw removeGate.fail;
+      return actual.removeCronTasks(...args);
+    },
   };
 });
 
@@ -73,6 +87,7 @@ describe('CronScheduler', () => {
     readGate.fail = null;
     updateGate.block = null;
     updateGate.onHit = null;
+    removeGate.fail = null;
   });
 
   describe('create', () => {
@@ -1066,15 +1081,21 @@ describe('CronScheduler', () => {
     it('restores the job and throws when durable removal cannot persist', async () => {
       const job = await scheduler.createDurable('* * * * *', 'sticky', true);
 
-      // Replace .qwen with a regular file so the tasks-file update fails.
-      const qwenDir = path.join(tmpDir, '.qwen');
-      await fs.rm(qwenDir, { recursive: true, force: true });
-      await fs.writeFile(qwenDir, 'not a directory');
+      removeGate.fail = Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
 
       await expect(scheduler.delete(job.id)).rejects.toThrow();
       // Deletion didn't persist, so the job must not silently vanish
       // from this session either.
       expect(scheduler.list().map((j) => j.id)).toContain(job.id);
+
+      // Obstruction cleared — the restored job deletes cleanly, from
+      // memory and disk.
+      removeGate.fail = null;
+      await expect(scheduler.delete(job.id)).resolves.toBe(true);
+      expect(scheduler.list()).toHaveLength(0);
+      expect(await readCronTasks(tmpDir)).toHaveLength(0);
     });
 
     it('sessionSize counts only session-only jobs', async () => {

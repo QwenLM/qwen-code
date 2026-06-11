@@ -38,7 +38,7 @@ describe('cronTasksFile', () => {
   describe('getCronFilePath', () => {
     it('returns path under .qwen/', () => {
       expect(getCronFilePath('/project')).toBe(
-        '/project/.qwen/scheduled_tasks.json',
+        path.join('/project', '.qwen', 'scheduled_tasks.json'),
       );
     });
   });
