@@ -384,8 +384,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   if (!isPending && !expanded) {
     const label =
       durationMs != null
-        ? `⠏ ${t('Thought for')} ${formatDuration(durationMs)}`
-        : `⠏ ${t('Thinking')}`;
+        ? `${t('Thought for')} ${formatDuration(durationMs)}`
+        : t('Thinking');
     // TODO(follow-up): restore "(ctrl+o to expand)" hint once Ctrl+O is
     // decoupled from compactMode so it can toggle thinking blocks independently.
     return (
@@ -424,8 +424,8 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 
   const expandedLabel =
     durationMs != null
-      ? `⠏ ${t('Thought for')} ${formatDuration(durationMs)}`
-      : `⠏ ${t('Thinking')}…`;
+      ? `${t('Thought for')} ${formatDuration(durationMs)}`
+      : `${t('Thinking')}…`;
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
