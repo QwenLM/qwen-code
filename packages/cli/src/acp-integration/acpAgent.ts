@@ -6594,8 +6594,10 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
-              } catch {
-                // Model switch failure — continue with other refreshes
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: switchModel failed for session ${id}: ${err}`,
+                );
               }
             } else if (
               (changed.has('modelProviders') || envChanged) &&
@@ -6603,8 +6605,10 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.refreshAuth(authType);
-              } catch {
-                // Auth refresh failure — continue with other refreshes
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: refreshAuth failed for session ${id}: ${err}`,
+                );
               }
             }
 
@@ -6622,8 +6626,10 @@ class QwenAgent implements Agent {
               ) {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
-                } catch {
-                  // Trust-gate or validation failure — continue with other refreshes
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: setApprovalMode failed for session ${id}: ${err}`,
+                  );
                 }
               }
             }

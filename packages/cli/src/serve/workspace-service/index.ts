@@ -555,7 +555,13 @@ export function createDaemonWorkspaceService(
 
     async reload(ctx: WorkspaceRequestContext) {
       if (deps.reloadDaemonEnv) {
-        await deps.reloadDaemonEnv(boundWorkspace);
+        try {
+          await deps.reloadDaemonEnv(boundWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: daemon env reload failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
 
       let childReloaded = false;
@@ -594,7 +600,14 @@ export function createDaemonWorkspaceService(
 
       publishWorkspaceEvent({
         type: 'settings_reloaded',
-        data: { env, changedKeys, childReloaded, sessionsRefreshed },
+        data: {
+          env,
+          changedKeys,
+          childReloaded,
+          sessionsRefreshed,
+          sessionsSkipped,
+          childError,
+        },
         originatorClientId: ctx.originatorClientId,
       });
 
