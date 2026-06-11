@@ -3088,7 +3088,7 @@ export function createServeApp(
     token: opts.token,
   });
   if (acpHandle) {
-    app.locals.acpHandle = acpHandle;
+    app.locals['acpHandle'] = acpHandle;
   }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with

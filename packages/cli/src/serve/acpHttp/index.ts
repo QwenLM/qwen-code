@@ -394,7 +394,7 @@ export function mountAcpHttp(
             `[::1]:${localPort}`,
             `host.docker.internal:${localPort}`,
           ]);
-          if (host && !allowed.has(host)) {
+          if (!allowed.has(host)) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
@@ -407,7 +407,7 @@ export function mountAcpHttp(
         const origin = req.headers['origin'];
         if (origin) {
           try {
-            const originHost = new URL(origin).hostname;
+            const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
             if (
               originHost !== '127.0.0.1' &&
               originHost !== 'localhost' &&
