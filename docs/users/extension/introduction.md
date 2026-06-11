@@ -145,7 +145,7 @@ qwen extensions install <source> --scope project
 
 ### Managing marketplace sources
 
-Marketplace sources (Claude plugin marketplaces) power the Discover tab in `/extensions manage`. You can manage them from the CLI as well:
+Marketplace sources power the Discover tab in `/extensions manage`. Both Qwen-native marketplaces (a `qwen-marketplace.json` at the repo root) and Claude plugin marketplaces (`.claude-plugin/marketplace.json`) are supported; when both are present the Qwen manifest wins. You can manage sources from the CLI as well:
 
 ```bash
 # Add a marketplace (owner/repo, git URL, https URL to marketplace.json, or local path)
@@ -160,6 +160,47 @@ qwen extensions sources update <name>
 # Remove a marketplace
 qwen extensions sources remove <name>
 ```
+
+### Publishing a Qwen marketplace
+
+To turn a repository into a Qwen marketplace, add a `qwen-marketplace.json` at its root:
+
+```json
+{
+  "name": "my-marketplace",
+  "description": "Curated extensions for my team",
+  "metadata": { "extensionRoot": "extensions" },
+  "extensions": [
+    {
+      "name": "hello",
+      "description": "Example extension kept in this repo",
+      "source": "./hello"
+    },
+    {
+      "name": "remote-ext",
+      "source": { "type": "github", "repo": "owner/repo", "ref": "v1.0.0" }
+    },
+    {
+      "name": "npm-ext",
+      "source": { "type": "npm", "package": "@scope/extension" }
+    }
+  ]
+}
+```
+
+Each entry's `source` tells the installer where the extension code lives:
+
+- A relative path inside the repo (resolved against `metadata.extensionRoot` when set; must stay within the marketplace directory — `..` and absolute paths are rejected)
+- An `http(s)://` URL string (for `git@`/`ssh://` URLs or to pin a `ref`/subdir, use the structured `git`/`github` forms below)
+- `{ "type": "github", "repo": "owner/repo", "path?": "subdir", "ref?": "tag" }`
+- `{ "type": "git", "url": "...", "path?": "subdir", "ref?": "tag" }`
+- `{ "type": "npm", "package": "@scope/name" }` — scoped packages only; pin a version with `@scope/name@1.2.3`
+
+Entries may point at extensions of any supported format — Qwen-native (`qwen-extension.json`), Gemini (`gemini-extension.json`), or Claude (`.claude-plugin/plugin.json`); non-native formats are converted automatically on install. Optional entry fields like `version`, `author`, `homepage`, `category`, `tags`, and `components` enrich the Discover view.
+
+Install a specific entry directly with `qwen extensions install <marketplace-source>:<extension-name>`.
+
+> **Note:** Marketplaces added as a direct `marketplace.json` URL (rather than a repo/owner-repo/local path) cannot express a per-entry `path` or `ref` when installing from the Discover tab — those entries install the repository root at its default branch. Add such marketplaces by repo or local path to honor structured-source `path`/`ref`.
 
 ### Uninstalling an extension
 

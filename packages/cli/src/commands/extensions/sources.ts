@@ -51,7 +51,7 @@ export async function handleSourcesList() {
       sources
         .map((entry) => {
           let output = `${entry.name}`;
-          output += `\n ${t('Source:')} ${redactUrlCredentials(entry.source)} (${t('Type:')} ${entry.type})`;
+          output += `\n ${t('Source:')} ${redactUrlCredentials(entry.source)} (${t('Type:')} ${entry.type}${entry.format ? `, ${t('Format:')} ${entry.format}` : ''})`;
           const updated = entry.lastUpdatedAt ?? entry.addedAt;
           if (updated) {
             output += `\n ${t('Last updated: {{date}}', { date: updated })}`;
@@ -89,7 +89,7 @@ export async function handleSourcesUpdate(args: { name: string }) {
     writeStdoutLine(t('Updated marketplace "{{name}}".', { name: entry.name }));
     writeStdoutLine(
       t('{{count}} available extensions', {
-        count: String(config.plugins?.length ?? 0),
+        count: String(config.entries.length),
       }),
     );
   } catch (error) {
@@ -100,7 +100,7 @@ export async function handleSourcesUpdate(args: { name: string }) {
 
 const addCommand: CommandModule = {
   command: 'add <source>',
-  describe: t('Adds a marketplace source (Claude format).'),
+  describe: t('Adds a marketplace source (Qwen or Claude format).'),
   builder: (yargs) =>
     yargs.positional('source', {
       describe: t(

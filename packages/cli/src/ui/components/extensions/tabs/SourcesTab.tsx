@@ -16,7 +16,7 @@ import {
   type Config,
   type Extension,
   type ExtensionSource,
-  type ClaudeMarketplaceConfig,
+  type MarketplaceConfig,
   parseInstallSource,
   redactUrlCredentials,
   createDebugLogger,
@@ -81,8 +81,9 @@ export const SourcesTab = ({
   const [view, setView] = useState<SourcesView>('list');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [detailConfig, setDetailConfig] =
-    useState<ClaudeMarketplaceConfig | null>(null);
+  const [detailConfig, setDetailConfig] = useState<MarketplaceConfig | null>(
+    null,
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   // The marketplace currently being viewed or confirmed.
   const [detailSource, setDetailSource] = useState<ExtensionSource | null>(
@@ -435,7 +436,7 @@ export const SourcesTab = ({
 
         <Box flexDirection="column">
           <Text color={theme.text.primary}>
-            {t('Enter marketplace source (Claude format):')}
+            {t('Enter marketplace source (Qwen or Claude format):')}
           </Text>
           <Text color={theme.text.secondary}>{t('Examples:')}</Text>
           <Text color={theme.text.secondary}>{' · owner/repo (GitHub)'}</Text>
@@ -463,10 +464,10 @@ export const SourcesTab = ({
   }
 
   if (view === 'detail' && detailSource) {
-    const plugins = detailConfig?.plugins ?? [];
-    const availableCount = plugins.length;
+    const entries = detailConfig?.entries ?? [];
+    const availableCount = entries.length;
     const installedNames = new Set(extensions.map((ext) => ext.name));
-    const installedHere = plugins.filter((p) => installedNames.has(p.name));
+    const installedHere = entries.filter((p) => installedNames.has(p.name));
     const lastUpdated = formatDate(
       detailSource.lastUpdatedAt ?? detailSource.addedAt,
     );
@@ -633,7 +634,7 @@ export const SourcesTab = ({
         {renderRow(
           1,
           t('+ Add new marketplace'),
-          t('Claude plugin marketplace'),
+          t('Qwen / Claude marketplace'),
           true,
         )}
       </Box>
@@ -647,7 +648,12 @@ export const SourcesTab = ({
             renderRow(
               sourcesStart + j,
               source.name,
-              `${redactUrlCredentials(source.source)} (${source.type})`,
+              `${redactUrlCredentials(source.source)} (${[
+                source.format,
+                source.type,
+              ]
+                .filter(Boolean)
+                .join(' · ')})`,
             ),
           )}
         </Box>

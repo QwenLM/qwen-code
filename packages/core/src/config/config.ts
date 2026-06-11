@@ -172,7 +172,7 @@ import {
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
-import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
+import type { MarketplaceConfig } from '../extension/marketplaceTypes.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -492,7 +492,7 @@ export interface ExtensionInstallMetadata {
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
-  marketplaceConfig?: ClaudeMarketplaceConfig;
+  marketplaceConfig?: MarketplaceConfig;
   pluginName?: string;
 }
 

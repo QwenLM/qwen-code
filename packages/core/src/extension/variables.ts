@@ -20,6 +20,7 @@ export type { HookDefinition };
 
 export const EXTENSIONS_DIRECTORY_NAME = path.join(QWEN_DIR, 'extensions');
 export const EXTENSIONS_CONFIG_FILENAME = 'qwen-extension.json';
+export const QWEN_MARKETPLACE_CONFIG_FILENAME = 'qwen-marketplace.json';
 export const INSTALL_METADATA_FILENAME = '.qwen-extension-install.json';
 export const EXTENSION_SETTINGS_FILENAME = '.env';
 

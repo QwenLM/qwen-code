@@ -38,7 +38,7 @@ export default {
   'Change scope for "{{name}}":': '更改 "{{name}}" 的作用域：',
   'Changing scope...': '正在更改作用域...',
   'Checked "{{name}}" for updates.': '已检查 "{{name}}" 的更新。',
-  'Claude plugin marketplace': 'Claude 插件市场',
+  'Qwen / Claude marketplace': 'Qwen / Claude 市场',
   Commands: '命令',
   'Components:': '组件：',
   'Could not load this marketplace.': '无法加载该市场源。',
@@ -52,8 +52,8 @@ export default {
   'Enabling "{{name}}"...': '正在启用 "{{name}}"...',
   'Enabling MCP "{{name}}"...': '正在启用 MCP "{{name}}"...',
   'Enter extension source:': '输入扩展来源：',
-  'Enter marketplace source (Claude format):':
-    '输入市场源地址（Claude 格式）：',
+  'Enter marketplace source (Qwen or Claude format):':
+    '输入市场源地址（Qwen 或 Claude 格式）：',
   'Examples:': '示例：',
   'Extension details': '扩展详情',
   'Extension v{{version}}': '扩展 v{{version}}',
@@ -655,8 +655,8 @@ export default {
   'Marketplace "{{name}}" not found.': '未找到市场源 "{{name}}"。',
   'No marketplace sources added yet.': '尚未添加任何市场源。',
   'No marketplaces added yet.': '尚未添加任何市场源。',
-  'Adds a marketplace source (Claude format).':
-    '添加一个市场源（Claude 格式）。',
+  'Adds a marketplace source (Qwen or Claude format).':
+    '添加一个市场源（Qwen 或 Claude 格式）。',
   'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
     '要添加的市场源：owner/repo（GitHub）、git 或 https URL，或本地路径。',
   'Removes a marketplace source.': '移除一个市场源。',
@@ -745,6 +745,7 @@ export default {
   'Path:': '路径：',
   'Source:': '来源：',
   'Type:': '类型：',
+  'Format:': '格式：',
   'Ref:': '引用：',
   'Release tag:': '发布标签：',
   'Enabled (User):': '已启用（用户）：',

@@ -50,7 +50,7 @@ describe('extensions sources command', () => {
     mockGetSources.mockReturnValue([
       { name: 'my-marketplace', source: 'owner/repo', type: 'github' },
     ]);
-    mockLoadSource.mockResolvedValue({ name: 'my-marketplace', plugins: [] });
+    mockLoadSource.mockResolvedValue({ name: 'my-marketplace', entries: [] });
     // A fresh parser per parse: yargs carries validation state across calls.
     const parse = (command: string) =>
       yargs([]).command(sourcesCommand).fail(false).locale('en').parse(command);
@@ -182,8 +182,9 @@ describe('handleSourcesUpdate', () => {
       { name: 'market-a', source: 'owner/repo', type: 'github' },
     ]);
     mockLoadSource.mockResolvedValue({
+      format: 'claude',
       name: 'market-a',
-      plugins: [{ name: 'p1' }, { name: 'p2' }],
+      entries: [{ name: 'p1' }, { name: 'p2' }],
     });
 
     await handleSourcesUpdate({ name: 'market-a' });

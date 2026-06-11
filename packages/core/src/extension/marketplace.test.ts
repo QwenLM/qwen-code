@@ -312,7 +312,52 @@ describe('parseInstallSource', () => {
       const result = await parseInstallSource('owner/repo');
 
       expect(result.originSource).toBe('Claude');
-      expect(result.marketplaceConfig).toEqual(mockMarketplaceConfig);
+      expect(result.marketplaceConfig).toMatchObject({
+        format: 'claude',
+        name: 'test-marketplace',
+      });
+      expect(result.marketplaceConfig?.entries.map((e) => e.name)).toEqual([
+        'plugin1',
+      ]);
+    });
+
+    it('should detect qwen marketplace and tag originSource as QwenCode', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const mockQwenMarketplace = {
+        name: 'qwen-marketplace',
+        extensions: [{ name: 'ext1', source: './extensions/ext1' }],
+      };
+
+      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+        const mockRes = {
+          statusCode: 200,
+          resume: vi.fn(),
+          on: vi.fn((event, handler) => {
+            if (event === 'data') {
+              handler(Buffer.from(JSON.stringify(mockQwenMarketplace)));
+            }
+            if (event === 'end') {
+              handler();
+            }
+          }),
+        };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn(), setTimeout: vi.fn(), destroy: vi.fn() } as never;
+      });
+
+      const result = await parseInstallSource('owner/repo');
+
+      expect(result.originSource).toBe('QwenCode');
+      expect(result.marketplaceConfig).toMatchObject({
+        format: 'qwen',
+        name: 'qwen-marketplace',
+      });
+      expect(result.marketplaceConfig?.entries.map((e) => e.name)).toEqual([
+        'ext1',
+      ]);
     });
 
     it('should remain git type when marketplace config not found', async () => {
@@ -357,7 +402,11 @@ describe('parseInstallSource', () => {
       const result = await loadMarketplaceConfigFromSource(
         'git@github.com:owner/repo.git',
       );
-      expect(result).toEqual(cfg);
+      expect(result).toMatchObject({
+        format: 'claude',
+        name: 'ssh-marketplace',
+      });
+      expect(result?.entries.map((e) => e.name)).toEqual(['p1']);
     });
   });
 });

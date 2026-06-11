@@ -40,7 +40,7 @@ export default {
   'Change scope for "{{name}}":': 'Change scope for "{{name}}":',
   'Changing scope...': 'Changing scope...',
   'Checked "{{name}}" for updates.': 'Checked "{{name}}" for updates.',
-  'Claude plugin marketplace': 'Claude plugin marketplace',
+  'Qwen / Claude marketplace': 'Qwen / Claude marketplace',
   Commands: 'Commands',
   'Components:': 'Components:',
   'Could not load this marketplace.': 'Could not load this marketplace.',
@@ -54,8 +54,8 @@ export default {
   'Enabling "{{name}}"...': 'Enabling "{{name}}"...',
   'Enabling MCP "{{name}}"...': 'Enabling MCP "{{name}}"...',
   'Enter extension source:': 'Enter extension source:',
-  'Enter marketplace source (Claude format):':
-    'Enter marketplace source (Claude format):',
+  'Enter marketplace source (Qwen or Claude format):':
+    'Enter marketplace source (Qwen or Claude format):',
   'Examples:': 'Examples:',
   'Extension details': 'Extension details',
   'Extension v{{version}}': 'Extension v{{version}}',
@@ -683,8 +683,8 @@ export default {
   'Marketplace "{{name}}" not found.': 'Marketplace "{{name}}" not found.',
   'No marketplace sources added yet.': 'No marketplace sources added yet.',
   'No marketplaces added yet.': 'No marketplaces added yet.',
-  'Adds a marketplace source (Claude format).':
-    'Adds a marketplace source (Claude format).',
+  'Adds a marketplace source (Qwen or Claude format).':
+    'Adds a marketplace source (Qwen or Claude format).',
   'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
     'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.',
   'Removes a marketplace source.': 'Removes a marketplace source.',
@@ -786,6 +786,7 @@ export default {
   'Path:': 'Path:',
   'Source:': 'Source:',
   'Type:': 'Type:',
+  'Format:': 'Format:',
   'Ref:': 'Ref:',
   'Release tag:': 'Release tag:',
   'Enabled (User):': 'Enabled (User):',

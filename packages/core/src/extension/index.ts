@@ -3,6 +3,8 @@ export * from './variables.js';
 export * from './github.js';
 export * from './extensionSettings.js';
 export * from './marketplace.js';
+export * from './marketplaceTypes.js';
+export * from './qwenMarketplace.js';
 export * from './sourceRegistry.js';
 export * from './extensionPreferences.js';
 export * from './npm.js';

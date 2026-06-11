@@ -165,6 +165,14 @@ export async function checkForExtensionUpdate(
   extensionManager: ExtensionManager,
 ): Promise<ExtensionUpdateState> {
   const installMetadata = extension.installMetadata;
+  // Extensions installed from a marketplace entry are addressed by the
+  // (marketplace source + pluginName) pair, which the checks below don't
+  // re-resolve — `type`/`source` point at the marketplace, not the entry. Treat
+  // them as not auto-updatable (matching the existing Claude behavior) rather
+  // than letting them fall through and report a spurious ERROR.
+  if (installMetadata?.pluginName) {
+    return ExtensionUpdateState.NOT_UPDATABLE;
+  }
   if (installMetadata?.type === 'local') {
     let latestConfig: ExtensionConfig | undefined;
     try {

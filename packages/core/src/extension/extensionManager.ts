@@ -9,7 +9,6 @@ import type {
   ExtensionInstallMetadata,
   SkillConfig,
   SubagentConfig,
-  ClaudeMarketplaceConfig,
 } from '../index.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import {
@@ -32,6 +31,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
   INSTALL_METADATA_FILENAME,
+  QWEN_MARKETPLACE_CONFIG_FILENAME,
   recursivelyHydrateStrings,
   substituteHookVariables,
   performVariableReplacement,
@@ -62,6 +62,11 @@ import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
+import {
+  type MarketplaceConfig,
+  parseMarketplaceDocument,
+} from './marketplaceTypes.js';
+import { resolveQwenMarketplaceExtensionDir } from './qwenMarketplace.js';
 import {
   isGeminiExtensionConfig,
   convertGeminiExtensionPackage,
@@ -199,9 +204,7 @@ export interface ExtensionManagerOptions {
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
   requestSetting?: (setting: ExtensionSetting) => Promise<string>;
-  requestChoicePlugin?: (
-    marketplace: ClaudeMarketplaceConfig,
-  ) => Promise<string>;
+  requestChoicePlugin?: (marketplace: MarketplaceConfig) => Promise<string>;
 }
 
 // ============================================================================
@@ -290,20 +293,61 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
+): Promise<{
+  extensionDir: string;
+  originSource: ExtensionOriginSource;
+  /** Temp download dir the caller must clean up; set for remote entries. */
+  marketplaceTempDir?: string;
+  /**
+   * Temp dir produced by a Gemini/Claude conversion (a copy, never the user's
+   * source); the caller must clean it up regardless of install type.
+   */
+  convertedTempDir?: string;
+}> {
+  // A named entry of a Qwen-native marketplace: locate the entry's extension
+  // code, then run the regular detection chain on it. The located directory
+  // may hold an extension of any supported format (mixed-ecosystem entries).
+  if (
+    pluginName &&
+    fs.existsSync(path.join(extensionDir, QWEN_MARKETPLACE_CONFIG_FILENAME))
+  ) {
+    const { extensionDir: resolvedDir, tempDownloadDir } =
+      await resolveQwenMarketplaceExtensionDir(extensionDir, pluginName);
+    try {
+      const result = await convertGeminiOrClaudeExtension(resolvedDir);
+      return {
+        ...result,
+        marketplaceTempDir: tempDownloadDir ?? result.marketplaceTempDir,
+      };
+    } catch (error) {
+      // The download dir won't reach the installer's cleanup if conversion
+      // throws here, so remove it before propagating.
+      if (tempDownloadDir) {
+        await fs.promises.rm(tempDownloadDir, {
+          recursive: true,
+          force: true,
+        });
+      }
+      throw error;
+    }
+  }
+
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
+  let convertedTempDir: string | undefined;
   const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
   if (fs.existsSync(configFilePath)) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtensionConfig(extensionDir)) {
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
+    convertedTempDir = newExtensionDir;
     originSource = 'Gemini';
   } else if (pluginName) {
     newExtensionDir = (
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
+    convertedTempDir = newExtensionDir;
     originSource = 'Claude';
   } else if (
     fs.existsSync(path.join(extensionDir, '.claude-plugin', 'plugin.json'))
@@ -312,9 +356,10 @@ async function convertGeminiOrClaudeExtension(
     // holds `.claude-plugin/plugin.json` with no marketplace.json.
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
       .convertedDir;
+    convertedTempDir = newExtensionDir;
     originSource = 'Claude';
   }
-  return { extensionDir: newExtensionDir, originSource };
+  return { extensionDir: newExtensionDir, originSource, convertedTempDir };
 }
 
 // ============================================================================
@@ -339,7 +384,7 @@ export class ExtensionManager {
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
   private requestSetting?: (setting: ExtensionSetting) => Promise<string>;
   private requestChoicePlugin: (
-    marketplace: ClaudeMarketplaceConfig,
+    marketplace: MarketplaceConfig,
   ) => Promise<string>;
 
   constructor(options: ExtensionManagerOptions) {
@@ -386,9 +431,7 @@ export class ExtensionManager {
   }
 
   setRequestChoicePlugin(
-    requestChoicePlugin: (
-      marketplace: ClaudeMarketplaceConfig,
-    ) => Promise<string>,
+    requestChoicePlugin: (marketplace: MarketplaceConfig) => Promise<string>,
   ): void {
     this.requestChoicePlugin = requestChoicePlugin;
   }
@@ -568,9 +611,10 @@ export class ExtensionManager {
     }
     const config = await loadMarketplaceConfigFromSource(trimmed);
     if (!config) {
-      // A "marketplace" is a Claude-format collection (.claude-plugin/
-      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
-      // not a marketplace — guide the user to install it directly instead.
+      // A "marketplace" is a collection manifest (qwen-marketplace.json or
+      // .claude-plugin/marketplace.json). A single extension repo
+      // (Qwen/Gemini/Claude/git/npm) is not a marketplace — guide the user to
+      // install it directly instead.
       let isInstallableExtension = false;
       try {
         await parseInstallSource(trimmed);
@@ -587,7 +631,7 @@ export class ExtensionManager {
       }
       throw new Error(
         `No marketplace found at "${redacted}". ` +
-          `Expected a .claude-plugin/marketplace.json.`,
+          `Expected a ${QWEN_MARKETPLACE_CONFIG_FILENAME} or .claude-plugin/marketplace.json.`,
       );
     }
     const now = new Date().toISOString();
@@ -595,6 +639,7 @@ export class ExtensionManager {
       name: config.name || trimmed,
       source: trimmed,
       type: parseExtensionSourceType(trimmed),
+      format: config.format,
       addedAt: now,
       lastUpdatedAt: now,
     };
@@ -629,7 +674,7 @@ export class ExtensionManager {
     return updated;
   }
 
-  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
+  loadSource(source: string): Promise<MarketplaceConfig | null> {
     return loadMarketplaceConfigFromSource(source);
   }
 
@@ -841,7 +886,7 @@ export class ExtensionManager {
         name: config.name,
         version:
           config.version ||
-          installMetadata?.marketplaceConfig?.metadata?.version ||
+          installMetadata?.marketplaceConfig?.version ||
           '1.0.0',
         path: effectiveExtensionPath,
         installMetadata,
@@ -967,6 +1012,12 @@ export class ExtensionManager {
     try {
       const configContent = fs.readFileSync(metadataFilePath, 'utf-8');
       const metadata = JSON.parse(configContent) as ExtensionInstallMetadata;
+      if (metadata.marketplaceConfig) {
+        // Metadata persisted before the unified model holds a raw Claude
+        // manifest here; normalize it (no-op for already-unified configs).
+        metadata.marketplaceConfig =
+          parseMarketplaceDocument(metadata.marketplaceConfig) ?? undefined;
+      }
       return metadata;
     } catch (_e) {
       return undefined;
@@ -1030,6 +1081,8 @@ export class ExtensionManager {
     const isUpdate = !!previousExtensionConfig;
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
+    let marketplaceTempDir: string | undefined;
+    let convertedTempDir: string | undefined;
 
     try {
       if (!this.isWorkspaceTrusted) {
@@ -1053,11 +1106,7 @@ export class ExtensionManager {
 
       let tempDir: string | undefined;
 
-      if (
-        installMetadata.originSource === 'Claude' &&
-        installMetadata.marketplaceConfig &&
-        !installMetadata.pluginName
-      ) {
+      if (installMetadata.marketplaceConfig && !installMetadata.pluginName) {
         const pluginName = await this.requestChoicePlugin(
           installMetadata.marketplaceConfig,
         );
@@ -1103,13 +1152,19 @@ export class ExtensionManager {
       }
 
       try {
-        const { extensionDir, originSource } =
-          await convertGeminiOrClaudeExtension(
-            localSourcePath,
-            installMetadata.pluginName,
-          );
+        const {
+          extensionDir,
+          originSource,
+          marketplaceTempDir: mtd,
+          convertedTempDir: ctd,
+        } = await convertGeminiOrClaudeExtension(
+          localSourcePath,
+          installMetadata.pluginName,
+        );
 
         localSourcePath = extensionDir;
+        marketplaceTempDir = mtd;
+        convertedTempDir = ctd;
         installMetadata.originSource = originSource;
 
         newExtensionConfig = this.loadExtensionConfig({
@@ -1292,8 +1347,32 @@ export class ExtensionManager {
         if (tempDir) {
           await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
+        // A remote marketplace entry is fetched into its own temp dir, separate
+        // from the marketplace checkout (tempDir); clean it up regardless of the
+        // install type (local marketplaces skip the localSourcePath branch).
+        if (marketplaceTempDir && marketplaceTempDir !== tempDir) {
+          await fs.promises.rm(marketplaceTempDir, {
+            recursive: true,
+            force: true,
+          });
+        }
+        // Gemini/Claude conversion output is always a fresh temp copy; remove it
+        // regardless of install type. The local/link guard below would otherwise
+        // leak it when converting a local-sourced extension.
+        if (
+          convertedTempDir &&
+          convertedTempDir !== tempDir &&
+          convertedTempDir !== marketplaceTempDir
+        ) {
+          await fs.promises.rm(convertedTempDir, {
+            recursive: true,
+            force: true,
+          });
+        }
         if (
           localSourcePath !== tempDir &&
+          localSourcePath !== marketplaceTempDir &&
+          localSourcePath !== convertedTempDir &&
           installMetadata.type !== 'link' &&
           installMetadata.type !== 'local'
         ) {

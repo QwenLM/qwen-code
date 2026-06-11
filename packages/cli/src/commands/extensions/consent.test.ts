@@ -10,9 +10,10 @@ import {
   requestConsentOrFail,
   requestChoicePluginNonInteractive,
 } from './consent.js';
-import type {
-  ExtensionConfig,
-  ClaudeMarketplaceConfig,
+import {
+  fromClaudeMarketplace,
+  type ClaudeMarketplaceConfig,
+  type ExtensionConfig,
 } from '@qwen-code/qwen-code-core';
 import prompts from 'prompts';
 
@@ -263,11 +264,12 @@ describe('requestChoicePluginNonInteractive', () => {
   });
 
   it('should throw error when plugins array is empty', async () => {
-    const marketplace: ClaudeMarketplaceConfig = {
+    const claudeMarketplace: ClaudeMarketplaceConfig = {
       name: 'test-marketplace',
       owner: { name: 'Test Owner', email: 'test@example.com' },
       plugins: [],
     };
+    const marketplace = fromClaudeMarketplace(claudeMarketplace);
 
     await expect(
       requestChoicePluginNonInteractive(marketplace),
@@ -275,7 +277,7 @@ describe('requestChoicePluginNonInteractive', () => {
   });
 
   it('should return selected plugin name', async () => {
-    const marketplace: ClaudeMarketplaceConfig = {
+    const claudeMarketplace: ClaudeMarketplaceConfig = {
       name: 'test-marketplace',
       owner: { name: 'Test Owner', email: 'test@example.com' },
       plugins: [
@@ -293,6 +295,7 @@ describe('requestChoicePluginNonInteractive', () => {
         },
       ],
     };
+    const marketplace = fromClaudeMarketplace(claudeMarketplace);
 
     vi.mocked(prompts).mockResolvedValueOnce({ plugin: 'plugin2' });
 
@@ -312,11 +315,12 @@ describe('requestChoicePluginNonInteractive', () => {
   });
 
   it('should throw error when selection is cancelled', async () => {
-    const marketplace: ClaudeMarketplaceConfig = {
+    const claudeMarketplace: ClaudeMarketplaceConfig = {
       name: 'test-marketplace',
       owner: { name: 'Test Owner', email: 'test@example.com' },
       plugins: [{ name: 'plugin1', version: '1.0.0', source: 'src1' }],
     };
+    const marketplace = fromClaudeMarketplace(claudeMarketplace);
 
     vi.mocked(prompts).mockResolvedValueOnce({ plugin: undefined });
 

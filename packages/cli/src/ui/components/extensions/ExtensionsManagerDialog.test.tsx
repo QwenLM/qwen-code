@@ -361,7 +361,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     // '+ Add new marketplace', so assert it renders at least twice (title + row).
     expect((frame?.split('Add new').length ?? 1) - 1).toBeGreaterThanOrEqual(2);
     expect(frame).toContain('Install a new extension');
-    expect(frame).toContain('Claude plugin marketplace'); // (Claude) annotation
+    expect(frame).toContain('Qwen / Claude marketplace'); // format annotation
     expect(frame).toContain('Marketplaces'); // section header
     expect(frame).toContain('Skills');
   });
@@ -374,9 +374,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       ],
     });
     manager.loadSource = vi.fn().mockResolvedValue({
+      format: 'claude',
       name: 'Skills',
-      owner: { name: 'o', email: 'e' },
-      plugins: [
+      entries: [
         { name: 'pdf', version: '1', description: 'PDF tools', source: 'a/s' },
         { name: 'docx', version: '1', source: 'a/s' },
       ],
@@ -423,9 +423,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       ],
     });
     manager.loadSource = vi.fn().mockResolvedValue({
+      format: 'claude',
       name: 'Skills',
-      owner: { name: 'o', email: 'e' },
-      plugins: installed.map((ext) => ({
+      entries: installed.map((ext) => ({
         name: ext.name,
         version: '1',
         source: 'a/s',
@@ -465,9 +465,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       .fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
+        format: 'claude',
         name: 'Skills',
-        owner: { name: 'o', email: 'e' },
-        plugins: [{ name: 'pdf', version: '1', source: 'a/s' }],
+        entries: [{ name: 'pdf', version: '1', source: 'a/s' }],
       });
     const { stdin, lastFrame } = renderDialog(createConfig(manager), {
       initialTab: EXTENSIONS_TABS.SOURCES,
@@ -520,9 +520,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       ],
     });
     manager.loadSource = vi.fn().mockResolvedValue({
+      format: 'claude',
       name: 'Skills',
-      owner: { name: 'o', email: 'e' },
-      plugins: [
+      entries: [
         { name: 'pdf', version: '1', source: 'a/s' },
         { name: 'docx', version: '1', source: 'a/s' },
       ],

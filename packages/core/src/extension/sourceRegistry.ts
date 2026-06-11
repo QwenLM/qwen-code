@@ -11,9 +11,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import type {
-  ClaudeMarketplaceConfig,
-  ClaudeMarketplacePluginConfig,
-} from './claude-converter.js';
+  MarketplaceConfig,
+  MarketplaceEntry,
+  MarketplaceEntryComponents,
+  MarketplaceFormat,
+} from './marketplaceTypes.js';
 
 const debugLogger = createDebugLogger('SOURCE_REGISTRY');
 
@@ -28,26 +30,25 @@ export interface ExtensionSource {
   /** Original input string used to add the source. */
   source: string;
   type: ExtensionSourceType;
+  /**
+   * Manifest format resolved when the source was added. Sources persisted
+   * before this field existed have it unset; the loaders re-detect on fetch.
+   */
+  format?: MarketplaceFormat;
   /** ISO timestamp recorded when the source was added. */
   addedAt?: string;
   /** ISO timestamp of the last successful (re)fetch / update. */
   lastUpdatedAt?: string;
 }
 
-/**
- * A single installable plugin surfaced by the Discover view.
- */
 /** Components a plugin declares in its marketplace entry ("Will install"). */
-export interface DiscoveredPluginComponents {
-  skills?: string[];
-  commands?: string[];
-  agents?: string[];
-  mcpServers?: string[];
-}
+export type DiscoveredPluginComponents = MarketplaceEntryComponents;
 
 export interface DiscoveredPlugin {
   /** Name of the marketplace this plugin came from. */
   marketplaceName: string;
+  /** Manifest format of the marketplace this plugin came from. */
+  format?: MarketplaceFormat;
   name: string;
   description?: string;
   version?: string;
@@ -64,54 +65,6 @@ export interface DiscoveredPlugin {
   installSource: string;
   /** Whether an extension with this name is already installed. */
   installed: boolean;
-}
-
-function asNameList(
-  value: string | string[] | undefined,
-): string[] | undefined {
-  return Array.isArray(value) && value.length > 0 ? value : undefined;
-}
-
-function asMcpNames(
-  value: string | Record<string, unknown> | undefined,
-): string[] | undefined {
-  if (value && typeof value === 'object') {
-    const names = Object.keys(value);
-    return names.length > 0 ? names : undefined;
-  }
-  return undefined;
-}
-
-function pluginComponents(
-  plugin: ClaudeMarketplacePluginConfig,
-): DiscoveredPluginComponents | undefined {
-  const components: DiscoveredPluginComponents = {
-    skills: asNameList(plugin.skills),
-    commands: asNameList(plugin.commands),
-    agents: asNameList(plugin.agents),
-    mcpServers: asMcpNames(plugin.mcpServers),
-  };
-  return Object.values(components).some(Boolean) ? components : undefined;
-}
-
-function pluginLastUpdated(
-  plugin: ClaudeMarketplacePluginConfig,
-): string | undefined {
-  const record = plugin as unknown as Record<string, unknown>;
-  const value =
-    record['lastUpdated'] ?? record['updatedAt'] ?? record['updated'];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function pluginInstalls(
-  plugin: ClaudeMarketplacePluginConfig,
-): number | undefined {
-  const record = plugin as unknown as Record<string, unknown>;
-  const value =
-    record['installs'] ?? record['installCount'] ?? record['downloads'];
-  return typeof value === 'number' && Number.isFinite(value)
-    ? value
-    : undefined;
 }
 
 /**
@@ -148,48 +101,67 @@ function isOwnerRepoShorthand(source: string): boolean {
 /**
  * Builds the install-source string fed to `parseInstallSource` for a discovered
  * plugin. For repo/local sources this is `<marketplace>:<pluginName>`,
- * which the existing installer resolves against the marketplace's
- * `marketplace.json`. For direct-JSON (`http`) sources it is derived from
- * the per-plugin `source` field.
+ * which the existing installer resolves against the marketplace's manifest.
+ * For direct-JSON (`http`) sources it is derived from the per-entry `source`
+ * field, whose structured shapes differ between the Claude and Qwen formats.
  */
 function resolveInstallSource(
   marketplace: ExtensionSource,
-  plugin: ClaudeMarketplacePluginConfig,
+  entry: MarketplaceEntry,
 ): string {
   if (marketplace.type !== 'http') {
-    return `${marketplace.source}:${plugin.name}`;
+    return `${marketplace.source}:${entry.name}`;
   }
-  const src = plugin.source;
+  const src = entry.source;
   if (typeof src === 'string') {
-    return src.includes(':') ? src : `${src}:${plugin.name}`;
+    return src.includes(':') ? src : `${src}:${entry.name}`;
   }
-  if (src && src.source === 'github') {
-    return `${src.repo}:${plugin.name}`;
+  if (!src) {
+    return entry.name;
   }
-  if (src && src.source === 'url') {
-    return src.url;
+  if ('source' in src) {
+    // Claude-format structured source.
+    if (src.source === 'github') {
+      return `${src.repo}:${entry.name}`;
+    }
+    if (src.source === 'url' || src.source === 'git-subdir') {
+      return src.url;
+    }
   }
-  return plugin.name;
+  if ('type' in src) {
+    // Qwen-format structured source.
+    if (src.type === 'github') {
+      return `https://github.com/${src.repo}`;
+    }
+    if (src.type === 'git') {
+      return src.url;
+    }
+    if (src.type === 'npm') {
+      return src.package;
+    }
+  }
+  return entry.name;
 }
 
 function pluginsFromConfig(
   marketplace: ExtensionSource,
-  config: ClaudeMarketplaceConfig,
+  config: MarketplaceConfig,
   installedNames: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
-  return (config.plugins ?? []).map((plugin) => ({
+  return config.entries.map((entry) => ({
     marketplaceName: config.name || marketplace.name,
-    name: plugin.name,
-    description: plugin.description,
-    version: plugin.version,
-    author: plugin.author?.name,
-    homepage: plugin.homepage,
-    category: plugin.category,
-    lastUpdated: pluginLastUpdated(plugin),
-    installs: pluginInstalls(plugin),
-    components: pluginComponents(plugin),
-    installSource: resolveInstallSource(marketplace, plugin),
-    installed: installedNames.has(plugin.name),
+    format: config.format,
+    name: entry.name,
+    description: entry.description,
+    version: entry.version,
+    author: entry.author,
+    homepage: entry.homepage,
+    category: entry.category,
+    lastUpdated: entry.lastUpdated,
+    installs: entry.installs,
+    components: entry.components,
+    installSource: resolveInstallSource(marketplace, entry),
+    installed: installedNames.has(entry.name),
   }));
 }
 

@@ -6,7 +6,6 @@
 
 import type { ExtensionConfig } from './extensionManager.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
-import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as https from 'node:https';
@@ -14,6 +13,11 @@ import { stat } from 'node:fs/promises';
 import { parseGitHubRepoForReleases } from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
+import { QWEN_MARKETPLACE_CONFIG_FILENAME } from './variables.js';
+import {
+  type MarketplaceConfig,
+  parseMarketplaceDocument,
+} from './marketplaceTypes.js';
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -157,18 +161,36 @@ function fetchUrl(
 }
 
 /**
- * Fetch marketplace config from GitHub repository.
+ * Candidate manifest paths within a marketplace repo, probed in order. The
+ * Qwen-native manifest takes priority over the Claude one.
+ */
+const MARKETPLACE_MANIFEST_PATHS = [
+  QWEN_MARKETPLACE_CONFIG_FILENAME,
+  '.claude-plugin/marketplace.json',
+] as const;
+
+function parseMarketplaceJson(content: string): MarketplaceConfig | null {
+  try {
+    return parseMarketplaceDocument(JSON.parse(content));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a file from a GitHub repository.
  * Primary: GitHub API (supports private repos with token)
  * Fallback: raw.githubusercontent.com (no rate limit for public repos)
  */
-async function fetchGitHubMarketplaceConfig(
+async function fetchGitHubFile(
   owner: string,
   repo: string,
-): Promise<ClaudeMarketplaceConfig | null> {
+  filePath: string,
+): Promise<string | null> {
   const token = process.env['GITHUB_TOKEN'];
 
   // Primary: GitHub API (works for private repos, but has rate limits)
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/.claude-plugin/marketplace.json`;
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
   const apiHeaders: Record<string, string> = {
     'User-Agent': 'qwen-code',
     Accept: 'application/vnd.github.v3.raw',
@@ -181,22 +203,35 @@ async function fetchGitHubMarketplaceConfig(
 
   // Fallback: raw.githubusercontent.com (no rate limit, public repos only)
   if (!content) {
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.claude-plugin/marketplace.json`;
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${filePath}`;
     const rawHeaders: Record<string, string> = {
       'User-Agent': 'qwen-code',
     };
     content = await fetchUrl(rawUrl, rawHeaders);
   }
 
-  if (!content) {
-    return null;
-  }
+  return content;
+}
 
-  try {
-    return JSON.parse(content) as ClaudeMarketplaceConfig;
-  } catch {
-    return null;
+/**
+ * Fetch marketplace config from a GitHub repository, probing the Qwen-native
+ * manifest first and falling back to the Claude one.
+ */
+async function fetchGitHubMarketplaceConfig(
+  owner: string,
+  repo: string,
+): Promise<MarketplaceConfig | null> {
+  for (const manifestPath of MARKETPLACE_MANIFEST_PATHS) {
+    const content = await fetchGitHubFile(owner, repo, manifestPath);
+    if (!content) {
+      continue;
+    }
+    const config = parseMarketplaceJson(content);
+    if (config) {
+      return config;
+    }
   }
+  return null;
 }
 
 /**
@@ -204,28 +239,35 @@ async function fetchGitHubMarketplaceConfig(
  */
 async function readLocalMarketplaceConfig(
   localPath: string,
-): Promise<ClaudeMarketplaceConfig | null> {
-  const marketplaceConfigPath = path.join(
-    localPath,
-    '.claude-plugin',
-    'marketplace.json',
-  );
-  try {
-    const content = await fs.promises.readFile(marketplaceConfigPath, 'utf-8');
-    return JSON.parse(content) as ClaudeMarketplaceConfig;
-  } catch {
-    return null;
+): Promise<MarketplaceConfig | null> {
+  for (const manifestPath of MARKETPLACE_MANIFEST_PATHS) {
+    try {
+      const content = await fs.promises.readFile(
+        path.join(localPath, manifestPath),
+        'utf-8',
+      );
+      const config = parseMarketplaceJson(content);
+      if (config) {
+        return config;
+      }
+    } catch {
+      // Manifest missing or unreadable; try the next candidate.
+    }
   }
+  return null;
 }
 
 /**
- * Loads a Claude-format marketplace config (`.claude-plugin/marketplace.json`)
- * from any supported source string, without installing anything. Used by the
- * marketplace registry / Discover view to enumerate installable plugins.
+ * Loads a marketplace config from any supported source string, without
+ * installing anything. Both manifest formats are supported — the Qwen-native
+ * `qwen-marketplace.json` (probed first) and the Claude
+ * `.claude-plugin/marketplace.json` — and the result is normalized into the
+ * unified {@link MarketplaceConfig} model. Used by the marketplace registry /
+ * Discover view to enumerate installable extensions.
  *
  * Supported sources:
- * - Local directory containing `.claude-plugin/marketplace.json`
- * - Local path directly to a `marketplace.json` file
+ * - Local directory containing either manifest
+ * - Local path directly to a marketplace JSON file (format auto-detected)
  * - `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
  * - Arbitrary `https://host/.../marketplace.json` returning the JSON document
  *
@@ -233,11 +275,11 @@ async function readLocalMarketplaceConfig(
  */
 export async function loadMarketplaceConfigFromSource(
   source: string,
-): Promise<ClaudeMarketplaceConfig | null> {
+): Promise<MarketplaceConfig | null> {
   const trimmed = source.trim();
 
-  // Priority 1: local path (directory with .claude-plugin/marketplace.json,
-  // or a direct marketplace.json file).
+  // Priority 1: local path (directory holding a manifest, or a direct
+  // marketplace JSON file).
   try {
     const stats = await stat(trimmed);
     if (stats.isDirectory()) {
@@ -246,7 +288,7 @@ export async function loadMarketplaceConfigFromSource(
     if (stats.isFile()) {
       try {
         const content = await fs.promises.readFile(trimmed, 'utf-8');
-        return JSON.parse(content) as ClaudeMarketplaceConfig;
+        return parseMarketplaceJson(content);
       } catch {
         return null;
       }
@@ -270,11 +312,7 @@ export async function loadMarketplaceConfigFromSource(
     if (!content) {
       return null;
     }
-    try {
-      return JSON.parse(content) as ClaudeMarketplaceConfig;
-    } catch {
-      return null;
-    }
+    return parseMarketplaceJson(content);
   }
 
   // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.
@@ -312,7 +350,7 @@ export async function parseInstallSource(
 
   let installMetadata: ExtensionInstallMetadata;
   let repoSource = repo;
-  let marketplaceConfig: ClaudeMarketplaceConfig | null = null;
+  let marketplaceConfig: MarketplaceConfig | null = null;
 
   // Step 2: Determine repo type with correct priority order
   // Priority 1: Check if it's a local path that exists
@@ -377,10 +415,11 @@ export async function parseInstallSource(
     throw new Error(`Install source not found: ${redactUrlCredentials(repo)}`);
   }
 
-  // Step 3: If marketplace config exists, update type to marketplace
+  // Step 3: If marketplace config exists, tag the metadata with it
   if (marketplaceConfig) {
     installMetadata.marketplaceConfig = marketplaceConfig;
-    installMetadata.originSource = 'Claude';
+    installMetadata.originSource =
+      marketplaceConfig.format === 'qwen' ? 'QwenCode' : 'Claude';
   }
 
   return installMetadata;

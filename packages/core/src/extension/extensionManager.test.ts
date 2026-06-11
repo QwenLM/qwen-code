@@ -23,6 +23,7 @@ import {
   type ExtensionConfig,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
+import { ExtensionStorage } from './storage.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -330,6 +331,122 @@ describe('extension tests', () => {
 
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
+    });
+  });
+
+  describe('installExtension from a qwen marketplace', () => {
+    function createQwenMarketplace(
+      entries: Array<Record<string, unknown>>,
+      metadata?: Record<string, unknown>,
+    ): string {
+      const marketplaceDir = path.join(tempHomeDir, 'qwen-marketplace');
+      fs.mkdirSync(marketplaceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(marketplaceDir, 'qwen-marketplace.json'),
+        JSON.stringify({ name: 'test-market', metadata, extensions: entries }),
+      );
+      return marketplaceDir;
+    }
+
+    it('installs a native qwen extension entry by name', async () => {
+      const marketplaceDir = createQwenMarketplace(
+        [{ name: 'foo', source: './foo' }],
+        { extensionRoot: 'extensions' },
+      );
+      const fooDir = path.join(marketplaceDir, 'extensions', 'foo');
+      fs.mkdirSync(fooDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(fooDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'foo', version: '1.0.0' }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = await manager.installExtension({
+        source: marketplaceDir,
+        type: 'local',
+        pluginName: 'foo',
+      });
+
+      expect(extension.name).toBe('foo');
+      expect(extension.version).toBe('1.0.0');
+      expect(extension.installMetadata?.originSource).toBe('QwenCode');
+    });
+
+    it('installs a claude-format entry through the conversion chain', async () => {
+      const marketplaceDir = createQwenMarketplace([
+        { name: 'bar', source: './bar' },
+      ]);
+      const barPluginDir = path.join(marketplaceDir, 'bar', '.claude-plugin');
+      fs.mkdirSync(barPluginDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(barPluginDir, 'plugin.json'),
+        JSON.stringify({ name: 'bar', version: '2.0.0' }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = await manager.installExtension({
+        source: marketplaceDir,
+        type: 'local',
+        pluginName: 'bar',
+      });
+
+      expect(extension.name).toBe('bar');
+      expect(extension.version).toBe('2.0.0');
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+    });
+
+    it('fails clearly when the named entry is missing', async () => {
+      const marketplaceDir = createQwenMarketplace([
+        { name: 'foo', source: './foo' },
+      ]);
+
+      const manager = createExtensionManager();
+      await expect(
+        manager.installExtension({
+          source: marketplaceDir,
+          type: 'local',
+          pluginName: 'missing',
+        }),
+      ).rejects.toThrow(/missing not found/);
+    });
+
+    it('removes the conversion temp dir for a local-sourced claude entry', async () => {
+      const marketplaceDir = createQwenMarketplace([
+        { name: 'bar', source: './bar' },
+      ]);
+      const barPluginDir = path.join(marketplaceDir, 'bar', '.claude-plugin');
+      fs.mkdirSync(barPluginDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(barPluginDir, 'plugin.json'),
+        JSON.stringify({ name: 'bar', version: '2.0.0' }),
+      );
+
+      // A local install creates no marketplace tempDir, so the converted copy
+      // is the only temp dir; ensure it doesn't leak after a successful install.
+      const created: string[] = [];
+      const realCreate = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockImplementation(
+        async () => {
+          const dir = await realCreate();
+          created.push(dir);
+          return dir;
+        },
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      await manager.installExtension({
+        source: marketplaceDir,
+        type: 'local',
+        pluginName: 'bar',
+      });
+
+      expect(created.length).toBeGreaterThan(0);
+      for (const dir of created) {
+        expect(fs.existsSync(dir)).toBe(false);
+      }
     });
   });
 

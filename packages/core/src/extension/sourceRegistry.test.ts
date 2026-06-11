@@ -16,6 +16,10 @@ import {
 } from './sourceRegistry.js';
 import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
+import {
+  fromClaudeMarketplace,
+  type MarketplaceConfig,
+} from './marketplaceTypes.js';
 
 vi.mock('./marketplace.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./marketplace.js')>();
@@ -96,14 +100,17 @@ describe('discoverPlugins', () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockReset();
   });
 
+  // Fixtures stay in the raw Claude shape so the test also covers the
+  // claude -> unified normalization used by the real loaders.
   const config = (
     name: string,
     plugins: ClaudeMarketplaceConfig['plugins'],
-  ): ClaudeMarketplaceConfig => ({
-    name,
-    owner: { name: 'o', email: 'e' },
-    plugins,
-  });
+  ): MarketplaceConfig =>
+    fromClaudeMarketplace({
+      name,
+      owner: { name: 'o', email: 'e' },
+      plugins,
+    });
 
   it('flattens plugins across sources and marks installed ones', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockImplementation(

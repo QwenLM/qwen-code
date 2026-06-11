@@ -348,7 +348,7 @@ export const AppContainer = (props: AppContainerProps) => {
       new Promise<string>((resolve, reject) => {
         addPluginChoiceRequest({
           marketplaceName: marketplace.name,
-          plugins: marketplace.plugins.map((p) => ({
+          plugins: marketplace.entries.map((p) => ({
             name: p.name,
             description: p.description,
           })),

@@ -1,7 +1,7 @@
 import type {
-  ClaudeMarketplaceConfig,
   ExtensionConfig,
   ExtensionRequestOptions,
+  MarketplaceConfig,
   SkillConfig,
   SubagentConfig,
 } from '@qwen-code/qwen-code-core';
@@ -40,19 +40,19 @@ export async function requestConsentNonInteractive(
  * @returns The name of the selected plugin.
  */
 export async function requestChoicePluginNonInteractive(
-  marketplace: ClaudeMarketplaceConfig,
+  marketplace: MarketplaceConfig,
 ): Promise<string> {
-  const plugins = marketplace.plugins;
+  const entries = marketplace.entries;
 
-  if (plugins.length === 0) {
+  if (entries.length === 0) {
     throw new Error(t('No plugins available in this marketplace.'));
   }
 
   // Build choices for prompts select
 
-  const choices = plugins.map((plugin) => ({
-    title: chalk.green(chalk.bold(`[${plugin.name}]`)),
-    value: plugin.name,
+  const choices = entries.map((entry) => ({
+    title: chalk.green(chalk.bold(`[${entry.name}]`)),
+    value: entry.name,
   }));
 
   const response = await prompts({
