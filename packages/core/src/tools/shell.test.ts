@@ -160,6 +160,52 @@ describe('ShellTool', () => {
       ).toThrow('Command cannot be empty.');
     });
 
+    it('should mention the intentional sleep escape hatch when blocking sleep', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5',
+        is_background: false,
+      });
+
+      expect(error).toContain('intentional-sleep:');
+    });
+
+    it('should explain rejected intentional sleep comments', async () => {
+      const shortReasonError = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait',
+        is_background: false,
+      });
+      const overCapError = shellTool.validateToolParams({
+        command:
+          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(shortReasonError).toContain('reason is too short');
+      expect(shortReasonError).not.toContain('add a trailing comment like');
+      expect(overCapError).toContain('foreground sleeps over 10 minutes');
+      expect(overCapError).not.toContain('add a trailing comment like');
+    });
+
+    it('should allow sleep with a valid intentional sleep comment', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(error).toBeNull();
+    });
+
+    it('should guide model to split and use intentional-sleep for sleep chains', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 && echo ok',
+        is_background: false,
+      });
+
+      expect(error).toContain('Split into two calls');
+      expect(error).toContain('intentional-sleep:');
+      expect(error).toContain('reason');
+    });
+
     it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({
@@ -469,6 +515,15 @@ describe('ShellTool', () => {
         'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
       expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps pre-existing comment trimming behavior for managed background validation', async () => {
+      const invocation = shellTool.build({
+        command: 'echo ok # note\nsleep 5 &',
+        is_background: true,
+      });
+
+      expect(invocation).toBeDefined();
     });
 
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
@@ -5514,7 +5569,8 @@ describe('detectBlockedSleepPattern', () => {
 
   it('blocks sleep followed by a top-level shell comment', () => {
     // Shell ignores trailing comments, so these are equivalent to
-    // standalone foreground sleeps and must not bypass the guard.
+    // standalone foreground sleeps unless they use the explicit
+    // intentional-sleep escape hatch.
     expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
       'standalone sleep 5',
     );
@@ -5525,6 +5581,69 @@ describe('detectBlockedSleepPattern', () => {
       'standalone sleep 2s',
     );
     expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('allows standalone sleep with an intentional sleep comment', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 2s # intentional-sleep: deliberate rate limit backoff',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10m # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+  });
+
+  it('requires a meaningful intentional sleep reason', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep:')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
+      'standalone sleep 5',
+    );
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 1234567'),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 12345678'),
+    ).toBeNull();
+  });
+
+  it('blocks intentional sleep comments above the duration cap', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBe('standalone sleep 601s');
+  });
+
+  it('does not allow intentional sleep comments on leading sleep chains', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('does not allow intentional sleep comments to hide newline commands', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('preserves commands after a shell comment newline', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # wait\necho ok')).toBe(
       'sleep 5 followed by: echo ok',
     );
   });

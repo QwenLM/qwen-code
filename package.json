@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.16.1",
+  "version": "0.17.1",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -11,6 +11,7 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
+    "packages/channels/feishu",
     "packages/channels/plugin-example"
   ],
   "repository": {
@@ -18,7 +19,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.16.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -70,8 +71,10 @@
     "package:standalone:release": "node scripts/build-standalone-release.js",
     "verify:installation-release": "node scripts/verify-installation-release.js",
     "release:version": "node scripts/version.js",
+    "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },
@@ -100,6 +103,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",

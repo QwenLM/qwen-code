@@ -73,6 +73,19 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Skills manager dialog (`/skills`)
+  openSkillsManagerDialog: () => void;
+  closeSkillsManagerDialog: () => void;
+  // Trigger a CommandService rebuild — dialogs that mutate settings
+  // affecting the slash-command surface (e.g. SkillsManagerDialog)
+  // call this after `setValue` so `/<skill-name>` and the skills
+  // listing reflect the new state without restarting the CLI.
+  reloadCommands: () => void | Promise<void>;
+  // Replace the chat input buffer's text without submitting. Used by
+  // dialogs that want to "pick" something into the prompt and let the
+  // user review/edit before sending — e.g. SkillsManagerDialog Enter
+  // closes the dialog and drops `/<skill-name>` into the input.
+  setInputBuffer: (text: string) => void;
   // Extensions manager dialog
   closeExtensionsManagerDialog: () => void;
   // MCP dialog
@@ -81,6 +94,7 @@ export interface UIActions {
   openHooksDialog: () => void;
   // Hooks dialog
   closeHooksDialog: () => void;
+  closeStatsDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

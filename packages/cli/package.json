@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.16.1",
+  "version": "0.17.1",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,16 +37,17 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.16.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.1"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
-    "@google/genai": "1.30.0",
+    "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
@@ -76,6 +77,7 @@
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
+    "tar": "^7.5.2",
     "undici": "^6.22.0",
     "update-notifier": "^7.3.1",
     "wrap-ansi": "^10.0.0",

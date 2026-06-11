@@ -1,0 +1,32 @@
+{
+  "root": "maxcompute-table.dataworks_analyze.meta_table_lineage",
+  "query": {
+    "entityGuid": "odps.dataworks_analyze.meta_table_lineage",
+    "entityType": "odps-table",
+    "direction": "BOTH",
+    "maxDepth": 10,
+    "pageSize": 100,
+    "brief": false
+  },
+  "entity_count": 1201,
+  "relationship_count": 128,
+  "instance_count": 1275,
+  "pages_loaded": 392,
+  "cycle_count": 7,
+  "layer_distribution": {
+    "0": 1,
+    "1": 7,
+    "2": 10,
+    "3": 66,
+    "4": 345,
+    "5": 772
+  },
+  "upstream_count": 1188,
+  "downstream_count": 12,
+  "upstream_edges": 1262,
+  "downstream_edges": 13,
+  "truncated": true,
+  "truncation_reasons": ["max_nodes=1200"],
+  "export_dir": "/Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code/.dataworks/lineage/maxcompute-table.dataworks_analyze.meta_table_lineage_20260529_141821_735225",
+  "mermaid_enabled": false
+}

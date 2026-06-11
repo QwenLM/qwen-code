@@ -84,17 +84,6 @@ describe('SettingsSchema', () => {
       ).toBe('boolean');
     });
 
-    it('should have checkpointing nested properties', () => {
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled,
-      ).toBeDefined();
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled.type,
-      ).toBe('boolean');
-    });
-
     it('should have fileFiltering nested properties', () => {
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
@@ -218,9 +207,6 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().ui.properties.customThemes.showInDialog).toBe(
         false,
       ); // Managed via theme editor
-      expect(
-        getSettingsSchema().general.properties.checkpointing.showInDialog,
-      ).toBe(false); // Experimental feature
       expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
       );
@@ -247,6 +233,16 @@ describe('SettingsSchema', () => {
         { value: 'render', label: 'Render visual previews' },
         { value: 'raw', label: 'Show raw source' },
       ]);
+    });
+
+    it('should have useTerminalBuffer in ui settings', () => {
+      const useTerminalBuffer =
+        getSettingsSchema().ui.properties.useTerminalBuffer;
+      expect(useTerminalBuffer).toBeDefined();
+      expect(useTerminalBuffer.type).toBe('boolean');
+      expect(useTerminalBuffer.default).toBe(false);
+      expect(useTerminalBuffer.showInDialog).toBe(true);
+      expect(useTerminalBuffer.requiresRestart).toBe(false);
     });
 
     it('should infer Settings type correctly', () => {

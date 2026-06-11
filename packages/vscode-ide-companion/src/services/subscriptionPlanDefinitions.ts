@@ -93,6 +93,7 @@ const ALIBABA_SUBSCRIPTION_MODELS = [
     contextWindowSize: 1000000,
     enableThinking: true,
   },
+  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
   { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },

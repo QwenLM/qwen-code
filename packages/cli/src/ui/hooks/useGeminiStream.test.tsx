@@ -97,7 +97,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
   return {
     ...actualCoreModule,
-    GitService: vi.fn(),
     GeminiClient: MockedGeminiClientClass,
     UserPromptEvent: MockedUserPromptEvent,
     ApiCancelEvent: MockedApiCancelEvent,
@@ -165,6 +164,7 @@ describe('useGeminiStream', () => {
   let mockScheduleToolCalls: Mock;
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
+  let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
   let handleAtCommandSpy: MockInstance;
 
   beforeEach(() => {
@@ -193,6 +193,9 @@ describe('useGeminiStream', () => {
       vertexai: false,
       authType: AuthType.USE_GEMINI,
     };
+    mockBackgroundShellRegistry = {
+      setNotificationCallback: vi.fn(),
+    };
 
     mockConfig = {
       apiKey: 'test-api-key',
@@ -217,9 +220,11 @@ describe('useGeminiStream', () => {
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
-      getCheckpointingEnabled: vi.fn(() => false),
+      getFileCheckpointingEnabled: vi.fn(() => false),
       getGeminiClient: mockGetGeminiClient,
       getApprovalMode: () => ApprovalMode.DEFAULT,
+      getTeamManager: vi.fn(() => null),
+      onTeamManagerChange: vi.fn(),
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       addHistory: vi.fn(),
@@ -241,6 +246,7 @@ describe('useGeminiStream', () => {
       getBackgroundTaskRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
+      getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn(() => ({
         setNotificationCallback: vi.fn(),
       })),
@@ -366,6 +372,98 @@ describe('useGeminiStream', () => {
       client,
     };
   };
+
+  it('queues background shell terminal notifications for the model loop', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    const displayText = 'Background shell "npm test" completed.';
+    const modelText =
+      '<task-notification>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>';
+
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+      .calls[0][0] as (displayText: string, modelText: string) => void;
+
+    act(() => {
+      callback(displayText, modelText);
+    });
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: displayText },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        modelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Notification,
+          notificationDisplayText: displayText,
+        }),
+      );
+    });
+  });
+
+  it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
+    const mockManager = { setLeaderMessageCallback: vi.fn() };
+    (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(mockManager);
+
+    const { mockSendMessageStream } = renderTestHook();
+
+    await waitFor(() => {
+      expect(mockManager.setLeaderMessageCallback).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+
+    const display = '**scout-cli** reported back';
+    const modelText =
+      '<teammate_message_abcdef0123456789 from="scout-cli">\n' +
+      'a very long report that should never reach the UI verbatim\n' +
+      '</teammate_message_abcdef0123456789>';
+
+    const callback = (mockManager.setLeaderMessageCallback as Mock).mock
+      .calls[0][0] as (modelText: string, display: string) => void;
+
+    act(() => {
+      callback(modelText, display);
+    });
+
+    // The compact display line is added to history…
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: display },
+        expect.any(Number),
+      );
+    });
+
+    // …and the full envelope is sent to the model as a Teammate turn.
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        modelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: display,
+        }),
+      );
+    });
+
+    // The raw envelope is never rendered as a history item (no `> …`
+    // user bubble dumping the whole report on screen).
+    const addedTexts = (mockAddItem as Mock).mock.calls
+      .map((c) => (c[0] as { text?: string })?.text)
+      .filter((t): t is string => typeof t === 'string');
+    expect(addedTexts.some((t) => t.includes('teammate_message'))).toBe(false);
+  });
 
   it('should not submit tool responses if not all tool calls are completed', () => {
     const toolCalls: TrackedToolCall[] = [
@@ -626,7 +724,8 @@ describe('useGeminiStream', () => {
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
-      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
+      ([item]) =>
+        item.type === MessageType.NOTIFICATION && item.text === queuedPrompt,
     );
     expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
@@ -636,7 +735,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.USER, text: queuedPrompt },
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -731,7 +830,7 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.USER, text: queuedPrompt },
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -3915,6 +4014,22 @@ describe('useGeminiStream', () => {
         {
           reason: 'IMAGE_SAFETY',
           message: '⚠️  Response stopped due to image safety violations.',
+        },
+        {
+          reason: 'IMAGE_PROHIBITED_CONTENT',
+          message: '⚠️  Response stopped due to image prohibited content.',
+        },
+        {
+          reason: 'NO_IMAGE',
+          message: '⚠️  Response stopped due to no image.',
+        },
+        {
+          reason: 'IMAGE_RECITATION',
+          message: '⚠️  Response stopped due to image recitation policy.',
+        },
+        {
+          reason: 'IMAGE_OTHER',
+          message: '⚠️  Response stopped due to other image-related reasons.',
         },
         {
           reason: 'UNEXPECTED_TOOL_CALL',

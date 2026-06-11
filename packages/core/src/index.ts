@@ -88,7 +88,10 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/modifiable-tool.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
-export { buildSkillLlmContent } from './tools/skill-utils.js';
+export {
+  buildSkillLlmContent,
+  applySkillAllowedTools,
+} from './tools/skill-utils.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -115,6 +118,10 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type {
+  WorkflowTool,
+  WorkflowParams,
+} from './tools/workflow/workflow.js';
 export type {
   TodoWriteTool,
   TodoItem,
@@ -148,11 +155,11 @@ export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
-export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
+export * from './services/sleepInhibitor.js';
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
@@ -164,6 +171,7 @@ export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
 export * from './services/toolUseSummary.js';
+export * from './services/usageHistoryService.js';
 export * from './utils/bareMode.js';
 
 // ============================================================================
@@ -289,6 +297,7 @@ export * from './followup/index.js';
 // Utilities
 // ============================================================================
 
+export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
@@ -388,7 +397,12 @@ export * from './test-utils/index.js';
 // ============================================================================
 
 export * from './hooks/types.js';
-export { HookSystem, HookRegistry } from './hooks/index.js';
+export {
+  HookSystem,
+  HookRegistry,
+  createInstructionsLoadedCallback,
+  hookEventSupportsMatcher,
+} from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,

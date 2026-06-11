@@ -11,9 +11,6 @@ export default {
   headless: 'Headless Mode',
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
-  checkpointing: {
-    display: 'hidden',
-  },
   'approval-mode': 'Approval Mode',
   'auto-mode': 'Auto Mode',
   worktree: 'Worktrees',

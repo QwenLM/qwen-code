@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,6 +21,7 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
   validateSkillName,
@@ -78,6 +78,14 @@ export class SkillManager {
   // `Promise.resolve().then(listener)` runtime adapter to swallow the
   // mismatch silently.
   private readonly changeListeners: Set<() => void | Promise<void>> = new Set();
+  // One-shot signal: when true, the *next* `notifyChangeListeners()` run
+  // will tell `slashCommandProcessor`'s reload-listener (and any other
+  // opt-in consumer) that an external reload is about to be redundant —
+  // the dialog has already orchestrated `reloadCommands()` itself, so a
+  // listener-driven second reload would be a wasted CommandService
+  // rebuild. Consumed exactly once. See `notifyConfigChanged` &
+  // `slashCommandProcessor.ts:416`.
+  private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
@@ -110,6 +118,55 @@ export class SkillManager {
     return () => {
       this.changeListeners.delete(listener);
     };
+  }
+
+  /**
+   * Public re-entry into the change-listener pipeline for non-disk events,
+   * specifically when the user toggles `skills.disabled` via the
+   * `/skills` dialog. The underlying
+   * `SKILL.md` files have not changed, so `refreshCache` is unnecessary —
+   * we just need every consumer (`SkillTool.refreshSkills`, the slash
+   * command list reload bridged in `slashCommandProcessor`) to re-read its
+   * derived state with the updated disabled set.
+   *
+   * Returns when every listener has either resolved or hit its 30s
+   * timeout, matching the disk-change path's semantics.
+   */
+  async notifyConfigChanged(): Promise<void> {
+    await this.notifyChangeListeners();
+  }
+
+  /**
+   * Tell the next `notifyChangeListeners()` (typically via
+   * `notifyConfigChanged`) that callers which would otherwise reload the
+   * slash-command surface as a side effect should skip it — the caller has
+   * already done that work explicitly. One-shot: consumed by the next
+   * `consumeSlashReloadSuppression()` and reset to `false`.
+   *
+   * Used by the `/skills` dialog: it calls `reloadCommands()` BEFORE
+   * `notifyConfigChanged()` to enforce the provider-registration ordering
+   * that `SkillTool.refreshSkills` depends on. Without this signal, the
+   * `slashCommandProcessor` change-listener would trigger a second
+   * `reloadCommands()` (one awaited by the dialog, one orphaned by the
+   * fire-and-forget listener), doubling CommandService rebuild cost per
+   * save. Listeners that DON'T reload commands are unaffected — they
+   * still fire normally.
+   */
+  suppressNextSlashReload(): void {
+    this.slashReloadSuppressed = true;
+  }
+
+  /**
+   * Read-and-clear: returns `true` exactly once if the suppression flag
+   * was set, then resets it. Listeners that opt into respecting the
+   * signal call this in their handler.
+   */
+  consumeSlashReloadSuppression(): boolean {
+    if (this.slashReloadSuppressed) {
+      this.slashReloadSuppressed = false;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -631,34 +688,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md

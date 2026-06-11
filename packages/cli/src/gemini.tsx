@@ -17,6 +17,8 @@ import {
   type Config,
   createDebugLogger,
   writeRuntimeStatus,
+  persistSessionUsage,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -26,9 +28,15 @@ import v8 from 'node:v8';
 import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+  parseArguments,
+} from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
@@ -38,6 +46,7 @@ import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
+import { handleList as handleListExtensions } from './commands/extensions/list.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -104,6 +113,11 @@ import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimiz
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+function clearCorruptionEnvVars(): void {
+  delete process.env[ENV_CORRUPTED_PATH];
+  delete process.env[ENV_WAS_RECOVERED];
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -330,13 +344,13 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                        />
+                      <AppContainer
+                        config={config}
+                        settings={settings}
+                        startupWarnings={startupWarnings}
+                        version={version}
+                        initializationResult={initializationResult}
+                      />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
@@ -427,10 +441,19 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  // Load user settings — bare mode uses minimal config, normal mode loads full.
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+
+  // Propagate corruption state to child process via env vars so
+  // relaunchAppInChildProcess() doesn't lose the marker.
+  if (settings.corruptedPath) {
+    process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
+    process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
+  }
   await cleanupCheckpoints();
+  // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
   // Emit settings warnings early so the parent process surfaces them
@@ -439,6 +462,20 @@ export async function main() {
   const settingsWarnings = getSettingsWarnings(settings);
   for (const warning of settingsWarnings) {
     writeStderrLine(warning);
+  }
+  // Corruption notification no longer goes through migrationWarnings —
+  // check corruptedPath directly to keep stderr visible in relaunch.
+  if (settings.corruptedPath) {
+    writeStderrLine(
+      'Warning: Settings file had invalid JSON and was reset. ' +
+        'A copy of the corrupted file has been saved at: ' +
+        settings.corruptedPath,
+    );
+  }
+
+  if (argv.listExtensions) {
+    await handleListExtensions();
+    process.exit(0);
   }
 
   // Check for invalid input combinations early to prevent crashes
@@ -498,6 +535,7 @@ export async function main() {
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
+        buildDisabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -594,7 +632,9 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, []);
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        afterSpawn: clearCorruptionEnvVars,
+      });
     }
   }
 
@@ -747,6 +787,7 @@ export async function main() {
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
+      buildDisabledSkillNamesProvider(settings),
     );
     profileCheckpoint('after_load_cli_config');
 
@@ -795,6 +836,29 @@ export async function main() {
       }
     }
 
+    // Persist session usage for cross-session reports (must run before
+    // config.shutdown() which clears telemetry state).
+    // sessionStartTime is read from uiTelemetryService so it stays correct
+    // after /clear resets the session (reset() updates the internal timestamp).
+    registerCleanup(() => {
+      try {
+        const metrics = uiTelemetryService.getMetrics();
+        const hasActivity = Object.values(metrics.models).some(
+          (m) => m.api.totalRequests > 0,
+        );
+        if (!hasActivity) return;
+        persistSessionUsage({
+          sessionId: config.getSessionId(),
+          startTime: uiTelemetryService.getSessionStartTime(),
+          endTime: new Date(),
+          project: config.getProjectRoot(),
+          metrics,
+        });
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+    });
+
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
@@ -813,15 +877,6 @@ export async function main() {
         `Preconnect skipped due to error getting authType: ${error}`,
       );
     }
-
-    // FIXME: list extensions after the config initialize
-    // if (config.getListExtensions()) {
-    //   console.log('Installed extensions:');
-    //   for (const extension of extensions) {
-    //     console.log(`- ${extension.config.name}`);
-    //   }
-    //   process.exit(0);
-    // }
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -881,6 +936,25 @@ export async function main() {
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);
+    }
+
+    // Background housekeeping: file-history cleanup and (future) other
+    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
+    // don't create the file-history dirs this cleans, so they skip.
+    // Dynamic import keeps --help / one-shot --prompt paths from loading
+    // this code at all. Timers inside are .unref()'d so they never block
+    // process exit.
+    if (config.isInteractive()) {
+      // .catch() is intentional: a dynamic-import or module-init failure
+      // (theoretically near-impossible — the module has no top-level side
+      // effects — but defense in depth matches the runPass try/catch in
+      // scheduler.ts) becomes a swallowed log instead of an unhandled
+      // promise rejection that crashes the REPL.
+      void import('./utils/housekeeping/scheduler.js')
+        .then((m) => m.startBackgroundHousekeeping(config, settings))
+        .catch((err) => {
+          debugLogger.warn('failed to start background housekeeping:', err);
+        });
     }
 
     let input = config.getQuestion();
@@ -955,8 +1029,15 @@ export async function main() {
         process.cwd(),
         initializationResult!,
       );
+      // Clean up corruption env vars so subsequent relaunch children
+      // and subprocesses don't inherit stale state.
+      clearCorruptionEnvVars();
       return;
     }
+
+    // Also clean up env vars for non-interactive paths so that
+    // subprocesses don't inherit stale state.
+    clearCorruptionEnvVars();
 
     // Non-interactive: defer finalize until after `config.initialize()` runs
     // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
@@ -994,6 +1075,7 @@ export async function main() {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
+
       // Non-interactive paths feed a prompt to the model immediately after
       // init. Under PR-A's progressive MCP availability,
       // `config.initialize()` returns BEFORE MCP servers settle, so

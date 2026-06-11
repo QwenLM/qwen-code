@@ -278,6 +278,33 @@ interface ChannelInfo {
   isDying: boolean;
 }
 
+/** @internal Visible for bridge lifecycle regression tests. */
+export function findChannelInfoForEntry<T extends { channel: unknown }>(
+  current: T | undefined,
+  alive: Iterable<T>,
+  entry: { channel: unknown },
+): T | undefined {
+  if (current?.channel === entry.channel) return current;
+  for (const info of alive) {
+    if (info.channel === entry.channel) return info;
+  }
+  return undefined;
+}
+
+/** @internal Visible for bridge lifecycle regression tests. */
+export function detachSessionIdFromEntryChannel<
+  T extends { channel: unknown; sessionIds: Set<string> },
+>(
+  current: T | undefined,
+  alive: Iterable<T>,
+  entry: { channel: unknown },
+  sessionId: string,
+): T | undefined {
+  const info = findChannelInfoForEntry(current, alive, entry);
+  info?.sessionIds.delete(sessionId);
+  return info;
+}
+
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
@@ -722,27 +749,32 @@ class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
-   * method is recognized today — `qwen/notify/session/mcp-budget-event`
-   * — translating the McpClientManager's budget-event payload into a
-   * session-scoped SSE frame. Unknown methods, unknown event kinds,
-   * and missing sessionIds are dropped silently for forward-compat
-   * (a future child can add new notification methods without breaking
-   * this handler; an older daemon can ignore them cleanly).
-   *
-   * Codex review fix #1: when the sessionId IS present but the
-   * `byId`-resolvable entry is not yet registered (the child fired
-   * the event during its own `newSession` handler, before
-   * `connection.newSession` returned to `doSpawn`), buffer the frame
-   * and replay it on `drainEarlyEvents`.
+   * Handle child→bridge ACP `extNotification` calls and translate them into
+   * session-scoped SSE frames.
    */
   async extNotification(
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
-    if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
+
+    if (method === 'qwen/notify/session/terminal-sequence') {
+      const { v: _v2, sessionId: _sid2, ...tsRest } = params;
+      void _v2;
+      void _sid2;
+      const terminalSequence = tsRest['terminalSequence'];
+      if (
+        typeof terminalSequence !== 'string' ||
+        terminalSequence.length === 0
+      ) {
+        return;
+      }
+      this.publishExtNotification(sessionId, 'terminal_sequence', tsRest);
+      return;
+    }
+
+    if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const kind = params['kind'];
     const type =
       kind === 'budget_warning'
@@ -760,10 +792,18 @@ class BridgeClient implements Client {
     void _v;
     void _sid;
     void _kind;
+    this.publishExtNotification(sessionId, type, rest);
+  }
+
+  private publishExtNotification(
+    sessionId: string,
+    type: string,
+    data: Record<string, unknown>,
+  ): void {
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
-      data: rest,
+      data,
       ...(entry?.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),
@@ -2031,15 +2071,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return channelInfo;
   };
 
-  const channelInfoForEntry = (
-    entry: SessionEntry,
-  ): ChannelInfo | undefined => {
-    if (channelInfo?.channel === entry.channel) return channelInfo;
-    for (const info of aliveChannels) {
-      if (info.channel === entry.channel) return info;
-    }
-    return undefined;
-  };
+  const channelInfoForEntry = (entry: SessionEntry): ChannelInfo | undefined =>
+    findChannelInfoForEntry(channelInfo, aliveChannels, entry);
 
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
@@ -2887,10 +2920,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      const ci = channelInfo;
-      if (ci && ci.channel === entry.channel) {
-        ci.sessionIds.delete(sessionId);
-      }
+      const ci = detachSessionIdFromEntryChannel(
+        channelInfo,
+        aliveChannels,
+        entry,
+        sessionId,
+      );
       for (const id of Array.from(entry.pendingPermissionIds)) {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
@@ -3717,10 +3752,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Detach from the channel. The channel dies only when its LAST
       // session leaves — other sessions on the same channel keep
       // running.
-      const ci = channelInfo;
-      if (ci && ci.channel === entry.channel) {
-        ci.sessionIds.delete(sessionId);
-      }
+      const ci = detachSessionIdFromEntryChannel(
+        channelInfo,
+        aliveChannels,
+        entry,
+        sessionId,
+      );
       // PR 14b fix (codex round 5): tombstone the killed sessionId
       // so any in-flight `extNotification` from the (about-to-be-
       // killed) child can't seed the early-event buffer for a

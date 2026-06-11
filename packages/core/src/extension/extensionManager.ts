@@ -24,6 +24,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
+import {
+  atomicWriteFile,
+  atomicWriteFileSync,
+} from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
@@ -121,6 +125,7 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  description?: string;
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
@@ -531,7 +536,7 @@ export class ExtensionManager {
 
   private writeEnablementConfig(config: AllExtensionsEnablementConfig): void {
     fs.mkdirSync(this.configDir, { recursive: true });
-    fs.writeFileSync(this.configFilePath, JSON.stringify(config, null, 2));
+    atomicWriteFileSync(this.configFilePath, JSON.stringify(config, null, 2));
   }
 
   /**
@@ -1072,7 +1077,7 @@ export class ExtensionManager {
           destinationPath,
           INSTALL_METADATA_FILENAME,
         );
-        await fs.promises.writeFile(metadataPath, metadataString);
+        await atomicWriteFile(metadataPath, metadataString);
 
         extension = await this.loadExtension({ extensionDir: destinationPath });
         if (!extension) {

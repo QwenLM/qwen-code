@@ -70,6 +70,7 @@ function createApprovalEvent(
     round: 1,
     timestamp: Date.now(),
     description: `Awaiting approval for ${overrides.name}`,
+    args: {},
     ...overrides,
   };
 }
@@ -719,6 +720,10 @@ describe('SubAgentTracker', () => {
             type: 'text',
             text: 'Hello, this is a response from the model.',
           },
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+          }),
         }),
       );
     });

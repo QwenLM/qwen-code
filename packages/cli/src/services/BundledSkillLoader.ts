@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
+  applySkillAllowedTools,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -45,7 +46,7 @@ export class BundledSkillLoader implements ICommandLoader {
 
       // Hide skills whose allowedTools require cron when cron is disabled
       const cronEnabled = this.config?.isCronEnabled() ?? false;
-      const skills = allSkills.filter((skill) => {
+      const cronVisible = allSkills.filter((skill) => {
         if (
           !cronEnabled &&
           skill.allowedTools?.some((t) => t.startsWith('cron_'))
@@ -58,8 +59,18 @@ export class BundledSkillLoader implements ICommandLoader {
         return true;
       });
 
+      // Apply user-controlled `skills.disabled` filter HERE so disabling a
+      // bundled skill cannot accidentally hide a same-named built-in
+      // command or MCP prompt (which would happen if we routed this
+      // through `CommandService`'s global denylist instead).
+      const disabled =
+        this.config?.getDisabledSkillNames() ?? new Set<string>();
+      const skills = cronVisible.filter(
+        (skill) => !disabled.has(skill.name.toLowerCase()),
+      );
+
       debugLogger.debug(
-        `Loaded ${skills.length} bundled skill(s) as slash commands`,
+        `Loaded ${skills.length} bundled skill(s) as slash commands; ${cronVisible.length - skills.length} hidden by skills.disabled`,
       );
 
       return skills.map((skill) => ({
@@ -72,7 +83,19 @@ export class BundledSkillLoader implements ICommandLoader {
         modelInvocable: !skill.disableModelInvocation,
         argumentHint: skill.argumentHint,
         whenToUse: skill.whenToUse,
+        skillDetail: {
+          name: skill.name,
+          description: skill.description,
+          body: skill.body,
+          level: skill.level,
+        },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          // Auto-approve the skill's declared allowedTools before its body is submitted.
+          applySkillAllowedTools(
+            this.config?.getPermissionManager(),
+            skill.allowedTools,
+          );
+
           // Resolve template variables in skill body
           let body = skill.body;
           const modelId = this.config?.getModel()?.trim() || '';

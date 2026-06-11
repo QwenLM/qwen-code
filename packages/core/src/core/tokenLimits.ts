@@ -138,6 +138,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // MiniMax
   // -------------------
+  [/^minimax-m3/i, LIMITS['1m']], // MiniMax-M3: 1,000,000
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 

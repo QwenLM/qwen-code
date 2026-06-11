@@ -129,6 +129,7 @@ export class InProcessBackend implements Backend {
         initialTask: inProcessConfig.initialTask,
         maxTurnsPerMessage: runConfig.max_turns,
         maxTimeMinutesPerMessage: runConfig.max_time_minutes,
+        completeOnIdle: inProcessConfig.completeOnIdle,
         chatHistory: inProcessConfig.chatHistory,
       },
       core,

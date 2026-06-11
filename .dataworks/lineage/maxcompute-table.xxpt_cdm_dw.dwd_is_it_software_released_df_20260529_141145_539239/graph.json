@@ -1,0 +1,174 @@
+{
+  "root": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+  "query": {
+    "entityGuid": "odps.xxpt_cdm_dw.dwd_is_it_software_released_df",
+    "entityType": "odps-table",
+    "direction": "UP",
+    "maxDepth": 1,
+    "pageSize": 100,
+    "brief": false
+  },
+  "entities": [
+    {
+      "qualified_name": "maxcompute-table.cdo_new_webbi.ods_ism_it_software_key_released_df",
+      "entity_guid": "odps.cdo_new_webbi.ods_ism_it_software_key_released_df",
+      "entity_type": "odps-table",
+      "name": "ods_ism_it_software_key_released_df",
+      "database_name": "cdo_new_webbi",
+      "channel": "FIRST_PARTY",
+      "detail_url": "",
+      "owner": "519804",
+      "temporary_table": null,
+      "attributes": {
+        "owner": "519804",
+        "tableGuid": "odps.cdo_new_webbi.ods_ism_it_software_key_released_df",
+        "isTemp": "0"
+      }
+    },
+    {
+      "qualified_name": "maxcompute-table.cdo_new_webbi.ods_ism_it_software_software_version_df",
+      "entity_guid": "odps.cdo_new_webbi.ods_ism_it_software_software_version_df",
+      "entity_type": "odps-table",
+      "name": "ods_ism_it_software_software_version_df",
+      "database_name": "cdo_new_webbi",
+      "channel": "FIRST_PARTY",
+      "detail_url": "",
+      "owner": "123818",
+      "temporary_table": null,
+      "attributes": {
+        "owner": "123818",
+        "tableGuid": "odps.cdo_new_webbi.ods_ism_it_software_software_version_df",
+        "isTemp": "0"
+      }
+    },
+    {
+      "qualified_name": "maxcompute-table.xxpt_cdm_dw.dim_is_fin_pl_reve_volume_dept",
+      "entity_guid": "odps.xxpt_cdm_dw.dim_is_fin_pl_reve_volume_dept",
+      "entity_type": "odps-table",
+      "name": "dim_is_fin_pl_reve_volume_dept",
+      "database_name": "xxpt_cdm_dw",
+      "channel": "FIRST_PARTY",
+      "detail_url": "",
+      "owner": "123818",
+      "temporary_table": null,
+      "attributes": {
+        "owner": "123818",
+        "tableGuid": "odps.xxpt_cdm_dw.dim_is_fin_pl_reve_volume_dept",
+        "isTemp": "0"
+      }
+    },
+    {
+      "qualified_name": "maxcompute-table.xxpt_cdm_dw.dim_is_hr_emp_bsc_info",
+      "entity_guid": "odps.xxpt_cdm_dw.dim_is_hr_emp_bsc_info",
+      "entity_type": "odps-table",
+      "name": "dim_is_hr_emp_bsc_info",
+      "database_name": "xxpt_cdm_dw",
+      "channel": "FIRST_PARTY",
+      "detail_url": "",
+      "owner": "104464",
+      "temporary_table": null,
+      "attributes": {
+        "owner": "104464",
+        "tableGuid": "odps.xxpt_cdm_dw.dim_is_hr_emp_bsc_info",
+        "isTemp": "0"
+      }
+    },
+    {
+      "qualified_name": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "entity_guid": "odps.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "entity_type": "odps-table",
+      "name": "dwd_is_it_software_released_df",
+      "database_name": "xxpt_cdm_dw",
+      "channel": "",
+      "detail_url": "",
+      "owner": "形空",
+      "temporary_table": null,
+      "attributes": {}
+    }
+  ],
+  "relationships": [
+    {
+      "relationship_guid": "odps.SQL.289290490",
+      "relationship_type": "SQL",
+      "channel": "FIRST_PARTY",
+      "engine": "odps",
+      "task_attribute": {
+        "uuid": "289290490",
+        "nodeId": "289290490",
+        "projectId": 22007,
+        "instanceSet": [
+          {
+            "instanceId": "94758523791",
+            "logUrl": "https://workbench2.dw.alibaba-inc.com/?env=prod&taskId=94758523791&defaultProjectId=22007#/runLog"
+          },
+          {
+            "instanceId": "94789269551",
+            "logUrl": "https://workbench2.dw.alibaba-inc.com/?env=prod&taskId=94789269551&defaultProjectId=22007#/runLog"
+          }
+        ]
+      }
+    }
+  ],
+  "instances": [
+    {
+      "src": "maxcompute-table.cdo_new_webbi.ods_ism_it_software_key_released_df",
+      "dst": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "direction": "UP",
+      "depth": 1,
+      "parent_qualified_name": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "relationship_ids": ["odps.SQL.289290490"]
+    },
+    {
+      "src": "maxcompute-table.cdo_new_webbi.ods_ism_it_software_software_version_df",
+      "dst": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "direction": "UP",
+      "depth": 1,
+      "parent_qualified_name": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "relationship_ids": ["odps.SQL.289290490"]
+    },
+    {
+      "src": "maxcompute-table.xxpt_cdm_dw.dim_is_fin_pl_reve_volume_dept",
+      "dst": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "direction": "UP",
+      "depth": 1,
+      "parent_qualified_name": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "relationship_ids": ["odps.SQL.289290490"]
+    },
+    {
+      "src": "maxcompute-table.xxpt_cdm_dw.dim_is_hr_emp_bsc_info",
+      "dst": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "direction": "UP",
+      "depth": 1,
+      "parent_qualified_name": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "relationship_ids": ["odps.SQL.289290490"]
+    }
+  ],
+  "summary": {
+    "root": "maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df",
+    "query": {
+      "entityGuid": "odps.xxpt_cdm_dw.dwd_is_it_software_released_df",
+      "entityType": "odps-table",
+      "direction": "UP",
+      "maxDepth": 1,
+      "pageSize": 100,
+      "brief": false
+    },
+    "entity_count": 5,
+    "relationship_count": 1,
+    "instance_count": 4,
+    "pages_loaded": 1,
+    "cycle_count": 0,
+    "layer_distribution": {
+      "0": 1,
+      "1": 4
+    },
+    "upstream_count": 4,
+    "downstream_count": 0,
+    "upstream_edges": 4,
+    "downstream_edges": 0,
+    "truncated": false,
+    "truncation_reasons": [],
+    "export_dir": "/Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code/.dataworks/lineage/maxcompute-table.xxpt_cdm_dw.dwd_is_it_software_released_df_20260529_141145_539239",
+    "mermaid_enabled": true
+  }
+}

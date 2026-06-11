@@ -126,7 +126,7 @@ const renderWithContext = (
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <CompactModeProvider value={{ compactMode }}>
+    <CompactModeProvider value={{ compactMode, compactInline: false }}>
       <SettingsContext.Provider value={mockSettings}>
         <StreamingContext.Provider value={contextValue}>
           {ui}
@@ -646,7 +646,7 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 0 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false }}>
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
         <SettingsContext.Provider value={settingsWithDisabledCap}>
           <StreamingContext.Provider value={StreamingState.Idle}>
             <ToolMessage
@@ -685,7 +685,7 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 12 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false }}>
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
         <SettingsContext.Provider value={settingsWithCustomCap}>
           <StreamingContext.Provider value={StreamingState.Idle}>
             <ToolMessage
@@ -830,7 +830,7 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: badValue } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false }}>
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
         <SettingsContext.Provider value={settingsWithBadCap}>
           <StreamingContext.Provider value={StreamingState.Idle}>
             <ToolMessage

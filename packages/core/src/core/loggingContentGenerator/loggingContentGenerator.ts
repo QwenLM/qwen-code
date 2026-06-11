@@ -62,6 +62,34 @@ import {
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
 import { hasUserVisibleContent } from './streamContentDetection.js';
+import {
+  retryContext,
+  type RetryAttemptContext,
+} from '../../utils/retryContext.js';
+
+/**
+ * Phase 4b — read the active retry context once, default attempt to 1 when
+ * absent (warmup/side-queries/direct calls). Returns the fields in the exact
+ * shape consumed by `endLLMRequestSpan` so callers can spread the result.
+ *
+ * Called in the SYNCHRONOUS PRELUDE of `generateContent` / `generateContentStream`
+ * — before the first await — because the streaming path returns an
+ * AsyncGenerator that's iterated AFTER `retryWithBackoff` has resolved and
+ * the ALS frame has exited. The closure carries this snapshot to all later
+ * endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+ */
+function snapshotRetryMetadata(): {
+  attempt: number;
+  requestSetupMs?: number;
+  retryTotalDelayMs?: number;
+} {
+  const ctx: RetryAttemptContext | undefined = retryContext.getStore();
+  return {
+    attempt: ctx?.attempt ?? 1,
+    requestSetupMs: ctx?.requestSetupMs,
+    retryTotalDelayMs: ctx?.retryTotalDelayMs,
+  };
+}
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -77,6 +105,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private splitToolMedia?: boolean;
   private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
@@ -85,6 +114,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.splitToolMedia = generatorConfig.splitToolMedia;
     this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
@@ -213,6 +243,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
+    // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', false);
@@ -288,6 +322,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputTokens: response.usageMetadata?.candidatesTokenCount,
         cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
         durationMs: Date.now() - startTime,
+        ...retrySnapshot,
       });
       return response;
     } catch (error) {
@@ -304,6 +339,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        ...retrySnapshot,
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
@@ -326,6 +362,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Phase 4b — snapshot retry context in the synchronous prelude. This is
+    // the only point where the ALS frame from `retryWithBackoff` is guaranteed
+    // to be active for the streaming path: once this function returns the
+    // AsyncGenerator, the caller iterates AFTER `retryWithBackoff` has
+    // resolved and the frame has exited. Threaded as a parameter to
+    // loggingStreamWrapper so its closure carries the snapshot to all later
+    // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', true);
@@ -383,6 +428,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        ...retrySnapshot,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -416,6 +462,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         llmSpan,
         spanContext,
         req.config?.abortSignal,
+        retrySnapshot,
       ),
     );
   }
@@ -451,6 +498,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     span?: Span,
     spanContext?: Context,
     abortSignal?: AbortSignal,
+    // Phase 4b — snapshot of retry context captured BEFORE the stream wrapper
+    // returned, when the ALS frame from `retryWithBackoff` was still active.
+    // Closure-carried to every endLLMRequestSpan callsite below so the
+    // idle-timeout `setTimeout` callback sees the same values as the
+    // entry-time read.
+    retrySnapshot?: ReturnType<typeof snapshotRetryMetadata>,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -504,6 +557,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               success: false,
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
+              ...retrySnapshot,
             });
             spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
@@ -626,6 +680,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
               : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
+          ...retrySnapshot,
         });
       }
     }
@@ -683,6 +738,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     return {
       model,
       modalities: this.modalities ?? {},
+      // Mirror the pipeline default (see pipeline.ts createRequestContext) so the
+      // --openai-logging fallback reconstruction reflects the same split as the
+      // request actually sent. Opt out via generationConfig.splitToolMedia = false.
+      splitToolMedia: this.splitToolMedia ?? true,
       startTime: 0,
     };
   }

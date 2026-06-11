@@ -1,5 +1,6 @@
 {
   "name": "mcp-server-example",
+  "description": "Example extension that provides an MCP server",
   "version": "1.0.0",
   "mcpServers": {
     "nodeServer": {

@@ -225,10 +225,25 @@ const useResultDisplayRenderer = (
       };
     }
 
-    // Default to string
+    // TeamResultDisplay / TaskListResultDisplay — handled by their tools'
+    // returnDisplay text; don't render the structured object inline.
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      (resultDisplay.type === 'team_result' ||
+        resultDisplay.type === 'task_list')
+    ) {
+      return { type: 'none' };
+    }
+
+    // Default to string — safeguard against non-string objects
     return {
       type: 'string',
-      data: resultDisplay as string,
+      data:
+        typeof resultDisplay === 'string'
+          ? resultDisplay
+          : JSON.stringify(resultDisplay),
     };
   }, [resultDisplay]);
 

@@ -1,0 +1,14 @@
+src_qualified_name,dst_qualified_name,relationship_type,direction,depth,relationship_ids
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.dataworks_analyze.meta_table_lineage_statistics,SQL,DOWN,1,odps.SQL.163035315
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.dataworks_analyze.meta_table_lineage_with_user,SQL,DOWN,1,odps.SQL.163079158
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.dataworks_analyze.rpt_d_table_lineage,SQL,DOWN,1,odps.SQL.163035229
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.ecodata_dist.icbu_jspt_meta_table_lineage_view,SQL,DOWN,1,odps.ecodata_dist.icbu_jspt_meta_table_lineage_view
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.ecodata_dist.vabt_jspt_meta_table_lineage_view,SQL,DOWN,1,odps.SQL.183836123
+maxcompute-table.dataworks_analyze.meta_table_lineage,maxcompute-table.fin_data_platform.fin_meta_table_lineage,SQL,DOWN,1,odps.SQL.183836123
+maxcompute-table.dataworks_analyze.meta_table_lineage_with_user,mysql-table.4d6d25c4647eb187660054a4e2c88da7ffb287e2,DATAX,DOWN,2,datax.DATAX.163128583
+maxcompute-table.dataworks_analyze.rpt_d_table_lineage,loghub-logstore.b52a375842a2066f5afcb524abd21c8807f7bd33,DATAX,DOWN,2,"datax.DATAX.163931893,datax.DATAX.163372736"
+maxcompute-table.dataworks_analyze.rpt_d_table_lineage,loghub-logstore.f01251296bd1cfaec37ae9268c5d5b92def773ab,DATAX,DOWN,2,datax.DATAX.228375141
+maxcompute-table.ecodata_dist.vabt_jspt_meta_table_lineage_view,maxcompute-table.fin_data_platform.fin_meta_table_lineage,SQL,DOWN,2,odps.SQL.183836123
+maxcompute-table.fin_data_platform.fin_meta_table_lineage,mysql-table.22badf3053c1ae316917326ddf761907cb7842ee,DATAX,DOWN,2,datax.DATAX.183634649
+loghub-logstore.b52a375842a2066f5afcb524abd21c8807f7bd33,maxcompute-table.dataworks_meta.ods_d_crawled_metadata_lineage,DATAX,DOWN,3,datax.DATAX.304309634
+maxcompute-table.dataworks_meta.ods_d_crawled_metadata_lineage,maxcompute-table.dataworks_meta.dwd_d_retained_metadata_lineage,SQL,DOWN,4,odps.SQL.304306841

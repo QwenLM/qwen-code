@@ -200,12 +200,12 @@ function autoTitleDisabledByEnv(): boolean {
 
 /**
  * A single record stored in the JSONL file.
- * Forms a tree structure via uuid/parentUuid for future checkpointing support.
+ * Forms a tree structure via uuid/parentUuid for future conversation branching support.
  *
  * Each record is self-contained with full metadata, enabling:
  * - Append-only writes (crash-safe)
  * - Tree reconstruction by following parentUuid chain
- * - Future checkpointing by branching from any historical record
+ * - Future conversation branching by forking from any historical record
  */
 export interface ChatRecord {
   /** Unique identifier for this logical message */
@@ -358,6 +358,8 @@ export interface SlashCommandRecordPayload {
   phase: 'invocation' | 'result';
   /** Raw user-entered slash command (e.g., "/about"). */
   rawCommand: string;
+  /** Whether the visible slash-command invocation reached model history. */
+  sentToModel?: boolean;
   /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.
@@ -444,7 +446,7 @@ export interface RewindRecordPayload {
  * Each record has uuid/parentUuid fields enabling:
  * - Append-only writes (never rewrite the file)
  * - Linear history reconstruction
- * - Future checkpointing (branch from any historical point)
+ * - Future conversation branching (fork from any historical point)
  *
  * File location: ~/.qwen/tmp/<project_id>/chats/
  *

@@ -1,0 +1,65 @@
+{
+  "source": {
+    "name": "meta_table_lineage",
+    "databaseName": "dataworks_analyze",
+    "entityGuid": "odps.dataworks_analyze.meta_table_lineage",
+    "entityType": "odps-table",
+    "qualifiedName": "maxcompute-table.dataworks_analyze.meta_table_lineage"
+  },
+  "target": {
+    "name": "m_table_lineage_private_domains",
+    "databaseName": "dataworks_meta",
+    "entityGuid": "odps.dataworks_meta.m_table_lineage_private_domains",
+    "entityType": "odps-table",
+    "qualifiedName": "maxcompute-table.dataworks_meta.m_table_lineage_private_domains"
+  },
+  "query": {
+    "direction": "UP",
+    "findAll": false,
+    "maxDepth": 6,
+    "maxPaths": 50
+  },
+  "graph_summary": {
+    "root": "maxcompute-table.dataworks_analyze.meta_table_lineage",
+    "query": {
+      "entityGuid": "odps.dataworks_analyze.meta_table_lineage",
+      "entityType": "odps-table",
+      "direction": "UP",
+      "maxDepth": 6,
+      "pageSize": 100,
+      "brief": false
+    },
+    "entity_count": 467,
+    "relationship_count": 110,
+    "instance_count": 527,
+    "pages_loaded": 200,
+    "cycle_count": 7,
+    "layer_distribution": {
+      "0": 1,
+      "1": 1,
+      "2": 6,
+      "3": 65,
+      "4": 344,
+      "5": 50
+    },
+    "upstream_count": 466,
+    "downstream_count": 0,
+    "upstream_edges": 527,
+    "downstream_edges": 0,
+    "truncated": true,
+    "truncation_reasons": ["max_pages=200"],
+    "export_dir": "/Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code/.dataworks/lineage/maxcompute-table.dataworks_analyze.meta_table_lineage_20260529_141725_850803",
+    "mermaid_enabled": false
+  },
+  "path_result": {
+    "exists": false,
+    "direction_found": "",
+    "shortest_path": null,
+    "all_paths": [],
+    "path_count": 0,
+    "path_length": 0,
+    "truncated": false,
+    "max_depth_searched": 6
+  },
+  "elapsed_ms": 49326
+}

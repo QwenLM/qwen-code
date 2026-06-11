@@ -409,8 +409,10 @@ export function microcompactHistory(
   }
 
   const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
-  const toolsKept = tool.length - toolsCleared;
-  const mediaKept = media.length + nestedMedia.length - mediaCleared;
+  // Only count items that were actually protected by keepRecent, not
+  // already-cleared items that were skipped during the clearing pass.
+  const toolsKept = Math.min(tool.length, keepRecent);
+  const mediaKept = Math.min(media.length + nestedMedia.length, keepRecent);
 
   return {
     history: result,

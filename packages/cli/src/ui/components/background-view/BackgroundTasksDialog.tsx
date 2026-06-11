@@ -31,6 +31,7 @@ import {
   type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
+import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
@@ -301,7 +302,9 @@ const ListBody: React.FC<{
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
-              <Text color={labelColor}>{rowLabel(entry)}</Text>
+              <Text color={labelColor}>
+                {escapeAnsiCtrlCodes(rowLabel(entry))}
+              </Text>
             </Box>
           );
         })}
@@ -556,7 +559,9 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`;
+  const title = escapeAnsiCtrlCodes(
+    `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
+  );
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
@@ -628,7 +633,7 @@ const AgentDetailBody: React.FC<{
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
             const label = truncateToWidth(
-              formatActivityLabel(a.name, a.description),
+              escapeAnsiCtrlCodes(formatActivityLabel(a.name, a.description)),
               Math.max(0, maxWidth - stringWidth(prefix)),
             );
             return (
@@ -655,7 +660,9 @@ const AgentDetailBody: React.FC<{
           </Box>
           {visiblePromptLines.map((line, i) => (
             <Box key={`prompt-${i}`}>
-              <Text wrap="truncate-end">{line || ' '}</Text>
+              <Text wrap="truncate-end">
+                {escapeAnsiCtrlCodes(line) || ' '}
+              </Text>
             </Box>
           ))}
         </Fragment>
@@ -951,8 +958,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity)
-      return;
+    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
@@ -960,7 +966,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, isDetailMode, config, selectedAgentIdForActivity]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    config,
+    selectedAgentIdForActivity,
+  ]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -1021,7 +1033,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus, exitDetail]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    selectedEntryId,
+    selectedStatus,
+    exitDetail,
+  ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
   // Foreground entries: first `x` arms; second `x` confirms. Background

@@ -1,0 +1,87 @@
+{
+  "source": {
+    "name": "m_table_lineage_private_domains",
+    "databaseName": "dataworks_meta",
+    "entityGuid": "odps.dataworks_meta.m_table_lineage_private_domains",
+    "entityType": "odps-table",
+    "qualifiedName": "maxcompute-table.dataworks_meta.m_table_lineage_private_domains"
+  },
+  "target": {
+    "name": "meta_table_lineage",
+    "databaseName": "dataworks_analyze",
+    "entityGuid": "odps.dataworks_analyze.meta_table_lineage",
+    "entityType": "odps-table",
+    "qualifiedName": "maxcompute-table.dataworks_analyze.meta_table_lineage"
+  },
+  "query": {
+    "direction": "AUTO",
+    "findAll": false,
+    "maxDepth": 10,
+    "maxPaths": 50
+  },
+  "graph_summary": {
+    "root": "maxcompute-table.dataworks_meta.m_table_lineage_private_domains",
+    "query": {
+      "entityGuid": "odps.dataworks_meta.m_table_lineage_private_domains",
+      "entityType": "odps-table",
+      "direction": "BOTH",
+      "maxDepth": 10,
+      "pageSize": 100,
+      "brief": false
+    },
+    "entity_count": 339,
+    "relationship_count": 275,
+    "instance_count": 416,
+    "pages_loaded": 200,
+    "cycle_count": 4,
+    "layer_distribution": {
+      "0": 1,
+      "1": 1,
+      "2": 1,
+      "3": 1,
+      "4": 3,
+      "5": 10,
+      "6": 15,
+      "7": 125,
+      "8": 123,
+      "9": 59
+    },
+    "upstream_count": 0,
+    "downstream_count": 338,
+    "upstream_edges": 0,
+    "downstream_edges": 416,
+    "truncated": true,
+    "truncation_reasons": ["max_pages=200"],
+    "export_dir": "/Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code/.dataworks/lineage/maxcompute-table.dataworks_meta.m_table_lineage_private_domains_20260529_132752_039050",
+    "mermaid_enabled": false
+  },
+  "path_result": {
+    "exists": true,
+    "direction_found": "FORWARD",
+    "shortest_path": {
+      "length": 5,
+      "nodes": [
+        "maxcompute-table.dataworks_meta.m_table_lineage_private_domains",
+        "maxcompute-table.dataworks_analyze.m_table_lineage_private_domains",
+        "maxcompute-table.dataworks_analyze.m_table_filtered_lineage_private_domains",
+        "maxcompute-table.dataworks_analyze.dwd_d_inst_derived_table_lineages",
+        "maxcompute-table.dataworks_analyze.tmp_d_table_lineage_with_skynets",
+        "maxcompute-table.dataworks_analyze.meta_table_lineage"
+      ],
+      "node_names": [
+        "m_table_lineage_private_domains",
+        "m_table_lineage_private_domains",
+        "m_table_filtered_lineage_private_domains",
+        "dwd_d_inst_derived_table_lineages",
+        "tmp_d_table_lineage_with_skynets",
+        "meta_table_lineage"
+      ]
+    },
+    "all_paths": [],
+    "path_count": 1,
+    "path_length": 5,
+    "truncated": false,
+    "max_depth_searched": 10
+  },
+  "elapsed_ms": 53624
+}
