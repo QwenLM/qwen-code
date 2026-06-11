@@ -229,6 +229,32 @@ describe('useShellCommandProcessor', () => {
     expect(modelHistoryText).toContain('... (truncated)');
   });
 
+  it('preserves unmatched surrogate code units in truncated shell model history', async () => {
+    const longOutput = `head-\uD800-${'x'.repeat(11_000)}`;
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'surrogate-output',
+        new AbortController().signal,
+      );
+    });
+    const execPromise = onExecMock.mock.calls[0][0];
+
+    act(() => {
+      resolveExecutionPromise(createMockServiceResult({ output: longOutput }));
+    });
+    await act(async () => await execPromise);
+
+    const modelHistoryText = (
+      vi.mocked(mockGeminiClient.addHistory).mock.calls[0]![0].parts![0]! as {
+        text: string;
+      }
+    ).text;
+    expect(modelHistoryText).toContain('\uD800');
+    expect(modelHistoryText).not.toContain('\uFFFD');
+  });
+
   it('should handle command failure and display error status', async () => {
     const { result } = renderProcessorHook();
 

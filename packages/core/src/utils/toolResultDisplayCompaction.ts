@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Buffer } from 'node:buffer';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
@@ -23,7 +22,7 @@ export const MAX_RETAINED_FILE_CONTENT_CHARS = 16_000;
 export const MAX_RETAINED_ANSI_OUTPUT_LINES = 200;
 
 function copyString(value: string): string {
-  return Buffer.from(value).toString('utf8');
+  return value.split('').join('');
 }
 
 export function compactStringForHistory(

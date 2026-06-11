@@ -3733,10 +3733,10 @@ describe('CoreToolScheduler edit cancellation', () => {
 });
 
 describe('CoreToolScheduler YOLO mode', () => {
-  it('compacts completed resultDisplay before retaining scheduler state', async () => {
-    const longDisplay = `head-${'x'.repeat(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    )}-tail`;
+  const runLongDisplayTool = async (
+    longDisplay: string,
+    isInteractive: boolean,
+  ) => {
     const executeFn = vi.fn().mockResolvedValue({
       llmContent: 'Tool executed',
       returnDisplay: longDisplay,
@@ -3783,7 +3783,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       }),
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
-      isInteractive: () => true,
+      isInteractive: () => isInteractive,
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
@@ -3817,14 +3817,34 @@ describe('CoreToolScheduler YOLO mode', () => {
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('success');
     if (completedCall.status === 'success') {
-      const retainedDisplay = completedCall.response.resultDisplay as string;
-      expect(retainedDisplay.length).toBeLessThanOrEqual(
-        MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-      );
-      expect(retainedDisplay).toContain('head-');
-      expect(retainedDisplay).toContain('-tail');
-      expect(retainedDisplay).toContain('truncated from');
+      return completedCall.response.resultDisplay as string;
     }
+    return undefined;
+  };
+
+  it('compacts completed resultDisplay before retaining interactive scheduler state', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    const retainedDisplay = await runLongDisplayTool(longDisplay, true);
+
+    expect(retainedDisplay?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(retainedDisplay).toContain('head-');
+    expect(retainedDisplay).toContain('-tail');
+    expect(retainedDisplay).toContain('truncated from');
+  });
+
+  it('preserves completed resultDisplay in non-interactive scheduler responses', async () => {
+    const longDisplay = `head-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-tail`;
+
+    await expect(runLongDisplayTool(longDisplay, false)).resolves.toBe(
+      longDisplay,
+    );
   });
 
   it('should execute tool requiring confirmation directly without waiting', async () => {
@@ -4028,6 +4048,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      isInteractive: () => true,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -4181,6 +4202,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      isInteractive: () => true,
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),

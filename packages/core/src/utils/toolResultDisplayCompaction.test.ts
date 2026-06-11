@@ -35,6 +35,17 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).toContain('truncated from');
   });
 
+  it('preserves unmatched surrogate code units when compacting', () => {
+    const value = `start-\uD800-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-end`;
+
+    const compacted = compactStringForHistory(value);
+
+    expect(compacted).toContain('\uD800');
+    expect(compacted).not.toContain('\uFFFD');
+  });
+
   it('drops subagent display fields that are not rendered in CLI history', () => {
     const nestedDisplay = `nested-${'x'.repeat(
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,

@@ -27,7 +27,6 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { SHELL_COMMAND_NAME } from '../constants.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import crypto from 'node:crypto';
-import { Buffer } from 'node:buffer';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -38,7 +37,7 @@ const MAX_OUTPUT_LENGTH = 10000;
 const debugLogger = createDebugLogger('SHELL_COMMAND_PROCESSOR');
 
 function copyString(value: string): string {
-  return Buffer.from(value).toString('utf8');
+  return value.split('').join('');
 }
 
 function addShellCommandToGeminiHistory(

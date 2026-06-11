@@ -799,7 +799,7 @@ const createErrorResponse = (
       },
     },
   ],
-  resultDisplay: compactToolResultDisplayForHistory(error.message),
+  resultDisplay: error.message,
   errorType,
   contentLength: error.message.length,
 });
@@ -1106,6 +1106,15 @@ export class CoreToolScheduler {
     return this.config.getMemoryPressureMonitor?.();
   }
 
+  private compactResultDisplayForInteractiveHistory<
+    T extends ToolResultDisplay | undefined,
+  >(resultDisplay: T): T {
+    return typeof this.config.isInteractive === 'function' &&
+      this.config.isInteractive()
+      ? compactToolResultDisplayForHistory(resultDisplay)
+      : resultDisplay;
+  }
+
   private setStatusInternal(
     targetCallId: string,
     status: 'success',
@@ -1255,7 +1264,8 @@ export class CoreToolScheduler {
                   },
                 },
               ],
-              resultDisplay: compactToolResultDisplayForHistory(resultDisplay),
+              resultDisplay:
+                this.compactResultDisplayForInteractiveHistory(resultDisplay),
               error: undefined,
               errorType: undefined,
               contentLength: errorMessage.length,
@@ -3051,7 +3061,8 @@ export class CoreToolScheduler {
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
       ? (outputChunk: ToolResultDisplay) => {
-          const compactOutput = compactToolResultDisplayForHistory(outputChunk);
+          const compactOutput =
+            this.compactResultDisplayForInteractiveHistory(outputChunk);
           if (this.outputUpdateHandler) {
             this.outputUpdateHandler(callId, outputChunk);
           }
@@ -3501,7 +3512,7 @@ export class CoreToolScheduler {
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
-          resultDisplay: compactToolResultDisplayForHistory(
+          resultDisplay: this.compactResultDisplayForInteractiveHistory(
             toolResult.returnDisplay,
           ),
           error: undefined,
