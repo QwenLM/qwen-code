@@ -15,6 +15,14 @@ type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
 type AuthStep = 'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig';
+type AdvancedOptionValue =
+  | 'thinking'
+  | 'modality'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'context';
 
 interface AuthMessageProps {
   onMessage: (text: string, type?: 'status' | 'error') => void;
@@ -168,8 +176,15 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const steps = provider?.steps ?? [];
   const currentStep = steps[stepIndex] as AuthStep | undefined;
   const shouldReview = provider?.showAdvancedConfig === true;
-  const advancedContextIndex = modality ? 6 : 2;
-  const advancedCount = modality ? 7 : 3;
+  const advancedOptionValues = useMemo<AdvancedOptionValue[]>(
+    () =>
+      modality
+        ? ['thinking', 'modality', 'image', 'video', 'audio', 'pdf', 'context']
+        : ['thinking', 'modality', 'context'],
+    [modality],
+  );
+  const advancedContextIndex = advancedOptionValues.indexOf('context');
+  const advancedCount = advancedOptionValues.length;
   const totalSteps = steps.length + (shouldReview ? 1 : 0);
   const isInputStep =
     currentStep === 'apiKey' ||
@@ -356,6 +371,37 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     t,
   ]);
 
+  const activateAdvancedOption = useCallback(
+    (value: AdvancedOptionValue | undefined) => {
+      switch (value) {
+        case 'thinking':
+          setThinking((current) => !current);
+          return;
+        case 'modality':
+          setModality((current) => !current);
+          return;
+        case 'image':
+          setModalityImage((current) => !current);
+          return;
+        case 'video':
+          setModalityVideo((current) => !current);
+          return;
+        case 'audio':
+          setModalityAudio((current) => !current);
+          return;
+        case 'pdf':
+          setModalityPdf((current) => !current);
+          return;
+        case 'context':
+          goNext();
+          return;
+        default:
+          return;
+      }
+    },
+    [goNext],
+  );
+
   const activate = useCallback(() => {
     if (view === 'groups') {
       const group = groups[groupIndex];
@@ -408,13 +454,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       return;
     }
     if (currentStep === 'advancedConfig') {
-      if (optionIndex === 0) setThinking((value) => !value);
-      if (optionIndex === 1) setModality((value) => !value);
-      if (modality && optionIndex === 2) setModalityImage((value) => !value);
-      if (modality && optionIndex === 3) setModalityVideo((value) => !value);
-      if (modality && optionIndex === 4) setModalityAudio((value) => !value);
-      if (modality && optionIndex === 5) setModalityPdf((value) => !value);
-      if (optionIndex === advancedContextIndex) goNext();
+      activateAdvancedOption(advancedOptionValues[optionIndex]);
       return;
     }
     goNext();
@@ -431,8 +471,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     save,
     startProvider,
     view,
-    modality,
-    advancedContextIndex,
+    activateAdvancedOption,
+    advancedOptionValues,
   ]);
 
   const activateAtIndex = useCallback(
@@ -485,13 +525,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         return;
       }
       if (currentStep === 'advancedConfig') {
-        if (index === 0) setThinking((value) => !value);
-        if (index === 1) setModality((value) => !value);
-        if (modality && index === 2) setModalityImage((value) => !value);
-        if (modality && index === 3) setModalityVideo((value) => !value);
-        if (modality && index === 4) setModalityAudio((value) => !value);
-        if (modality && index === 5) setModalityPdf((value) => !value);
-        if (index === advancedContextIndex) goNext();
+        activateAdvancedOption(advancedOptionValues[index]);
       }
     },
     [
@@ -499,8 +533,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       catalog,
       goNext,
       groups,
-      modality,
-      advancedContextIndex,
+      activateAdvancedOption,
+      advancedOptionValues,
       provider,
       providers,
       save,
@@ -694,7 +728,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
     }
     const checkmark = (enabled: boolean) => (enabled ? '◉' : '○');
-    const advancedOptions: Array<Option<string>> = [
+    const advancedOptions: Array<Option<AdvancedOptionValue>> = [
       {
         value: 'thinking',
         label: `${checkmark(thinking)} ${t('auth.advanced.thinking')}`,

@@ -638,9 +638,10 @@ export function createDaemonSessionActions({
 
     async cancelTask(taskId: string, kind: DaemonSessionTaskStatus['kind']) {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Cancel task failed',
+        'cancel_task',
       );
       try {
         return await withActionTimeout(
@@ -648,15 +649,21 @@ export function createDaemonSessionActions({
           'Cancel task timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Cancel task failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Cancel task failed',
+          error,
+          'cancel_task',
+        );
       }
     },
 
     async clearGoal() {
       const session = requireSessionForAction(
-        store,
+        addNotice,
         sessionRef.current,
         'Clear goal failed',
+        'clear_goal',
       );
       try {
         return await withActionTimeout(
@@ -664,7 +671,12 @@ export function createDaemonSessionActions({
           'Clear goal timed out',
         );
       } catch (error) {
-        throw dispatchActionError(store, 'Clear goal failed', error);
+        throw dispatchActionError(
+          addNotice,
+          'Clear goal failed',
+          error,
+          'clear_goal',
+        );
       }
     },
 

@@ -114,6 +114,8 @@ export type DaemonNoticeOperation =
   | 'load_context'
   | 'load_context_usage'
   | 'load_tasks'
+  | 'cancel_task'
+  | 'clear_goal'
   | 'load_stats'
   | 'refresh_commands'
   | 'recap_session'

@@ -3778,8 +3778,8 @@ describe('DaemonSessionProvider', () => {
       if (callCount === 1) {
         yield {
           id: 5,
-          v: 1,
-          type: 'session_update',
+          v: 1 as const,
+          type: 'session_update' as const,
           data: {
             update: {
               sessionUpdate: 'agent_message_chunk',
@@ -3792,8 +3792,8 @@ describe('DaemonSessionProvider', () => {
       // Second call: delta resume succeeds with new content
       yield {
         id: 6,
-        v: 1,
-        type: 'session_update',
+        v: 1 as const,
+        type: 'session_update' as const,
         data: {
           update: {
             sessionUpdate: 'agent_message_chunk',

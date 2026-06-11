@@ -1371,11 +1371,14 @@ export function App({
       store.appendLocalUserMessage(text);
       dispatchGoalCleared(goalToClear);
       sessionActions.clearGoal().catch((error: unknown) => {
+        if (goalToClear) {
+          dispatchGoalSet(goalToClear.condition, goalToClear.setAt);
+        }
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [dispatchGoalCleared, reportError, sessionActions, store],
+    [dispatchGoalCleared, dispatchGoalSet, reportError, sessionActions, store],
   );
 
   const handleGoalSlashCommand = useCallback(

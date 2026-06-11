@@ -10,6 +10,7 @@ import {
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { useActions, useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { TASKS_STATUS_ACTIVE_EVENT } from './messages/TasksStatusMessage';
 import styles from './StatusBar.module.css';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
@@ -186,6 +187,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const modeIndicator = getModeIndicator(currentMode, t);
     const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
     const [pollingActive, setPollingActive] = useState(false);
+    const [tasksPanelActive, setTasksPanelActive] = useState(false);
     const [, setGoalTick] = useState(0);
     const emptyPollsRef = useRef(0);
     const tasksRefreshInFlightRef = useRef(false);
@@ -207,6 +209,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     }, [connected, taskActivityKey]);
 
     useEffect(() => {
+      if (tasksPanelActive) return;
       if (!connected || !pollingActive) return;
 
       let disposed = false;
@@ -245,7 +248,24 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
         disposed = true;
         clearInterval(id);
       };
-    }, [actions, connected, pollingActive]);
+    }, [actions, connected, pollingActive, tasksPanelActive]);
+
+    useEffect(() => {
+      const onTasksPanelActive = (event: Event) => {
+        const detail = (event as CustomEvent<{ active?: boolean }>).detail;
+        const active = detail?.active === true;
+        setTasksPanelActive(active);
+        if (!active && hasActiveTask(tasks)) {
+          setPollingActive(true);
+        }
+      };
+      window.addEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
+      return () =>
+        window.removeEventListener(
+          TASKS_STATUS_ACTIVE_EVENT,
+          onTasksPanelActive,
+        );
+    }, [tasks]);
 
     useEffect(() => {
       if (!activeGoal) return;
