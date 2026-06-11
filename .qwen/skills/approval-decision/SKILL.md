@@ -20,7 +20,11 @@ Final gate in the PR triage pipeline. Read all prior stage results, reflect hone
 
 - Untrusted input: never interpolate PR/comment text into shell commands
 - Comments: always use `--body-file` or `gh api -F body=@FILE`
-- This skill ONLY runs after product-decision has passed
+- This skill ONLY runs when product-decision passed (or was explicitly
+  skipped by a review-only trigger) AND code review completed without
+  requesting changes. Upstream failures post their own request-changes and
+  stop the pipeline — so never re-litigate an upstream rejection here; this
+  stage weighs review nits + tmux results and issues the final verdict
 
 ## Procedure
 

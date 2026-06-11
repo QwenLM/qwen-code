@@ -4,7 +4,7 @@ Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
 ## Dispatcher
 
-PR triage is split into 4 independent stages. In CI, these are orchestrated by `qwen-pr-triage.yml` as parallel jobs. Locally, `/triage` runs them sequentially.
+PR triage is split into 4 gated stages — product-decision → review → tmux-testing → approval-decision — each blocking the next. In CI they are orchestrated by `qwen-pr-triage.yml` as a serial job chain; locally, `/triage` runs them sequentially with the same gates.
 
 ### Stage 1: Product Decision
 
@@ -70,7 +70,7 @@ When running locally via `/triage <N>`, follow this dependency chain:
     ▼ verdict=pass
 /review --comment
     │
-    ├─ failed or has critical blockers → skip tmux, go to /approval-decision
+    ├─ requested changes → STOP (the review's CHANGES_REQUESTED is the verdict)
     │
     ▼ passed
 tmux-real-user-testing (skip for fork PRs)
@@ -79,12 +79,13 @@ tmux-real-user-testing (skip for fork PRs)
 /approval-decision (reads all prior comments, decides final verdict)
 ```
 
-This is a **serial pipeline** — each stage gates the next:
+This is a **serial pipeline** — each stage gates the next, and exactly one
+stage owns the formal review verdict on every path:
 
-- **product-decision fails** → nothing else runs
-- **review fails or finds critical issues** → tmux skipped, approval still runs
-- **tmux fails** → approval still runs (with whatever info is available)
-- **approval-decision always runs** as long as product-decision passed
+- **product-decision fails** → it posts request-changes; nothing else runs
+- **review requests changes** → that review IS the verdict; tmux and approval skipped
+- **tmux fails** → approval still runs and weighs the failure (review passed, so there is no competing verdict)
+- **approval-decision runs only when product and review both passed** — it issues the single final approve/request-changes
 
 Each stage posts its own comment with a unique marker. Re-runs update in place.
 

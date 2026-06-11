@@ -58,35 +58,17 @@ jobs:
   # Restores the old qwen-code-pr-review.yml acknowledgement: when a
   # maintainer comments `@qwen-code /triage` or `/review`, reply right away
   # so they know the request was accepted (the pipeline itself may sit in
-  # the debounce queue). KEEP THE IF IN SYNC with resolve's comment branch.
+  # the debounce queue). Trigger validation (author association, body
+  # prefix, PR open) lives once in resolve's `if`; this job just reacts to
+  # its comment_trigger output — resolve runs in seconds, so the ack is
+  # still effectively immediate.
   ack-request:
+    needs: ['resolve']
     if: >-
-      github.repository == 'QwenLM/qwen-code' && (
-        (github.event_name == 'issue_comment' &&
-         github.event.issue.pull_request &&
-         github.event.issue.state == 'open' &&
-         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
-          startsWith(github.event.comment.body, '@qwen-code /review')) &&
-         (github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR')) ||
-        (github.event_name == 'pull_request_review_comment' &&
-         github.event.pull_request.state == 'open' &&
-         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
-          startsWith(github.event.comment.body, '@qwen-code /review')) &&
-         (github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR')) ||
-        (github.event_name == 'pull_request_review' &&
-         github.event.pull_request.state == 'open' &&
-         (startsWith(github.event.review.body, '@qwen-code /triage') ||
-          startsWith(github.event.review.body, '@qwen-code /review')) &&
-         (github.event.review.author_association == 'OWNER' ||
-          github.event.review.author_association == 'MEMBER' ||
-          github.event.review.author_association == 'COLLABORATOR'))
-      )
+      needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.comment_trigger == 'true'
     concurrency:
-      group: 'qwen-pr-triage-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
+      group: 'qwen-pr-triage-ack-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
@@ -97,7 +79,7 @@ jobs:
       - name: 'Post queued acknowledgement'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
@@ -130,6 +112,7 @@ jobs:
       trigger_type: '${{ steps.resolve.outputs.trigger_type }}'
       is_fork: '${{ steps.resolve.outputs.is_fork }}'
       should_run: '${{ steps.resolve.outputs.should_run }}'
+      comment_trigger: '${{ steps.resolve.outputs.comment_trigger }}'
       review_environment: '${{ steps.resolve.outputs.review_environment }}'
       review_timeout: '${{ steps.resolve.outputs.review_timeout }}'
     if: >-
@@ -229,11 +212,21 @@ jobs:
             REVIEW_TIMEOUT="$INPUT_TIMEOUT"
           fi
 
+          # Comment-style triggers get an immediate ack reply (ack-request job).
+          # Trigger validation already happened in this job's `if`.
+          case "$EVENT_NAME" in
+            issue_comment|pull_request_review_comment|pull_request_review)
+              COMMENT_TRIGGER=true ;;
+            *)
+              COMMENT_TRIGGER=false ;;
+          esac
+
           {
             echo "pr_number=$PR_NUMBER"
             echo "trigger_type=$TRIGGER_TYPE"
             echo "is_fork=$IS_FORK"
             echo "should_run=true"
+            echo "comment_trigger=$COMMENT_TRIGGER"
             echo "review_environment=$REVIEW_ENV"
             echo "review_timeout=$REVIEW_TIMEOUT"
           } >> "$GITHUB_OUTPUT"
@@ -246,7 +239,7 @@ jobs:
       needs.resolve.outputs.trigger_type == 'full'
     timeout-minutes: 15
     concurrency:
-      group: 'qwen-pr-triage-product-${{ needs.resolve.outputs.pr_number }}'
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
     # Self-hosted: product-decision reads local Claude Code source on the
     # runner for product-direction reasoning (not available on GitHub-hosted).
@@ -254,8 +247,24 @@ jobs:
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
+      # Cross-border git transfers from the ECS runners can stall: abort
+      # transfers slower than 1 KB/s for 60s (instead of hanging until the
+      # job timeout) and retry once — the runner workspace persists, so
+      # after the first successful clone subsequent fetches are incremental.
       - name: 'Checkout repo'
+        id: 'checkout'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout repo (retry)'
+        if: "steps.checkout.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run product-decision'
         id: 'run'
@@ -353,7 +362,7 @@ jobs:
     # rapid consecutive pushes. Empty string = no environment = no delay.
     environment: '${{ needs.resolve.outputs.review_environment }}'
     concurrency:
-      group: 'qwen-pr-triage-review-${{ needs.resolve.outputs.pr_number }}'
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
@@ -373,7 +382,21 @@ jobs:
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
         run: |
           set -euo pipefail
-          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          # api.github.com can be flaky from the ECS runners — retry with
+          # backoff before giving up, so a transient blip doesn't kill a
+          # review that already waited out the 30-minute debounce.
+          pr_data=""
+          for attempt in 1 2 3; do
+            if pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to read PR state after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
           IFS=$'\t' read -r state is_draft <<< "$pr_data"
           if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
             echo "::notice::Skipping review: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
@@ -382,12 +405,31 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # fetch-depth 0 is the heaviest cross-border transfer in the pipeline;
+      # the stall abort + retry matter most here. Only the first run per
+      # runner pays full price — the persistent workspace makes later
+      # fetches incremental.
       - name: 'Checkout base branch'
         if: "steps.pr_state.outputs.should_review == 'true'"
+        id: 'checkout_base'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout base branch (retry)'
+        if: "steps.checkout_base.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run review'
         if: "steps.pr_state.outputs.should_review == 'true'"
@@ -442,6 +484,11 @@ jobs:
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Review exited with code $EXIT_CODE"
           fi
+          # Propagate: a crashed or timed-out review must fail this job.
+          # Otherwise the verdict step finds no CHANGES_REQUESTED review
+          # (because none ran to completion) and defaults to "pass",
+          # waving the PR through to tmux-testing and approval unreviewed.
+          exit "$EXIT_CODE"
 
       - name: 'Check review verdict'
         id: 'verdict'
@@ -457,12 +504,35 @@ jobs:
             exit 0
           fi
 
-          # Check if the bot's latest review requested changes
-          REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json latestReviews --jq '
-              [.latestReviews[] | select(.author.login == "qwen-code-ci-bot")] |
-              if length > 0 then .[0].state else "NONE" end
-            ' 2>/dev/null || echo "NONE")
+          # Check if the bot's latest review requested changes. Derive the
+          # bot login from the token actually used to post the review,
+          # rather than hardcoding the account name — if the PAT is ever
+          # rotated to a different account, a hardcoded login would silently
+          # match nothing and this gate would always pass.
+          BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "qwen-code-ci-bot")
+          export BOT_LOGIN
+
+          # Fail closed on network errors: "NONE" must mean "the bot posted
+          # no review" (jq's else branch), never "the API call failed" — a
+          # flaky connection from the ECS runner must not be mistaken for a
+          # passing review. Retry, then fail the job so the fallback comment
+          # fires instead of silently waving the PR through.
+          REVIEW_STATE=""
+          for attempt in 1 2 3; do
+            if REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+              --json latestReviews --jq '
+                [.latestReviews[] | select(.author.login == env.BOT_LOGIN)] |
+                if length > 0 then .[0].state else "NONE" end
+              '); then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to read review state after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::gh pr view failed (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
 
           if [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
@@ -481,7 +551,7 @@ jobs:
       needs.resolve.outputs.is_fork == 'false'
     timeout-minutes: 20
     concurrency:
-      group: 'qwen-pr-triage-tmux-${{ needs.resolve.outputs.pr_number }}'
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # Minimal permissions — NO write access to repo/PRs
@@ -491,10 +561,25 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict }}'
     steps:
       - name: 'Checkout PR code'
+        id: 'checkout_pr'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
           fetch-depth: 1
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout PR code (retry)'
+        if: "steps.checkout_pr.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
+          fetch-depth: 1
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run tmux testing'
         id: 'run'
@@ -558,17 +643,26 @@ jobs:
   # ─── Stage 3: Approval Decision ────────────────────────────────────
   approval-decision:
     needs: ['resolve', 'product-decision', 'review', 'tmux-testing']
+    # Exactly one stage owns the formal review verdict on every path:
+    #   - template fail      → product-decision posts request-changes, stop
+    #   - needs_human        → product-decision posts escalation comment, stop
+    #   - review fail        → /review posts CHANGES_REQUESTED, stop
+    #   - review pass        → approval-decision posts the final verdict here
+    # So this job only runs when product-decision passed (or was explicitly
+    # skipped via a review_only trigger) AND review completed with verdict
+    # pass — never alongside an upstream stage's request-changes.
     if: >-
       always() &&
       needs.resolve.outputs.should_run == 'true' &&
-      (needs.product-decision.result == 'success' ||
+      ((needs.product-decision.result == 'success' &&
+        needs.product-decision.outputs.verdict == 'pass') ||
        needs.resolve.outputs.trigger_type == 'review_only') &&
-      (needs.review.result == 'success' || needs.review.result == 'skipped') &&
-      needs.review.outputs.verdict != 'skip' &&
+      needs.review.result == 'success' &&
+      needs.review.outputs.verdict == 'pass' &&
       (needs.tmux-testing.result == 'success' || needs.tmux-testing.result == 'skipped')
     timeout-minutes: 10
     concurrency:
-      group: 'qwen-pr-triage-approval-${{ needs.resolve.outputs.pr_number }}'
+      group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
     runs-on: 'ubuntu-latest'
     steps:
