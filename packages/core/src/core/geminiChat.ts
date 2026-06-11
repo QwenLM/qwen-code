@@ -1719,7 +1719,8 @@ export class GeminiChat {
             `hard=${hard}, localPromptTokensAfterCompression=` +
             `${localPromptTokensAfterCompression}, compressionStatus=` +
             `${compressionStatus}, newTokenCount=` +
-            `${compressionInfo.newTokenCount}, consecutiveFailures=` +
+            `${compressionInfo.newTokenCount}, hardRescueFailureCount=` +
+            `${this.hardRescueFailureCount}, consecutiveFailures=` +
             `${this.consecutiveFailures}. ${message}`,
         );
         throw new Error(message);

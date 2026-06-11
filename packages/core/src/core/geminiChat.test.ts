@@ -2911,6 +2911,9 @@ describe('GeminiChat', async () => {
         1,
       );
       expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('hardRescueFailureCount=1'),
+      );
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
         expect.stringContaining('hard-tier rescue skipped'),
       );
       expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
