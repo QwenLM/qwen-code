@@ -395,7 +395,9 @@ export const handleSlashCommand = async (
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
     sessionStartTime: new Date(),
-    metrics: config ? uiTelemetryService.getMetricsForSession(config.getSessionId()) : uiTelemetryService.getMetrics(),
+    metrics: config
+      ? uiTelemetryService.getMetricsForSession(config.getSessionId())
+      : uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
     promptCount: 1,
   };
@@ -441,6 +443,11 @@ export const handleSlashCommand = async (
       abortController.signal,
     );
     if (hookResult.blockedResult) {
+      // A blocked expansion drops this submit_prompt — fire its onComplete
+      // first so a captured callback (e.g. auto-improve's markRunCompleted)
+      // isn't lost, which would otherwise strand currentRun in 'implementing'
+      // until the 2h stale reclaim.
+      await result.onComplete?.({ errored: true }).catch(() => {});
       return hookResult.blockedResult;
     }
     return handleCommandResult({ ...result, content: hookResult.content });
