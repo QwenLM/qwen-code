@@ -189,6 +189,12 @@ jobs:
           fi
 
           GO="$(jq -r '.go // empty' "${WORKDIR}/decision.json")"
+          if [[ -n "${GO}" && ! "${GO}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "❌ Assessment produced an invalid issue number"
+            echo "go_issue=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           echo "go_issue=${GO}" >> "${GITHUB_OUTPUT}"
           echo "🧭 Decision: go=${GO:-none}"
           jq -r '.reason // empty' "${WORKDIR}/decision.json"
@@ -242,7 +248,29 @@ jobs:
           settings_json: |-
             {
               "maxSessionTurns": 400,
-              "sandbox": false
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git status)",
+                "run_shell_command(git switch)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(node dist/cli.js)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run bundle)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(pwd)"
+              ],
+              "sandbox": true
             }
           prompt: |-
             ## Role
