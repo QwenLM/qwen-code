@@ -31,8 +31,6 @@ describe('assignFindingIds', () => {
           rationale: 'file moved',
         },
       ],
-      limitations: [],
-      reviewedEvidence: [],
     };
     const merged = assignFindingIds(result);
     expect(merged).toHaveLength(2);
@@ -45,8 +43,6 @@ describe('assignFindingIds', () => {
       agent: 'plan_reviewer',
       decision: 'pass',
       findings: [],
-      limitations: [],
-      reviewedEvidence: [],
     };
     const merged = assignFindingIds(result);
     expect(merged).toHaveLength(0);
@@ -66,8 +62,6 @@ describe('assignFindingIds', () => {
           suggestedQuestion: 'Are you sure?',
         },
       ],
-      limitations: [],
-      reviewedEvidence: [],
     };
     const merged = assignFindingIds(result);
     expect(merged[0]).toEqual({
@@ -96,8 +90,6 @@ function makeResult(overrides: Partial<GateAgentResult> = {}): GateAgentResult {
     agent: 'plan_reviewer',
     decision: 'pass',
     findings: [],
-    limitations: [],
-    reviewedEvidence: [],
     ...overrides,
   };
 }
@@ -262,55 +254,192 @@ describe('runPlanApprovalGate', () => {
 
 // ── Cap logic tests ───────────────────────────────────────────────────
 
-describe('cap handling with assignFindingIds', () => {
-  it('P3-only findings are identified correctly', () => {
-    const result: GateAgentResult = {
-      agent: 'plan_reviewer',
-      decision: 'blocked',
-      findings: [
-        {
-          localId: 'GF-1',
-          severity: 'P3',
-          issue: 'Minor thing',
-          rationale: 'small',
-        },
-      ],
-      limitations: [],
-      reviewedEvidence: [],
-    };
-    const merged = assignFindingIds(result);
-    const hasBlocking = merged.some(
-      (f) => f.severity === 'P1' || f.severity === 'P2',
-    );
-    expect(hasBlocking).toBe(false);
-    expect(merged.length).toBeGreaterThan(0);
+describe('runPlanApprovalGate decision edge cases', () => {
+  let gateState: PlanGateState;
+  let mockConfig: Config;
+  const signal = new AbortController().signal;
+
+  const bundle: EvidenceBundle = {
+    originalRequest: 'Add a button',
+    plan: 'Step 1: add button component',
+  };
+
+  beforeEach(() => {
+    gateState = createPlanGateState(1);
+    mockConfig = {
+      getPlanGateState: vi.fn(() => gateState),
+      getSubagentManager: vi.fn(),
+    } as unknown as Config;
+    mockRunGateAgent.mockReset();
   });
 
-  it('P1 findings are always blocking', () => {
-    const result: GateAgentResult = {
-      agent: 'plan_reviewer',
-      decision: 'blocked',
-      findings: [
-        {
-          localId: 'GF-1',
-          severity: 'P1',
-          issue: 'Critical',
-          rationale: 'bad',
-        },
-        {
-          localId: 'GF-2',
-          severity: 'P3',
-          issue: 'Minor',
-          rationale: 'small',
-        },
-      ],
-      limitations: [],
-      reviewedEvidence: [],
-    };
-    const merged = assignFindingIds(result);
-    const hasBlocking = merged.some(
-      (f) => f.severity === 'P1' || f.severity === 'P2',
+  it('should return unavailable when needs_user has empty findings', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({ decision: 'needs_user', findings: [] }),
     );
-    expect(hasBlocking).toBe(true);
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('unavailable');
+    expect((decision as { reason: string }).reason).toContain('needs_user');
+  });
+
+  it('should return unavailable when blocked has empty findings', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({ decision: 'blocked', findings: [] }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('unavailable');
+    expect((decision as { reason: string }).reason).toContain('blocked');
+  });
+
+  it('should treat pass-with-findings as blocked', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'pass',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P2',
+            issue: 'Anomalous finding',
+            rationale: 'should not pass',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('blocked');
+  });
+
+  it('should return unavailable when pre-aborted signal', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+    mockRunGateAgent.mockRejectedValue(new Error('aborted'));
+
+    const decision = await runPlanApprovalGate(
+      mockConfig,
+      bundle,
+      abortController.signal,
+    );
+    expect(decision.kind).toBe('unavailable');
+  });
+
+  it('should succeed after partial retries (fail 2, then succeed)', async () => {
+    mockRunGateAgent
+      .mockRejectedValueOnce(new Error('transient 1'))
+      .mockRejectedValueOnce(new Error('transient 2'))
+      .mockResolvedValueOnce(makeResult({ decision: 'pass' }));
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('approved');
+    expect(mockRunGateAgent).toHaveBeenCalledTimes(3);
+  });
+
+  it('should handle uncapped mode (findings still block without cap escalation)', async () => {
+    gateState.gateMode = 'uncapped';
+    gateState.reviewCount = 10;
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P1',
+            issue: 'Critical',
+            rationale: 'bad',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('blocked');
+  });
+
+  it('should increment reviewCount on each gate run', async () => {
+    expect(gateState.reviewCount).toBe(0);
+    mockRunGateAgent.mockResolvedValue(makeResult({ decision: 'pass' }));
+
+    await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(gateState.reviewCount).toBe(1);
+  });
+
+  it('should store findings in gateState.lastFindings', async () => {
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P2',
+            issue: 'Test issue',
+            rationale: 'test',
+          },
+        ],
+      }),
+    );
+
+    await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(gateState.lastFindings).toHaveLength(1);
+    expect(gateState.lastFindings[0]!.id).toBe('GF-1');
+  });
+
+  it('P3-only at cap approves with nonBlockingFindings', async () => {
+    gateState.reviewCount = 4;
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P3',
+            issue: 'Minor',
+            rationale: 'nit',
+          },
+          {
+            localId: 'GF-2',
+            severity: 'P3',
+            issue: 'Also minor',
+            rationale: 'style',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('approved');
+    expect(
+      (decision as { nonBlockingFindings?: unknown[] }).nonBlockingFindings,
+    ).toHaveLength(2);
+  });
+
+  it('P1 at cap triggers cap_escalation with only blocking findings', async () => {
+    gateState.reviewCount = 4;
+    mockRunGateAgent.mockResolvedValue(
+      makeResult({
+        decision: 'blocked',
+        findings: [
+          {
+            localId: 'GF-1',
+            severity: 'P1',
+            issue: 'Critical',
+            rationale: 'bad',
+          },
+          {
+            localId: 'GF-2',
+            severity: 'P3',
+            issue: 'Minor',
+            rationale: 'nit',
+          },
+        ],
+      }),
+    );
+
+    const decision = await runPlanApprovalGate(mockConfig, bundle, signal);
+    expect(decision.kind).toBe('cap_escalation');
+    const escalation = decision as { blockingFindings: Array<{ id: string }> };
+    expect(escalation.blockingFindings).toHaveLength(1);
+    expect(escalation.blockingFindings[0]!.id).toBe('GF-1');
   });
 });

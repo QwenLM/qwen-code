@@ -10,7 +10,7 @@ import type { MergedGateFinding } from './types.js';
 /**
  * Where the gate is in its lifecycle for the current Plan Mode Entry.
  *
- * - `capped`: normal 3-agent gate, bounded by the capped review limit.
+ * - `capped`: normal single-agent gate review, bounded by the capped review limit.
  * - `uncapped`: user chose to keep iterating past the cap; gate still runs but
  *   the round limit no longer applies.
  * - `user_takeover`: user took manual control; the automatic gate stops and

@@ -11,6 +11,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
@@ -63,6 +64,20 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    // In headless (non-interactive) mode without ACP support, the gate
+    // exit paths require user interaction that cannot be fulfilled.
+    const isAcpMode =
+      this.config.getExperimentalZedIntegration?.() ||
+      this.config.getInputFormat?.() === InputFormat.STREAM_JSON;
+
+    if (!this.config.isInteractive() && !isAcpMode) {
+      return {
+        llmContent:
+          'Cannot enter plan mode in non-interactive mode without ACP support. The gate exit paths require user interaction.',
+        returnDisplay: 'Plan mode unavailable in non-interactive mode.',
+      };
+    }
+
     try {
       // Idempotent: only switch when not already in plan mode so we never
       // overwrite the saved prePlanMode.

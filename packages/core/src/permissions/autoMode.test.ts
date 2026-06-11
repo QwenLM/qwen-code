@@ -1352,6 +1352,12 @@ describe('shouldRunAutoModeForCall', () => {
     ).toBe(false);
   });
 
+  it('excludes ENTER_PLAN_MODE even under AUTO — plan entries are always allowed without classification', () => {
+    expect(
+      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ENTER_PLAN_MODE),
+    ).toBe(false);
+  });
+
   it('returns false for unknown tool names when not in AUTO', () => {
     expect(shouldRunAutoModeForCall(ApprovalMode.DEFAULT, 'unknown_tool')).toBe(
       false,

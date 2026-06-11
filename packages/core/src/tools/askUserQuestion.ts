@@ -278,26 +278,38 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     if (!gateState) return;
 
     if (source === 'plan_gate_cap') {
-      // Cap escalation: the first answer determines the next gate mode.
+      // Cap escalation: only honor when a cap escalation actually
+      // occurred (prevents model from fabricating this metadata).
+      if (!gateState.capEscalationPending) {
+        debugLogger.warn(
+          '[applyPlanGateMetadata] plan_gate_cap ignored: no cap escalation pending',
+        );
+        return;
+      }
+
+      // The first answer determines the next gate mode.
       // Match against the canonical labels from CAP_ESCALATION_LABELS.
       const firstAnswer = Object.values(this.userAnswers)[0] ?? '';
 
       if (firstAnswer === CAP_ESCALATION_LABELS.CONTINUE) {
         gateState.gateMode = 'uncapped';
-        gateState.capEscalationPending = false;
       } else if (firstAnswer === CAP_ESCALATION_LABELS.APPROVE) {
         gateState.gateMode = 'user_override';
-        gateState.capEscalationPending = false;
       } else {
         // Free-text / Other: user takes manual control
         gateState.gateMode = 'user_takeover';
-        gateState.capEscalationPending = false;
       }
+      gateState.capEscalationPending = false;
     } else if (source === 'plan_gate_needs_user') {
-      // User answered a gate-suggested question. Reset the capped
-      // review count because the new information may change the plan
-      // basis, and keep the gate active.
-      gateState.reviewCount = 0;
+      // User answered a gate-suggested question. Only reset the
+      // review count when the gate actually asked for user input
+      // (gateMode must still be active, not already overridden).
+      if (
+        gateState.gateMode === 'capped' ||
+        gateState.gateMode === 'uncapped'
+      ) {
+        gateState.reviewCount = 0;
+      }
     }
   }
 }

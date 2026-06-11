@@ -209,6 +209,21 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
         const decision = await runPlanApprovalGate(this.config, bundle, signal);
 
+        // After the async gate call, verify the user hasn't toggled out
+        // of plan mode mid-gate (e.g. via Shift+Tab).
+        const currentGateState = this.config.getPlanGateState();
+        if (
+          this.config.getApprovalMode() !== ApprovalMode.PLAN ||
+          !currentGateState ||
+          currentGateState.entryId !== gateState.entryId
+        ) {
+          return {
+            llmContent:
+              'Plan mode was exited while the gate was running. No action taken.',
+            returnDisplay: 'Plan mode exited during gate review.',
+          };
+        }
+
         switch (decision.kind) {
           case 'approved': {
             const notes = decision.nonBlockingFindings
@@ -253,6 +268,20 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       }
 
       // ── Path C: normal user confirmation path ──────────────────
+      // Guard: if we somehow reached here without being in plan mode
+      // (e.g. user toggled mode externally), report it accurately.
+      if (
+        this.config.getApprovalMode() !== ApprovalMode.PLAN &&
+        !this.wasApproved
+      ) {
+        return {
+          llmContent: 'Not in plan mode — no action taken.',
+          returnDisplay: 'Not in plan mode.',
+        };
+      }
+
+      // onConfirm already set the approval mode (PLAN -> target), so we
+      // must NOT touch it here — only save the plan and return the result.
       if (!this.wasApproved) {
         const rejectionMessage =
           'Plan execution was not approved. Remaining in plan mode.';
@@ -262,7 +291,25 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         };
       }
 
-      return this.approveAndRestore(plan, prePlanMode, 'User approved');
+      // Save plan to disk (mode was already set by onConfirm)
+      try {
+        this.config.savePlan(plan);
+      } catch (error) {
+        debugLogger.warn(
+          `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      const llmMessage =
+        'User approved. You can now start coding. Start with updating your todo list if applicable.';
+      return {
+        llmContent: llmMessage,
+        returnDisplay: {
+          type: 'plan_summary',
+          message: 'User approved.',
+          plan,
+        },
+      };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

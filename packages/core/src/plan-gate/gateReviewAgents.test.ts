@@ -14,8 +14,6 @@ describe('parseGateAgentResult', () => {
       agent: 'plan_reviewer',
       decision: 'pass',
       findings: [],
-      limitations: [],
-      reviewedEvidence: ['plan'],
     });
     const result = parseGateAgentResult(json);
     expect(result.agent).toBe('plan_reviewer');
@@ -25,7 +23,7 @@ describe('parseGateAgentResult', () => {
 
   it('should parse markdown-fenced JSON', () => {
     const raw =
-      '```json\n{"agent":"plan_reviewer","decision":"blocked","findings":[{"localId":"GF-1","severity":"P2","issue":"wrong path","rationale":"moved"}],"limitations":[],"reviewedEvidence":[]}\n```';
+      '```json\n{"agent":"plan_reviewer","decision":"blocked","findings":[{"localId":"GF-1","severity":"P2","issue":"wrong path","rationale":"moved"}]}\n```';
     const result = parseGateAgentResult(raw);
     expect(result.decision).toBe('blocked');
     expect(result.findings).toHaveLength(1);
@@ -34,7 +32,7 @@ describe('parseGateAgentResult', () => {
 
   it('should parse fenced JSON without lang tag', () => {
     const raw =
-      '```\n{"agent":"plan_reviewer","decision":"pass","findings":[],"limitations":[],"reviewedEvidence":[]}\n```';
+      '```\n{"agent":"plan_reviewer","decision":"pass","findings":[]}\n```';
     const result = parseGateAgentResult(raw);
     expect(result.decision).toBe('pass');
   });
@@ -63,8 +61,6 @@ describe('parseGateAgentResult', () => {
       findings: [
         { localId: 'GF-1', severity: 'HIGH', issue: 'x', rationale: 'y' },
       ],
-      limitations: [],
-      reviewedEvidence: [],
     });
     const result = parseGateAgentResult(json);
     expect(result.findings[0]!.severity).toBe('P2');
@@ -75,8 +71,6 @@ describe('parseGateAgentResult', () => {
       agent: 'plan_reviewer',
       decision: 'blocked',
       findings: [{ severity: 'P1', issue: 'test', rationale: 'why' }],
-      limitations: [],
-      reviewedEvidence: [],
     });
     const result = parseGateAgentResult(json);
     expect(result.findings[0]!.localId).toBe('GF-1');
@@ -87,8 +81,6 @@ describe('parseGateAgentResult', () => {
       agent: 'wrong_name',
       decision: 'pass',
       findings: [],
-      limitations: [],
-      reviewedEvidence: [],
     });
     const result = parseGateAgentResult(json);
     expect(result.agent).toBe('plan_reviewer');
@@ -101,8 +93,6 @@ describe('parseGateAgentResult', () => {
     });
     const result = parseGateAgentResult(json);
     expect(result.findings).toEqual([]);
-    expect(result.limitations).toEqual([]);
-    expect(result.reviewedEvidence).toEqual([]);
   });
 });
 
@@ -112,7 +102,6 @@ describe('formatEvidence', () => {
       originalRequest: 'Add a button',
       plan: 'Step 1: create button',
       researchSummary: 'Found Button.tsx',
-      keyContext: ['file: src/Button.tsx'],
       lastFindings: [
         {
           id: 'GF-1',
@@ -122,16 +111,13 @@ describe('formatEvidence', () => {
         },
       ],
       resolutionSummary: 'GF-1: added color prop',
-      agentLimitations: ['Could not read test file'],
     };
     const text = formatEvidence(bundle);
     expect(text).toContain('Add a button');
     expect(text).toContain('Step 1: create button');
     expect(text).toContain('Found Button.tsx');
-    expect(text).toContain('src/Button.tsx');
     expect(text).toContain('GF-1');
     expect(text).toContain('added color prop');
-    expect(text).toContain('Could not read test file');
   });
 
   it('should omit empty optional sections', () => {

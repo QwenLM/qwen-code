@@ -66,6 +66,7 @@ export async function runPlanApprovalGate(
   gateState.lastFindings = findings;
 
   // ── Determine decision ───────────────────────────────────────────
+  // Branch on result.decision first — only 'pass' may approve.
 
   // Safety: agent self-reporting unavailable should never auto-approve
   if (result.decision === 'unavailable') {
@@ -75,11 +76,18 @@ export async function runPlanApprovalGate(
     };
   }
 
-  if (findings.length === 0) {
-    return { kind: 'approved' };
+  // 'pass' with zero findings → approved
+  if (result.decision === 'pass') {
+    if (findings.length === 0) {
+      return { kind: 'approved' };
+    }
+    // 'pass' but agent emitted findings anyway — treat as blocked for safety
+    debugLogger.warn(
+      `Gate agent returned 'pass' with ${findings.length} finding(s); treating as blocked`,
+    );
   }
 
-  // Collect questions from needs_user
+  // 'needs_user' — collect questions
   if (result.decision === 'needs_user') {
     const questions = result.findings
       .filter((f) => f.suggestedQuestion)
@@ -91,6 +99,15 @@ export async function runPlanApprovalGate(
     debugLogger.warn(
       'Gate agent returned needs_user with no suggestedQuestion; treating as blocked',
     );
+  }
+
+  // 'blocked' (or fallthrough from pass-with-findings / needs_user-without-questions)
+  // with zero findings — treat as unavailable (cannot produce actionable feedback)
+  if (findings.length === 0) {
+    return {
+      kind: 'unavailable',
+      reason: `Gate agent returned '${result.decision}' with no findings`,
+    };
   }
 
   // Check cap

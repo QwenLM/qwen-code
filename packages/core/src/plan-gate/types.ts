@@ -46,8 +46,6 @@ export interface GateAgentResult {
   agent: GateAgentName;
   decision: GateAgentDecision;
   findings: GateFinding[];
-  limitations: string[];
-  reviewedEvidence: string[];
 }
 
 /** A finding with a stable id, e.g. `GF-1`. Referenced by later resolutionSummary. */
@@ -69,10 +67,8 @@ export interface EvidenceBundle {
   originalRequest: string;
   plan: string;
   researchSummary?: string;
-  keyContext?: string[];
   lastFindings?: MergedGateFinding[];
   resolutionSummary?: string;
-  agentLimitations?: string[];
 }
 
 /** Final decision produced by the orchestrator for a single gate run. */
