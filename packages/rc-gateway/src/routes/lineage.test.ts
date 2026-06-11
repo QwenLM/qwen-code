@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
+import { requireScope } from '../auth.js';
+import { OWNER, SESSION_READ, type RcScope } from '../scopes.js';
 import { createLineageRoute } from './lineage.js';
 
 const CWD = '/lineage-test/ws';
@@ -143,5 +145,53 @@ describe('GET /rc/session/:id/lineage', () => {
     const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe('daemon_unavailable');
+  });
+});
+
+// Mounts the route BEHIND a requireScope(OWNER) gate (the production posture),
+// with an injectable client standing in for bearerResolve, to lock down the
+// single riskiest line: a downgrade to SESSION_READ would 200 a non-owner.
+async function mountGuarded(
+  scopes: RcScope[],
+  audit: AuditRecorder,
+): Promise<string> {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.rcClient = { id: 'tok', scopes };
+    next();
+  });
+  app.get(
+    '/rc/session/:id/lineage',
+    requireScope(OWNER, audit),
+    createLineageRoute(async () => CWD, audit),
+  );
+  await new Promise<void>((resolve) => {
+    server = app.listen(0, resolve);
+  });
+  const { port } = server!.address() as AddressInfo;
+  return `http://127.0.0.1:${port}`;
+}
+
+describe('GET /rc/session/:id/lineage — OWNER gate', () => {
+  it('403s a non-owner (session:read) token before the handler runs', async () => {
+    await writeTranscript(PARENT);
+    const audit = fakeAudit();
+    const base = await mountGuarded([SESSION_READ], audit);
+    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    expect(res.status).toBe(403);
+    // Handler never ran -> no lineage read was audited.
+    expect(audit.calls.some((c) => c.action === 'session_lineage_read')).toBe(
+      false,
+    );
+  });
+
+  it('200s an owner token through the same gate', async () => {
+    await writeTranscript(PARENT);
+    const audit = fakeAudit();
+    const base = await mountGuarded([OWNER], audit);
+    const res = await fetch(`${base}/rc/session/${PARENT}/lineage`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).sessionId).toBe(PARENT);
   });
 });
