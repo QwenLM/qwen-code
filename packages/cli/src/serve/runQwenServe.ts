@@ -62,6 +62,7 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rateLimit.js';
+import type { AcpHttpHandle } from './acpHttp/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
@@ -1150,7 +1151,7 @@ export async function runQwenServe(
             }
             // Dispose ACP handle (close WebSocketServer + send close frames).
             const acpHandle = app.locals?.['acpHandle'] as
-              | { dispose?: () => void }
+              | AcpHttpHandle
               | undefined;
             if (acpHandle?.dispose) {
               try {
@@ -1264,9 +1265,7 @@ export async function runQwenServe(
       }
 
       // Enable WebSocket transport now that http.Server is available.
-      const acpHandle = app.locals?.['acpHandle'] as
-        | { attachServer?: (s: typeof server) => void }
-        | undefined;
+      const acpHandle = app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
       acpHandle?.attachServer?.(server);
 
       resolve(handle);

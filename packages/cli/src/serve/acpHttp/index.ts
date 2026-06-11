@@ -358,329 +358,332 @@ export function mountAcpHttp(
 
   // ── WebSocket upgrade (ACP RFD) ────────────────────────────────────
   let wss: WebSocketServer | undefined;
+  let upgradeListener: ((...args: unknown[]) => void) | undefined;
+  let upgradeServer: import('node:http').Server | undefined;
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
     if (wss) return;
     wss = new WebSocketServer({ noServer: true, maxPayload: 10 * 1024 * 1024 });
+    upgradeServer = httpServer;
 
-    httpServer.on(
-      'upgrade',
-      (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-        let url: URL;
-        try {
-          url = new URL(
-            req.url ?? '/',
-            `http://${req.headers.host ?? 'localhost'}`,
-          );
-        } catch {
-          socket.destroy();
-          return;
-        }
-        if (url.pathname !== path) {
-          socket.destroy();
-          return;
-        }
+    upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+      let url: URL;
+      try {
+        url = new URL(
+          req.url ?? '/',
+          `http://${req.headers.host ?? 'localhost'}`,
+        );
+      } catch {
+        socket.destroy();
+        return;
+      }
+      if (url.pathname !== path) {
+        socket.destroy();
+        return;
+      }
 
-        const fromLoopback = isLoopbackSocket(socket);
+      const fromLoopback = isLoopbackSocket(socket);
 
-        // Host allowlist: mirror REST surface's hostAllowlist middleware
-        // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
-        // domain resolves to 127.0.0.1 and the browser sends the
-        // attacker's Host header. Match the full host:port string like
-        // the REST middleware does; extract port from the socket.
-        if (fromLoopback) {
-          const host = (req.headers['host'] ?? '').toLowerCase();
-          const localPort = (socket as { localPort?: number }).localPort;
-          const allowed = new Set([
-            `localhost:${localPort}`,
-            `127.0.0.1:${localPort}`,
-            `[::1]:${localPort}`,
-            `host.docker.internal:${localPort}`,
-          ]);
-          if (!allowed.has(host)) {
-            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-            socket.destroy();
-            return;
-          }
-        }
-
-        // CSRF: reject cross-origin WS upgrades. Browser-initiated requests
-        // to 127.0.0.1 carry the external origin, so this check must apply
-        // to loopback too (CSWSH defence).
-        const origin = req.headers['origin'];
-        if (origin) {
-          try {
-            const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
-            if (
-              originHost !== '127.0.0.1' &&
-              originHost !== 'localhost' &&
-              originHost !== '::1'
-            ) {
-              socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-              socket.destroy();
-              return;
-            }
-          } catch {
-            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-            socket.destroy();
-            return;
-          }
-        }
-
-        // Auth: WS bypasses Express middleware. Same posture as REST:
-        // loopback without token = allow; non-loopback/token-mismatch = reject.
-        if (opts.token) {
-          const authHeader = req.headers['authorization'];
-          if (!authHeader || !authHeader.includes(' ')) {
-            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-            socket.destroy();
-            return;
-          }
-          const scheme = authHeader
-            .slice(0, authHeader.indexOf(' '))
-            .toLowerCase();
-          const credentials = authHeader
-            .slice(authHeader.indexOf(' ') + 1)
-            .trim();
-          const expected = createHash('sha256').update(opts.token).digest();
-          const actual = createHash('sha256').update(credentials).digest();
-          if (scheme !== 'bearer' || !timingSafeEqual(expected, actual)) {
-            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-            socket.destroy();
-            return;
-          }
-        } else if (!fromLoopback) {
+      // Host allowlist: mirror REST surface's hostAllowlist middleware
+      // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
+      // domain resolves to 127.0.0.1 and the browser sends the
+      // attacker's Host header. Match the full host:port string like
+      // the REST middleware does; extract port from the socket.
+      if (fromLoopback) {
+        const host = (req.headers['host'] ?? '').toLowerCase();
+        const localPort = (socket as { localPort?: number }).localPort;
+        const allowed = new Set([
+          `localhost:${localPort}`,
+          `127.0.0.1:${localPort}`,
+          `[::1]:${localPort}`,
+          `host.docker.internal:${localPort}`,
+        ]);
+        if (!allowed.has(host)) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;
         }
+      }
 
-        wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-          let initialized = false;
-          const initTimer = setTimeout(() => {
-            if (!initialized) {
-              ws.close(1002, 'Initialize timeout');
-            }
-          }, 30_000);
-          initTimer.unref?.();
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let connRef: any;
-          let messageQueue = Promise.resolve();
-          const wsKey = socket.remoteAddress ?? 'ws-unknown';
+      // CSRF: reject cross-origin WS upgrades. Browser-initiated requests
+      // to 127.0.0.1 carry the external origin, so this check must apply
+      // to loopback too (CSWSH defence).
+      const origin = req.headers['origin'];
+      if (origin) {
+        try {
+          const originHost = new URL(origin).hostname.replace(/^\[|\]$/g, '');
+          if (
+            originHost !== '127.0.0.1' &&
+            originHost !== 'localhost' &&
+            originHost !== '::1'
+          ) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+            socket.destroy();
+            return;
+          }
+        } catch {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      }
 
-          ws.on('error', (err) => {
-            writeStderrLine(
-              `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+      // Auth: WS bypasses Express middleware. Same posture as REST:
+      // loopback without token = allow; non-loopback/token-mismatch = reject.
+      if (opts.token) {
+        const authHeader = req.headers['authorization'];
+        if (!authHeader || !authHeader.includes(' ')) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const scheme = authHeader
+          .slice(0, authHeader.indexOf(' '))
+          .toLowerCase();
+        const credentials = authHeader
+          .slice(authHeader.indexOf(' ') + 1)
+          .trim();
+        const expected = createHash('sha256').update(opts.token).digest();
+        const actual = createHash('sha256').update(credentials).digest();
+        if (scheme !== 'bearer' || !timingSafeEqual(expected, actual)) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      } else if (!fromLoopback) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
 
-          ws.on('message', (rawData: Buffer | string) => {
-            messageQueue = messageQueue
-              .then(() => handleWsMessage(rawData))
-              .catch((err) => {
-                writeStderrLine(
-                  `qwen serve: /acp WS message handler error: ${err instanceof Error ? err.message : String(err)}`,
-                );
-              });
-          });
+      wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+        let initialized = false;
+        const initTimer = setTimeout(() => {
+          if (!initialized) {
+            ws.close(1002, 'Initialize timeout');
+          }
+        }, 30_000);
+        initTimer.unref?.();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let connRef: any;
+        let messageQueue = Promise.resolve();
+        const wsKey = socket.remoteAddress ?? 'ws-unknown';
 
-          async function handleWsMessage(
-            rawData: Buffer | string,
-          ): Promise<void> {
-            let text: string;
-            try {
-              text =
-                typeof rawData === 'string'
-                  ? rawData
-                  : rawData.toString('utf8');
-            } catch {
-              ws.close(1003, 'Only text frames supported');
-              return;
-            }
+        ws.on('error', (err) => {
+          writeStderrLine(
+            `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
 
-            let parsed: unknown;
-            try {
-              parsed = JSON.parse(text);
-            } catch {
-              ws.send(
-                JSON.stringify(rpcError(null, RPC.PARSE_ERROR, 'Parse error')),
-              );
-              return;
-            }
-
-            if (Array.isArray(parsed)) {
-              ws.send(
-                JSON.stringify({
-                  error: 'Batch JSON-RPC not supported',
-                }),
-              );
-              return;
-            }
-
-            const inbound = parseInbound(parsed);
-            if (!inbound.ok) {
-              ws.send(JSON.stringify(inbound.error));
-              return;
-            }
-            const message = inbound.message;
-
-            if (!initialized) {
-              if (!isRequest(message) || message.method !== 'initialize') {
-                ws.send(
-                  JSON.stringify(
-                    rpcError(
-                      isRequest(message) ? message.id : null,
-                      RPC.INVALID_REQUEST,
-                      'First message must be initialize',
-                    ),
-                  ),
-                );
-                ws.close(1002, 'Protocol error');
-                return;
-              }
-
-              const conn = registry.create(fromLoopback);
-              if (!conn) {
-                ws.send(
-                  JSON.stringify(
-                    rpcError(
-                      message.id,
-                      RPC.INTERNAL_ERROR,
-                      'Too many connections',
-                    ),
-                  ),
-                );
-                ws.close(1013, 'Connection cap');
-                return;
-              }
-
-              const requestedVersion =
-                message.params &&
-                typeof message.params === 'object' &&
-                !Array.isArray(message.params)
-                  ? (message.params as Record<string, unknown>)[
-                      'protocolVersion'
-                    ]
-                  : undefined;
-
-              // WS: single socket serves as conn stream + all session streams.
-              const stream = new WsStream(
-                ws,
-                () => {
-                  writeStderrLine(
-                    `qwen serve: /acp WS closed (${conn.connectionId.slice(0, 8)})`,
-                  );
-                  registry.delete(conn.connectionId);
-                },
-                () => conn.touch(),
-              );
-              conn.attachConnStream(stream);
-
-              ws.send(
-                JSON.stringify({
-                  jsonrpc: '2.0',
-                  id: message.id,
-                  result: dispatcher.buildInitializeResult(
-                    conn.connectionId,
-                    requestedVersion,
-                  ),
-                }),
-              );
-
-              initialized = true;
-              clearTimeout(initTimer);
-              connRef = conn;
+        ws.on('message', (rawData: Buffer | string) => {
+          messageQueue = messageQueue
+            .then(() => handleWsMessage(rawData))
+            .catch((err) => {
               writeStderrLine(
-                `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
+                `qwen serve: /acp WS message handler error: ${err instanceof Error ? err.message : String(err)}`,
               );
-              return;
-            }
+            });
+        });
 
-            // Subsequent messages
-            const conn = connRef;
-            if (!conn || conn.destroyed) {
+        async function handleWsMessage(
+          rawData: Buffer | string,
+        ): Promise<void> {
+          let text: string;
+          try {
+            text =
+              typeof rawData === 'string' ? rawData : rawData.toString('utf8');
+          } catch {
+            ws.close(1003, 'Only text frames supported');
+            return;
+          }
+
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            ws.send(
+              JSON.stringify(rpcError(null, RPC.PARSE_ERROR, 'Parse error')),
+            );
+            return;
+          }
+
+          if (Array.isArray(parsed)) {
+            ws.send(
+              JSON.stringify({
+                error: 'Batch JSON-RPC not supported',
+              }),
+            );
+            return;
+          }
+
+          const inbound = parseInbound(parsed);
+          if (!inbound.ok) {
+            ws.send(JSON.stringify(inbound.error));
+            return;
+          }
+          const message = inbound.message;
+
+          if (!initialized) {
+            if (!isRequest(message) || message.method !== 'initialize') {
               ws.send(
                 JSON.stringify(
-                  rpcError(null, RPC.INTERNAL_ERROR, 'Connection lost'),
+                  rpcError(
+                    isRequest(message) ? message.id : null,
+                    RPC.INVALID_REQUEST,
+                    'First message must be initialize',
+                  ),
                 ),
               );
-              ws.close(1011, 'Connection lost');
+              ws.close(1002, 'Protocol error');
               return;
             }
 
-            // Lazy session stream attachment for WS
-            if (
-              isRequest(message) &&
-              message.params &&
-              typeof message.params === 'object'
-            ) {
-              const sid = (message.params as Record<string, unknown>)[
-                'sessionId'
-              ];
-              if (typeof sid === 'string' && conn.ownsSession(sid)) {
-                const binding = conn.sessions.get(sid);
-                if (binding && !binding.stream) {
-                  const ac = new AbortController();
-                  conn.attachSessionStream(sid, conn.connStream!, ac);
-                  const myAbort = ac;
-                  const cleanupSession = () => {
-                    const b = conn.sessions.get(sid);
-                    if (b?.stream === conn.connStream && b?.abort === myAbort) {
-                      conn.closeSessionStream(sid);
-                    }
-                  };
-                  void dispatcher
-                    .pumpSessionEvents(conn, sid, ac.signal)
-                    .then(cleanupSession, (err: unknown) => {
-                      writeStderrLine(
-                        `qwen serve: /acp WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
-                      );
-                      cleanupSession();
-                    });
-                }
-              }
-            }
-
-            // Rate limit: classify by method name, matching REST tiers.
-            if (opts.checkRate && isRequest(message)) {
-              const m = message.method;
-              const tier: RateLimitTier =
-                m === 'session/prompt' || m === '_qwen/session/prompt'
-                  ? 'prompt'
-                  : m.startsWith('session/') || m.startsWith('_qwen/session/')
-                    ? 'read'
-                    : 'mutation';
-              if (!opts.checkRate(wsKey, tier)) {
-                ws.send(
-                  JSON.stringify(
-                    rpcError(
-                      message.id,
-                      RPC.INTERNAL_ERROR,
-                      'Rate limit exceeded',
-                    ),
+            const conn = registry.create(fromLoopback);
+            if (!conn) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INTERNAL_ERROR,
+                    'Too many connections',
                   ),
-                );
-                return;
-              }
+                ),
+              );
+              ws.close(1013, 'Connection cap');
+              return;
             }
 
-            await dispatcher
-              .handle(conn, message, undefined, fromLoopback)
-              .catch((err: unknown) => {
+            const requestedVersion =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params)
+                ? (message.params as Record<string, unknown>)['protocolVersion']
+                : undefined;
+
+            // WS: single socket serves as conn stream + all session streams.
+            const stream = new WsStream(
+              ws,
+              () => {
                 writeStderrLine(
-                  `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
+                  `qwen serve: /acp WS closed (${conn.connectionId.slice(0, 8)})`,
                 );
-              });
+                registry.delete(conn.connectionId);
+              },
+              () => conn.touch(),
+            );
+            conn.attachConnStream(stream);
+
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: message.id,
+                result: dispatcher.buildInitializeResult(
+                  conn.connectionId,
+                  requestedVersion,
+                ),
+              }),
+            );
+
+            initialized = true;
+            clearTimeout(initTimer);
+            connRef = conn;
+            writeStderrLine(
+              `qwen serve: /acp WS established ${conn.connectionId.slice(0, 8)} (loopback=${fromLoopback}, active=${registry.size})`,
+            );
+            return;
           }
-        });
-      },
-    );
+
+          // Subsequent messages
+          const conn = connRef;
+          if (!conn || conn.destroyed) {
+            ws.send(
+              JSON.stringify(
+                rpcError(null, RPC.INTERNAL_ERROR, 'Connection lost'),
+              ),
+            );
+            ws.close(1011, 'Connection lost');
+            return;
+          }
+
+          // Lazy session stream attachment for WS
+          if (
+            isRequest(message) &&
+            message.params &&
+            typeof message.params === 'object'
+          ) {
+            const sid = (message.params as Record<string, unknown>)[
+              'sessionId'
+            ];
+            if (typeof sid === 'string' && conn.ownsSession(sid)) {
+              const binding = conn.sessions.get(sid);
+              if (binding && !binding.stream) {
+                const ac = new AbortController();
+                conn.attachSessionStream(sid, conn.connStream!, ac);
+                const myAbort = ac;
+                const cleanupSession = () => {
+                  const b = conn.sessions.get(sid);
+                  if (b?.stream === conn.connStream && b?.abort === myAbort) {
+                    conn.closeSessionStream(sid);
+                  }
+                };
+                void dispatcher
+                  .pumpSessionEvents(conn, sid, ac.signal)
+                  .then(cleanupSession, (err: unknown) => {
+                    writeStderrLine(
+                      `qwen serve: /acp WS pump error (${sid}): ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                    cleanupSession();
+                  });
+              }
+            }
+          }
+
+          // Rate limit: classify by method name, matching REST tiers.
+          if (opts.checkRate && isRequest(message)) {
+            const m = message.method;
+            const tier: RateLimitTier =
+              m === 'session/prompt' || m === '_qwen/session/prompt'
+                ? 'prompt'
+                : m.startsWith('session/') || m.startsWith('_qwen/session/')
+                  ? 'read'
+                  : 'mutation';
+            if (!opts.checkRate(wsKey, tier)) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INTERNAL_ERROR,
+                    'Rate limit exceeded',
+                  ),
+                ),
+              );
+              return;
+            }
+          }
+
+          await dispatcher
+            .handle(conn, message, undefined, fromLoopback)
+            .catch((err: unknown) => {
+              writeStderrLine(
+                `qwen serve: /acp WS handle error: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        }
+      });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    httpServer.on('upgrade', upgradeListener as any);
 
     writeStderrLine(`qwen serve: /acp WebSocket transport enabled on ${path}`);
   }
 
   return {
     dispose: () => {
+      if (upgradeServer && upgradeListener) {
+        upgradeServer.removeListener('upgrade', upgradeListener);
+        upgradeListener = undefined;
+        upgradeServer = undefined;
+      }
       registry.dispose();
       if (wss) {
         wss.close();
