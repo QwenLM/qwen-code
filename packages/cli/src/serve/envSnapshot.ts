@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import {
   detectRuntime,
   redactProxyCredentials,
@@ -13,6 +14,7 @@ import {
   type ServeEnvCell,
   type ServeWorkspaceEnvStatus,
 } from './status.js';
+import { formatMemoryUsage } from '../ui/utils/formatters.js';
 
 /**
  * Whitelisted environment variables whose **presence** the daemon will
@@ -116,7 +118,7 @@ function safeProxyValue(name: string, raw: string): string {
  * Build the daemon's environment snapshot from `process.*` state. Pure
  * function — no I/O, no ACP roundtrip, no globals beyond `process.env`.
  *
- * The daemon owns runtime locality (#4175): all checks reflect the daemon
+ * The daemon owns runtime locality: all checks reflect the daemon
  * process, not a client-side environment.
  */
 export function buildEnvStatusFromProcess(
@@ -153,7 +155,14 @@ export function buildEnvStatusFromProcess(
     kind: 'platform',
     name: process.platform,
     status: 'ok',
-    value: process.arch,
+    value: `${process.arch} (${os.release()})`,
+  });
+
+  cells.push({
+    kind: 'memory',
+    name: 'rss',
+    status: 'ok',
+    value: formatMemoryUsage(process.memoryUsage().rss),
   });
 
   const sandboxName = env['SANDBOX'];

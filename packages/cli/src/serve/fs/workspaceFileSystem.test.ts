@@ -442,6 +442,209 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect((err as { kind: string }).kind).toBe('file_too_large');
   });
 
+  // ----- writeTextOverwrite -----
+  // The "unconditional create-or-overwrite, no client hash" primitive
+  // used by adapters whose wire format omits expectedHash (ACP
+  // `WriteTextFileRequest` is the immediate consumer). Tests pin the
+  // BridgeFileSystem-contract guarantees the adapter relies on:
+  // atomic write, mode preservation, `0o600` default for new files,
+  // symlink rejection.
+
+  it('writeTextOverwrite creates a new file at 0o600 (no umask leakage)', async () => {
+    // Skipped on Windows where POSIX permission bits are not honored.
+    if (process.platform === 'win32') return;
+    const r = await h.fs.resolve('new-overwrite.txt', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'hello\n');
+    expect(out.created).toBe(true);
+    expect(out.sizeBytes).toBe(6);
+    expect(out.hash).toBe(rawHash('hello\n'));
+    expect(await fsp.readFile(r as string, 'utf-8')).toBe('hello\n');
+    const st = await fsp.lstat(r as string);
+    expect(st.mode & 0o7777).toBe(0o600);
+  });
+
+  it('writeTextOverwrite preserves existing target mode bits', async () => {
+    if (process.platform === 'win32') return;
+    const target = path.join(h.workspace, 'secret.txt');
+    await fsp.writeFile(target, 'old', { mode: 0o600 });
+    await fsp.chmod(target, 0o600);
+    const r = await h.fs.resolve('secret.txt', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'new');
+    expect(out.created).toBe(false);
+    expect(out.hash).toBe(rawHash('new'));
+    expect(await fsp.readFile(target, 'utf-8')).toBe('new');
+    const st = await fsp.lstat(target);
+    expect(st.mode & 0o7777).toBe(0o600);
+  });
+
+  it('writeTextOverwrite preserves an executable +x bit on overwrite', async () => {
+    if (process.platform === 'win32') return;
+    const target = path.join(h.workspace, 'exec.sh');
+    await fsp.writeFile(target, '#!/bin/sh\necho old\n', { mode: 0o755 });
+    await fsp.chmod(target, 0o755);
+    const r = await h.fs.resolve('exec.sh', 'write');
+    await h.fs.writeTextOverwrite(r, '#!/bin/sh\necho new\n');
+    const st = await fsp.lstat(target);
+    expect(st.mode & 0o7777).toBe(0o755);
+  });
+
+  it('writeTextOverwrite rejects symlink targets planted post-resolve (symlink_escape)', async () => {
+    // Parity with writeTextAtomic and HTTP POST /file from PR 20 —
+    // the inline pre-F1 BridgeClient proxy resolved symlinks; PR 18
+    // intentionally rejects them so a planted link can't redirect a
+    // write outside the operator's expectation. Mirrors the existing
+    // `writeText rejects when path was swapped to a symlink between
+    // resolve and write` shape so the test only differs in which
+    // method is invoked (writeTextOverwrite).
+    if (process.platform === 'win32') return;
+    const target = path.join(h.workspace, 'about-to-overwrite.txt');
+    const r = await h.fs.resolve('about-to-overwrite.txt', 'write');
+    const outside = path.join(h.scratch, 'overwrite-outside.txt');
+    await fsp.writeFile(outside, ''); // pre-create so symlink isn't dangling
+    await fsp.symlink(outside, target, 'file');
+    const err = await h.fs
+      .writeTextOverwrite(r, 'attacker')
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    // The outside file MUST remain empty (no escape).
+    expect(await fsp.readFile(outside, 'utf-8')).toBe('');
+  });
+
+  it('writeTextOverwrite enforces the trust gate', async () => {
+    const untrusted = await makeHarness({ trusted: false });
+    try {
+      const r = await untrusted.fs.resolve('denied.txt', 'write');
+      const err = await untrusted.fs
+        .writeTextOverwrite(r, 'x')
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+    } finally {
+      await teardown(untrusted);
+    }
+  });
+
+  it('writeTextOverwrite emits fs.access on success', async () => {
+    const r = await h.fs.resolve('audited.txt', 'write');
+    await h.fs.writeTextOverwrite(r, 'audited-content');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+  });
+
+  it('writeTextOverwrite succeeds over an existing >MAX_READ_BYTES file', async () => {
+    // wenshao #4334 review: the meta-read inside writeTextOverwrite is
+    // best-effort (only used for encoding / BOM / line-ending hints).
+    // A `file_too_large` thrown by `readExistingTextMeta` must NOT
+    // block the overwrite — pre-PR the inline `BridgeClient` proxy
+    // never read the existing file, so overwriting a 1 MiB log via
+    // the agent was always supported. Regression guard for that.
+    const { MAX_READ_BYTES } = await import('./policy.js');
+    const target = path.join(h.workspace, 'big-existing.log');
+    await fsp.writeFile(target, 'a'.repeat(MAX_READ_BYTES + 1024));
+    const r = await h.fs.resolve('big-existing.log', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'tiny');
+    expect(out.created).toBe(false);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('tiny');
+  });
+
+  it('writeTextOverwrite succeeds over an existing 0o000 (unreadable) file', async () => {
+    // wenshao #4334 review: EACCES on the best-effort meta-read must
+    // NOT block the overwrite. Pre-PR the inline BridgeClient proxy
+    // never read the existing file, so the daemon could always
+    // overwrite an unreadable target (subject only to the parent dir's
+    // write permission). The 0o000 case also matters as a probing
+    // defense — bubbling EACCES on overwrite would let agents probe
+    // file readability indirectly.
+    // Skipped on Windows + when running as root (root bypasses mode bits).
+    if (process.platform === 'win32') return;
+    if (process.getuid && process.getuid() === 0) return;
+    const target = path.join(h.workspace, 'unreadable-secret.txt');
+    await fsp.writeFile(target, 'old-secret', { mode: 0o000 });
+    await fsp.chmod(target, 0o000);
+    try {
+      const r = await h.fs.resolve('unreadable-secret.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'new-content');
+      expect(out.created).toBe(false);
+      // Restore mode so the test can read back the content for verification.
+      await fsp.chmod(target, 0o600);
+      expect(await fsp.readFile(target, 'utf-8')).toBe('new-content');
+    } finally {
+      // Best-effort restore so afterEach rm doesn't trip on a 0o000 file.
+      await fsp.chmod(target, 0o600).catch(() => {});
+    }
+  });
+
+  it('writeTextOverwrite succeeds over an existing binary file', async () => {
+    // Sibling of the >MAX_READ_BYTES regression: existing binary
+    // content makes `readExistingTextMeta` throw `binary_file`. The
+    // overwrite must still succeed since the new content is text and
+    // ACP semantics is "just write".
+    const target = path.join(h.workspace, 'binary-existing.bin');
+    const buf = Buffer.alloc(64);
+    buf[5] = 0; // null byte → looksBinary()
+    await fsp.writeFile(target, buf);
+    const r = await h.fs.resolve('binary-existing.bin', 'write');
+    const out = await h.fs.writeTextOverwrite(r, 'now-text');
+    expect(out.created).toBe(false);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('now-text');
+  });
+
+  it('writeTextOverwrite rejects a directory target with parse_error', async () => {
+    // wenshao #4334 review sub-bullet: `assertAtomicTargetPrecondition`
+    // throws `parse_error` for non-regular files in the 'overwrite'
+    // branch (parity with 'replace'). Pin it so a future refactor that
+    // accidentally relaxes that branch (e.g. by treating a directory
+    // as "missing target → create") is caught.
+    const dir = path.join(h.workspace, 'a-dir');
+    await fsp.mkdir(dir);
+    const r = await h.fs.resolve('a-dir', 'write');
+    const err = await h.fs
+      .writeTextOverwrite(r, 'noop')
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('writeTextOverwrite rejects content exceeding MAX_WRITE_BYTES with file_too_large', async () => {
+    // wenshao #4334 review: the `enforceWriteSize(decodedSizeBytes)`
+    // call at the top of `writeTextOverwrite` mirrors `writeText`'s
+    // 5 MiB cap. The existing oversized-write test only exercises
+    // `writeText`; pin the cap for `writeTextOverwrite` too since it's
+    // the primary consumer (ACP adapter). A regression dropping this
+    // check would let agents write arbitrarily large files undetected.
+    const { MAX_WRITE_BYTES } = await import('./policy.js');
+    const r = await h.fs.resolve('huge-overwrite.txt', 'write');
+    const err = await h.fs
+      .writeTextOverwrite(r, 'a'.repeat(MAX_WRITE_BYTES + 1024))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
+
+  it('writeTextAtomic rejects mode="overwrite" with parse_error (internal-only)', async () => {
+    // wenshao #4334 review: `'overwrite'` is a `WriteMode` value but
+    // `writeTextAtomic`'s `existingMeta` branch only reads metadata for
+    // `'replace'` AND its `created` outcome is hard-coded to `opts.mode
+    // === 'create'`. A direct caller of `writeTextAtomic({mode:
+    // 'overwrite'})` would silently drop CRLF on Windows files and
+    // report `created: false` for new files. The validator explicitly
+    // rejects this combination so the only supported path for
+    // unconditional-overwrite semantics is the dedicated
+    // `writeTextOverwrite()` method (which handles both correctly).
+    const r = await h.fs.resolve('atomic-overwrite-reject.txt', 'write');
+    const err = await h.fs
+      .writeTextAtomic(r, 'x', { mode: 'overwrite' as never })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+    expect((err as Error).message).toMatch(/writeTextOverwrite/);
+  });
+
   it('edits an existing file by replacing oldText with newText', async () => {
     const target = path.join(h.workspace, 'config.txt');
     await fsp.writeFile(target, 'foo=1\nbar=2\n');

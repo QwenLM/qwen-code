@@ -65,6 +65,9 @@ export interface DialogCloseOptions {
   isDiffDialogOpen?: boolean;
   closeDiffDialog?: () => void;
 
+  isStatsDialogOpen?: boolean;
+  closeStatsDialog?: () => void;
+
   // Worktree exit dialog (Phase C)
   showWorktreeExitDialog?: boolean;
   closeWorktreeExitDialog?: () => void;
@@ -144,6 +147,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     // priority dialogs in `DialogManager` (theme, auth, settings, …)
     // already appear above this block in their own priority order. Only
     // the diff-vs-background pair previously matched the wrong way.
+    if (options.isStatsDialogOpen && options.closeStatsDialog) {
+      options.closeStatsDialog();
+      return true;
+    }
+
     if (options.isDiffDialogOpen && options.closeDiffDialog) {
       // /diff dialog — same rationale as the background-tasks dialog:
       // Ctrl+C should dismiss the dialog rather than fall through to the

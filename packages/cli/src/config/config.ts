@@ -37,6 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import {
@@ -1031,7 +1032,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand);
 
   yargsInstance
@@ -1205,11 +1206,14 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -1564,19 +1568,10 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
-  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
-  // while preserving original casing; downstream lookups go through
-  // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output.
-  const disabledTools: string[] = [];
-  const seenDisabledTools = new Set<string>();
-  for (const raw of settings.tools?.disabled ?? []) {
-    if (typeof raw !== 'string') continue;
-    const trimmed = raw.trim();
-    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
-    seenDisabledTools.add(trimmed);
-    disabledTools.push(trimmed);
-  }
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
+  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1876,7 +1871,8 @@ export async function loadCliConfig(
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    cronEnabled: settings.experimental?.cron ?? false,
+    cronEnabled: settings.experimental?.cron ?? true,
+    agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,

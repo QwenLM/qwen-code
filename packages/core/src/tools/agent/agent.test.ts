@@ -166,6 +166,8 @@ describe('AgentTool', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getTeamManager: vi.fn().mockReturnValue(undefined),
+      isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -514,6 +516,24 @@ describe('AgentTool', () => {
       } finally {
         await fs.rm(repo, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('team routing', () => {
+    it('rejects `name` when no team is active', async () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeDefined();
+      expect(result.llmContent).toContain('no active team');
+      expect(result.llmContent).toContain('"helper"');
+      // Subagent must NOT have been spawned as a one-shot fallback.
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
     });
   });
 

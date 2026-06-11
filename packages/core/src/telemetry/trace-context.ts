@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  trace,
-  isSpanContextValid,
-  INVALID_TRACEID,
-} from '@opentelemetry/api';
+import { trace, isSpanContextValid, INVALID_TRACEID } from '@opentelemetry/api';
 import type { Span } from '@opentelemetry/api';
 import { getSessionContext } from './session-context.js';
 

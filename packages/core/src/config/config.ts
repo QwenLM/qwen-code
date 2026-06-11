@@ -25,6 +25,8 @@ import type { ShellExecutionConfig } from '../services/shellExecutionService.js'
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
+import type { TeamManager } from '../agents/team/TeamManager.js';
+import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -421,8 +423,7 @@ export interface TelemetryMetricsSettings {
  * collector / file outfile). The settings here control data flow OUT of
  * the qwen-code process and INTO third-party LLM provider request
  * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
- * different consent decision, so a different settings tree. See PR
- * #4390 review (LaZzyMan) for the framing rationale.
+ * different consent decision, so a different settings tree.
  *
  * All values default to off / no propagation. Operators who want to
  * propagate trace context for server-side trace stitching (e.g. ARMS
@@ -639,6 +640,11 @@ export interface AgentsCollabSettings {
     /** Total timeout in seconds for the Arena session. No limit if unset. */
     timeoutSeconds?: number;
   };
+  /** Team-specific settings */
+  team?: {
+    /** Maximum number of teammates (default: 10). */
+    maxTeammates?: number;
+  };
 }
 
 export interface ConfigParameters {
@@ -685,8 +691,7 @@ export interface ConfigParameters {
    * invocation), tools listed here are not registered at all and never
    * appear in `/tools`, `getAllTools()`, or function-call discovery.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
-   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
-   * 17). Active sessions retain already-registered tools — the disabled
+   * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
@@ -743,7 +748,7 @@ export interface ConfigParameters {
   maxSessionTurns?: number;
   /**
    * Wall-clock budget for an unattended run, in seconds. `-1` (default)
-   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * means no limit. Enforced by the CLI's non-interactive run loop
    * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
    * Issue: QwenLM/qwen-code#4103.
    */
@@ -758,7 +763,9 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  agentTeamEnabled?: boolean;
   forkSubagentEnabled?: boolean;
+  workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -980,6 +987,22 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipGeminiInitialization?: boolean;
+  /**
+   * skip MCP
+   * discovery entirely (both inline tool-registry-time discovery AND
+   * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
+   * The bootstrap config in ACP daemon mode uses this to AVOID spawning
+   * MCP servers under the bootstrap's pool-less McpClientManager.
+   * Pre-fix every stdio MCP server was spawned twice — once by the
+   * bootstrap (legacy per-server path, invisible to pool / budget /
+   * drainAll / pid-sweep) and once by each session's pool-routed
+   * discovery — silently violating the workspace budget contract.
+   * The bootstrap's MCP clients were never actually used to serve a
+   * session (each session builds its own per-session Config and runs
+   * its own discovery), so skipping at the bootstrap layer is safe
+   * AND closes the 2N subprocess leak.
+   */
+  skipMcpDiscovery?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -1022,7 +1045,7 @@ export class Config {
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
-   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * callback stashed BEFORE
    * `initialize()` runs and applied as soon as `toolRegistry` is up,
    * so the manager's `setOnBudgetEvent` is wired before
    * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
@@ -1082,7 +1105,15 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
-  private readonly disabledTools: ReadonlySet<string>;
+  //   `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -1091,6 +1122,7 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
@@ -1129,7 +1161,7 @@ export class Config {
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
-  private readonly outputLanguageFilePath?: string;
+  private outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
@@ -1146,8 +1178,10 @@ export class Config {
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly cronEnabled: boolean = false;
+  private readonly cronEnabled: boolean = true;
+  private readonly agentTeamEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
+  private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1167,6 +1201,11 @@ export class Config {
     | ((manager: ArenaManager | null) => void)
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
+  private teamManager: TeamManager | null = null;
+  private teamManagerChangeCallbacks = new Set<
+    (manager: TeamManager | null) => void
+  >();
+  private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
@@ -1330,8 +1369,10 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.cronEnabled = params.cronEnabled ?? false;
+    this.cronEnabled = params.cronEnabled ?? true;
+    this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -1700,7 +1741,14 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    // Also force the inline-discovery skip when the caller opts
+    // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
+    // blocking mode would still spawn MCP servers via the tool-registry
+    // construction path.
+    const skipInlineMcpDiscovery =
+      this.getBareMode() ||
+      !legacyBlockingMcp ||
+      options?.skipMcpDiscovery === true;
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
@@ -1733,7 +1781,15 @@ export class Config {
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    //
+    // Also gated on `!options?.skipMcpDiscovery` — the ACP
+    // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
+    // config doesn't run discovery under its pool-less manager.
+    if (
+      skipInlineMcpDiscovery &&
+      !this.getBareMode() &&
+      !options?.skipMcpDiscovery
+    ) {
       this.startMcpDiscoveryInBackground();
     }
 
@@ -2222,8 +2278,8 @@ export class Config {
     // Only refresh when THIS process established its own sidecar at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id —
-    // mirrors kimi-cli PR #2082's "write only when a session is
+    // sidecar that happens to share the outgoing session id
+    // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
     if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
@@ -2619,6 +2675,7 @@ export class Config {
       this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -2662,8 +2719,8 @@ export class Config {
    *
    * This merges all sources so that PermissionManager receives a single,
    * authoritative list:
-   *   - settings.permissions.allow  (persistent rules from all scopes)
-   *   - allowedTools param  (SDK / argv auto-approve list)
+   *   - settings.permissions.allow (persistent rules from all scopes)
+   *   - allowedTools param (SDK / argv auto-approve list)
    *
    * Note: coreTools is intentionally excluded here — it has whitelist semantics
    * (only listed tools are registered), not auto-approve semantics. It is
@@ -2692,8 +2749,8 @@ export class Config {
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
-   *   - settings.permissions.deny  (persistent rules from all scopes)
-   *   - excludeTools param  (SDK / argv blocklist)
+   *   - settings.permissions.deny (persistent rules from all scopes)
+   *   - excludeTools param (SDK / argv blocklist)
    *
    * CLI callers pre-merge argv.excludeTools into permissionsDeny.
    */
@@ -2736,12 +2793,45 @@ export class Config {
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics: the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {
@@ -2750,6 +2840,43 @@ export class Config {
 
   getMcpServerCommand(): string | undefined {
     return this.mcpServerCommand;
+  }
+
+  /**
+   * optional workspace-shared MCP transport pool
+   * injected by the daemon-mode `QwenAgent`. When set, the wrapping
+   * `ToolRegistry` threads it into `McpClientManager`, which delegates
+   * non-SDK MCP server discovery to the pool instead of spawning its
+   * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
+   * this `undefined` and the manager keeps its previous behavior.
+   *
+   * Eagerly instantiated by `QwenAgent` (per Q6 resolved); the
+   * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
+   * until the first `acquire()` from a session.
+   */
+  private mcpTransportPool?: import('../tools/mcp-transport-pool.js').McpTransportPool;
+
+  setMcpTransportPool(
+    pool: import('../tools/mcp-transport-pool.js').McpTransportPool | undefined,
+  ): void {
+    this.mcpTransportPool = pool;
+  }
+
+  getMcpTransportPool():
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
+    return this.mcpTransportPool;
+  }
+
+  /**
+   * T2.8: return the raw settings-layer MCP servers map (without the
+   * runtime overlay or extension contributions). Used by
+   * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
+   * settings (a runtime entry whose name collides with a pre-existing
+   * settings entry).
+   */
+  getSettingsMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.mcpServers;
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
@@ -2765,6 +2892,11 @@ export class Config {
           };
         },
       );
+    }
+
+    // T2.8 — runtime layer wins over settings + extensions (shadow semantics)
+    for (const [name, cfg] of this.runtimeMcpServers) {
+      mcpServers[name] = cfg;
     }
 
     if (this.allowedMcpServers) {
@@ -2799,6 +2931,26 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
+   * touch `this.mcpServers` (settings layer) and does not enforce the
+   * `initialized` guard — the whole point is post-init mutation from the
+   * daemon surface. `getMcpServers()` will overlay these entries on top
+   * of the settings layer (Task 5).
+   */
+  addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    this.runtimeMcpServers.set(name, config);
+  }
+
+  /**
+   * Remove a runtime-only MCP server previously added via
+   * `addRuntimeMcpServer`. Returns `true` if the entry existed and was
+   * removed, `false` otherwise.
+   */
+  removeRuntimeMcpServer(name: string): boolean {
+    return this.runtimeMcpServers.delete(name);
   }
 
   isLspEnabled(): boolean {
@@ -2898,6 +3050,10 @@ export class Config {
     return this.outputLanguageFilePath;
   }
 
+  setOutputLanguageFilePath(filePath: string): void {
+    this.outputLanguageFilePath = filePath;
+  }
+
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
   }
@@ -2935,6 +3091,57 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  // ─── Team Manager ──────────────────────────────────────────
+
+  getTeamManager(): TeamManager | null {
+    return this.teamManager;
+  }
+
+  setTeamManager(manager: TeamManager | null): void {
+    this.teamManager = manager;
+    for (const cb of this.teamManagerChangeCallbacks) {
+      cb(manager);
+    }
+  }
+
+  /**
+   * Register a callback invoked whenever the team manager changes.
+   * Pass `null` to unsubscribe a previously registered callback.
+   * Multiple subscribers are supported.
+   */
+  onTeamManagerChange(
+    cb: ((manager: TeamManager | null) => void) | null,
+    previous?: (manager: TeamManager | null) => void,
+  ): void {
+    if (previous) {
+      this.teamManagerChangeCallbacks.delete(previous);
+    }
+    if (cb) {
+      this.teamManagerChangeCallbacks.add(cb);
+    }
+  }
+
+  getTeamContext(): TeamContext | null {
+    return this.teamContext;
+  }
+
+  setTeamContext(ctx: TeamContext | null): void {
+    this.teamContext = ctx;
+  }
+
+  /**
+   * Clean up Team runtime — stops all teammates and clears state.
+   */
+  async cleanupTeamRuntime(): Promise<void> {
+    const manager = this.teamManager;
+    if (!manager) {
+      return;
+    }
+    await manager.cleanup();
+    this.setTeamManager(null);
+    this.setTeamContext(null);
   }
 
   /**
@@ -3313,15 +3520,33 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
-    // Cron is experimental and opt-in: enabled via settings or env var
-    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
+  }
+
+  isAgentTeamEnabled(): boolean {
+    // Agent team is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
+    return this.agentTeamEnabled;
   }
 
   isForkSubagentEnabled(): boolean {
     if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
     return this.forkSubagentEnabled;
   }
+
+  isWorkflowsEnabled(): boolean {
+    // Workflows are experimental and opt-in: enabled via settings or env var
+    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+    return this.workflowsEnabled;
+  }
+
+  setWorkflowsEnabled(enabled: boolean): void {
+    this.workflowsEnabled = enabled;
+  }
+
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -3449,7 +3674,7 @@ export class Config {
 
   /**
    * Fast-path check: returns true only when hooks are enabled AND there are
-   * registered hooks for the given event name.  Callers can use this to skip
+   * registered hooks for the given event name. Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
   hasHooksForEvent(eventName: string, sessionId?: string): boolean {
@@ -4244,6 +4469,40 @@ export class Config {
       });
     }
 
+    // Register team collaboration tools (experimental). The team-specific
+    // tools (team_create/team_delete/task_create/task_update/task_list)
+    // are gated on this flag.
+    if (this.isAgentTeamEnabled()) {
+      await registerLazy(ToolNames.TEAM_CREATE, async () => {
+        const { TeamCreateTool } = await import('../tools/team-create.js');
+        return new TeamCreateTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_DELETE, async () => {
+        const { TeamDeleteTool } = await import('../tools/team-delete.js');
+        return new TeamDeleteTool(this);
+      });
+      await registerLazy(ToolNames.TASK_CREATE, async () => {
+        const { TaskCreateTool } = await import('../tools/task-create.js');
+        return new TaskCreateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_UPDATE, async () => {
+        const { TaskUpdateTool } = await import('../tools/task-update.js');
+        return new TaskUpdateTool(this);
+      });
+      await registerLazy(ToolNames.TASK_LIST, async () => {
+        const { TaskListTool } = await import('../tools/task-list.js');
+        return new TaskListTool(this);
+      });
+    }
+
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
+      });
+    }
+
     // Register computer-use tools unless disabled. All 9 are deferred —
     // they surface only via ToolSearch keyword match
     // (see packages/core/src/tools/computer-use/).
@@ -4265,7 +4524,7 @@ export class Config {
       return new MonitorTool(this);
     });
 
-    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // apply any pending MCP
     // budget-event callback BEFORE `discoverAllTools` (legacy blocking
     // mode runs MCP discovery synchronously in there) and BEFORE the
     // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
@@ -4277,7 +4536,7 @@ export class Config {
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
       }
-      // PR 14b fix (codex round 6): clear after consumption so a
+      // clear after consumption so a
       // subsequent `createToolRegistry` call (e.g. subagent override
       // via `createApprovalModeOverride` /
       // `buildSubagentContextOverride`) doesn't re-apply the parent
@@ -4303,7 +4562,7 @@ export class Config {
   }
 
   /**
-   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * register the MCP guardrail
    * push-event callback. Acceptable to call at any point in the
    * Config lifecycle — before, during, or after `initialize()`.
    *

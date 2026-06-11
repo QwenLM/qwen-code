@@ -79,8 +79,6 @@ function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
   } catch (_e) {
-    // If realpathSync fails, it might be because the path doesn't exist.
-    // In that case, we can fall back to the original path.
     return path;
   }
 }
@@ -452,7 +450,6 @@ export class IdeClient {
         ListToolsResultSchema,
       );
 
-      // Map the array of tool objects to an array of tool names (strings)
       this.availableTools = response.tools.map((tool) => tool.name);
 
       if (this.availableTools.length > 0) {
@@ -465,8 +462,7 @@ export class IdeClient {
         );
       }
     } catch (error) {
-      // It's okay if this fails, the IDE might not support it.
-      // Don't log an error if the method is not found, which is a common case.
+      // "Method not found" is expected for IDEs that don't support tool discovery.
       if (
         error instanceof Error &&
         !error.message?.includes('Method not found')

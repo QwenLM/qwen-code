@@ -37,6 +37,11 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   TASK_STOP: 'task_stop',
+  TASK_CREATE: 'task_create',
+  TASK_UPDATE: 'task_update',
+  TASK_LIST: 'task_list',
+  TEAM_CREATE: 'team_create',
+  TEAM_DELETE: 'team_delete',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
@@ -57,6 +62,7 @@ export const ToolNames = {
   COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
   COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
   COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  WORKFLOW: 'workflow',
 } as const;
 
 /**
@@ -84,6 +90,11 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   TASK_STOP: 'TaskStop',
+  TASK_CREATE: 'TaskCreate',
+  TASK_UPDATE: 'TaskUpdate',
+  TASK_LIST: 'TaskList',
+  TEAM_CREATE: 'TeamCreate',
+  TEAM_DELETE: 'TeamDelete',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
@@ -101,6 +112,7 @@ export const ToolDisplayNames = {
   COMPUTER_USE_TYPE_TEXT: 'computer_use__type_text',
   COMPUTER_USE_PRESS_KEY: 'computer_use__press_key',
   COMPUTER_USE_SET_VALUE: 'computer_use__set_value',
+  WORKFLOW: 'Workflow',
 } as const;
 
 // Migration from old tool names to new tool names
