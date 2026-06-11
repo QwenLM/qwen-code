@@ -3260,6 +3260,15 @@ export class CoreToolScheduler {
                     activatedEntries,
                   )}\n</available_skills>`,
                 );
+                // Record the announced keys so the client's per-turn drain
+                // (drainSkillAndCommandReminders) marks them as announced and
+                // does not re-announce them in the same turn's tail reminder.
+                // Without this, a subagent activation on a shared SkillManager
+                // would land in the subagent's discarded transcript while the
+                // parent's drain sees a genuinely-new key and duplicates.
+                this.config.addInlineAnnouncedSkillKeys(
+                  activatedEntries.map((e) => `skill:${e.name}`),
+                );
               }
             }
           }

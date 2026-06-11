@@ -201,7 +201,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     );
     if (skillExists) return null;
 
-    // Check model-invocable commands (e.g. MCP prompts) listed in the description
+    // Check model-invocable commands (e.g. MCP prompts) listed in <available_skills>
     const commandExists = this.modelInvocableCommands.some(
       (cmd) => cmd.name === params.skill,
     );

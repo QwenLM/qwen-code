@@ -502,6 +502,9 @@ describe('Gemini Client (client.ts)', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn().mockReturnValue(undefined),
+      consumeInlineAnnouncedSkillKeys: vi
+        .fn()
+        .mockReturnValue(new Set<string>()),
       getDebugLogger: vi.fn().mockReturnValue({
         isEnabled: vi.fn().mockReturnValue(true),
         debug: vi.fn(),
@@ -7092,7 +7095,10 @@ Other open files:
       mockChat.addHistory.mockClear();
     });
 
-    it('first drain seeds announced set and emits nothing', async () => {
+    it('first drain without snapshot seed announces all entries as new', async () => {
+      // When seedSkillReminderDedupFromSnapshot was never called (edge-case
+      // construction path), the first drain treats every entry as genuinely
+      // new rather than silently swallowing them as "already announced".
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7104,20 +7110,36 @@ Other open files:
 
       expect(priv().skillRemindersInitialized).toBe(true);
       expect(priv().announcedSkillReminderKeys.size).toBe(2);
-      expect(mockChat.addHistory).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-a');
+      expect(addedContent.parts[0].text).toContain('skill-b');
     });
 
-    it('second drain with a genuinely new skill emits a reminder', async () => {
-      // First drain: seed
+    it('first drain with snapshot seed emits nothing for seeded entries', async () => {
+      // When seedSkillReminderDedupFromSnapshot was called (normal path),
+      // the first drain does not re-announce entries already in the snapshot.
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-a', 'skill-b']),
+      );
+
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
         modelInvocableCommands: [],
-        entries: makeEntries(['skill-a']),
+        entries: makeEntries(['skill-a', 'skill-b']),
       });
+
       await drain();
 
-      // Second drain: skill-b is new
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('drain with a genuinely new skill emits a reminder', async () => {
+      // Seed from snapshot (normal startChat path)
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
+      // Drain: skill-b is new
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7126,12 +7148,17 @@ Other open files:
       });
       await drain();
 
-      expect(mockChat.addHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
       const addedContent = mockChat.addHistory.mock.calls[0][0];
       expect(addedContent.parts[0].text).toContain('skill-b');
+      // Already-seeded skill-a should not appear in the reminder
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-a');
     });
 
-    it('second drain with no new skills emits nothing', async () => {
+    it('drain with no new skills after seed emits nothing', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+
       const entries = makeEntries(['skill-a']);
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
@@ -7140,21 +7167,14 @@ Other open files:
         entries,
       });
 
-      await drain(); // seed
-      await drain(); // same skills
+      await drain(); // same skills as seed
 
       expect(mockChat.addHistory).not.toHaveBeenCalled();
     });
 
     it('removed skill prunes its key so re-adding re-announces', async () => {
-      // First drain: seed with skill-a
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: makeEntries(['skill-a']),
-      });
-      await drain();
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
 
       // Second drain: skill-a removed (user disabled)
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
@@ -7186,18 +7206,13 @@ Other open files:
         new Set(['skill-a']),
       );
 
-      // First drain: seed
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: makeEntries(['skill-existing']),
-      });
-      await drain();
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
 
-      // Second drain: skill-a appears (may also have been announced inline by
-      // coreToolScheduler — the duplicate is harmless, while suppression based
-      // on the shared activation set was broken for subagent activations)
+      // Drain: skill-a appears — announced by drain because it was not
+      // in the snapshot, regardless of getActivatedSkillNames state.
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -7206,20 +7221,14 @@ Other open files:
       });
       await drain();
 
-      expect(mockChat.addHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
       const addedContent = mockChat.addHistory.mock.calls[0][0];
       expect(addedContent.parts[0].text).toContain('skill-a');
     });
 
     it('path-activated skill re-announces after disable/re-enable', async () => {
-      // First drain: seed with skill-a
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: makeEntries(['skill-a']),
-      });
-      await drain();
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
 
       // Second drain: skill-a removed (user disabled)
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
@@ -7276,20 +7285,14 @@ Other open files:
         new Set(['mcp-prompt-a']),
       );
 
-      // First drain: seed with a command entry (no level)
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: [
-          {
-            name: 'existing-skill',
-            description: 'desc',
-            level: 'project' as const,
-          },
-        ],
-      });
-      await drain();
+      // Seed from snapshot with a file-based skill
+      priv().seedSkillReminderDedupFromSnapshot([
+        {
+          name: 'existing-skill',
+          description: 'desc',
+          level: 'project' as const,
+        },
+      ]);
 
       // Second drain: add a command entry (no level — MCP prompt/command)
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
@@ -7314,14 +7317,10 @@ Other open files:
     });
 
     it('command entry prunes and re-announces correctly', async () => {
-      // First drain: seed with a command
-      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
-        availableSkills: [],
-        pendingConditionalSkillNames: new Set(),
-        modelInvocableCommands: [],
-        entries: [{ name: 'cmd-a', description: 'desc' }],
-      });
-      await drain();
+      // Seed from snapshot with a command
+      priv().seedSkillReminderDedupFromSnapshot([
+        { name: 'cmd-a', description: 'desc' },
+      ]);
 
       // Second drain: command removed
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
@@ -7368,6 +7367,62 @@ Other open files:
 
       expect(priv().skillRemindersInitialized).toBe(true);
       expect(priv().announcedSkillReminderKeys.size).toBe(0);
+    });
+
+    it('inline-announced skills consumed from config are not re-announced by drain', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Simulate coreToolScheduler recording inline-announced skills
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Drain sees skill-inline as a new entry but it was already announced
+      // inline by coreToolScheduler, so it should not be re-announced.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline']),
+      });
+      await drain();
+
+      // skill-inline should be in announcedSkillReminderKeys but NOT in the
+      // reminder (no addHistory call since all new entries were consumed)
+      expect(priv().announcedSkillReminderKeys.has('skill:skill-inline')).toBe(
+        true,
+      );
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('inline-announced does not suppress genuinely new skills', async () => {
+      // Seed from snapshot
+      priv().seedSkillReminderDedupFromSnapshot(
+        makeEntries(['skill-existing']),
+      );
+
+      // Only skill-inline was announced inline
+      vi.mocked(mockConfig.consumeInlineAnnouncedSkillKeys).mockReturnValue(
+        new Set(['skill:skill-inline']),
+      );
+
+      // Both skill-inline and skill-new appear; only skill-new should be
+      // announced since skill-inline was already handled inline.
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: makeEntries(['skill-existing', 'skill-inline', 'skill-new']),
+      });
+      await drain();
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      const addedContent = mockChat.addHistory.mock.calls[0][0];
+      expect(addedContent.parts[0].text).toContain('skill-new');
+      expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
     });
     /* eslint-enable @typescript-eslint/no-explicit-any */
   });

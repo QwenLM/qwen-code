@@ -537,7 +537,7 @@ describe('SkillTool', () => {
       expect(skillTool.getAvailableSkillNames()).toContain('new-skill');
     });
 
-    it('should refresh available skills and update description', async () => {
+    it('should refresh available skills and update validation state', async () => {
       const newSkills: SkillConfig[] = [
         {
           name: 'test-skill',

@@ -1062,6 +1062,10 @@ export class Config {
         args?: string,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
+  // Skill keys (e.g. "skill:foo") that coreToolScheduler announced inline on a
+  // tool result. The client's drain consumes this set so it can mark them as
+  // announced and avoid double-announcing in the same turn's tail reminder.
+  private pendingInlineAnnouncedSkillKeys = new Set<string>();
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -4030,8 +4034,8 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that SkillTool can merge these into
-   * its tool description.
+   * CommandService after initialisation so that the startup snapshot and
+   * per-turn drain can include these in the `<available_skills>` listing.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
@@ -4074,6 +4078,31 @@ export class Config {
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
+  }
+
+  /**
+   * Records skill keys that were announced inline on a tool result by
+   * `coreToolScheduler` (e.g. path-activated conditional skills). The
+   * client's `drainSkillAndCommandReminders` consumes these to mark them as
+   * announced and avoid a duplicate announcement in the same turn's tail
+   * reminder. Keys use the `"skill:<name>"` format matching
+   * `GeminiClient.skillEntryKey`.
+   */
+  addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
+    for (const k of keys) {
+      this.pendingInlineAnnouncedSkillKeys.add(k);
+    }
+  }
+
+  /**
+   * Returns and clears the set of skill keys announced inline since the last
+   * consumption. Idempotent — a second call returns an empty set until new
+   * keys are added.
+   */
+  consumeInlineAnnouncedSkillKeys(): Set<string> {
+    const result = this.pendingInlineAnnouncedSkillKeys;
+    this.pendingInlineAnnouncedSkillKeys = new Set();
+    return result;
   }
 
   getPermissionManager(): PermissionManager | null {

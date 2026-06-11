@@ -940,22 +940,30 @@ export class GeminiClient {
     }
 
     // Safety net: if seedSkillReminderDedupFromSnapshot was never called (e.g.
-    // edge-case construction path), fall back to seeding from current entries.
-    // Normally seedSkillReminderDedupFromSnapshot sets this in startChat/rebuild.
+    // edge-case construction path), mark initialized but do NOT seed from
+    // current entries — no startup snapshot was shown to the model, so all
+    // entries are genuinely new and should be announced by the code below.
+    // Seeding here used to silently swallow late registrations (cmd:* keys
+    // and MCP prompts discovered after startChat) by marking them as
+    // "already announced" when the model had never seen them.
     if (!this.skillRemindersInitialized) {
       this.skillRemindersInitialized = true;
-      for (const key of currentKeys) {
-        this.announcedSkillReminderKeys.add(key);
-      }
-      return;
     }
 
-    // Announce every genuinely new skill/command. A conditional path-activation
-    // may also have been announced inline on the tool result by
-    // coreToolScheduler — the duplicate is harmless (the model sees it twice in
-    // the same turn), while the omission from suppressing based on the shared
-    // SkillManager.getActivatedSkillNames() was permanent when a subagent
-    // activated the skill instead of this session's own scheduler.
+    // Consume skill keys that coreToolScheduler announced inline on a tool
+    // result this turn (e.g. path-activated conditional skills). Mark them as
+    // announced so the drain below does not re-announce them. This fixes the
+    // subagent shared-SkillManager case: the inline reminder lands in the
+    // subagent's discarded transcript, but the parent's drain now skips those
+    // keys because the scheduler recorded them on the shared Config.
+    const inlineKeys = this.config.consumeInlineAnnouncedSkillKeys();
+    for (const key of inlineKeys) {
+      this.announcedSkillReminderKeys.add(key);
+    }
+
+    // Announce every genuinely new skill/command that was not already
+    // announced — either in the startup snapshot, a prior drain, or inline
+    // by coreToolScheduler above.
     const newEntries: AvailableSkillEntry[] = [];
     for (const entry of entries) {
       const key = GeminiClient.skillEntryKey(entry);

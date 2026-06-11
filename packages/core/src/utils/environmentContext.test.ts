@@ -735,4 +735,33 @@ describe('buildAddedSkillsReminder', () => {
     expect(result).toContain('skill-a');
     expect(result).toContain('skill-b');
   });
+
+  it('caps long descriptions to first line and MAX_TRIMMED_SKILL_DESC_LEN', () => {
+    const longDesc = 'A'.repeat(300) + '\nSecond line that should be dropped';
+    const entries: AvailableSkillEntry[] = [
+      { name: 'mcp-skill', description: longDesc },
+    ];
+    const result = buildAddedSkillsReminder(entries);
+    expect(result).not.toBeNull();
+    // The full 300-char first line should be truncated
+    expect(result).not.toContain('A'.repeat(300));
+    // Should contain a truncated version ending with "..."
+    expect(result).toContain('...');
+    // Second line should be dropped
+    expect(result).not.toContain('Second line');
+  });
+
+  it('caps multi-line descriptions to first line only', () => {
+    const entries: AvailableSkillEntry[] = [
+      {
+        name: 'multiline-skill',
+        description: 'First line only\nDrop this\nAnd this',
+      },
+    ];
+    const result = buildAddedSkillsReminder(entries);
+    expect(result).not.toBeNull();
+    expect(result).toContain('First line only');
+    expect(result).not.toContain('Drop this');
+    expect(result).not.toContain('And this');
+  });
 });

@@ -9193,6 +9193,7 @@ describe('CoreToolScheduler activation wiring', () => {
       },
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9517,6 +9518,7 @@ describe('CoreToolScheduler activation wiring', () => {
       }),
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9628,6 +9630,7 @@ describe('CoreToolScheduler activation wiring', () => {
       }),
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9722,6 +9725,7 @@ describe('CoreToolScheduler activation wiring', () => {
       }),
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
