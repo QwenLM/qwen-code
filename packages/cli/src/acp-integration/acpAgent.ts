@@ -6215,7 +6215,7 @@ class QwenAgent implements Agent {
         return {
           authType: cfg?.authType ?? config.getAuthType() ?? null,
           model: cfg?.model ?? config.getModel() ?? null,
-          baseUrl: cfg?.baseUrl ?? null,
+          baseUrl: cfg?.baseUrl ? sanitizeProviderBaseUrl(cfg.baseUrl) : null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
       }

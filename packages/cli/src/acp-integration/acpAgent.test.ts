@@ -1167,6 +1167,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('getAccountInfo sanitizes credentials from baseUrl', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'openai',
+        model: 'qwen-plus',
+        baseUrl: 'https://user:sk-secret@api.example.com/v1',
+        apiKeyEnvKey: 'OPENAI_API_KEY',
+      }),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const accountInfo = await agent.extMethod('getAccountInfo', {});
+
+    expect(accountInfo).toEqual({
+      authType: 'openai',
+      model: 'qwen-plus',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEnvKey: 'OPENAI_API_KEY',
+    });
+    expect(JSON.stringify(accountInfo)).not.toContain('sk-secret');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   function makeInnerConfig() {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
