@@ -198,10 +198,14 @@ export function getReplayTokenCount(
   return undefined;
 }
 
+// Sub-agent usage events carry `parentToolCallId` in `_meta`; skip them
+// so the status bar only reflects the main conversation's context usage.
 function getUsageTokenCount(
   update: Record<string, unknown> | undefined,
 ): number | undefined {
-  const usage = getRecord(getRecord(update?.['_meta'])?.['usage']);
+  const meta = getRecord(update?.['_meta']);
+  if (meta?.['parentToolCallId'] !== undefined) return undefined;
+  const usage = getRecord(meta?.['usage']);
   const count =
     getNumber(usage, 'inputTokens') ?? getNumber(usage, 'totalTokens');
   return count !== undefined && count > 0 ? count : undefined;

@@ -193,6 +193,18 @@ export class DaemonHttpError extends Error {
   }
 }
 
+export interface DaemonTurnError extends DaemonHttpError {
+  _daemonTurnError: true;
+}
+
+export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true
+  );
+}
+
 export interface CreateSessionRequest {
   /**
    * Workspace path the daemon must be bound to. When
@@ -2315,10 +2327,13 @@ export function matchTurnEvent(
       code?: string;
     };
     if (data.promptId === promptId) {
-      throw new DaemonHttpError(
-        500,
-        data.code ?? 'turn_error',
-        data.message ?? 'Prompt failed',
+      throw Object.assign(
+        new DaemonHttpError(
+          500,
+          data.code ?? 'turn_error',
+          data.message ?? 'Prompt failed',
+        ),
+        { _daemonTurnError: true as const },
       );
     }
   }

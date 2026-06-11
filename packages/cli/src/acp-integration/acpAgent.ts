@@ -143,7 +143,11 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
-import { updateOutputLanguageFile } from '../utils/languageUtils.js';
+import { updateOutputLanguageFile ,
+  resolveOutputLanguage,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -152,11 +156,6 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import {
-  resolveOutputLanguage,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
-} from '../utils/languageUtils.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,

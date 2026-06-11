@@ -813,8 +813,7 @@ export default {
     'O comando /fork requer o feature gate de fork. Defina QWEN_CODE_ENABLE_FORK_SUBAGENT=1 para ativá-lo.',
   'The agent tool is unavailable; cannot fork.':
     'A ferramenta de agente está indisponível; não é possível criar um fork.',
-  'Failed to launch fork: {{error}}':
-    'Falha ao iniciar o fork: {{error}}',
+  'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
   'User launched a background fork via /fork: {{directive}}':
     'O usuário iniciou um fork em segundo plano via /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':

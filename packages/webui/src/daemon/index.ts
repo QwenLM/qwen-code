@@ -12,6 +12,7 @@ export {
   useDaemonConnection,
   useDaemonPendingPermissions,
   useDaemonPromptStatus,
+  useDaemonSessionNotices,
   useDaemonStreamingState,
   useDaemonSession,
   useDaemonTranscriptBlocks,
@@ -36,10 +37,14 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
+  DaemonNoticeCategory,
+  DaemonNoticeOperation,
+  DaemonNoticeSeverity,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
+  DaemonSessionNotice,
   DaemonSessionProviderProps,
   DaemonTodoItem,
   DaemonTodoList,
@@ -84,8 +89,6 @@ export type {
   ResourceState,
 } from './workspace/index.js';
 
-// ── Shared (daemon → webui bridge) ─────────────────────────────────
-export { daemonTranscriptToUnifiedMessages } from './transcriptAdapter.js';
 export {
   useDaemonFollowupSuggestion,
   type UseDaemonFollowupSuggestionReturn,

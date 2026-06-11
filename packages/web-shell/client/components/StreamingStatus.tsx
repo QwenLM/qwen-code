@@ -3,17 +3,15 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
-import {
-  useConnection,
-  useStreamingState,
-} from '@qwen-code/webui/daemon-react-sdk';
+import { useStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { useStreamingOutputTokens } from '../hooks/useStreamingOutputTokens';
+import { formatTokenCount } from '../utils/formatTokenCount';
 import styles from './StreamingStatus.module.css';
 
 export function StreamingStatus() {
   const streamingState = useStreamingState();
-  const connection = useConnection();
-  const tokenCount = connection.tokenCount ?? 0;
+  const outputTokens = useStreamingOutputTokens();
   const { language, t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());
@@ -63,8 +61,8 @@ export function StreamingStatus() {
   const spinnerChar = dots[dotFrame % dots.length];
   const arrow = streamingState === 'responding' ? '↓' : '↑';
   const tokenStr =
-    tokenCount > 0
-      ? ` · ${arrow} ${t('stream.tokens', { count: tokenCount })}`
+    outputTokens > 0
+      ? ` · ${arrow} ${t('stream.tokens', { count: formatTokenCount(outputTokens) })}`
       : '';
 
   return (

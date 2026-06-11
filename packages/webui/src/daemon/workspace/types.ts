@@ -84,6 +84,7 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  getCapabilities?: () => Promise<DaemonCapabilities>;
   actions: DaemonWorkspaceActions;
 }
 

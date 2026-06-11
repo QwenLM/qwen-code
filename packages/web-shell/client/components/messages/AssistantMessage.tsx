@@ -44,14 +44,25 @@ export const AssistantMessage = memo(function AssistantMessage({
   useEffect(() => {
     const el = previewRef.current;
     if (!el || !collapsed) return;
+    let animationFrame = 0;
 
     const check = () => {
       setOverflowing(el.scrollHeight > el.clientHeight);
     };
 
-    const observer = new ResizeObserver(check);
+    const checkAfterLayout = () => {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(check);
+    };
+
+    checkAfterLayout();
+
+    const observer = new ResizeObserver(checkAfterLayout);
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+    };
   }, [collapsed]);
 
   useEffect(() => {
@@ -97,7 +108,11 @@ export const AssistantMessage = memo(function AssistantMessage({
               </div>
             ) : (
               <div className={styles.thinkingExpandedWrap}>
-                <Markdown content={thinking} source="thinking" />
+                <Markdown
+                  content={thinking}
+                  source="thinking"
+                  deferMermaid={isStreaming}
+                />
                 {compactThinking && thinkingExpanded && (
                   <button
                     className={styles.expandToggle}
@@ -118,7 +133,11 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.content}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.contentBody}>
-            <Markdown content={content} source="assistant" />
+            <Markdown
+              content={content}
+              source="assistant"
+              deferMermaid={isStreaming}
+            />
           </div>
         </div>
       )}

@@ -30,6 +30,14 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
+interface TranscriptMessageLabels {
+  promptCancelled?: string;
+}
+
+interface TranscriptMessageOptions {
+  labels?: TranscriptMessageLabels;
+}
+
 function parseDaemonTodoItemsFromEntries(
   entries: readonly unknown[],
 ): DaemonMessageTodoItem[] | undefined {
@@ -55,8 +63,11 @@ function parseDaemonTodoItemsFromEntries(
 
 export function transcriptBlocksToDaemonMessages(
   blocks: readonly DaemonTranscriptBlock[],
+  options: TranscriptMessageOptions = {},
 ): DaemonMessage[] {
   const messages: DaemonMessage[] = [];
+  const promptCancelledText =
+    options.labels?.promptCancelled ?? 'Request cancelled.';
   // Replay can contain thousands of blocks. Keep tool calls indexed by callId
   // so later tool updates, parented children, and permission placeholders
   // merge in O(1)
@@ -394,6 +405,16 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: (block as DaemonStatusTranscriptBlock).text,
           variant: 'error',
+        });
+        needsNewContentMessage = true;
+        break;
+
+      case 'prompt_cancelled':
+        messages.push({
+          id: block.id,
+          role: 'system',
+          content: promptCancelledText,
+          variant: 'info',
         });
         needsNewContentMessage = true;
         break;

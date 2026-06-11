@@ -210,6 +210,9 @@ export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
   text: string;
   recoverable?: boolean;
+  code?: string;
+  promptId?: string;
+  source?: 'turn_error';
   /**
    * Closed-enum error category propagated from the daemon's typed-error
    * taxonomy. Lets renderers branch on `errorKind` for "retry auth" vs
@@ -610,7 +613,8 @@ export type DaemonTranscriptBlockKind =
   | 'permission'
   | 'status'
   | 'error'
-  | 'debug';
+  | 'debug'
+  | 'prompt_cancelled';
 
 export interface DaemonTranscriptBlockBase {
   id: string;
@@ -728,6 +732,15 @@ export interface DaemonPermissionTranscriptBlock
 export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'status' | 'error' | 'debug';
   text: string;
+  code?: string;
+  promptId?: string;
+  source?: 'turn_error';
+}
+
+export interface DaemonPromptCancelledTranscriptBlock
+  extends DaemonTranscriptBlockBase {
+  kind: 'prompt_cancelled';
+  reason?: string;
 }
 
 export type DaemonTranscriptBlock =
@@ -736,7 +749,8 @@ export type DaemonTranscriptBlock =
   | DaemonShellTranscriptBlock
   | DaemonUserShellTranscriptBlock
   | DaemonPermissionTranscriptBlock
-  | DaemonStatusTranscriptBlock;
+  | DaemonStatusTranscriptBlock
+  | DaemonPromptCancelledTranscriptBlock;
 
 /**
  * PR-E sidechannel state — workspace / session state mirror that tracks

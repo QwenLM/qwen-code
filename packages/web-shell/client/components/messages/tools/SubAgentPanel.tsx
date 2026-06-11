@@ -209,7 +209,9 @@ function SubAgentStream({ text }: { text: string }) {
       <pre
         ref={streamRef}
         className={
-          collapsed ? `${styles.stream} ${styles.streamCollapsed}` : styles.stream
+          collapsed
+            ? `${styles.stream} ${styles.streamCollapsed}`
+            : styles.stream
         }
       >
         {text}
