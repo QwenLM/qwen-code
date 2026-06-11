@@ -219,3 +219,64 @@ export async function loadLayeredPolicy(
   }
   return mergePolicies(workspace, user);
 }
+
+/** Result of {@link lintPolicyFile}: a daemon-free schema check of one file. */
+export interface PolicyLintResult {
+  ok: boolean;
+  /** Number of rules (valid files only). */
+  ruleCount?: number;
+  /**
+   * Rule id (or `[index]`) of each rule that uses the still-deferred
+   * `maxPerWindow` field — these downgrade to prompt at runtime (valid files).
+   */
+  deferred?: string[];
+  /** Human-readable reason (invalid files only). */
+  error?: string;
+}
+
+/**
+ * Validate a policy file's schema WITHOUT loading it into a running gateway —
+ * the `qwen-rc policy lint <file>` pre-flight check. Runs the SAME
+ * {@link loadPolicy} validator the boot path uses (one schema, no drift). Never
+ * throws: every failure is reported as `{ ok: false, error }`. A missing file is
+ * a lint FAILURE (not the loader's "absent → default" pass) — an explicit
+ * `lint <file>` target that does not exist is an error.
+ */
+export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return {
+      ok: false,
+      error:
+        code === 'ENOENT'
+          ? `file not found: ${path}`
+          : `cannot read ${path}: ${(err as Error).message}`,
+    };
+  }
+  let policy: Policy;
+  try {
+    policy = loadPolicy(text);
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+  const deferred = policy.rules
+    .map((r, i) => (r.maxPerWindow !== undefined ? (r.id ?? `[${i}]`) : null))
+    .filter((x): x is string => x !== null);
+  return { ok: true, ruleCount: policy.rules.length, deferred };
+}
+
+/** Render a {@link PolicyLintResult} as a one/two-line human summary. */
+export function formatPolicyLint(path: string, r: PolicyLintResult): string {
+  if (!r.ok) return `✖ ${path}: ${r.error}`;
+  const lines = [`✓ ${path}: valid (${r.ruleCount} rule(s))`];
+  if (r.deferred && r.deferred.length > 0) {
+    lines.push(
+      `  note: ${r.deferred.length} rule(s) use the still-deferred ` +
+        `maxPerWindow field (will downgrade to prompt): ${r.deferred.join(', ')}`,
+    );
+  }
+  return lines.join('\n');
+}
