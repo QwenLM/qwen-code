@@ -537,6 +537,12 @@ export interface ExtensionInstallMetadata {
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
+/**
+ * Per-message budget (chars) for the combined model-facing output of one
+ * batch of tool calls. When a batch's total output exceeds this, the largest
+ * results are offloaded to disk (with a recoverable pointer). `<= 0` disables.
+ */
+export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
 
 export class MCPServerConfig {
   constructor(
@@ -801,6 +807,7 @@ export interface ConfigParameters {
   skipLoopDetection?: boolean;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
+  toolOutputBatchBudget?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -1219,6 +1226,7 @@ export class Config {
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
+  private readonly toolOutputBatchBudget: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1414,6 +1422,8 @@ export class Config {
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputBatchBudget =
+      params.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
@@ -4013,6 +4023,14 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
+  }
+
+  getToolOutputBatchBudget(): number {
+    if (this.toolOutputBatchBudget <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    return this.toolOutputBatchBudget;
   }
 
   getOutputFormat(): OutputFormat {
