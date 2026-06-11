@@ -63,7 +63,7 @@ export function resolveOutputLanguage(
 /**
  * Returns the path to the LLM output language rule file (~/.qwen/output-language.md).
  */
-function getOutputLanguageFilePath(): string {
+export function getOutputLanguageFilePath(): string {
   return path.join(
     Storage.getGlobalQwenDir(),
     LLM_OUTPUT_LANGUAGE_RULE_FILENAME,
@@ -151,9 +151,16 @@ function readOutputLanguageFromFile(): string | null {
 
 /**
  * Writes the output language rule file with the given language.
+ *
+ * @param targetPath - When provided, write to this path instead of the
+ *   global default.  Callers should pass `config.getOutputLanguageFilePath()`
+ *   so the file that the session actually reads is the one being updated.
  */
-export function writeOutputLanguageFile(language: string): void {
-  const filePath = getOutputLanguageFilePath();
+export function writeOutputLanguageFile(
+  language: string,
+  targetPath?: string,
+): void {
+  const filePath = targetPath ?? getOutputLanguageFilePath();
   const content = generateOutputLanguageFileContent(language);
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
@@ -163,10 +170,38 @@ export function writeOutputLanguageFile(language: string): void {
 /**
  * Updates the LLM output language rule file based on the setting value.
  * Resolves 'auto' to the detected system language before writing.
+ *
+ * @param targetPath - Forwarded to {@link writeOutputLanguageFile}.
  */
-export function updateOutputLanguageFile(settingValue: string): void {
+export function updateOutputLanguageFile(
+  settingValue: string,
+  targetPath?: string,
+): void {
   const resolved = resolveOutputLanguage(settingValue);
-  writeOutputLanguageFile(resolved);
+  writeOutputLanguageFile(resolved, targetPath);
+}
+
+/**
+ * Writes the output-language file to the correct (config-bound) path and,
+ * when no path was known yet (first-time creation), registers the global
+ * default on the config so subsequent reads are consistent.
+ *
+ * This encapsulates the get-path → write → register-fallback sequence
+ * that was previously duplicated across acpAgent, languageCommand, and
+ * SettingsDialog.
+ */
+export function writeOutputLanguageAndRegisterPath(
+  settingValue: string,
+  config?: {
+    getOutputLanguageFilePath(): string | undefined;
+    setOutputLanguageFilePath(p: string): void;
+  } | null,
+): void {
+  const targetPath = config?.getOutputLanguageFilePath();
+  updateOutputLanguageFile(settingValue, targetPath);
+  if (!targetPath) {
+    config?.setOutputLanguageFilePath(getOutputLanguageFilePath());
+  }
 }
 
 /**

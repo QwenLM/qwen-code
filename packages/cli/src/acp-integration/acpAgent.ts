@@ -144,11 +144,6 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
-import { updateOutputLanguageFile ,
-  resolveOutputLanguage,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
-} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -157,6 +152,14 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
+import {
+  resolveOutputLanguage,
+  updateOutputLanguageFile,
+  getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+} from '../utils/languageUtils.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
@@ -5485,7 +5488,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        this.sessionOrThrow(sessionId);
+        const session = this.sessionOrThrow(sessionId);
 
         try {
           await setLanguageAsync(language);
@@ -5520,7 +5523,10 @@ class QwenAgent implements Agent {
 
           let fileWriteOk = false;
           try {
-            updateOutputLanguageFile(settingValue);
+            writeOutputLanguageAndRegisterPath(
+              settingValue,
+              session.getConfig(),
+            );
             fileWriteOk = true;
           } catch (err) {
             debugLogger.warn('Failed to write output-language.md:', err);
@@ -5539,10 +5545,28 @@ class QwenAgent implements Agent {
                 err,
               );
             }
+            const writtenPath =
+              session.getConfig().getOutputLanguageFilePath() ??
+              getOutputLanguageFilePath();
             const allSessions = [...this.sessions.values()];
             const results = await Promise.allSettled(
               allSessions.map(async (s) => {
                 const cfg = s.getConfig();
+                let sessionPath: string | undefined;
+                try {
+                  sessionPath = cfg.getOutputLanguageFilePath();
+                  if (sessionPath && sessionPath !== writtenPath) {
+                    updateOutputLanguageFile(settingValue, sessionPath);
+                  }
+                  if (!sessionPath) {
+                    writeOutputLanguageAndRegisterPath(settingValue, cfg);
+                  }
+                } catch (err) {
+                  debugLogger.warn(
+                    `Failed to write output-language.md for session ${s.getId()} (path=${sessionPath ?? 'global-default'}):`,
+                    err,
+                  );
+                }
                 await cfg.refreshHierarchicalMemory();
                 await cfg.getGeminiClient()?.refreshSystemInstruction();
               }),

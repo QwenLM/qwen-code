@@ -58,6 +58,7 @@ import type {
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SetSessionLanguageResult,
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -1696,6 +1697,33 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/model');
         }
         return (await res.json()) as SetModelResult;
+      },
+    );
+  }
+
+  async setSessionLanguage(
+    sessionId: string,
+    language: string,
+    opts?: { syncOutputLanguage?: boolean; clientId?: string },
+  ): Promise<SetSessionLanguageResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/language`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          language,
+          syncOutputLanguage: opts?.syncOutputLanguage ?? false,
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/language');
+        }
+        return (await res.json()) as SetSessionLanguageResult;
       },
     );
   }

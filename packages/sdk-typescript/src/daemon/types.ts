@@ -965,6 +965,13 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Returned from `POST /session/:id/language`. */
+export interface SetSessionLanguageResult {
+  language: string;
+  outputLanguage: string | null;
+  refreshed: boolean;
+}
+
 /**
  * Closed enumeration of session approval modes the
  * daemon exposes via `POST /session/:id/approval-mode`. Mirrors core's

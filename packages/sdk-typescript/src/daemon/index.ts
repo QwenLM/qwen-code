@@ -398,5 +398,6 @@ export type {
   PromptResult,
   PromptTextContent,
   SetModelResult,
+  SetSessionLanguageResult,
   SessionMetadataResult,
 } from './types.js';
