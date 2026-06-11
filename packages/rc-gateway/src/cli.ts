@@ -24,6 +24,8 @@ import {
   lintPolicyFile,
   formatPolicyLint,
 } from './policy/loader.js';
+import { explainPolicy } from './policy/evaluator.js';
+import { parseExplainArgs, formatExplanation } from './policy/explain.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
 import { QuotaStore, FileQuotaWal } from './policy/quotas.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
@@ -183,6 +185,41 @@ if (process.argv[2] === 'serve') {
     console.log(formatPolicyLint(file, result));
     process.exit(result.ok ? 0 : 1);
   });
+} else if (process.argv[2] === 'policy' && process.argv[3] === 'explain') {
+  // `qwen-rc policy explain <toolName> [--args=…] [--path=…] [--scope=…]
+  // [--tag=…]` — daemon-free dry-run of the layered policy (user
+  // ~/.qwen/rc/policy.yaml + <cwd>/.qwen/policy.yaml). Read-only INSPECTOR:
+  // exit 0 on success, 2 on a missing tool, 1 when the policy is malformed (it
+  // cannot be explained — surface the loader error rather than pretend). The
+  // bug-prone logic is in the pure, unit-tested parseExplainArgs/explainPolicy/
+  // formatExplanation; this is glue. No quota oracle (no live store) → a
+  // maxPerWindow rule shows as prompt, as formatExplanation's caveat notes.
+  const { tool, ctx } = parseExplainArgs(process.argv.slice(4));
+  if (!tool) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'usage: qwen-rc policy explain <toolName> [--args=…] [--path=…] [--scope=…] [--tag=…]',
+    );
+    process.exit(2);
+  }
+  loadLayeredPolicy(
+    join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+    process.cwd(),
+    // eslint-disable-next-line no-console
+    (msg) => console.warn(msg),
+  )
+    .then((policy) => {
+      // eslint-disable-next-line no-console
+      console.log(`policy explain: tool=${tool}`);
+      // eslint-disable-next-line no-console
+      console.log(formatExplanation(explainPolicy(policy, ctx)));
+      process.exit(0);
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error(`cannot explain: ${(err as Error).message}`);
+      process.exit(1);
+    });
 } else if (process.argv[2] === 'routing' && process.argv[3] === 'rules') {
   // `qwen-rc routing rules [--resolved]` — print the effective routing ruleset.
   // Read-only INSPECTOR (always exit 0): a malformed file fail-opens (logged +
