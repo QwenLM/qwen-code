@@ -622,8 +622,10 @@ export function mountAcpHttp(
                 if (binding && !binding.stream) {
                   const ac = new AbortController();
                   conn.attachSessionStream(sid, conn.connStream!, ac);
+                  const myAbort = ac;
                   const cleanupSession = () => {
-                    if (conn.sessions.get(sid)?.stream === conn.connStream) {
+                    const b = conn.sessions.get(sid);
+                    if (b?.stream === conn.connStream && b?.abort === myAbort) {
                       conn.closeSessionStream(sid);
                     }
                   };

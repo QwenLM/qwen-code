@@ -257,7 +257,9 @@ export class AcpConnection {
     // reconnecting, not leaving — the prompt must survive). CONTRACT: that
     // identity guard and this ordering must stay in lockstep.
     binding.stream = stream;
-    if (prevStream && prevStream !== stream) prevStream.close();
+    if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
+      prevStream.close();
+    }
     for (const frame of binding.buffer.splice(0)) void stream.send(frame);
     return binding;
   }
