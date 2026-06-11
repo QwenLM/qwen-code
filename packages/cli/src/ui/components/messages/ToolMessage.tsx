@@ -669,10 +669,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
-  const { compactMode } = useCompactMode();
 
   const isCompleted = status === ToolCallStatus.Success;
-  const shouldCollapse = compactMode && isCompleted && !forceShowResult;
+  const shouldCollapse = isCompleted && !forceShowResult;
   const effectiveDisplayRenderer = shouldCollapse
     ? { type: 'none' as const }
     : displayRenderer;
@@ -782,7 +781,6 @@ const ToolInfo: React.FC<ToolInfo> = ({
   status,
   emphasis,
 }) => {
-  const { compactMode } = useCompactMode();
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
@@ -797,7 +795,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = compactMode && status === ToolCallStatus.Success;
+  const isDim = status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
       <Text
