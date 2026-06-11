@@ -398,7 +398,7 @@ describe('commandUtils', () => {
         });
       });
 
-      it('should emit error when xclip or xsel fail with stderr output (command installed)', async () => {
+      it('should try OSC 52 when xclip/xsel fail but no TTY is available', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
@@ -431,6 +431,13 @@ describe('commandUtils', () => {
           return child as unknown as ReturnType<typeof spawn>;
         });
 
+        // No TTY available — OSC 52 will fail
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
         const xclipErrorMsg = `'xclip' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
@@ -451,6 +458,69 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
+      });
+
+      it('should succeed with OSC 52 when xclip/xsel fail but TTY is available', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+        const errorMsg = "Error: Can't open display:";
+        const exitCode = 1;
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            // e.g., cannot connect to X server
+            if (callCount === 0) {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+              callCount++;
+            } else {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available — OSC 52 should succeed
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        // Should not throw — OSC 52 succeeds
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain(
+          Buffer.from(testText, 'utf-8').toString('base64'),
+        );
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
     });
 
