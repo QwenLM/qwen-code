@@ -1504,7 +1504,6 @@ export const useGeminiStream = (
               // buffered reasoning so the full thought is captured, then commit
               // it to history (collapsed) above the answer. After that the
               // condition is false, so normal content batching resumes.
-              setThought((prev) => (prev ? null : prev));
               if (
                 pendingThoughtItemRef.current ||
                 bufferedEvents.some((e) => e.kind === 'thought')
@@ -1513,6 +1512,7 @@ export const useGeminiStream = (
                 commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
               }
+              setThought((prev) => (prev ? null : prev));
               bufferedEvents.push({ kind: 'content', value: event.value });
               scheduleBufferedStreamFlush();
               break;
@@ -1520,10 +1520,10 @@ export const useGeminiStream = (
               // Thinking is done once a tool call is issued; flush buffered
               // reasoning then commit it to history (collapsed) above the tool
               // output.
-              setThought((prev) => (prev ? null : prev));
               flushBufferedStreamEvents();
               commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
+              setThought((prev) => (prev ? null : prev));
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
