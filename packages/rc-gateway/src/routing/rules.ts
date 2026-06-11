@@ -273,6 +273,33 @@ async function loadOneFailOpen(
 }
 
 /**
+ * Load both routing layers FAIL-OPEN: the user file first, then (when a workspace
+ * cwd is given) the workspace override `<workspaceCwd>/.qwen/routing.yaml`. Each
+ * is independently caught (a malformed file → logged + null). Returns the two
+ * configs plus the resolved workspace file path (undefined when no cwd). Shared
+ * by {@link loadLayeredRoutingMatcher} (runtime) and {@link loadResolvedRoutingRules}
+ * (the `routing rules` inspector) so they never drift. Never throws.
+ */
+async function loadBothRoutingLayers(
+  userPath: string,
+  workspaceCwd: string | undefined,
+  warn: (msg: string) => void,
+): Promise<{
+  workspace: RoutingConfig | null;
+  user: RoutingConfig | null;
+  workspacePath: string | undefined;
+}> {
+  const user = await loadOneFailOpen(userPath, 'routing.yaml', warn);
+  const workspacePath = workspaceCwd
+    ? join(workspaceCwd, '.qwen', 'routing.yaml')
+    : undefined;
+  const workspace = workspacePath
+    ? await loadOneFailOpen(workspacePath, 'workspace routing.yaml', warn)
+    : null;
+  return { workspace, user, workspacePath };
+}
+
+/**
  * Load the user-level routing file and, when a workspace cwd is given, the
  * workspace override `<workspaceCwd>/.qwen/routing.yaml`, merge them (workspace
  * rules PREPENDED — design D1), and compile a single {@link RoutingMatcher}.
@@ -288,17 +315,78 @@ export async function loadLayeredRoutingMatcher(
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
 ): Promise<{ matcher: RoutingMatcher | undefined; ruleCount: number }> {
-  const user = await loadOneFailOpen(userPath, 'routing.yaml', warn);
-  const workspace = workspaceCwd
-    ? await loadOneFailOpen(
-        join(workspaceCwd, '.qwen', 'routing.yaml'),
-        'workspace routing.yaml',
-        warn,
-      )
-    : null;
+  const { workspace, user } = await loadBothRoutingLayers(
+    userPath,
+    workspaceCwd,
+    warn,
+  );
   const merged = mergeRoutingConfigs(workspace, user);
   if (!merged) return { matcher: undefined, ruleCount: 0 };
   return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
+}
+
+/** One rule of the resolved (merged) routing ruleset, with its source file path. */
+export interface ResolvedRoutingRule {
+  /** The file the rule was loaded from (workspace or user routing.yaml path). */
+  source: string;
+  rule: RoutingRule;
+}
+
+/**
+ * The effective (merged) routing ruleset for the `routing rules` inspector:
+ * workspace rules FIRST (each tagged with the workspace file path), then user
+ * rules (tagged with the user file path) — mirroring cycle-36's prepend and the
+ * spec's "workspace first" ordering. `workspaceCwd` undefined → user rules only.
+ * Per-file FAIL-OPEN (a malformed layer is logged + omitted); never throws.
+ */
+export async function loadResolvedRoutingRules(
+  userPath: string,
+  workspaceCwd: string | undefined,
+  warn: (msg: string) => void = () => {},
+): Promise<ResolvedRoutingRule[]> {
+  const { workspace, user, workspacePath } = await loadBothRoutingLayers(
+    userPath,
+    workspaceCwd,
+    warn,
+  );
+  const out: ResolvedRoutingRule[] = [];
+  if (workspace && workspacePath) {
+    for (const rule of workspace.rules)
+      out.push({ source: workspacePath, rule });
+  }
+  if (user) {
+    for (const rule of user.rules) out.push({ source: userPath, rule });
+  }
+  return out;
+}
+
+/** Render a `kind`/`sessionTag`/`scopeIn`/`tokenIdsIn` spec for display. */
+function fmtSpec(spec: string | string[]): string {
+  return Array.isArray(spec) ? `[${spec.join(',')}]` : spec;
+}
+
+/**
+ * Render the resolved ruleset as one line per rule (source path, id, a compact
+ * match summary — `any` when the match is empty — and the drop flag). An empty
+ * ruleset renders `(no routing rules)`. Pure, no I/O.
+ */
+export function formatResolvedRouting(rules: ResolvedRoutingRule[]): string {
+  if (rules.length === 0) return '(no routing rules)';
+  return rules
+    .map(({ source, rule }) => {
+      const id = rule.id || '<unnamed>';
+      const m = rule.match;
+      const parts: string[] = [];
+      if (m.kind !== undefined) parts.push(`kind=${fmtSpec(m.kind)}`);
+      if (m.sessionTag !== undefined)
+        parts.push(`sessionTag=${fmtSpec(m.sessionTag)}`);
+      if (m.scopeIn !== undefined) parts.push(`scopeIn=${fmtSpec(m.scopeIn)}`);
+      if (m.tokenIdsIn !== undefined)
+        parts.push(`tokenIdsIn=${fmtSpec(m.tokenIdsIn)}`);
+      const match = parts.length > 0 ? parts.join(' ') : 'any';
+      return `${source}  ${id}  match: ${match}  drop:${rule.route.drop === true}`;
+    })
+    .join('\n');
 }
 
 /** A present `kind` spec matches by equality (string) or membership (list). */
