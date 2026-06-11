@@ -2318,7 +2318,12 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
-      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
 
       act(() => {
@@ -2384,7 +2389,12 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
-      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
 
       act(() => {
@@ -4300,7 +4310,12 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(result.current.thought?.description).toBe('thinking more');
       });
-      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
 
       await act(async () => {
         releaseStream();
@@ -4361,7 +4376,12 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
-      expect(result.current.pendingHistoryItems).toEqual([]);
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({
+          type: 'gemini_thought',
+          durationMs: expect.any(Number),
+        }),
+      ]);
 
       await act(async () => {
         releaseStream();

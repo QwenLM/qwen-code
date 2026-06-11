@@ -1511,6 +1511,7 @@ export const useGeminiStream = (
               ) {
                 flushBufferedStreamEvents();
                 commitPendingThought(userMessageTimestamp);
+                thoughtBuffer = '';
               }
               bufferedEvents.push({ kind: 'content', value: event.value });
               scheduleBufferedStreamFlush();
@@ -1522,6 +1523,7 @@ export const useGeminiStream = (
               setThought((prev) => (prev ? null : prev));
               flushBufferedStreamEvents();
               commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
@@ -1603,11 +1605,10 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                if (pendingThoughtItemRef.current) {
-                  setPendingThoughtItem(null);
-                }
-                geminiMessageBuffer = '';
+                commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
+                setThought(null);
+                geminiMessageBuffer = '';
               } else {
                 flushBufferedStreamEvents();
               }
@@ -1664,6 +1665,7 @@ export const useGeminiStream = (
         }
       } finally {
         flushBufferedStreamEvents();
+        commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
@@ -1691,7 +1693,6 @@ export const useGeminiStream = (
       pendingHistoryItemRef,
       pendingThoughtItemRef,
       setPendingHistoryItem,
-      setPendingThoughtItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
       handleActiveGoalEvent,

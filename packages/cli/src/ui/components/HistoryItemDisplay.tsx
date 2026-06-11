@@ -185,7 +185,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ThinkMessage
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
-          expanded={compactMode}
+          expanded={false}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
@@ -197,7 +197,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ThinkMessageContent
           text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
-          expanded={compactMode}
+          expanded={false}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
