@@ -217,7 +217,8 @@ export async function listWorkspaceSessionsForResponse(
   }
   const isFirstPage = numericCursor === undefined;
 
-  const persisted = await new SessionService(workspaceCwd).listSessions({
+  const sessionService = new SessionService(workspaceCwd);
+  const persisted = await sessionService.listSessions({
     cursor: numericCursor,
     size: pageSize,
   });
@@ -238,33 +239,39 @@ export async function listWorkspaceSessionsForResponse(
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
-    if (!existing && !isFirstPage) continue;
-    bySessionId.set(live.sessionId, {
-      ...existing,
-      ...live,
-      createdAt: existing?.createdAt ?? live.createdAt,
-      title: live.title ?? existing?.title,
-      updatedAt: live.updatedAt ?? existing?.updatedAt,
-      clientCount: live.clientCount,
-      hasActivePrompt: live.hasActivePrompt,
-    });
+    if (existing) {
+      bySessionId.set(live.sessionId, {
+        ...existing,
+        ...live,
+        createdAt: existing.createdAt,
+        title: live.title ?? existing.title,
+        updatedAt: live.updatedAt ?? existing.updatedAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    } else if (
+      isFirstPage &&
+      !(await sessionService.sessionExists(live.sessionId))
+    ) {
+      bySessionId.set(live.sessionId, {
+        ...live,
+        createdAt: live.createdAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    }
   }
 
-  const sorted = [...bySessionId.values()].sort((a, b) => {
+  const sessions = [...bySessionId.values()].sort((a, b) => {
     const aTime = Date.parse(a.updatedAt ?? a.createdAt);
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
-  const sessions = sorted.slice(0, pageSize);
-  const hasExcess = sorted.length > pageSize;
 
-  let nextCursor: string | undefined;
-  if (hasExcess) {
-    const last = sessions[sessions.length - 1];
-    nextCursor = String(Date.parse(last?.updatedAt ?? last?.createdAt));
-  } else if (persisted.nextCursor != null) {
-    nextCursor = String(persisted.nextCursor);
-  }
+  const nextCursor =
+    persisted.nextCursor != null
+      ? String(persisted.nextCursor)
+      : undefined;
 
   return { sessions, nextCursor };
 }
