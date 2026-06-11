@@ -2071,8 +2071,15 @@ export const useGeminiStream = (
           submitPromptOnCompleteRef.current = null;
           currentAutoImproveLoopIdRef.current = null;
           if (onComplete) {
-            void onComplete({ errored: true }).catch((err: unknown) => {
-              debugLogger.warn('submitPrompt onComplete (errored) threw:', err);
+            // An AbortError reaching this catch with the ref still set (e.g. a
+            // process-shutdown abort, vs. an interactive cancel which clears
+            // the ref first) is a cancellation, not a failure — record it as
+            // cancelled, consistent with the ACP / non-interactive paths.
+            const cancelled = isNodeError(error) && error.name === 'AbortError';
+            void onComplete(
+              cancelled ? { cancelled: true } : { errored: true },
+            ).catch((err: unknown) => {
+              debugLogger.warn('submitPrompt onComplete threw:', err);
             });
           }
           if (error instanceof UnauthorizedError) {
