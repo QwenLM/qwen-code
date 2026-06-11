@@ -463,12 +463,12 @@ jobs:
             DETAIL='The run failed before producing a verified fix.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi
+          gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
           gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
 
           What the agent found, in case it helps a human contributor:
 
-          ${DETAIL}"
-          gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
+          ${DETAIL}" || true
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
