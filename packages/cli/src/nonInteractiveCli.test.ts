@@ -99,7 +99,6 @@ describe('runNonInteractive', () => {
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
   };
-  let mockGetDebugResponses: Mock;
 
   beforeEach(async () => {
     // Reset module-level state from any prior test in this file. Without
@@ -149,8 +148,6 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
-    mockGetDebugResponses = vi.fn(() => []);
-
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
@@ -161,9 +158,7 @@ describe('runNonInteractive', () => {
         recordMessageTokens: vi.fn(),
         recordToolCalls: vi.fn(),
       })),
-      getChat: vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-      })),
+      getChat: vi.fn(() => ({})),
     };
 
     let currentModel = 'test-model';
@@ -1821,14 +1816,6 @@ describe('runNonInteractive', () => {
       }
       return true;
     });
-
-    const usageMetadata = {
-      promptTokenCount: 11,
-      candidatesTokenCount: 5,
-      totalTokenCount: 16,
-      cachedContentTokenCount: 3,
-    };
-    mockGetDebugResponses.mockReturnValue([{ usageMetadata }]);
 
     const nowSpy = vi.spyOn(Date, 'now');
     let current = 0;
