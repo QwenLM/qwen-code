@@ -1719,8 +1719,10 @@ export class AcpDispatcher {
                 ) {
                   closedIds.push(sid);
                 } else {
+                  const safeSessionId = logSafe(sid.slice(0, 8));
+                  const safeMessage = logSafe(msg);
                   writeStderrLine(
-                    `qwen serve: /acp sessions/delete closeSession(${sid.slice(0, 8)}) failed: ${msg}`,
+                    `qwen serve: /acp sessions/delete closeSession(${safeSessionId}) failed: ${safeMessage}`,
                   );
                   closeErrors.push({ sessionId: sid, error: msg });
                 }
@@ -1730,8 +1732,10 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace);
           const removeResult = await svc.removeSessions(closedIds);
           for (const e of removeResult.errors) {
+            const safeSessionId = logSafe(e.sessionId.slice(0, 8));
+            const safeMessage = logSafe(e.error.message);
             writeStderrLine(
-              `qwen serve: /acp sessions/delete removeSessions(${e.sessionId.slice(0, 8)}) failed: ${e.error.message}`,
+              `qwen serve: /acp sessions/delete removeSessions(${safeSessionId}) failed: ${safeMessage}`,
             );
           }
           this.replyConn(conn, id, {

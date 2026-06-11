@@ -1499,10 +1499,14 @@ export class DaemonClient {
    */
   async restartMcpServer(
     serverName: string,
-    opts?: { clientId?: string; timeoutMs?: number },
+    opts?: { clientId?: string; entryIndex?: number | '*'; timeoutMs?: number },
   ): Promise<DaemonMcpRestartResult> {
+    const query =
+      opts?.entryIndex === undefined
+        ? ''
+        : `?entryIndex=${encodeURIComponent(String(opts.entryIndex))}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart${query}`,
       {
         method: 'POST',
         headers: this.headers(

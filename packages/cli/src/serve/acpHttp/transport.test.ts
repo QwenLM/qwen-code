@@ -85,6 +85,7 @@ class FakeBridge {
   lastSetModel: unknown;
   lastSpawnScope: string | undefined;
   closeShouldThrow = false;
+  closeError: Error | undefined;
   killed: string[] = [];
   cancelled: string[] = [];
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
@@ -207,6 +208,7 @@ class FakeBridge {
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
     if (this.closeGate) await this.closeGate;
+    if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
   async detachClient(sessionId: string, clientId?: string) {
@@ -1919,6 +1921,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr close errors', async () => {
+      bridge.closeError = new Error('close\nFAILED\r\x1b[31m');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 67,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: ['sess\nFAKE\r\x1b[31m'] },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { removed: [], notFound: [] },
+      });
+      const deleteLog = stdioMocks.writeStderrLine.mock.calls
+        .map(([line]) => line)
+        .find((line) => line.includes('sessions/delete'));
+      expect(deleteLog).toContain(
+        'closeSession(sess FAK) failed: close FAILED  [31m',
+      );
+      expect(deleteLog).not.toContain('\n');
+      expect(deleteLog).not.toContain('\r');
+      expect(deleteLog).not.toContain('\x1b');
     });
   });
 

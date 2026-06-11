@@ -1701,6 +1701,29 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('forwards entryIndex and returns pool entry results', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          entries: [
+            { entryIndex: 3, restarted: true, durationMs: 42 },
+            { entryIndex: 4, restarted: false, reason: 'in_flight' },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs', { entryIndex: 3 });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/docs/restart?entryIndex=3',
+      );
+      expect('entries' in result).toBe(true);
+      if (!('entries' in result)) throw new Error('expected entry results');
+      expect(result.entries).toEqual([
+        { entryIndex: 3, restarted: true, durationMs: 42 },
+        { entryIndex: 4, restarted: false, reason: 'in_flight' },
+      ]);
+    });
+
     it('throws on 404 when the daemon reports an unknown server', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'no such server' }),
