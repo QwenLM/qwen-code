@@ -594,18 +594,19 @@ function processContent(
         requestContext,
       );
       if (toolMessage) {
-        // Opt-in only (ContentGeneratorConfig.splitToolMedia). OpenAI spec
-        // only permits string / text-part content on `role: "tool"` messages.
-        // Strict OpenAI-compatible servers (e.g. LM Studio) reject tool
-        // messages containing image_url / input_audio / video_url / file
-        // parts with HTTP 400 "Invalid 'messages' in payload". When the flag
-        // is set, strip non-text media from this tool message and accumulate
-        // it; the combined media is emitted as a single follow-up user
-        // message after the parts loop completes — preserving the
-        // "all tool responses contiguous" requirement for parallel tool
-        // calls. Default (flag false) preserves prior behavior: media is
-        // embedded in the tool message and permissive providers continue
-        // to receive it that way. See #3616.
+        // Controlled by ContentGeneratorConfig.splitToolMedia (default true;
+        // resolved in pipeline.ts). OpenAI spec only permits string / text-part
+        // content on `role: "tool"` messages. Strict OpenAI-compatible servers
+        // (e.g. doubao / new-api / LM Studio) silently drop or reject tool
+        // messages containing image_url / input_audio / video_url / file parts
+        // (HTTP 400 "Invalid 'messages' in payload"), so an image read via
+        // read_file never reaches the model. When the flag is set, strip
+        // non-text media from this tool message and accumulate it; the combined
+        // media is emitted as a single follow-up user message after the parts
+        // loop completes — preserving the "all tool responses contiguous"
+        // requirement for parallel tool calls. Opt out (flag false) to restore
+        // the legacy behavior: media embedded in the tool message, which only
+        // permissive providers accept. See #4876, #3616.
         if (
           requestContext.splitToolMedia &&
           Array.isArray(toolMessage.content)

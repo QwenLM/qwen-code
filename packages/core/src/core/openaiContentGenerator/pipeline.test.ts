@@ -301,6 +301,50 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should default splitToolMedia to true when neither provider override nor content generator config sets it (issue #4876)', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      // Neither the provider nor the content generator config sets
+      // splitToolMedia — it must default to true so tool-returned images are
+      // moved out of the spec-violating `role: "tool"` message (#4876).
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({});
+      mockContentGeneratorConfig.splitToolMedia = undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: true,
+        }),
+      );
+    });
+
     it('should fall back to configured model when request.model is empty', async () => {
       // Arrange — empty model string is falsy, should fall back to contentGeneratorConfig.model
       const request: GenerateContentParameters = {
