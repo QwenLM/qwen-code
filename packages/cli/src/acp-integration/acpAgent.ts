@@ -6601,7 +6601,11 @@ class QwenAgent implements Agent {
               (changed.has('modelProviders') || envChanged) &&
               authType
             ) {
-              await config.refreshAuth(authType);
+              try {
+                await config.refreshAuth(authType);
+              } catch {
+                // Auth refresh failure — continue with other refreshes
+              }
             }
 
             if (changed.has('tools')) {
@@ -6632,6 +6636,10 @@ class QwenAgent implements Agent {
         );
         for (let i = 0; i < results.length; i++) {
           if (results[i]!.status === 'rejected') {
+            const reason = (results[i] as PromiseRejectedResult).reason;
+            debugLogger.warn(
+              `Session ${sessions[i]![0]} reload failed: ${reason}`,
+            );
             skipped.push(sessions[i]![0]);
           }
         }
