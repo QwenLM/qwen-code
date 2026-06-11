@@ -39,7 +39,7 @@ export const MessageItem = memo(function MessageItem({
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
-      return <UserMessage content={message.content} />;
+      return <UserMessage content={message.content} images={message.images} />;
     case 'assistant':
       return (
         <AssistantMessage
@@ -120,7 +120,11 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
     case 'user':
-      return next.role === 'user' && prev.content === next.content;
+      return (
+        next.role === 'user' &&
+        prev.content === next.content &&
+        stableImagesEqual(prev.images, next.images)
+      );
     case 'assistant':
       return (
         next.role === 'assistant' &&
@@ -222,6 +226,17 @@ function areToolListsEqual(
 }
 
 const jsonCache = new WeakMap<object, string>();
+
+function stableImagesEqual(
+  a: Array<{ data: string; mimeType: string }> | undefined,
+  b: Array<{ data: string; mimeType: string }> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every(
+    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+  );
+}
 
 function stableJson(value: unknown): string {
   if (value === undefined) return '';

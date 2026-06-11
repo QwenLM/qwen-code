@@ -64,6 +64,7 @@ export interface DaemonUserMessage {
   id: string;
   role: 'user';
   content: string;
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 export interface DaemonAssistantMessage {

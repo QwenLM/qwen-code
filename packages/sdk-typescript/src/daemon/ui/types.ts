@@ -17,6 +17,7 @@ export const DAEMON_PLAN_TOOL_CALL_ID = 'daemon-plan';
 export type DaemonUiEventType =
   // Chat-stream events (Stage 1)
   | 'user.text.delta'
+  | 'user.image.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -84,6 +85,12 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+}
+
+export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
+  type: 'user.image.delta';
+  data: string;
+  mimeType: string;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -442,6 +449,7 @@ export type DaemonUiAuthDeviceFlowEvent =
 export type DaemonUiEvent =
   // Chat-stream events
   | DaemonUiTextEvent
+  | DaemonUiUserImageEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiToolUpdateEvent
@@ -660,6 +668,8 @@ export interface DaemonTranscriptBlockBase {
 export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'user' | 'assistant' | 'thought';
   text: string;
+  /** Images attached to this user message (base64 data URIs). */
+  images?: Array<{ data: string; mimeType: string }>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -840,7 +850,10 @@ export interface DaemonTranscriptStore {
   getSnapshot(): DaemonTranscriptState;
   subscribe(listener: () => void): () => void;
   dispatch(event: DaemonUiEvent | DaemonUiEvent[]): void;
-  appendLocalUserMessage(text: string): void;
+  appendLocalUserMessage(
+    text: string,
+    images?: Array<{ data: string; mimeType: string }>,
+  ): void;
   reset(seed?: Partial<DaemonTranscriptState>): void;
   /**
    * Clear the `awaitingResync` latch that gets set when the daemon emits
