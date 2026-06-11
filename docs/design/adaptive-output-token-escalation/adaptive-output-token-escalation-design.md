@@ -1,3 +1,7 @@
+---
+description: "Optimize Qwen Code output tokens with Adaptive Escalation. Reduce GPU costs by 4x using low default + escalation strategy for smarter token management."
+---
+
 # Adaptive Output Token Escalation Design
 
 > Reduces GPU slot over-reservation by ~4x through a "low default + escalate on truncation" strategy for output tokens, with multi-turn recovery for responses that exceed even the escalated limit.

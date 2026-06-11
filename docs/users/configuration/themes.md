@@ -1,3 +1,7 @@
+---
+description: "Personalize Qwen Code with built-in themes. Choose dark or light color schemes, switch with /theme, or create your own custom theme."
+---
+
 # Themes
 
 Qwen Code supports a variety of themes to customize its color scheme and appearance. You can change the theme to suit your preferences via the `/theme` command or `"theme":` configuration setting.

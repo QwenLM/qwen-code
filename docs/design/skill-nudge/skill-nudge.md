@@ -1,3 +1,7 @@
+---
+description: "Qwen Code AutoSkill design. Automatically extract reusable procedural skills from tool-heavy coding sessions for project-level reuse."
+---
+
 # AutoSkill：自动技能提炼系统设计文档
 
 ## 概述

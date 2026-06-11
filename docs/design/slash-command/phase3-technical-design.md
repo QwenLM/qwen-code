@@ -1,3 +1,7 @@
+---
+description: "Qwen Code slash command Phase 3 technical design. Improve completion UI, help panels, recent command ranking, and ACP metadata."
+---
+
 # Phase 3 技术设计文档：体验对齐
 
 ## 1. 设计目标与约束

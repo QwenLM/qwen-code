@@ -1,3 +1,7 @@
+---
+description: "Configure multiple AI model providers in Qwen Code. Switch between OpenAI, Anthropic, Gemini, and more with the /model command."
+---
+
 # Model Providers
 
 Qwen Code allows you to configure multiple model providers through the `modelProviders` setting in your `settings.json`. This enables you to switch between different AI models and providers using the `/model` command.

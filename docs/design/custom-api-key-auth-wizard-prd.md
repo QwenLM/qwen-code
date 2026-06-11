@@ -1,3 +1,7 @@
+---
+description: "Qwen Code custom API key auth wizard PRD. Design an in-terminal setup flow for custom OpenAI, Anthropic, and Gemini-compatible providers."
+---
+
 # Custom API Key Auth Wizard PRD
 
 ## Summary

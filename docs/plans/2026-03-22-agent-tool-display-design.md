@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Agent Tool Display implementation plan. Build dedicated VSCode/web UI for subagent progress tracking and failure visualization."
+---
+
 # Agent Tool Display Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

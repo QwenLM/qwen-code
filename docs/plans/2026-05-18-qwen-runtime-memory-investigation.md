@@ -1,3 +1,7 @@
+---
+description: "Plan Qwen Code runtime memory investigation with repeatable benchmarks, diagnostics, and optimization directions."
+---
+
 # Qwen Code Runtime Memory Investigation Plan
 
 Date: 2026-05-18

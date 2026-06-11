@@ -1,3 +1,7 @@
+---
+description: "Qwen Code LLM request timing telemetry design. Capture TTFT, setup time, sampling duration, and retry visibility for slow request analysis."
+---
+
 # LLM Request Timing Decomposition Design (P3 Phase 4)
 
 > Issue #3731 — Phase 4 of hierarchical session tracing. Adds time-to-first-token, request-setup duration, sampling duration, and per-attempt retry telemetry to the `qwen-code.llm_request` span so operators can answer "why was this LLM call slow?" without guessing.

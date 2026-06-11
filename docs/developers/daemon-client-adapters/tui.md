@@ -1,3 +1,7 @@
+---
+description: "Design an experimental TUI daemon adapter for Qwen Code that routes terminal sessions through qwen serve."
+---
+
 # TUI Daemon Adapter Draft
 
 ## Goal

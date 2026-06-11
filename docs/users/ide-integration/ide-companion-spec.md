@@ -1,3 +1,7 @@
+---
+description: "Build an IDE companion plugin for Qwen Code. Learn the MCP transport, lock file discovery, and workspace validation contract."
+---
+
 # Qwen Code Companion Plugin: Interface Specification
 
 > Last Updated: September 15, 2025

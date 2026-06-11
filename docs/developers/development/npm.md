@@ -1,3 +1,7 @@
+---
+description: "Qwen Code npm package structure. Understand @qwen-code/qwen-code and @qwen-code/qwen-code-core packages for development and distribution."
+---
+
 # Package Overview
 
 This monorepo contains two main packages: `@qwen-code/qwen-code` and `@qwen-code/qwen-code-core`.

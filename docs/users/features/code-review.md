@@ -1,3 +1,7 @@
+---
+description: "Review code changes with Qwen Code using /review. Check correctness, security, performance, and code quality in seconds — not hours."
+---
+
 # Code Review
 
 > Review code changes for correctness, security, performance, and code quality using `/review`.

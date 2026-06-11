@@ -1,3 +1,7 @@
+---
+description: "Run multiple AI models on the same task with Qwen Code Agent Arena. Compare results side-by-side in isolated worktrees and pick the best solution."
+---
+
 # Agent Arena
 
 > Dispatch multiple AI models simultaneously to execute the same task, compare their solutions side-by-side, and select the best result to apply to your workspace.

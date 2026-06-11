@@ -1,3 +1,7 @@
+---
+description: "Qwen Code subagent trace tree design. Isolate foreground, forked, and background subagent spans for clearer OpenTelemetry traces."
+---
+
 # Subagent Trace Tree Design (P3 Phase 3)
 
 > Issue #3731 — Phase 3 of hierarchical session tracing. Adds a `qwen-code.subagent` span so subagent invocations get isolated, queryable trace structure instead of interleaving silently under the parent `qwen-code.interaction` span.

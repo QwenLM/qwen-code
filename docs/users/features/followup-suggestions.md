@@ -1,3 +1,7 @@
+---
+description: "Let Qwen Code predict your next command with Followup Suggestions. See AI-generated ghost text and press Tab to accept — code faster with less typing."
+---
+
 # Followup Suggestions
 
 Qwen Code can predict what you want to type next and show it as ghost text in the input area. This feature uses an LLM call to analyze the conversation context and generate a natural next step suggestion.

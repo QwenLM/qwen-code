@@ -1,3 +1,7 @@
+---
+description: "Exclude files from Qwen Code with .qwenignore. Keep sensitive data, build artifacts, and irrelevant files out of your AI coding context."
+---
+
 # Ignoring Files
 
 This document provides an overview of the Qwen Ignore (`.qwenignore`) feature of Qwen Code.

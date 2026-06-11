@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Fork Subagent design. Run parallel tasks with shared context and prompt cache for cost-efficient AI coding workflows."
+---
+
 # Fork Subagent Design
 
 > Implicit fork subagent that inherits the parent's full conversation context and shares prompt cache for cost-efficient parallel task execution.
