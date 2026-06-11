@@ -66,6 +66,15 @@ export interface A2uiActionResult {
   fallback: string;
 }
 
+export interface A2uiToolResult {
+  isError?: boolean;
+  content?: Array<{
+    type: string;
+    text?: string;
+    resource?: { mimeType?: string; text?: string };
+  }>;
+}
+
 interface RegisterA2uiActionRoutesOptions {
   boundWorkspace: string;
   mutate: () => RequestHandler;
@@ -132,6 +141,47 @@ function buildTransport(cfg: McpServerConfigLike): Transport {
   });
 }
 
+/** Exported for unit testing the MCP content normalization rules. */
+export function extractA2uiActionResult(
+  result: A2uiToolResult,
+): A2uiActionResult {
+  if (result.isError) {
+    const errMsg = (result.content ?? [])
+      .filter(
+        (b): b is { type: string; text: string } =>
+          b.type === 'text' && typeof b.text === 'string',
+      )
+      .map((b) => b.text)
+      .join('');
+    throw new Error(
+      `a2ui action tool returned error: ${errMsg || 'unknown error'}`,
+    );
+  }
+
+  let commands: unknown[] | null = null;
+  let fallback = '';
+  for (const block of result.content ?? []) {
+    if (
+      commands === null &&
+      block.type === 'resource' &&
+      block.resource?.mimeType === A2UI_MIME &&
+      typeof block.resource.text === 'string'
+    ) {
+      // Single-block semantics: the first a2ui+json resource wins; further
+      // resource blocks are ignored while text blocks keep accumulating.
+      try {
+        const parsed = JSON.parse(block.resource.text);
+        if (Array.isArray(parsed)) commands = parsed;
+      } catch {
+        /* Invalid JSON -> treated as no continuation frame. */
+      }
+    } else if (block.type === 'text' && typeof block.text === 'string') {
+      fallback += block.text;
+    }
+  }
+  return { commands, fallback };
+}
+
 /** Call the UI MCP server's action tool directly and extract the A2UI continuation commands plus fallback text. */
 async function callA2uiAction(
   cfg: McpServerConfigLike,
@@ -145,48 +195,8 @@ async function callA2uiAction(
       { name: ACTION_TOOL, arguments: { ...args } },
       undefined,
       { timeout: CALL_TIMEOUT_MS },
-    )) as {
-      isError?: boolean;
-      content?: Array<{
-        type: string;
-        text?: string;
-        resource?: { mimeType?: string; text?: string };
-      }>;
-    };
-    if (result.isError) {
-      const errMsg = (result.content ?? [])
-        .filter(
-          (b): b is { type: string; text: string } =>
-            b.type === 'text' && typeof b.text === 'string',
-        )
-        .map((b) => b.text)
-        .join('');
-      throw new Error(
-        `a2ui action tool returned error: ${errMsg || 'unknown error'}`,
-      );
-    }
-    let commands: unknown[] | null = null;
-    let fallback = '';
-    for (const block of result.content ?? []) {
-      if (
-        commands === null &&
-        block.type === 'resource' &&
-        block.resource?.mimeType === A2UI_MIME &&
-        typeof block.resource.text === 'string'
-      ) {
-        // Single-block semantics: the first a2ui+json resource wins; further
-        // resource blocks are ignored while text blocks keep accumulating.
-        try {
-          const parsed = JSON.parse(block.resource.text);
-          if (Array.isArray(parsed)) commands = parsed;
-        } catch {
-          /* Invalid JSON -> treated as no continuation frame. */
-        }
-      } else if (block.type === 'text' && typeof block.text === 'string') {
-        fallback += block.text;
-      }
-    }
-    return { commands, fallback };
+    )) as A2uiToolResult;
+    return extractA2uiActionResult(result);
   } finally {
     // Close the transport explicitly as well: client.close() alone may not
     // reap a spawned stdio child when connect() failed mid-handshake.

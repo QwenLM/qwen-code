@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   registerA2uiActionRoutes,
+  extractA2uiActionResult,
   findFromSettingsFile,
   usableServerConfig,
   type A2uiActionArgs,
@@ -162,6 +163,97 @@ describe('POST /session/:id/a2ui-action', () => {
 describe('helpers', () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.restoreAllMocks());
+
+  it('extracts the first A2UI resource and accumulates text fallback', () => {
+    const result = extractA2uiActionResult({
+      content: [
+        { type: 'text', text: 'before ' },
+        {
+          type: 'resource',
+          resource: {
+            mimeType: 'application/a2ui+json',
+            text: JSON.stringify([
+              {
+                command: 'update',
+                payload: { items: [['nested']], label: 'say "hi"' },
+              },
+            ]),
+          },
+        },
+        {
+          type: 'resource',
+          resource: {
+            mimeType: 'application/a2ui+json',
+            text: JSON.stringify([{ command: 'ignored' }]),
+          },
+        },
+        { type: 'text', text: 'after' },
+      ],
+    });
+
+    expect(result).toEqual({
+      commands: [
+        {
+          command: 'update',
+          payload: { items: [['nested']], label: 'say "hi"' },
+        },
+      ],
+      fallback: 'before after',
+    });
+  });
+
+  it('keeps empty arrays and ignores invalid or non-array resources', () => {
+    expect(
+      extractA2uiActionResult({
+        content: [
+          {
+            type: 'resource',
+            resource: {
+              mimeType: 'application/a2ui+json',
+              text: '[',
+            },
+          },
+          {
+            type: 'resource',
+            resource: {
+              mimeType: 'application/a2ui+json',
+              text: '{"command":"not-array"}',
+            },
+          },
+        ],
+      }),
+    ).toEqual({ commands: null, fallback: '' });
+
+    expect(
+      extractA2uiActionResult({
+        content: [
+          {
+            type: 'resource',
+            resource: {
+              mimeType: 'application/a2ui+json',
+              text: '[]',
+            },
+          },
+        ],
+      }),
+    ).toEqual({ commands: [], fallback: '' });
+  });
+
+  it('throws MCP tool errors with text details when present', () => {
+    expect(() =>
+      extractA2uiActionResult({
+        isError: true,
+        content: [
+          { type: 'text', text: 'bad ' },
+          { type: 'text', text: 'input' },
+        ],
+      }),
+    ).toThrow('a2ui action tool returned error: bad input');
+
+    expect(() => extractA2uiActionResult({ isError: true })).toThrow(
+      'a2ui action tool returned error: unknown error',
+    );
+  });
 
   it('usableServerConfig accepts stdio or streamable-http shapes only', () => {
     expect(usableServerConfig({ command: 'node' })).toBe(true);
