@@ -2871,6 +2871,7 @@ describe('Session', () => {
       it('runs automatic compression before cron-fired ACP prompt sends', async () => {
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             callback({ prompt: 'scheduled prompt' });
           }),
@@ -2921,6 +2922,7 @@ describe('Session', () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             cronCallback = callback;
             callback({ prompt: 'scheduled prompt' });

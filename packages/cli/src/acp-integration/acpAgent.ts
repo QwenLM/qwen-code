@@ -4917,6 +4917,9 @@ class QwenAgent implements Agent {
     // Install rewriter AFTER history replay to avoid rewriting historical messages
     session.installRewriter();
 
+    // After replay so a durable cron fire can't interleave with it.
+    session.startCronScheduler();
+
     return session;
   }
 

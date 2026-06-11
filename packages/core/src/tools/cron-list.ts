@@ -1,5 +1,5 @@
 /**
- * cron_list tool — lists all active in-session cron jobs.
+ * cron_list tool — lists all active cron jobs (in-session and durable).
  */
 
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -7,6 +7,10 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
+import {
+  CRON_TASKS_DISPLAY_PATH,
+  readCronTasks,
+} from '../services/cronTasksFile.js';
 
 export type CronListParams = Record<string, never>;
 
@@ -26,8 +30,33 @@ class CronListInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    // File-first: durable jobs come straight from .qwen/scheduled_tasks.json
+    // so management works in every mode — headless included — regardless
+    // of what the scheduler has loaded.
+    // The scheduler contributes only this process's session-only jobs.
     const scheduler = this.config.getCronScheduler();
-    const jobs = scheduler.list();
+    const fileTasks = await readCronTasks(this.config.getProjectRoot()).catch(
+      () => [],
+    );
+    const jobs = [
+      ...fileTasks.map((task) => ({
+        id: task.id,
+        cron: task.cron,
+        prompt: task.prompt,
+        recurring: task.recurring,
+        durable: true,
+      })),
+      ...scheduler
+        .list()
+        .filter((job) => !job.durable)
+        .map((job) => ({
+          id: job.id,
+          cron: job.cronExpr,
+          prompt: job.prompt,
+          recurring: job.recurring,
+          durable: false,
+        })),
+    ];
 
     if (jobs.length === 0) {
       const result = 'No active cron jobs.';
@@ -36,12 +65,14 @@ class CronListInvocation extends BaseToolInvocation<
 
     const llmLines = jobs.map((job) => {
       const type = job.recurring ? 'recurring' : 'one-shot';
-      return `${job.id} — ${job.cronExpr} (${type}) [session-only]: ${job.prompt}`;
+      const durability = job.durable ? 'durable' : 'session-only';
+      return `${job.id} — ${job.cron} (${type}) [${durability}]: ${job.prompt}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
-      (job) => `${job.id} ${humanReadableCron(job.cronExpr)}`,
+      (job) =>
+        `${job.id} ${humanReadableCron(job.cron)} [${job.durable ? 'durable' : 'session-only'}]`,
     );
     const returnDisplay = displayLines.join('\n');
 
@@ -59,7 +90,7 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      'List all cron jobs scheduled via CronCreate in this session.',
+      `List all cron jobs scheduled via CronCreate, both session-only and durable (${CRON_TASKS_DISPLAY_PATH}).`,
       Kind.Other,
       {
         type: 'object',

@@ -994,6 +994,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
 
@@ -1133,6 +1134,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         captureHistorySnapshot: vi
           .fn()
@@ -3592,6 +3594,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       } as unknown as InstanceType<typeof Session>;
     });
@@ -4296,6 +4299,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
           dispose: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
@@ -4553,6 +4557,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
         dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;

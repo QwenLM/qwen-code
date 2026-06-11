@@ -1283,15 +1283,26 @@ export async function runNonInteractive(
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
+          // Durable support is fully enabled: file tasks load, the lock
+          // is acquired or probed, and missed one-shots are detected —
+          // start() below flushes them onto the queue so they execute
+          // during this run. The hold-open stays keyed on session-only
+          // jobs alone, so durable jobs never pin the process: once
+          // session jobs and the drain are done, stop() releases the
+          // lock and the run exits; durable jobs persist for a future
+          // owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
 
-          if (scheduler && scheduler.size > 0) {
+          if (scheduler) {
+            await scheduler
+              .enableDurable(config.getSessionId())
+              .catch(() => {});
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
-              // drop scheduler.size to 0 on their own, so without this the
-              // hold-back loop below is unreachable after an abort.
+              // drop scheduler.sessionSize to 0 on their own, so without
+              // this the hold-back loop below is unreachable after an abort.
               const onAbort = () => {
                 scheduler.stop();
                 resolve();
@@ -1315,7 +1326,7 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.size === 0 && !drainPromise) {
+                if (scheduler.sessionSize === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();

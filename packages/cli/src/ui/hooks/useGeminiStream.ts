@@ -2546,10 +2546,15 @@ export const useGeminiStream = (
   useEffect(() => {
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
-    scheduler.start((job: { prompt: string }) => {
+
+    // Enable durable cron support (loads tasks from disk, acquires lock).
+    // Missed one-shots arrive as late fires through the start() callback.
+    void scheduler.enableDurable(sessionStates.sessionId).catch(() => {});
+
+    scheduler.start((job: { prompt: string; missed?: boolean }) => {
       const label = job.prompt.slice(0, 40);
       notificationQueueRef.current.push({
-        displayText: `Cron: ${label}`,
+        displayText: `${job.missed ? 'Missed' : 'Cron'}: ${label}`,
         modelText: job.prompt,
         sendMessageType: SendMessageType.Cron,
       });
@@ -2562,7 +2567,7 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config]);
+  }, [config, sessionStates.sessionId]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {

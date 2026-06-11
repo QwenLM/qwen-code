@@ -456,6 +456,23 @@ export class Session implements SessionContext {
     return this.sessionId;
   }
 
+  /**
+   * Starts the cron scheduler at session creation. Durable tasks live on
+   * disk; waiting for the end of the first prompt (the in-turn start at
+   * the bottom of prompt()) would leave them invisible to cron_list /
+   * cron_delete for the whole first turn and unfired while the session
+   * idles before any prompt — the TUI equivalent enables durable cron on
+   * mount.
+   */
+  startCronScheduler(): void {
+    // Best-effort: a cron startup failure must not break session creation.
+    this.#startCronSchedulerIfNeeded().catch((error) => {
+      debugLogger.warn(
+        `Cron scheduler startup failed [session ${this.sessionId}]: ${error}`,
+      );
+    });
+  }
+
   getConfig(): Config {
     return this.config;
   }
@@ -475,6 +492,14 @@ export class Session implements SessionContext {
     }
     this.cronProcessing = false;
     this.cronCompletion = null;
+
+    // Stop the scheduler too: after dispose the drain guard drops fired
+    // prompts, but tick() would still mark durable fires (deleting
+    // one-shots from disk without executing them) and the held lock
+    // would block another session from taking over.
+    if (this.config.isCronEnabled()) {
+      this.config.getCronScheduler().stop();
+    }
 
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
@@ -733,7 +758,7 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      this.#startCronSchedulerIfNeeded();
+      void this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -1623,11 +1648,28 @@ export class Session implements SessionContext {
    * The scheduler runs in the background, pushing fired prompts into
    * `cronQueue` and triggering `#drainCronQueue`.
    */
-  #startCronSchedulerIfNeeded(): void {
+  async #startCronSchedulerIfNeeded(): Promise<void> {
+    if (this.disposed) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
-    if (scheduler.size === 0) return;
+
+    // Enable durable cron support (loads tasks from disk, acquires lock).
+    // Awaited: on a fresh session the only jobs may live on disk, and
+    // checking for work before the load completes would skip start() and
+    // leave durable jobs dormant until the next prompt. Missed one-shots
+    // are delivered as late fires through the start() callback below.
+    try {
+      await scheduler.enableDurable(this.sessionId);
+    } catch {
+      // Durable support is best-effort; session-only jobs still run.
+    }
+
+    // dispose() may have run while the durable load was in flight; its
+    // stop() already tore the scheduler down — don't restart the tick.
+    if (this.disposed) return;
+
+    if (!scheduler.hasPendingWork) return;
 
     scheduler.start((job: { prompt: string }) => {
       if (this.cronDisabledByTokenLimit) return;
@@ -1666,10 +1708,13 @@ export class Session implements SessionContext {
 
       void this.#drainNotificationQueue();
 
-      // Stop scheduler if all jobs were deleted during execution
+      // Stop scheduler if all jobs were deleted during execution. With
+      // durable mode active hasPendingWork stays true even at zero
+      // in-memory jobs — the file watcher / lock takeover can still
+      // install tasks persisted by other sessions.
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
-        if (scheduler.size === 0) {
+        if (!scheduler.hasPendingWork) {
           scheduler.stop();
         }
       }

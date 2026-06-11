@@ -3373,7 +3373,7 @@ export class Config {
 
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
-      this.cronScheduler = new CronScheduler();
+      this.cronScheduler = new CronScheduler(this.getProjectRoot());
     }
     return this.cronScheduler;
   }

@@ -1,11 +1,31 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CronListTool } from './cron-list.js';
 import { CronScheduler } from '../services/cronScheduler.js';
+import { writeCronTasks } from '../services/cronTasksFile.js';
+import type { DurableCronTask } from '../services/cronTasksFile.js';
 
-function makeConfig() {
-  const scheduler = new CronScheduler();
+function makeDurableTask(
+  overrides?: Partial<DurableCronTask>,
+): DurableCronTask {
+  return {
+    id: 'durable01',
+    cron: '0 */2 * * *',
+    prompt: 'check deploy',
+    recurring: true,
+    createdAt: Date.now(),
+    lastFiredAt: null,
+    ...overrides,
+  };
+}
+
+function makeConfig(projectRoot: string) {
+  const scheduler = new CronScheduler(projectRoot);
   return {
     getCronScheduler: () => scheduler,
+    getProjectRoot: () => projectRoot,
     _scheduler: scheduler,
   } as unknown as import('../config/config.js').Config & {
     _scheduler: CronScheduler;
@@ -13,12 +33,19 @@ function makeConfig() {
 }
 
 describe('CronListTool', () => {
+  let tmpDir: string;
   let config: ReturnType<typeof makeConfig>;
   let tool: CronListTool;
 
-  beforeEach(() => {
-    config = makeConfig();
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-list-test-'));
+    config = makeConfig(tmpDir);
     tool = new CronListTool(config);
+  });
+
+  afterEach(async () => {
+    config._scheduler.destroy();
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('has the correct name', () => {
@@ -45,5 +72,44 @@ describe('CronListTool', () => {
     expect(result.llmContent).toContain('(one-shot) [session-only]: ping');
     // Two lines, one per job
     expect(String(result.llmContent).split('\n')).toHaveLength(2);
+    expect(result.returnDisplay).toContain('[session-only]');
+  });
+
+  it('lists durable jobs from the tasks file without the scheduler loading them', async () => {
+    // Headless situation: the task is on disk but this scheduler never
+    // called enableDurable, so its job map is empty.
+    await writeCronTasks(tmpDir, [makeDurableTask()]);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'durable01 — 0 */2 * * * (recurring) [durable]: check deploy',
+    );
+    expect(result.returnDisplay).toContain('[durable]');
+  });
+
+  it('merges file-backed durable jobs with session-only jobs', async () => {
+    await writeCronTasks(tmpDir, [makeDurableTask()]);
+    config._scheduler.create('*/10 * * * *', 'session task', true);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    const lines = String(result.llmContent).split('\n');
+    expect(lines).toHaveLength(2);
+    expect(result.llmContent).toContain('[durable]: check deploy');
+    expect(result.llmContent).toContain('[session-only]: session task');
+  });
+
+  it('does not double-list a durable job the scheduler has also loaded', async () => {
+    // Interactive situation: createDurable persists to file AND registers
+    // the job in the scheduler's map. The file copy is authoritative.
+    await config._scheduler.createDurable('*/5 * * * *', 'persisted', true);
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    const lines = String(result.llmContent).split('\n');
+    expect(lines).toHaveLength(1);
+    expect(result.llmContent).toContain('[durable]: persisted');
   });
 });
