@@ -1,0 +1,141 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect } from 'vitest';
+import { parseExplainArgs, formatExplanation } from './explain.js';
+import { explainPolicy } from './evaluator.js';
+import type { Policy } from './loader.js';
+
+const NOW = new Date('2026-06-11T12:00:00Z');
+
+describe('parseExplainArgs', () => {
+  it('takes the first non-flag token as the tool', () => {
+    const { tool, ctx } = parseExplainArgs(['bash', '--args=npm test']);
+    expect(tool).toBe('bash');
+    expect(ctx.tool).toBe('bash');
+  });
+
+  it('--args="npm test" → raw string (spec form)', () => {
+    const { ctx } = parseExplainArgs(['bash', '--args=npm test']);
+    expect(ctx.args).toBe('npm test');
+  });
+
+  it('--args with JSON object → parsed object', () => {
+    const { ctx } = parseExplainArgs(['bash', '--args={"command":"rm -rf /"}']);
+    expect(ctx.args).toEqual({ command: 'rm -rf /' });
+  });
+
+  it('--args with malformed JSON → falls back to the raw string', () => {
+    const { ctx } = parseExplainArgs(['bash', '--args={not json']);
+    expect(ctx.args).toBe('{not json');
+  });
+
+  it('--path alone → args = { path }', () => {
+    const { ctx } = parseExplainArgs(['read', '--path=/etc/passwd']);
+    expect(ctx.args).toEqual({ path: '/etc/passwd' });
+  });
+
+  it('--path merges into a JSON object args (when absent)', () => {
+    const { ctx } = parseExplainArgs([
+      'read',
+      '--args={"mode":"r"}',
+      '--path=/etc/passwd',
+    ]);
+    expect(ctx.args).toEqual({ mode: 'r', path: '/etc/passwd' });
+  });
+
+  it('--path does NOT clobber an explicit path in JSON args', () => {
+    const { ctx } = parseExplainArgs([
+      'read',
+      '--args={"path":"/a"}',
+      '--path=/b',
+    ]);
+    expect(ctx.args).toEqual({ path: '/a' });
+  });
+
+  it('string --args + --path → --path wins, string dropped (documented)', () => {
+    const { ctx } = parseExplainArgs([
+      'read',
+      '--args=just a string',
+      '--path=/etc/passwd',
+    ]);
+    expect(ctx.args).toEqual({ path: '/etc/passwd' });
+  });
+
+  it('--scope and --tag map to originScope / sessionTag', () => {
+    const { ctx } = parseExplainArgs(['bash', '--scope=owner', '--tag=prod']);
+    expect(ctx.originScope).toBe('owner');
+    expect(ctx.sessionTag).toBe('prod');
+  });
+
+  it('missing tool → tool undefined (ctx.tool empty)', () => {
+    const { tool, ctx } = parseExplainArgs(['--args=x']);
+    expect(tool).toBeUndefined();
+    expect(ctx.tool).toBe('');
+  });
+
+  it('ignores unknown flags and bare --flags', () => {
+    const { tool, ctx } = parseExplainArgs(['bash', '--bogus=1', '--verbose']);
+    expect(tool).toBe('bash');
+    expect(ctx.args).toBeUndefined();
+  });
+});
+
+function policy(rules: Policy['rules']): Policy {
+  return { defaults: { action: 'prompt', requireScope: 'approve' }, rules };
+}
+
+describe('formatExplanation', () => {
+  it('renders MATCHED / not-reached lines and the decision', () => {
+    const p = policy([
+      { id: 'low', match: { tool: '*' }, action: 'deny' },
+      { id: 'high', match: { tool: 'bash' }, action: 'allow' },
+    ]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toContain('rules considered (evaluation order):');
+    expect(out).toMatch(/MATCHED\s+high -> allow/);
+    expect(out).toMatch(/high[\s\S]*low/); // eval order: high before low
+    expect(out).toMatch(/not reached: earlier-rule-won/);
+    expect(out).toContain('decision: allow (source: rule high)');
+  });
+
+  it('renders SKIPPED with a reason and a default decision', () => {
+    const p = policy([{ id: 'a', match: { tool: 'git' }, action: 'allow' }]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toContain('SKIPPED   a (tool-mismatch)');
+    expect(out).toContain('decision: prompt (source: default)');
+  });
+
+  it('marks a downgraded winner and appends the quota caveat', () => {
+    const p = policy([
+      {
+        id: 'q',
+        match: { tool: 'bash' },
+        action: 'allow',
+        maxPerWindow: { count: 1, windowSec: 60 },
+      },
+    ]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toMatch(
+      /MATCHED\s+q -> prompt \(downgraded: quota-not-evaluated\)/,
+    );
+    expect(out).toContain('[downgraded to prompt]');
+    expect(out).toContain('could be allow OR prompt');
+  });
+
+  it('no quota caveat when no maxPerWindow rule is involved', () => {
+    const p = policy([{ id: 'a', match: { tool: 'bash' }, action: 'allow' }]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).not.toContain('could be allow OR prompt');
+  });
+
+  it('renders an id-less matched rule by its index', () => {
+    const p = policy([{ match: { tool: 'bash' }, action: 'allow' }]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toMatch(/MATCHED\s+\[0\] -> allow/);
+    expect(out).toContain('decision: allow (source: rule (id-less))');
+  });
+});

@@ -88,6 +88,11 @@ export {
   type RuleTrace,
   type PolicyExplanation,
 } from './policy/evaluator.js';
+export {
+  parseExplainArgs,
+  formatExplanation,
+  type ParsedExplain,
+} from './policy/explain.js';
 export { PolicyEnforcer } from './policy/enforcer.js';
 export {
   QuotaStore,
