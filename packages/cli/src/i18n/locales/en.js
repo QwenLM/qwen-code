@@ -1328,10 +1328,10 @@ export default {
     'Directory not found in workspace: {{directory}}',
   'Error updating settings: {{error}}': 'Error updating settings: {{error}}',
   'Removed directory: {{directory}}': 'Removed directory: {{directory}}',
-  'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
-    'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
-  'The /directory remove command is not supported in restrictive sandbox profiles.':
-    'The /directory remove command is not supported in restrictive sandbox profiles.',
+  'Could not remove directory from the active workspace. Settings were not changed.':
+    'Could not remove directory from the active workspace. Settings were not changed.',
+  'The /directory remove command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
+    'The /directory remove command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.',
 
   // ============================================================================
   // Status Bar

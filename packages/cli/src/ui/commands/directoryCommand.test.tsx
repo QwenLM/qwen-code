@@ -704,9 +704,11 @@ describe('directoryCommand', () => {
           }),
         }),
       );
+      // Verify merged settings were recomputed after rollback.
+      expect(mockSettings.recomputeMerged).toHaveBeenCalled();
     });
 
-    it('should report error when in-memory removal fails but settings were updated', async () => {
+    it('should roll back settings when in-memory removal fails', async () => {
       const removableDir = path.normalize('/home/user/project2');
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
@@ -722,35 +724,41 @@ describe('directoryCommand', () => {
         getWorkspaceContext: () => mockWorkspaceContext,
       } as unknown as Config;
 
+      const originalDirs = [
+        path.normalize('/home/user/project1'),
+        removableDir,
+      ];
       mockSettings.workspace = {
-        settings: {},
+        settings: {
+          context: { includeDirectories: [...originalDirs] },
+        },
         originalSettings: {
-          context: {
-            includeDirectories: [
-              path.normalize('/home/user/project1'),
-              removableDir,
-            ],
-          },
+          context: { includeDirectories: [...originalDirs] },
         },
       };
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
+      // Settings should have been rolled back.
+      expect(
+        mockSettings.workspace.originalSettings.context.includeDirectories,
+      ).toEqual(originalDirs);
+      expect(saveSettings).toHaveBeenCalledWith(
+        mockSettings.workspace,
+        expect.objectContaining({
+          context: expect.objectContaining({
+            includeDirectories: originalDirs,
+          }),
+        }),
+      );
+      expect(mockSettings.recomputeMerged).toHaveBeenCalled();
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.ERROR,
           text: expect.stringContaining(
-            'could not be removed from the active workspace',
+            'Could not remove directory from the active workspace',
           ),
-        }),
-        expect.any(Number),
-      );
-      // Should NOT show success message.
-      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: `Removed directory: ${removableDir}`,
         }),
         expect.any(Number),
       );

@@ -306,7 +306,7 @@ export const directoryCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive'] as const,
-      completion: async (context: CommandContext) => {
+      completion: async (context: CommandContext, partialArg: string) => {
         const { services } = context;
         if (!services.config) return [];
         if (services.config.isRestrictiveSandbox()) return [];
@@ -314,7 +314,10 @@ export const directoryCommand: SlashCommand = {
         const initialSet = new Set(
           services.config.getWorkspaceContext().getInitialDirectories(),
         );
-        return dirs.filter((d) => !initialSet.has(d));
+        const candidates = dirs.filter((d) => !initialSet.has(d));
+        const prefix = partialArg?.trim() ?? '';
+        if (!prefix) return candidates;
+        return candidates.filter((d) => d.includes(prefix));
       },
       action: async (context: CommandContext, args: string) => {
         const {
@@ -349,7 +352,7 @@ export const directoryCommand: SlashCommand = {
             {
               type: MessageType.ERROR,
               text: t(
-                'The /directory remove command is not supported in restrictive sandbox profiles.',
+                'The /directory remove command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.',
               ),
             },
             Date.now(),
@@ -495,22 +498,26 @@ export const directoryCommand: SlashCommand = {
             committed.push(change.scope);
           }
         } catch (error) {
-          // Roll back in-memory state and disk for committed scopes.
+          // Always restore both scopes — setValue() modifies memory before
+          // saveSettings(), so the failing scope is also dirty.
+          settings.workspace.settings = workspaceBefore.settings;
+          settings.workspace.originalSettings =
+            workspaceBefore.originalSettings;
+          settings.user.settings = userBefore.settings;
+          settings.user.originalSettings = userBefore.originalSettings;
+          // Re-write disk for scopes that were actually committed.
           for (const scope of committed) {
-            if (scope === SettingScope.Workspace) {
-              settings.workspace.settings = workspaceBefore.settings;
-              settings.workspace.originalSettings =
-                workspaceBefore.originalSettings;
-              // Re-write the disk file to match the restored in-memory state.
-              saveSettings(
-                settings.workspace,
-                workspaceBefore.originalSettings,
-              );
-            } else {
-              settings.user.settings = userBefore.settings;
-              settings.user.originalSettings = userBefore.originalSettings;
-              // Re-write the disk file to match the restored in-memory state.
-              saveSettings(settings.user, userBefore.originalSettings);
+            try {
+              if (scope === SettingScope.Workspace) {
+                saveSettings(
+                  settings.workspace,
+                  workspaceBefore.originalSettings,
+                );
+              } else {
+                saveSettings(settings.user, userBefore.originalSettings);
+              }
+            } catch {
+              /* best-effort rollback */
             }
           }
           settings.recomputeMerged();
@@ -518,7 +525,7 @@ export const directoryCommand: SlashCommand = {
             {
               type: MessageType.ERROR,
               text: t('Error updating settings: {{error}}', {
-                error: (error as Error).message,
+                error: error instanceof Error ? error.message : String(error),
               }),
             },
             Date.now(),
@@ -529,16 +536,44 @@ export const directoryCommand: SlashCommand = {
         // Now remove from memory — persisted settings are already updated.
         const removed = workspaceContext.removeDirectory(canonicalDirectory);
         if (!removed) {
+          // Roll back persisted settings since in-memory removal failed.
+          settings.workspace.settings = workspaceBefore.settings;
+          settings.workspace.originalSettings =
+            workspaceBefore.originalSettings;
+          settings.user.settings = userBefore.settings;
+          settings.user.originalSettings = userBefore.originalSettings;
+          for (const scope of committed) {
+            try {
+              if (scope === SettingScope.Workspace) {
+                saveSettings(
+                  settings.workspace,
+                  workspaceBefore.originalSettings,
+                );
+              } else {
+                saveSettings(settings.user, userBefore.originalSettings);
+              }
+            } catch {
+              /* best-effort rollback */
+            }
+          }
+          settings.recomputeMerged();
           addItem(
             {
               type: MessageType.ERROR,
               text: t(
-                'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.',
+                'Could not remove directory from the active workspace. Settings were not changed.',
               ),
             },
             Date.now(),
           );
           return;
+        }
+
+        // Update the model's directory context so it's aware the
+        // directory has been removed (mirrors the add path).
+        const gemini = config.getGeminiClient();
+        if (gemini) {
+          await gemini.addDirectoryContext();
         }
 
         // Report success — the directory has been removed from both
@@ -582,7 +617,10 @@ export const directoryCommand: SlashCommand = {
                 type: MessageType.WARNING,
                 text: t(
                   'Directory removed but memory refresh failed: {{error}}',
-                  { error: (error as Error).message },
+                  {
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  },
                 ),
               },
               Date.now(),

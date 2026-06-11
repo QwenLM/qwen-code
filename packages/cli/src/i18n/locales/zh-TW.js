@@ -1123,10 +1123,10 @@ export default {
     '在工作區中找不到目錄：{{directory}}',
   'Error updating settings: {{error}}': '更新設置時出錯：{{error}}',
   'Removed directory: {{directory}}': '已移除目錄：{{directory}}',
-  'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
-    '目錄已從設置中移除，但無法從活動工作區中移除。在當前會話中可能仍然可以訪問。',
-  'The /directory remove command is not supported in restrictive sandbox profiles.':
-    '限制性沙箱配置不支援 /directory remove 命令。',
+  'Could not remove directory from the active workspace. Settings were not changed.':
+    '無法從活動工作區中移除目錄。設定未更改。',
+  'The /directory remove command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
+    '限制性沙箱配置不支援 /directory remove 命令。請在啟動會話時使用 --include-directories。',
 
   // ============================================================================
   // Status Bar
