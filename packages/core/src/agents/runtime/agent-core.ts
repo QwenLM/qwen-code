@@ -76,7 +76,12 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
-import { isTeammate } from '../team/identity.js';
+import {
+  isTeammate,
+  getTeammateContext,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
 
 /**
  * Result of a single reasoning loop invocation.
@@ -572,6 +577,15 @@ export class AgentCore {
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
    * has unwound.
    *
+   * `inheritedTeammateIdentity` restores the in-process teammate identity
+   * frame (`teammateIdentityStore`). Deferred approval needs it for the
+   * same reason as the others: when a teammate's `send_message` /
+   * `task_update` resumes from the UI chain, `getAgentName()` would
+   * otherwise be undefined and the tool would mis-attribute the message
+   * to the leader (forged `from="leader"` envelope) and slip past the
+   * leader-only `isTeammate()` guard. No-op on the reasoning-loop path,
+   * where TeamManager already establishes this frame.
+   *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
    */
@@ -579,13 +593,18 @@ export class AgentCore {
     fn: () => Promise<T>,
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
+    inheritedTeammateIdentity?: TeammateIdentity,
   ): Promise<T> {
-    return subagentNameContext.run(this.name, () => {
-      const runWithView = () => this.withRuntimeView(fn, inheritedView);
-      return inheritedAgentId
-        ? runWithAgentContext(inheritedAgentId, runWithView)
-        : runWithView();
-    });
+    const runInner = () =>
+      subagentNameContext.run(this.name, () => {
+        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        return inheritedAgentId
+          ? runWithAgentContext(inheritedAgentId, runWithView)
+          : runWithView();
+      });
+    return inheritedTeammateIdentity
+      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+      : runInner();
   }
 
   /**
@@ -1243,6 +1262,11 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Capture the teammate identity frame too, while the loop
+            // frame is still live, so the deferred-approval continuation
+            // can restore it. See `runInAgentFrames` for why this matters
+            // (mis-attributed `from="leader"` + leader-guard bypass).
+            const inheritedTeammateIdentity = getTeammateContext();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1272,6 +1296,7 @@ export class AgentCore {
                   () => waiting.confirmationDetails.onConfirm(outcome, payload),
                   inheritedView,
                   inheritedAgentId ?? undefined,
+                  inheritedTeammateIdentity,
                 );
               },
               timestamp: Date.now(),
