@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CompressionStatus } from '@qwen-code/qwen-code-core';
 import type { HistoryItemCompression } from '../types.js';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
@@ -66,7 +67,7 @@ export const compressFastCommand: SlashCommand = {
           const compressed = await doCompress();
           if (
             !compressed ||
-            compressed.originalTokenCount === compressed.newTokenCount
+            compressed.compressionStatus === CompressionStatus.NOOP
           ) {
             yield {
               messageType: 'info' as const,
@@ -100,7 +101,7 @@ export const compressFastCommand: SlashCommand = {
 
       if (
         !compressed ||
-        compressed.originalTokenCount === compressed.newTokenCount
+        compressed.compressionStatus === CompressionStatus.NOOP
       ) {
         if (executionMode === 'interactive') {
           ui.addItem(

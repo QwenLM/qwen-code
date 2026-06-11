@@ -41,6 +41,7 @@ import {
   logContentRetry,
   logContentRetryFailure,
   logApiRetry,
+  logChatCompression,
 } from '../telemetry/loggers.js';
 import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
@@ -65,6 +66,7 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
   ApiRetryEvent,
+  makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
@@ -1553,6 +1555,13 @@ export class GeminiChat {
       info,
       compressedHistory: newHistory,
     });
+    logChatCompression(
+      this.config,
+      makeChatCompressionEvent({
+        tokens_before: info.originalTokenCount,
+        tokens_after: info.newTokenCount,
+      }),
+    );
     this.setHistory(newHistory);
     clearDetailedSpanState();
     this.lastPromptTokenCount = adjustedTokenCount;
