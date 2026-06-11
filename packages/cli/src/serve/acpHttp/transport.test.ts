@@ -335,6 +335,44 @@ async function takeFrames(
   return out;
 }
 
+function frameReader(res: Response) {
+  const ac = new AbortController();
+  const iterator = readSse(res, ac.signal)[Symbol.asyncIterator]();
+  return {
+    async next(timeoutMs = 2000): Promise<unknown> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          ac.abort();
+          reject(new Error('Timed out waiting for SSE frame'));
+        }, timeoutMs);
+      });
+      try {
+        const result = await Promise.race([iterator.next(), timeout]);
+        if (result.done) throw new Error('SSE stream ended');
+        return result.value;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    close(): void {
+      ac.abort();
+    },
+  };
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 describe('ACP Streamable HTTP transport (over the wire)', () => {
   let server: Server;
   let base: string;
@@ -500,31 +538,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
-    const got = takeFrames(sessStream, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 7,
-      method: 'session/prompt',
-      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
-    });
-    const [reqFrame] = (await got) as Array<{
-      id: number;
-      method: string;
-      params: { _meta: Record<string, { requestId: string }> };
-    }>;
-    expect(reqFrame.method).toBe('session/request_permission');
-    expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
-    // Client answers with a JSON-RPC response echoing the issued id.
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: reqFrame.id,
-      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
-    });
-    await new Promise((r) => setTimeout(r, 50));
-    expect(resolvedWith).toEqual({
-      outcome: { outcome: 'selected', optionId: 'allow' },
-    });
+    const reader = frameReader(sessStream);
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as {
+        id: number;
+        method: string;
+        params: { _meta: Record<string, { requestId: string }> };
+      };
+      expect(reqFrame.method).toBe('session/request_permission');
+      expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
+      // Client answers with a JSON-RPC response echoing the issued id.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => resolvedWith !== undefined);
+      expect(resolvedWith).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      reader.close();
+    }
   });
 
   it('standard session/set_config_option (model) routes to the bridge', async () => {
@@ -1405,38 +1450,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const sess = await openStream(connId, 'sess-1');
-    const got = takeFrames(sess, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 350,
-      method: 'session/prompt',
-      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
-    });
-    const [reqFrame] = (await got) as Array<{ id: string }>;
-    // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: reqFrame.id,
-      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    // Teardown retries the cancel — whether triggered by the session stream
-    // closing or the explicit DELETE below. Either way it only happens if the
-    // entry was RETAINED after the immediate cancel failed.
-    await fetch(`${base}/acp`, {
-      method: 'DELETE',
-      headers: { 'acp-connection-id': connId },
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    const cancels = calls.filter((c) =>
-      JSON.stringify(c).includes('cancelled'),
-    );
-    // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry were
-    // dropped unconditionally after the failed immediate cancel, there would be
-    // exactly ONE cancel — so ≥2 is the retention invariant.
-    expect(cancels.length).toBeGreaterThanOrEqual(2);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const reader = frameReader(sess);
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 350,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(
+        () =>
+          calls.filter((c) => JSON.stringify(c).includes('cancelled')).length >=
+          1,
+      );
+      // Teardown retries the cancel. This only happens if the entry was
+      // retained after the immediate cancel failed.
+      await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': connId },
+      });
+      await waitUntil(() => {
+        const cancels = calls.filter((c) =>
+          JSON.stringify(c).includes('cancelled'),
+        );
+        return cancels.length >= 2 && calls.length >= 3;
+      });
+      const cancels = calls.filter((c) =>
+        JSON.stringify(c).includes('cancelled'),
+      );
+      // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry
+      // were dropped unconditionally after the failed immediate cancel, there
+      // would be exactly ONE cancel — so ≥2 is the retention invariant.
+      expect(cancels.length).toBeGreaterThanOrEqual(2);
+      expect(calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      reader.close();
+    }
   });
 
   it('client error response to a permission request → cancellation', async () => {
