@@ -26,11 +26,15 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
+  TurnInterruption,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
+  buildSyntheticToolResponseParts,
   CompressionStatus,
+  detectTurnInterruption,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
   convertToFunctionResponse,
   createDebugLogger,
   DiscoveredMCPTool,
@@ -394,6 +398,18 @@ export async function buildAvailableCommandsSnapshot(
  * - PlanEmitter for todo/plan updates
  * - SubAgentTracker for tracking sub-agent tool calls
  */
+/**
+ * Result of {@link Session.continueTurn} / the `_qwen/session/continue`
+ * vendor method.
+ */
+export interface ContinueTurnResponse {
+  stopReason: PromptResponse['stopReason'];
+  /** False when the last turn had already ended cleanly (no-op). */
+  resumed: boolean;
+  /** Which interruption shape was continued; 'none' when resumed is false. */
+  interruption: TurnInterruption['kind'];
+}
+
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
   /**
@@ -925,6 +941,168 @@ export class Session implements SessionContext {
     })();
   }
 
+  /**
+   * Continue the most recent unfinished turn of this session without
+   * appending any new user message to the transcript. Backs the
+   * `_qwen/session/continue` vendor method.
+   *
+   * Unlike {@link prompt}, an in-flight turn is NOT aborted: continue only
+   * applies to a session whose previous turn already stopped (process
+   * crash, stream cut-off, abort). Detection runs on persisted chat
+   * history, so it also works right after a session resume.
+   *
+   * @returns Stop reason plus which interruption shape (if any) was resumed.
+   * @throws RequestError 409 when a prompt/continue turn is already running.
+   */
+  async continueTurn(): Promise<ContinueTurnResponse> {
+    if (this.pendingPrompt) {
+      throw new RequestError(
+        409,
+        'A turn is already in flight; continue only applies to a stopped session.',
+      );
+    }
+    const pendingSend = new AbortController();
+    this.pendingPrompt = pendingSend;
+
+    try {
+      // Background cron/notification turns mutate the same chat history;
+      // stop and drain them before continuing, mirroring prompt().
+      if (this.cronAbortController) {
+        this.cronAbortController.abort();
+        this.cronAbortController = null;
+        this.cronQueue = [];
+        this.cronProcessing = false;
+      }
+      if (this.cronCompletion) {
+        try {
+          await this.cronCompletion;
+        } catch {
+          // Expected: cron was aborted
+        }
+        this.cronCompletion = null;
+      }
+      if (this.notificationAbortController) {
+        this.notificationAbortController.abort();
+        this.notificationAbortController = null;
+        this.notificationQueue = [];
+        this.notificationProcessing = false;
+      }
+      if (this.notificationCompletion) {
+        try {
+          await this.notificationCompletion;
+        } catch {
+          // Notification errors are surfaced through the session stream.
+        }
+      }
+
+      // Cancelled while draining background turns.
+      if (pendingSend.signal.aborted) {
+        return {
+          stopReason: 'cancelled',
+          resumed: false,
+          interruption: 'none',
+        };
+      }
+
+      // Track this turn's completion for the next prompt to await.
+      let resolveCompletion!: () => void;
+      this.pendingPromptCompletion = new Promise<void>((resolve) => {
+        resolveCompletion = resolve;
+      });
+      try {
+        const result = await this.#executeContinue(pendingSend);
+        this.pendingPrompt = null;
+        this.#startCronSchedulerIfNeeded();
+        void this.#drainCronQueue();
+        void this.#drainNotificationQueue();
+        return result;
+      } finally {
+        resolveCompletion();
+        this.pendingPromptCompletion = null;
+      }
+    } finally {
+      this.pendingPrompt = null;
+    }
+  }
+
+  /**
+   * Body of {@link continueTurn}: classify how the last turn ended and
+   * re-drive the model loop from existing history.
+   *
+   *  - `interrupted_prompt` (orphaned trailing user entry): strip it and
+   *    re-submit the same content — the transcript gains nothing new.
+   *  - `interrupted_turn` (dangling functionCall): close each pair with a
+   *    synthesized error functionResponse, the same continuation signal a
+   *    real tool completion would have sent.
+   *  - `none`: idempotent no-op.
+   *
+   * The continuation reuses the interrupted turn's number for its
+   * prompt id — it is the same logical turn, not a new one — and fires no
+   * UserPromptSubmit hook (there is no user prompt).
+   */
+  async #executeContinue(
+    pendingSend: AbortController,
+  ): Promise<ContinueTurnResponse> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const detection = detectTurnInterruption(
+          this.#getCurrentChat().getHistoryTail(1),
+        );
+        if (detection.kind === 'none') {
+          return {
+            stopReason: 'end_turn' as const,
+            resumed: false,
+            interruption: 'none' as const,
+          };
+        }
+
+        const promptId = this.config.getSessionId() + '########' + this.turn;
+
+        let parts: Part[];
+        if (detection.kind === 'interrupted_prompt') {
+          // The send below re-pushes this content; strip the orphaned
+          // original first so history doesn't carry it twice.
+          this.config.getGeminiClient()!.stripOrphanedUserEntriesFromHistory();
+          parts = detection.parts;
+        } else {
+          parts = buildSyntheticToolResponseParts(
+            detection.danglingCalls,
+            ORPHAN_TOOL_USE_REPAIR_REASON,
+          );
+        }
+
+        let turnCount = 0;
+        try {
+          const earlyExit = await this.#runModelTurnLoop(
+            promptId,
+            { role: 'user', parts },
+            pendingSend,
+            () => {
+              turnCount++;
+            },
+          );
+          const result =
+            earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
+          return {
+            ...result,
+            resumed: true,
+            interruption: detection.kind,
+          };
+        } finally {
+          logConversationFinishedEvent(
+            this.config,
+            new ConversationFinishedEvent(
+              this.config.getApprovalMode(),
+              turnCount,
+            ),
+          );
+        }
+      },
+    );
+  }
+
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
@@ -984,7 +1162,6 @@ export class Session implements SessionContext {
               ?.recordUserMessage(promptText);
 
             // Check if the input contains a slash command
-            // Extract text from the first text block if present
             const firstTextBlock = params.prompt.find(
               (block) => block.type === 'text',
             );
@@ -1110,165 +1287,21 @@ export class Session implements SessionContext {
               this.pendingWorktreeNotice = null;
             }
 
-            let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
-
             // conversation_finished must fire on every terminal path of the
-            // turn — the loop below has cancel/abort/no-stream early-returns
-            // and API-error throws — so the emission lives in a finally that
-            // wraps the whole turn, not just the stop-hook loop. Daemon turns
-            // run autonomously in all approval modes (approvals are mediated by
-            // the ACP client rather than by gating this loop), so unlike the
-            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
-            // is intentionally emitted for every mode.
+            // turn, so the emission lives in a finally that wraps the whole
+            // turn. Daemon turns run autonomously in all approval modes.
             try {
-              while (nextMessage !== null) {
-                turnCount++;
-                if (pendingSend.signal.aborted) {
-                  this.#getCurrentChat().addHistory(nextMessage);
-                  return { stopReason: 'cancelled' };
-                }
-
-                const functionCalls: FunctionCall[] = [];
-                let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                  null;
-                const streamStartTime = Date.now();
-
-                try {
-                  const sendResult =
-                    await this.#sendMessageStreamWithAutoCompression(
-                      promptId,
-                      nextMessage?.parts ?? [],
-                      pendingSend.signal,
-                    );
-                  if (!sendResult.responseStream) {
-                    this.#preserveUnsentMessageHistory(
-                      nextMessage,
-                      sendResult.stopReason === 'cancelled',
-                    );
-                    return { stopReason: sendResult.stopReason };
-                  }
-                  const responseStream = sendResult.responseStream;
-                  nextMessage = null;
-
-                  for await (const resp of responseStream) {
-                    if (pendingSend.signal.aborted) {
-                      return { stopReason: 'cancelled' };
-                    }
-
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.candidates &&
-                      resp.value.candidates.length > 0
-                    ) {
-                      const candidate = resp.value.candidates[0];
-                      for (const part of candidate.content?.parts ?? []) {
-                        if (!part.text) {
-                          continue;
-                        }
-
-                        this.messageEmitter.emitMessage(
-                          part.text,
-                          'assistant',
-                          part.thought,
-                        );
-                      }
-                    }
-
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.usageMetadata
-                    ) {
-                      usageMetadata = resp.value.usageMetadata;
-                    }
-
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.functionCalls
-                    ) {
-                      functionCalls.push(...resp.value.functionCalls);
-                    }
-                  }
-                } catch (error) {
-                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
-                  const errorStatus = getErrorStatus(error);
-                  const errorMessage =
-                    error instanceof Error ? error.message : String(error);
-                  const errorType = classifyApiError({
-                    message: errorMessage,
-                    status: errorStatus,
-                  });
-
-                  const hookSystem = this.config.getHookSystem?.();
-                  const hooksEnabledForStopFailure =
-                    !this.config.getDisableAllHooks?.();
-                  if (
-                    hooksEnabledForStopFailure &&
-                    hookSystem &&
-                    this.config.hasHooksForEvent?.('StopFailure')
-                  ) {
-                    // Fire-and-forget: don't wait for hook to complete
-                    hookSystem
-                      .fireStopFailureEvent(errorType, errorMessage)
-                      .catch((err) => {
-                        debugLogger.warn(`StopFailure hook failed: ${err}`);
-                      });
-                  }
-
-                  if (errorStatus === 429) {
-                    throw new RequestError(
-                      429,
-                      'Rate limit exceeded. Try again later.',
-                    );
-                  }
-
-                  throw error;
-                }
-
-                if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
-                  // Kick off rewrite in background (non-blocking, runs parallel to tools)
-                  if (this.messageRewriter) {
-                    this.messageRewriter.flushTurn(pendingSend.signal);
-                  }
-
-                  const durationMs = Date.now() - streamStartTime;
-                  await this.messageEmitter.emitUsageMetadata(
-                    usageMetadata,
-                    '',
-                    durationMs,
-                  );
-                }
-
-                if (functionCalls.length > 0) {
-                  const toolResponseParts = await this.runToolCalls(
-                    pendingSend.signal,
-                    promptId,
-                    functionCalls,
-                  );
-                  nextMessage = {
-                    role: 'user',
-                    parts: [
-                      ...toolResponseParts,
-                      ...(await this.#drainMidTurnUserMessages()),
-                    ],
-                  };
-                }
-              }
-
-              // Wait for any pending rewrite before returning
-              if (this.messageRewriter) {
-                await this.messageRewriter.waitForPendingRewrites();
-              }
-
-              // Fire Stop hook loop (aligned with core path in client.ts)
-              // This is triggered after model response completes with no pending tool calls
-              return await this.#handleStopHookLoop(
-                pendingSend,
+              const earlyExit = await this.#runModelTurnLoop(
                 promptId,
-                hooksEnabled,
-                messageBus,
+                { role: 'user', parts },
+                pendingSend,
+                () => {
+                  turnCount++;
+                },
+              );
+              return (
+                earlyExit ?? (await this.#finishTurn(pendingSend, promptId))
               );
             } finally {
               logConversationFinishedEvent(
@@ -1284,6 +1317,163 @@ export class Session implements SessionContext {
             result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
       },
+    );
+  }
+
+  /**
+   * Drive the model-call / tool-call loop for one turn: send, stream chunks
+   * to the client, run requested tools, feed their results back, repeat
+   * until the model stops calling tools. Extracted from #executePromptInner
+   * and shared with continueTurn so the two paths stay behaviorally identical.
+   */
+  async #runModelTurnLoop(
+    promptId: string,
+    initialMessage: Content,
+    pendingSend: AbortController,
+    onIteration?: () => void,
+  ): Promise<{ stopReason: PromptResponse['stopReason'] } | null> {
+    let nextMessage: Content | null = initialMessage;
+
+    while (nextMessage !== null) {
+      onIteration?.();
+      if (pendingSend.signal.aborted) {
+        this.#getCurrentChat().addHistory(nextMessage);
+        return { stopReason: 'cancelled' };
+      }
+
+      const functionCalls: FunctionCall[] = [];
+      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+      const streamStartTime = Date.now();
+
+      try {
+        const sendResult = await this.#sendMessageStreamWithAutoCompression(
+          promptId,
+          nextMessage?.parts ?? [],
+          pendingSend.signal,
+        );
+        if (!sendResult.responseStream) {
+          this.#preserveUnsentMessageHistory(
+            nextMessage,
+            sendResult.stopReason === 'cancelled',
+          );
+          return { stopReason: sendResult.stopReason };
+        }
+        const responseStream = sendResult.responseStream;
+        nextMessage = null;
+
+        for await (const resp of responseStream) {
+          if (pendingSend.signal.aborted) {
+            return { stopReason: 'cancelled' };
+          }
+
+          if (
+            resp.type === StreamEventType.CHUNK &&
+            resp.value.candidates &&
+            resp.value.candidates.length > 0
+          ) {
+            const candidate = resp.value.candidates[0];
+            for (const part of candidate.content?.parts ?? []) {
+              if (!part.text) {
+                continue;
+              }
+
+              this.messageEmitter.emitMessage(
+                part.text,
+                'assistant',
+                part.thought,
+              );
+            }
+          }
+
+          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
+            usageMetadata = resp.value.usageMetadata;
+          }
+
+          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
+            functionCalls.push(...resp.value.functionCalls);
+          }
+        }
+      } catch (error) {
+        // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+        const errorStatus = getErrorStatus(error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const errorType = classifyApiError({
+          message: errorMessage,
+          status: errorStatus,
+        });
+
+        const hookSystem = this.config.getHookSystem?.();
+        const hooksEnabledForStopFailure = !this.config.getDisableAllHooks?.();
+        if (
+          hooksEnabledForStopFailure &&
+          hookSystem &&
+          this.config.hasHooksForEvent?.('StopFailure')
+        ) {
+          hookSystem
+            .fireStopFailureEvent(errorType, errorMessage)
+            .catch((err) => {
+              debugLogger.warn(`StopFailure hook failed: ${err}`);
+            });
+        }
+
+        if (errorStatus === 429) {
+          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+        }
+
+        throw error;
+      }
+
+      if (usageMetadata) {
+        this.#recordPromptTokenCount(usageMetadata);
+        if (this.messageRewriter) {
+          this.messageRewriter.flushTurn(pendingSend.signal);
+        }
+
+        const durationMs = Date.now() - streamStartTime;
+        await this.messageEmitter.emitUsageMetadata(
+          usageMetadata,
+          '',
+          durationMs,
+        );
+      }
+
+      if (functionCalls.length > 0) {
+        const toolResponseParts = await this.runToolCalls(
+          pendingSend.signal,
+          promptId,
+          functionCalls,
+        );
+        nextMessage = {
+          role: 'user',
+          parts: [
+            ...toolResponseParts,
+            ...(await this.#drainMidTurnUserMessages()),
+          ],
+        };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Post-loop turn epilogue shared by the prompt and continue paths: wait
+   * for any pending message rewrite, then run the Stop-hook loop.
+   */
+  async #finishTurn(
+    pendingSend: AbortController,
+    promptId: string,
+  ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
+    if (this.messageRewriter) {
+      await this.messageRewriter.waitForPendingRewrites();
+    }
+
+    return this.#handleStopHookLoop(
+      pendingSend,
+      promptId,
+      !this.config.getDisableAllHooks?.(),
+      this.config.getMessageBus?.(),
     );
   }
 

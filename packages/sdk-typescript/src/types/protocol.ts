@@ -269,6 +269,15 @@ export interface CLIControlInterruptRequest {
   subtype: 'interrupt';
 }
 
+/**
+ * Continue the most recent unfinished turn from existing history without
+ * sending a new user message. The reply reports whether a continuation was
+ * accepted; the resumed turn's output then flows as regular stream messages.
+ */
+export interface CLIControlContinueLastTurnRequest {
+  subtype: 'continue_last_turn';
+}
+
 export interface CLIControlPermissionRequest {
   subtype: 'can_use_tool';
   tool_name: string;
@@ -393,6 +402,7 @@ export interface CLIControlGetContextUsageRequest {
 
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
+  | CLIControlContinueLastTurnRequest
   | CLIControlPermissionRequest
   | CLIControlInitializeRequest
   | CLIControlSetPermissionModeRequest
@@ -592,6 +602,7 @@ export enum ControlRequestType {
   // SystemController requests
   INITIALIZE = 'initialize',
   INTERRUPT = 'interrupt',
+  CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',

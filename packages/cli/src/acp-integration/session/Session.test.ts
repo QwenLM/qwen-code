@@ -1148,6 +1148,120 @@ describe('Session', () => {
     });
   });
 
+  describe('continueTurn', () => {
+    const setHistoryTail = (tail: Content[]) => {
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi.fn().mockReturnValue(tail);
+    };
+    const getStripSpy = () => {
+      const spy = vi.fn();
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = spy;
+      return spy;
+    };
+
+    it('no-ops with resumed=false when the last turn ended cleanly', async () => {
+      setHistoryTail([{ role: 'model', parts: [{ text: 'done' }] }]);
+
+      const result = await session.continueTurn();
+
+      expect(result).toEqual({
+        stopReason: 'end_turn',
+        resumed: false,
+        interruption: 'none',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('re-submits an orphaned trailing user prompt under the same turn id without recording a user message', async () => {
+      setHistoryTail([{ role: 'user', parts: [{ text: 'do the thing' }] }]);
+      const stripSpy = getStripSpy();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      const result = await session.continueTurn();
+
+      expect(result.resumed).toBe(true);
+      expect(result.interruption).toBe('interrupted_prompt');
+      expect(stripSpy).toHaveBeenCalledTimes(1);
+      // turn counter is NOT incremented — a continuation is the same
+      // logical turn, so the prompt id reuses the current turn number.
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        {
+          message: [{ text: 'do the thing' }],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('closes dangling tool calls with synthesized error responses as the opening message', async () => {
+      setHistoryTail([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      const result = await session.continueTurn();
+
+      expect(result.resumed).toBe(true);
+      expect(result.interruption).toBe('interrupted_turn');
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        'qwen3-code-plus',
+        {
+          message: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'shell',
+                response: { error: expect.stringContaining('not recorded') },
+              },
+            },
+          ],
+          config: { abortSignal: expect.any(AbortSignal) },
+        },
+        'test-session-id########0',
+      );
+    });
+
+    it('rejects with 409 while a prompt turn is in flight', async () => {
+      let releaseStream!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        await gate;
+        return createEmptyStream();
+      });
+
+      const promptPromise = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hi' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      });
+
+      await expect(session.continueTurn()).rejects.toMatchObject({
+        code: 409,
+      });
+
+      releaseStream();
+      await promptPromise;
+    });
+  });
+
   describe('prompt', () => {
     it('drains background task notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi

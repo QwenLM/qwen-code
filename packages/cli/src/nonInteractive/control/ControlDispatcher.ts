@@ -373,6 +373,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     switch (subtype) {
       case 'initialize':
       case 'interrupt':
+      case 'continue_last_turn':
       case 'set_model':
       case 'supported_commands':
       case 'get_context_usage':

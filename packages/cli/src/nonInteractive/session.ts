@@ -8,7 +8,11 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  detectTurnInterruption,
+  SendMessageType,
+} from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -61,6 +65,12 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
+  /**
+   * Count of accepted continue_last_turn requests not yet executed.
+   * Drained ahead of user messages by processPendingWork so a continuation
+   * runs before any prompt that arrives after it.
+   */
+  private pendingContinueTurns: number = 0;
   private abortController: AbortController;
   private config: Config;
   private sessionId: string;
@@ -276,6 +286,7 @@ class Session {
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
+      onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -457,6 +468,56 @@ class Session {
     }
   }
 
+  /**
+   * Handle a continue_last_turn control request: classify the last turn
+   * from chat history and, when it was interrupted, schedule a
+   * continuation turn on the work queue. Returns the control reply
+   * payload; the continuation itself runs serialized with user messages.
+   */
+  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
+    await this.waitForInitialization();
+
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      return { accepted: false, interruption: 'none' };
+    }
+
+    const detection = detectTurnInterruption(
+      geminiClient.getChat().getHistoryTail(1),
+    );
+    if (detection.kind === 'none') {
+      return { accepted: false, interruption: 'none' };
+    }
+
+    this.pendingContinueTurns += 1;
+    this.ensureProcessingStarted();
+    return { accepted: true, interruption: detection.kind };
+  }
+
+  /**
+   * Run a scheduled continuation turn. The authoritative interruption
+   * re-detection happens inside runNonInteractive (history may have moved
+   * since the request was accepted); a turn that became clean by then is
+   * a no-op result message.
+   */
+  private async processContinueTurn(): Promise<void> {
+    await this.waitForInitialization();
+
+    const promptId = this.getNextPromptId();
+    try {
+      await runNonInteractive(this.config, this.settings, '', promptId, {
+        abortController: this.abortController,
+        adapter: this.outputAdapter,
+        controlService: this.controlService ?? undefined,
+        continueInterrupted: true,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+      });
+    } catch (error) {
+      debugLogger.error('[Session] Continue turn execution error:', error);
+    }
+  }
+
   private async processMonitorNotification(
     notification: MonitorQueueItem,
   ): Promise<void> {
@@ -492,12 +553,24 @@ class Session {
     }
 
     while (
-      (this.userMessageQueue.length > 0 ||
+      (this.pendingContinueTurns > 0 ||
+        this.userMessageQueue.length > 0 ||
         this.monitorStartedQueue.length > 0 ||
         this.monitorQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.abortController.signal.aborted
     ) {
+      if (this.pendingContinueTurns > 0) {
+        this.pendingContinueTurns -= 1;
+        try {
+          await this.processContinueTurn();
+        } catch (error) {
+          debugLogger.error('[Session] Error processing continue turn:', error);
+          this.emitErrorResult(error);
+        }
+        continue;
+      }
+
       if (this.userMessageQueue.length > 0) {
         const userMessage = this.userMessageQueue.shift()!;
         try {

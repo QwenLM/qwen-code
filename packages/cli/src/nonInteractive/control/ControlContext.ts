@@ -41,6 +41,12 @@ export interface IControlContext {
   inputClosed: boolean;
 
   onInterrupt?: () => void;
+  /**
+   * Continue the most recent unfinished turn (continue_last_turn control
+   * request). Resolves with `{ accepted, interruption }`; the resumed
+   * turn's output flows through the regular stream afterwards.
+   */
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 }
 
 /**
@@ -61,6 +67,7 @@ export class ControlContext implements IControlContext {
   inputClosed: boolean;
 
   onInterrupt?: () => void;
+  onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 
   constructor(options: {
     config: Config;
@@ -70,6 +77,7 @@ export class ControlContext implements IControlContext {
     settings: LoadedSettings;
     permissionMode?: PermissionMode;
     onInterrupt?: () => void;
+    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
   }) {
     this.config = options.config;
     this.streamJson = options.streamJson;
@@ -82,5 +90,6 @@ export class ControlContext implements IControlContext {
     this.mcpClients = new Map();
     this.inputClosed = false;
     this.onInterrupt = options.onInterrupt;
+    this.onContinueLastTurn = options.onContinueLastTurn;
   }
 }

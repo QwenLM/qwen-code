@@ -61,6 +61,9 @@ export class SystemController extends BaseController {
       case 'interrupt':
         return this.handleInterrupt();
 
+      case 'continue_last_turn':
+        return this.handleContinueLastTurn();
+
       case 'set_model':
         return this.handleSetModel(
           payload as CLIControlSetModelRequest,
@@ -385,6 +388,27 @@ export class SystemController extends BaseController {
     debugLogger.debug('[SystemController] Interrupt handled');
 
     return { subtype: 'interrupt' };
+  }
+
+  /**
+   * Handle continue_last_turn request
+   *
+   * Delegates to the session-provided callback, which classifies the last
+   * turn from chat history and (when interrupted) schedules a continuation
+   * turn. The response reports `{ accepted, interruption }`; the resumed
+   * turn's output flows as regular stream messages afterwards.
+   */
+  private async handleContinueLastTurn(): Promise<Record<string, unknown>> {
+    if (!this.context.onContinueLastTurn) {
+      throw new Error(
+        'continue_last_turn is not available in this mode (no session callback registered)',
+      );
+    }
+
+    const result = await this.context.onContinueLastTurn();
+    debugLogger.debug('[SystemController] continue_last_turn handled:', result);
+
+    return { subtype: 'continue_last_turn', ...result };
   }
 
   /**

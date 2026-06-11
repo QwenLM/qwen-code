@@ -176,6 +176,41 @@ describe('ControlDispatcher', () => {
       });
     });
 
+    it('should route continue_last_turn request to system controller', async () => {
+      const request: CLIControlRequest = {
+        type: 'control_request',
+        request_id: 'req-continue',
+        request: {
+          subtype: 'continue_last_turn',
+        },
+      };
+
+      const mockResponse = {
+        subtype: 'continue_last_turn',
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      };
+
+      vi.mocked(mockSystemController.handleRequest).mockResolvedValue(
+        mockResponse,
+      );
+
+      await dispatcher.dispatch(request);
+
+      expect(mockSystemController.handleRequest).toHaveBeenCalledWith(
+        request.request,
+        'req-continue',
+      );
+      expect(mockContext.streamJson.send).toHaveBeenCalledWith({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: 'req-continue',
+          response: mockResponse,
+        },
+      });
+    });
+
     it('should route set_model request to system controller', async () => {
       const request: CLIControlRequest = {
         type: 'control_request',

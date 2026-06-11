@@ -26,6 +26,9 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  buildSyntheticToolResponseParts,
+  detectTurnInterruption,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
   restoreWorktreeContext,
   TeamEventType,
   ApprovalMode,
@@ -186,6 +189,15 @@ export interface RunNonInteractiveOptions {
   notificationDisplayText?: string;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
+  /**
+   * Continue the most recent unfinished turn from chat history instead of
+   * submitting `input` (which is ignored). No new user message enters the
+   * transcript: an orphaned trailing user entry is re-submitted with Retry
+   * semantics, and dangling tool calls are closed with synthesized error
+   * functionResponses sent as a ToolResult. When the last turn ended
+   * cleanly the run emits a no-op result and exits 0.
+   */
+  continueInterrupted?: boolean;
 }
 
 /**
@@ -457,6 +469,40 @@ export async function runNonInteractive(
         options.userMessage,
       );
 
+      // First-turn SendMessageType override for continuation turns; null
+      // means the regular options.sendMessageType / UserQuery selection
+      // applies.
+      let continueSendType: SendMessageType | null = null;
+
+      if (options.continueInterrupted) {
+        const detection = detectTurnInterruption(
+          geminiClient.getChat().getHistoryTail(1),
+        );
+        if (detection.kind === 'none') {
+          await emitNonInteractiveFinalMessage({
+            message: 'No interrupted turn to continue.',
+            isError: false,
+            adapter,
+            config,
+            startTimeMs: startTime,
+          });
+          return 0;
+        }
+        if (detection.kind === 'interrupted_prompt') {
+          // The send below re-pushes this content; strip the orphaned
+          // original first so history doesn't carry it twice.
+          geminiClient.stripOrphanedUserEntriesFromHistory();
+          initialPartList = detection.parts;
+          continueSendType = SendMessageType.Retry;
+        } else {
+          initialPartList = buildSyntheticToolResponseParts(
+            detection.danglingCalls,
+            ORPHAN_TOOL_USE_REPAIR_REASON,
+          );
+          continueSendType = SendMessageType.ToolResult;
+        }
+      }
+
       if (!initialPartList) {
         let slashHandled = false;
         if (isSlashCommand(input)) {
@@ -550,13 +596,21 @@ export async function runNonInteractive(
           : [reminderPart, existing];
       };
 
-      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      // Continuation turns must not prepend reminder text: a ToolResult
+      // payload's functionResponse parts have to stay at the HEAD of the
+      // user message or Anthropic-compatible backends reject the pairing.
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         initialPartList = withReminder(initialPartList, startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (config.getResumedSessionData()) {
+      } else if (
+        !options.continueInterrupted &&
+        config.getResumedSessionData()
+      ) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -960,7 +1014,10 @@ export async function runNonInteractive(
 
         let sendType: SendMessageType;
         if (isFirstTurn) {
-          sendType = options.sendMessageType ?? SendMessageType.UserQuery;
+          sendType =
+            continueSendType ??
+            options.sendMessageType ??
+            SendMessageType.UserQuery;
         } else if (isTeammateTurn) {
           sendType = SendMessageType.Teammate;
         } else {
