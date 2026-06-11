@@ -123,13 +123,46 @@ describe('formatExplanation', () => {
       /MATCHED\s+q -> prompt \(downgraded: quota-not-evaluated\)/,
     );
     expect(out).toContain('[downgraded to prompt]');
-    expect(out).toContain('could be allow OR prompt');
+    expect(out).toContain('no live quota store');
+  });
+
+  it('a deny + maxPerWindow rule: caveat never claims "allow"', () => {
+    // A deny rule with a quota is valid policy; at runtime with room it stays
+    // deny — the caveat must NOT assert it could become allow.
+    const p = policy([
+      {
+        id: 'd',
+        match: { tool: 'bash' },
+        action: 'deny',
+        maxPerWindow: { count: 1, windowSec: 60 },
+      },
+    ]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toContain('no live quota store');
+    expect(out).not.toMatch(/\ballow\b/);
+  });
+
+  it('caveat still fires when a malformed sibling field wins the reason slot', () => {
+    // maxPerWindow + a malformed expiresAt: the reason token is
+    // malformed-expiresAt, but the quota was still not evaluated → caveat fires.
+    const p = policy([
+      {
+        id: 'q',
+        match: { tool: 'bash' },
+        action: 'allow',
+        maxPerWindow: { count: 1, windowSec: 60 },
+        expiresAt: 'not-a-date',
+      },
+    ]);
+    const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
+    expect(out).toMatch(/downgraded: malformed-expiresAt/);
+    expect(out).toContain('no live quota store');
   });
 
   it('no quota caveat when no maxPerWindow rule is involved', () => {
     const p = policy([{ id: 'a', match: { tool: 'bash' }, action: 'allow' }]);
     const out = formatExplanation(explainPolicy(p, { tool: 'bash' }, NOW));
-    expect(out).not.toContain('could be allow OR prompt');
+    expect(out).not.toContain('no live quota store');
   });
 
   it('renders an id-less matched rule by its index', () => {

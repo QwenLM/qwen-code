@@ -339,6 +339,15 @@ export interface RuleTrace {
   action?: PolicyAction;
   /** True when matched but downgraded to prompt by an unevaluable condition. */
   downgraded?: boolean;
+  /**
+   * True when this matched winner carries a `maxPerWindow` whose quota was NOT
+   * consulted (no oracle / id-less / untracked) — the daemon-free dry-run case.
+   * Set INDEPENDENTLY of the reason token (which a malformed sibling field can
+   * win), so the renderer's quota caveat is never wrongly suppressed. The live
+   * quota could change this rule's runtime outcome (its real action while it has
+   * room; skipped once exhausted).
+   */
+  quotaNotEvaluated?: boolean;
 }
 
 /** Result of {@link explainPolicy}: the authoritative decision + per-rule trace. */
@@ -400,6 +409,14 @@ export function explainPolicy(
     // condition. A non-prompt action with an unevaluable condition is
     // downgraded to prompt — exactly as evaluate() does.
     const downgraded = cc.kind === 'unevaluable' && rule.action !== 'prompt';
+    // A maxPerWindow whose quota we could not consult here (no oracle / id-less
+    // / untracked). Computed independently of `cc.reason` so a malformed sibling
+    // field winning the reason slot doesn't hide that the quota was unevaluated.
+    const quotaNotEvaluated =
+      rule.maxPerWindow !== undefined &&
+      (!quota ||
+        rule.id === undefined ||
+        quota.state(rule.id, now.getTime()) === 'untracked');
     trace.push({
       index: idx,
       id: rule.id,
@@ -407,6 +424,7 @@ export function explainPolicy(
       reason: cc.kind === 'unevaluable' ? cc.reason : 'matched',
       action: downgraded ? 'prompt' : rule.action,
       downgraded,
+      ...(quotaNotEvaluated ? { quotaNotEvaluated: true } : {}),
     });
     winnerFound = true;
   }

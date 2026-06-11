@@ -265,6 +265,7 @@ describe('explainPolicy — condition reasons', () => {
       action: 'prompt',
       downgraded: true,
       reason: 'quota-not-evaluated',
+      quotaNotEvaluated: true,
     });
     expect(decision.action).toBe('prompt');
     expect(decision.usedDeferredField).toBe(true);
@@ -309,5 +310,7 @@ describe('explainPolicy — condition reasons', () => {
       reason: 'matched',
     });
     expect(trace[0].downgraded).toBe(false);
+    // The quota WAS consulted (oracle, room) → no dry-run caveat flag.
+    expect(trace[0].quotaNotEvaluated).toBeUndefined();
   });
 });

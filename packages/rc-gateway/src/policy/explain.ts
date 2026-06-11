@@ -81,9 +81,9 @@ export function parseExplainArgs(argv: string[]): ParsedExplain {
 /**
  * Render a {@link PolicyExplanation} as human-readable lines: each rule in
  * evaluation order with a MATCHED / SKIPPED / not-reached annotation, then the
- * authoritative decision and its source. When any rule was a `maxPerWindow`
- * (signalled by a `quota-not-evaluated` reason — the dry run has no live store),
- * a caveat notes the runtime result could differ.
+ * authoritative decision and its source. When the matched winner carries a
+ * `maxPerWindow` whose quota was not consulted (the dry run has no live store —
+ * `trace[].quotaNotEvaluated`), a caveat notes the runtime result could differ.
  */
 export function formatExplanation(exp: PolicyExplanation): string {
   const { decision, trace } = exp;
@@ -111,10 +111,13 @@ export function formatExplanation(exp: PolicyExplanation): string {
   if (decision.usedDeferredField) dline += ' [downgraded to prompt]';
   lines.push(dline);
 
-  if (trace.some((t) => t.reason === 'quota-not-evaluated')) {
+  if (trace.some((t) => t.quotaNotEvaluated)) {
     lines.push(
-      'note: maxPerWindow rules are not evaluated in this dry run; at runtime ' +
-        'such a rule could be allow OR prompt depending on live usage.',
+      'note: maxPerWindow is not evaluated in this dry run (no live quota ' +
+        'store); at runtime the matched rule applies with its real action ' +
+        'while it has quota room, or is skipped once exhausted (a later rule ' +
+        'or the default then decides) — so the live result may differ from ' +
+        'what is shown here.',
     );
   }
   return lines.join('\n');
