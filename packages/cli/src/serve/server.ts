@@ -380,6 +380,7 @@ function isBlockedAuthProviderHost(hostname: string): boolean {
       a === 0 ||
       a === 10 ||
       a === 127 ||
+      (a === 100 && b !== undefined && b >= 64 && b <= 127) ||
       (a === 169 && b === 254) ||
       (a === 172 && b !== undefined && b >= 16 && b <= 31) ||
       (a === 192 && b === 168)

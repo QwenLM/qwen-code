@@ -26,6 +26,8 @@ import type {
   AutoModeDecision,
   AutoModeOutcome,
   GoalTerminalEvent,
+} from '@qwen-code/qwen-code-core';
+import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
@@ -87,7 +89,6 @@ import type {
   ConversationFinishedEvent,
   acquireSleepInhibitor,
   setGoalTerminalObserver,
-  type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -123,9 +124,6 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
-
-const BACKGROUND_TASK_NOTIFICATION_POLL_MS = 100;
-const BACKGROUND_TASK_NOTIFICATION_DRAIN_TIMEOUT_MS = 1000;
 
 // Import modular session components
 import type {
@@ -393,20 +391,6 @@ export class Session implements SessionContext {
   private turn: number = 0;
   private readonly createdAt: number = Date.now();
   private readonly runtimeBaseDir: string;
-
-  // Background task notification state
-  private notificationQueue: Array<{ displayText: string; modelText: string }> =
-    [];
-  private notificationResolve: (() => void) | null = null;
-  /**
-   * Tracks background task notification prompts independently from user
-   * prompts.  Sharing `pendingPromptCompletion` would let a notification
-   * overwrite the active prompt's completion tracker.
-   */
-  private notificationProcessing: Promise<void> | null = null;
-  private notificationAbort: AbortController | null = null;
-  private notificationDraining = false;
-  private notificationCounter = 0;
 
   // Cron scheduling state
   private cronQueue: string[] = [];
@@ -691,11 +675,6 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (this.notificationAbort) {
-      this.notificationAbort.abort();
-      this.notificationAbort = null;
-    }
-
     if (!hadPrompt && !hadCron && !hadNotification) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
@@ -748,18 +727,6 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (this.notificationAbort) {
-      this.notificationAbort.abort();
-      this.notificationAbort = null;
-    }
-    if (this.notificationProcessing) {
-      try {
-        await this.notificationProcessing;
-      } catch {
-        // Expected: notification processing was aborted or errored.
-      }
-    }
-
     // Abort any in-progress cron execution (user prompt takes priority)
     if (this.cronAbortController) {
       this.cronAbortController.abort();
@@ -814,9 +781,7 @@ export class Session implements SessionContext {
     });
 
     try {
-      this.#installBackgroundTaskNotificationCallback();
       const result = await this.#executePrompt(params, pendingSend);
-      await this.#drainBackgroundTaskNotifications(pendingSend);
       this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
       void this.#drainCronQueue();
@@ -1807,277 +1772,6 @@ export class Session implements SessionContext {
       );
       return [];
     }
-  }
-
-  async #drainBackgroundTaskNotifications(
-    pendingSend: AbortController,
-  ): Promise<void> {
-    const registry = this.config.getBackgroundTaskRegistry();
-    if (
-      !registry.hasUnfinalizedTasks() &&
-      this.notificationQueue.length === 0
-    ) {
-      registry.setNotificationCallback(undefined);
-      return;
-    }
-    const deadline = Date.now() + BACKGROUND_TASK_NOTIFICATION_DRAIN_TIMEOUT_MS;
-
-    this.notificationDraining = true;
-    try {
-      if (this.notificationProcessing) {
-        try {
-          await this.notificationProcessing;
-        } catch {
-          // The scheduled processor logs its own failures.
-        }
-      }
-
-      while (true) {
-        if (pendingSend.signal.aborted) {
-          break;
-        }
-
-        while (this.notificationQueue.length > 0) {
-          if (Date.now() >= deadline) break;
-          const item = this.notificationQueue.shift()!;
-          await this.#executeNotificationPrompt(item, pendingSend);
-        }
-
-        if (
-          !registry.hasUnfinalizedTasks() &&
-          this.notificationQueue.length === 0
-        ) {
-          break;
-        }
-
-        if (Date.now() >= deadline) {
-          debugLogger.warn(
-            'Timed out draining background task notifications; leaving tasks running.',
-          );
-          break;
-        }
-
-        await new Promise<void>((resolve) => {
-          this.notificationResolve = resolve;
-          setTimeout(resolve, BACKGROUND_TASK_NOTIFICATION_POLL_MS);
-        });
-      }
-    } finally {
-      this.notificationDraining = false;
-      this.notificationResolve = null;
-      if (registry.hasUnfinalizedTasks() || this.notificationQueue.length > 0) {
-        this.#scheduleBackgroundTaskNotificationProcessing();
-      } else {
-        registry.setNotificationCallback(undefined);
-      }
-    }
-  }
-
-  #installBackgroundTaskNotificationCallback(): void {
-    const registry = this.config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
-      this.notificationQueue.push({ displayText, modelText });
-      if (this.notificationResolve) {
-        this.notificationResolve();
-        this.notificationResolve = null;
-      } else if (!this.notificationDraining && !this.pendingPrompt) {
-        this.#scheduleBackgroundTaskNotificationProcessing();
-      }
-    });
-  }
-
-  #scheduleBackgroundTaskNotificationProcessing(): void {
-    if (this.notificationDraining || this.notificationProcessing) return;
-    this.notificationProcessing = this.#processBackgroundTaskNotifications()
-      .catch((error) => {
-        debugLogger.warn(
-          `Failed to process background task notification: ${this.#formatError(
-            error,
-          )}`,
-        );
-      })
-      .finally(() => {
-        try {
-          this.notificationProcessing = null;
-          const registry = this.config.getBackgroundTaskRegistry();
-          if (this.notificationQueue.length > 0) {
-            this.#scheduleBackgroundTaskNotificationProcessing();
-          } else if (!registry.hasUnfinalizedTasks()) {
-            registry.setNotificationCallback(undefined);
-          }
-        } catch (cleanupError) {
-          this.notificationProcessing = null;
-          debugLogger.warn(
-            `Error in notification processing cleanup: ${this.#formatError(cleanupError)}`,
-          );
-        }
-      });
-  }
-
-  async #processBackgroundTaskNotifications(): Promise<void> {
-    if (this.pendingPromptCompletion) {
-      try {
-        await this.pendingPromptCompletion;
-      } catch {
-        // Expected: previous prompt was cancelled or errored.
-      }
-    }
-
-    const notificationSend = new AbortController();
-    this.notificationAbort = notificationSend;
-    try {
-      while (this.notificationQueue.length > 0) {
-        const item = this.notificationQueue.shift()!;
-        await this.#executeNotificationPrompt(item, notificationSend);
-      }
-    } finally {
-      if (this.notificationAbort === notificationSend) {
-        this.notificationAbort = null;
-      }
-    }
-  }
-
-  async #executeNotificationPrompt(
-    item: { displayText: string; modelText: string },
-    pendingSend: AbortController,
-  ): Promise<void> {
-    return Storage.runWithRuntimeBaseDir(
-      this.runtimeBaseDir,
-      this.config.getWorkingDir(),
-      async () => {
-        const promptId =
-          this.config.getSessionId() +
-          '########notif' +
-          String(++this.notificationCounter);
-
-        await withInteractionSpan(
-          this.config,
-          {
-            promptId,
-            model: this.config.getModel(),
-            messageType: 'acp_prompt',
-          },
-          async () => {
-            let turnCount = 0;
-            const chat = this.#getCurrentChat();
-            const historySnapshot = chat.getHistoryShallow();
-            try {
-              await this.sendUpdate({
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: item.displayText },
-              });
-
-              const reminders = await this.#buildInitialSystemReminders();
-              let nextMessage: Content | null = {
-                role: 'user',
-                parts: [...reminders, { text: item.modelText }],
-              };
-
-              while (nextMessage !== null) {
-                turnCount++;
-                if (pendingSend.signal.aborted) return;
-
-                const functionCalls: FunctionCall[] = [];
-                let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                  null;
-                const streamStartTime = Date.now();
-
-                const sendResult =
-                  await this.#sendMessageStreamWithAutoCompression(
-                    promptId,
-                    nextMessage.parts ?? [],
-                    pendingSend.signal,
-                    { skipCompression: true },
-                  );
-                if (!sendResult.responseStream) {
-                  this.#preserveUnsentMessageHistory(
-                    nextMessage,
-                    sendResult.stopReason === 'cancelled',
-                  );
-                  return;
-                }
-                const responseStream = sendResult.responseStream;
-                nextMessage = null;
-
-                for await (const resp of responseStream) {
-                  if (pendingSend.signal.aborted) return;
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) continue;
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
-                      );
-                    }
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
-                  ) {
-                    usageMetadata = resp.value.usageMetadata;
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
-                  }
-                }
-
-                if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
-                  if (this.messageRewriter) {
-                    this.messageRewriter.flushTurn(pendingSend.signal);
-                  }
-                  const durationMs = Date.now() - streamStartTime;
-                  await this.messageEmitter.emitUsageMetadata(
-                    usageMetadata,
-                    '',
-                    durationMs,
-                  );
-                }
-
-                if (functionCalls.length > 0) {
-                  const toolNames = functionCalls
-                    .map((call) => call.name || '(unknown)')
-                    .join(', ');
-                  debugLogger.warn(
-                    `Ignoring ${functionCalls.length} tool call(s) [${toolNames}] requested while processing background task notification: ${item.displayText.slice(0, 80)}`,
-                  );
-                }
-              }
-            } catch (error) {
-              if (pendingSend.signal.aborted) return;
-              debugLogger.error('Error processing notification prompt:', error);
-              const msg =
-                error instanceof Error ? error.message : String(error);
-              await this.messageEmitter.emitAgentMessage(
-                `[notification error] ${msg}`,
-              );
-            } finally {
-              chat.setHistory(historySnapshot);
-              logConversationFinishedEvent(
-                this.config,
-                new ConversationFinishedEvent(
-                  this.config.getApprovalMode(),
-                  turnCount,
-                ),
-              );
-            }
-          },
-          () => 'ok',
-        );
-      },
-    );
   }
 
   /**
@@ -3257,17 +2951,22 @@ export class Session implements SessionContext {
                       hookResult.updatedInput as typeof invocation.params;
                   }
 
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
                   if (approvalMode === ApprovalMode.AUTO) {
-                    const before = this.config.getAutoModeDenialState();
-                    const after = before;
-                    debugLogger.warn(
-                      `Auto mode denial counters preserved after hook approval: ` +
-                        `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+                    const snapshot = {
+                      ...this.config.getAutoModeDenialState(),
+                    };
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
                     );
-                    this.config.setAutoModeDenialState(after);
+                    this.config.setAutoModeDenialState(snapshot);
+                    debugLogger.debug(
+                      `Auto mode denial counters preserved after hook approval: ` +
+                        formatDenialStateLog(snapshot),
+                    );
+                  } else {
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
                   }
                 } else {
                   return earlyErrorResponse(

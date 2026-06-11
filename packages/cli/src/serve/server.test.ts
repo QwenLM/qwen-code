@@ -315,6 +315,9 @@ interface FakeBridgeOpts {
     taskId: string,
     taskKind: 'agent' | 'shell' | 'monitor',
   ) => Promise<{ cancelled: boolean }>;
+  clearSessionGoalImpl?: (
+    sessionId: string,
+  ) => Promise<{ cleared: boolean; condition?: string }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
@@ -460,6 +463,7 @@ interface FakeBridge extends AcpSessionBridge {
     taskId: string;
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
+  clearSessionGoalCalls: string[];
   sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -549,6 +553,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
+  const clearSessionGoalCalls: string[] = [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
@@ -722,6 +727,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
+  const clearSessionGoalImpl =
+    opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
   const sessionHooksImpl =
     opts.sessionHooksImpl ??
     (async (sessionId: string) => ({
@@ -853,6 +860,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
     cancelSessionTaskCalls,
+    clearSessionGoalCalls,
     sessionHooksCalls,
     setModelCalls,
     setLanguageCalls,
@@ -1024,6 +1032,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async cancelSessionTask(sessionId, taskId, taskKind) {
       cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind);
+    },
+    async clearSessionGoal(sessionId) {
+      clearSessionGoalCalls.push(sessionId);
+      return clearSessionGoalImpl(sessionId);
     },
     async getSessionHooksStatus(sessionId) {
       sessionHooksCalls.push(sessionId);
@@ -2239,6 +2251,73 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('clears a session goal through the bridge', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async () => ({
+          cleared: true,
+          condition: 'ship it',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cleared: true, condition: 'ship it' });
+      expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('maps goal clear bridge errors', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/missing/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('returns cleared false when no session goal is active', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async () => ({ cleared: false }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cleared: false });
+      expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
     });
   });
 
@@ -7940,11 +8019,12 @@ describe('auth device-flow routes', () => {
   });
 
   it.each([
+    'http://100.64.1.1:11434/v1',
     'http://[::]:11434/v1',
     'http://[febf::1]:11434/v1',
     'http://[::ffff:169.254.169.254]:11434/v1',
   ])(
-    'POST /workspace/auth/provider rejects private IPv6 %s',
+    'POST /workspace/auth/provider rejects private baseUrl %s',
     async (baseUrl) => {
       const installAuthProvider = vi.fn();
       const bridge = fakeBridge();

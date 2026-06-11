@@ -2164,6 +2164,15 @@ export function App({
 
       if (pendingApproval || bottomHidden) return;
 
+      if (tasksPanelMessage) {
+        e.preventDefault();
+        e.stopPropagation();
+        setTasksPanelMessage(null);
+        handleReturnToEditor();
+        resetEscapeState();
+        return;
+      }
+
       if (clearQueuedPrompts()) {
         e.preventDefault();
         resetEscapeState();
@@ -2212,6 +2221,8 @@ export function App({
     handleCycleMode,
     pendingApproval,
     bottomHidden,
+    tasksPanelMessage,
+    handleReturnToEditor,
     clearQueuedPrompts,
   ]);
 

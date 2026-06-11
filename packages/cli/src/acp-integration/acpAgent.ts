@@ -5713,7 +5713,11 @@ class QwenAgent implements Agent {
               );
               return { cancelled: false, reason, status: task?.status };
             }
-            config.getBackgroundTaskRegistry().cancel(taskId);
+            if (task.status === 'paused') {
+              config.getBackgroundTaskRegistry().abandon(taskId);
+            } else {
+              config.getBackgroundTaskRegistry().cancel(taskId);
+            }
             debugLogger.info(
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );

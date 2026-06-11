@@ -215,6 +215,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   applyProviderInstallPlan: vi.fn().mockResolvedValue({
     updatedModelProviders: {},
   }),
+  unregisterGoalHook: vi.fn(),
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
@@ -459,6 +460,7 @@ import {
   buildInstallPlan,
   applyProviderInstallPlan,
   Storage,
+  unregisterGoalHook,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -1999,6 +2001,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     const cancel = vi.fn();
+    const abandon = vi.fn();
     Object.assign(innerConfig, {
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         get: vi.fn().mockReturnValue({
@@ -2007,6 +2010,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           status: 'paused',
         }),
         cancel,
+        abandon,
       }),
     });
 
@@ -2031,7 +2035,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'agent',
       }),
     ).resolves.toEqual({ cancelled: true, status: 'paused' });
-    expect(cancel).toHaveBeenCalledWith('agent-1');
+    expect(abandon).toHaveBeenCalledWith('agent-1');
+    expect(cancel).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2188,6 +2193,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'completed',
     });
     expect(requestCancel).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears an active session goal', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    vi.mocked(unregisterGoalHook).mockReturnValue({
+      condition: 'ship it',
+      iterations: 1,
+      setAt: 123,
+      tokensAtStart: 456,
+      hookId: 'goal-hook',
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalClear, {
+        sessionId,
+      }),
+    ).resolves.toEqual({ cleared: true, condition: 'ship it' });
+    expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, sessionId);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns cleared false when no session goal is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    vi.mocked(unregisterGoalHook).mockReturnValue(undefined);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionGoalClear, {
+        sessionId,
+      }),
+    ).resolves.toEqual({ cleared: false, condition: undefined });
 
     mockConnectionState.resolve();
     await agentPromise;
