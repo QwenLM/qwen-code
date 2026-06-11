@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { startDaemon } from './daemonSupervisor.js';
@@ -23,11 +24,17 @@ import {
   loadLayeredPolicy,
   lintPolicyFile,
   formatPolicyLint,
+  type Policy,
 } from './policy/loader.js';
 import { explainPolicy } from './policy/evaluator.js';
 import { parseExplainArgs, formatExplanation } from './policy/explain.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
-import { QuotaStore, FileQuotaWal } from './policy/quotas.js';
+import {
+  QuotaStore,
+  FileQuotaWal,
+  quotaLimitsFromPolicy,
+} from './policy/quotas.js';
+import { PolicyReloader } from './policy/reloader.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
 
 export interface ServeOptions {
@@ -95,18 +102,15 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   );
   // Per-rule quota store (cycle 43): limits keyed by rule id from the active
   // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
-  // when the enforcer runs. limitsFor reflects the boot policy (hot-reload, a
-  // future cycle, would rebuild it).
+  // when the enforcer runs. The QuotaStore's limitsFor closure reads THIS map by
+  // reference, so hot-reload (cycle 45) rebuilds limits by mutating it in place
+  // (applyQuotaLimits) — no store reconstruction needed.
   const quotaLimits = new Map<string, { count: number; windowSec: number }>();
-  for (const r of policy.rules) {
-    if (
-      r.id !== undefined &&
-      r.maxPerWindow !== undefined &&
-      !quotaLimits.has(r.id)
-    ) {
-      quotaLimits.set(r.id, r.maxPerWindow);
-    }
-  }
+  const applyQuotaLimits = (p: Policy): void => {
+    quotaLimits.clear();
+    for (const [id, lim] of quotaLimitsFromPolicy(p)) quotaLimits.set(id, lim);
+  };
+  applyQuotaLimits(policy);
   const quota = notifier
     ? await QuotaStore.create(
         new FileQuotaWal(
@@ -120,6 +124,76 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const enforcer = notifier
     ? new PolicyEnforcer(handle.daemon, policy, audit, quota)
     : undefined;
+
+  // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
+  // debounced (250 ms) change, reload the LAYERED policy and, on success, swap
+  // it into the enforcer AND rebuild the quota limits IN PLACE. A malformed
+  // reload RETAINS the previous ruleset (PolicyReloader never throws) and audits
+  // policy_reload_failed — a running gateway must not crash/widen on a half-typed
+  // save (spec "Parse error preserves previous ruleset"). NOTE: a rule id reused
+  // across a reload inherits its prior consumption counts (fail-safe: more
+  // prompting, not a loosening). The policy_load_error SSE frame is deferred —
+  // no gateway-level owner-broadcast surface exists yet (Phase 4).
+  const watchers: FSWatcher[] = [];
+  let reloader: PolicyReloader | undefined;
+  if (enforcer) {
+    const activeEnforcer = enforcer;
+    reloader = new PolicyReloader({
+      load: () =>
+        loadLayeredPolicy(
+          join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+          workspaceCwd,
+          // eslint-disable-next-line no-console
+          (msg) => console.warn(msg),
+        ),
+      // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
+      apply: (p) => {
+        activeEnforcer.setPolicy(p);
+        applyQuotaLimits(p);
+      },
+      onReloaded: (p) => {
+        void audit.record({
+          action: 'policy_reloaded',
+          detail: { ruleCount: p.rules.length },
+        });
+        // eslint-disable-next-line no-console
+        console.log(`policy: reloaded (${p.rules.length} rule(s))`);
+      },
+      onError: (err) => {
+        const reason = (err as Error)?.name ?? 'error';
+        void audit.record({
+          action: 'policy_reload_failed',
+          detail: { reason },
+        });
+        // eslint-disable-next-line no-console
+        console.warn(
+          `policy: reload failed, keeping previous ruleset (${reason})`,
+        );
+      },
+    });
+    const activeReloader = reloader;
+    // Watch the PARENT DIR of each policy file (survives an editor's atomic
+    // rename-replace, unlike a file watch), filtering for the policy.yaml
+    // basename. fs.watch THROWS SYNCHRONOUSLY on a missing dir → guard the CALL;
+    // a missing/unwatchable dir simply won't hot-reload that layer.
+    const dirs = [join(homedir(), '.qwen', 'rc')];
+    if (workspaceCwd) dirs.push(join(workspaceCwd, '.qwen'));
+    for (const dir of dirs) {
+      try {
+        watchers.push(
+          watch(dir, (_event, filename) => {
+            // filename can be null on some platforms/events → trigger anyway
+            // (the watched dirs are tiny; debounce collapses spurious wakes).
+            if (filename === null || filename === 'policy.yaml') {
+              activeReloader.trigger();
+            }
+          }),
+        );
+      } catch {
+        // Missing/unwatchable dir → no hot-reload for that layer.
+      }
+    }
+  }
 
   const port = opts.gatewayPort ?? 4170;
   app.listen(port, '127.0.0.1', () => {
@@ -155,6 +229,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   }
 
   const shutdown = async () => {
+    for (const w of watchers) w.close();
+    reloader?.stop();
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
