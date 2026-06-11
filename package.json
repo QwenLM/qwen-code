@@ -12,7 +12,8 @@
     "packages/channels/weixin",
     "packages/channels/dingtalk",
     "packages/channels/feishu",
-    "packages/channels/plugin-example"
+    "packages/channels/plugin-example",
+    "!packages/desktop"
   ],
   "repository": {
     "type": "git",
@@ -74,6 +75,7 @@
     "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
     "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
@@ -103,6 +105,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",

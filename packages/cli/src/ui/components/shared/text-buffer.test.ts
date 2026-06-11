@@ -1123,6 +1123,26 @@ describe('useTextBuffer', () => {
       expect(state.viewportVisualLines).toEqual(['l1', 'l2', 'l3']);
       expect(state.visualCursor).toEqual([0, 0]);
     });
+
+    it('moves left across a hard-wrapped single-line boundary', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: '1234567890ABCDE',
+          initialCursorOffset: 10,
+          viewport: { width: 10, height: 1 },
+          isValidPath: () => false,
+        }),
+      );
+
+      expect(getBufferState(result).viewportVisualLines).toEqual(['ABCDE']);
+
+      act(() => result.current.move('left'));
+
+      const state = getBufferState(result);
+      expect(state.cursor).toEqual([0, 9]);
+      expect(state.visualCursor).toEqual([0, 9]);
+      expect(state.viewportVisualLines).toEqual(['1234567890']);
+    });
   });
 
   describe('Undo/Redo', () => {

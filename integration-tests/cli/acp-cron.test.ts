@@ -87,7 +87,6 @@ function setupAcpCronTest(rig: TestRig) {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        QWEN_CODE_ENABLE_CRON: '1',
       },
     },
   );
@@ -302,9 +301,7 @@ async function initSession(
     'cron job fires and streams results via sessionUpdate after prompt returns',
     async () => {
       const rig = new TestRig();
-      rig.setup('acp-cron-e2e', {
-        settings: { experimental: { cron: true } },
-      });
+      rig.setup('acp-cron-e2e');
 
       const {
         sendRequest,

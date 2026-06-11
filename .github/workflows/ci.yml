@@ -108,6 +108,9 @@ jobs:
       - name: 'Check lockfile'
         run: 'npm run check:lockfile'
 
+      - name: 'Check desktop workspace isolation'
+        run: 'npm run check:desktop-isolation'
+
       - name: 'Install linters'
         run: 'node scripts/lint.js --setup'
 

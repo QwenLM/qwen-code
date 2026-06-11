@@ -1,0 +1,187 @@
+appId: com.alibaba.qwen-code
+productName: Qwen Code Desktop
+copyright: Copyright © 2026 Alibaba Group.
+
+electronVersion: "39.2.7"
+
+# Hook to compile macOS 26+ Liquid Glass icon after packaging
+afterPack: scripts/afterPack.cjs
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - "!dist/renderer/src/**"
+  - "!**/*.map"
+  - package.json
+  # Include bundled MCP servers (bridge + session) for agent sessions
+  - resources/bridge-mcp-server/**/*
+  - resources/session-mcp-server/**/*
+  # Note: Bundled assets (docs, themes, permissions, tool-icons) are in resources/
+  # and copied to dist/resources/ by build:copy. They're included via dist/**/* above.
+  - packages/shared/src/interceptor-common.ts
+  - packages/shared/src/feature-flags.ts
+  - packages/shared/src/interceptor-request-utils.ts
+  # Include CLI tool Python scripts (platform-independent)
+  - resources/scripts/**/*
+  # Include CLI tool shell wrappers (platform-independent, both Unix and Windows)
+  - resources/bin/markitdown
+  - resources/bin/markitdown.cmd
+  - resources/bin/pdf-tool
+  - resources/bin/pdf-tool.cmd
+  - resources/bin/xlsx-tool
+  - resources/bin/xlsx-tool.cmd
+  - resources/bin/doc-diff
+  - resources/bin/doc-diff.cmd
+  - resources/bin/img-tool
+  - resources/bin/img-tool.cmd
+  - resources/bin/docx-tool
+  - resources/bin/docx-tool.cmd
+  - resources/bin/pptx-tool
+  - resources/bin/pptx-tool.cmd
+  - resources/bin/ical-tool
+  - resources/bin/ical-tool.cmd
+  # Include bundled uv binary (platform-specific, only the relevant one ships per build)
+  - resources/bin/darwin-arm64/**/*
+  - resources/bin/darwin-x64/**/*
+  - resources/bin/win32-x64/**/*
+  - resources/bin/linux-x64/**/*
+  # Include bundled Bun runtime (platform-specific, set by build script)
+  - vendor/bun/**/*
+  # Include bundled Codex binary (platform-specific, downloaded by build script)
+  - vendor/codex/**/*
+  # Include bundled Qwen Code CLI package (downloaded by build script)
+  - vendor/qwen-code/**/*
+  # Exclude everything from node_modules.
+  - "!node_modules/**/*"
+
+extraMetadata:
+  main: dist/main.cjs
+
+# Auto-update publish metadata is generated from the active brand config.
+
+# Disable ASAR to avoid decompression overhead and click delays
+asar: false
+
+mac:
+  category: public.app-category.productivity
+  icon: resources/brands/qwen-code/icon.icns
+  # macOS 26+ Liquid Glass: Tell macOS to look for icon in Assets.car
+  # The value must match --app-icon used in actool (see afterPack.js)
+  extendInfo:
+    CFBundleIconName: AppIcon
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extraResources:
+    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
+    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
+      to: messaging-whatsapp-worker/worker.cjs
+  # Exclude binaries for other platforms
+  files:
+    - "!**/vendor/codex/linux-*/**"
+    - "!**/vendor/codex/win32-*/**"
+    - "!**/resources/bin/win32-*/**"
+    - "!**/resources/bin/linux-*/**"
+  # Use predictable naming for macOS packages (applies to zip; dmg uses its own config below)
+  artifactName: "Qwen-Code-Desktop-${arch}.${ext}"
+  # Code signing & notarization (disabled by default for local builds)
+  # To enable: set CSC_LINK, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+  # notarize:
+  #   teamId: ${APPLE_TEAM_ID}
+
+dmg:
+  # Use predictable naming: Qwen-Code-Desktop-arm64.dmg, Qwen-Code-Desktop-x64.dmg
+  artifactName: "Qwen-Code-Desktop-${arch}.dmg"
+  # Custom background (multi-resolution TIFF with 1x+2x for retina support)
+  background: resources/dmg-background.tiff
+  # Use app icon as the mounted volume icon in Finder
+  icon: resources/brands/qwen-code/icon.icns
+  iconSize: 80
+  title: "Qwen Code Desktop"
+  contents:
+    - x: 130
+      y: 200
+    - x: 410
+      y: 200
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
+
+win:
+  icon: resources/brands/qwen-code/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # Use predictable naming: Qwen-Code-Desktop-x64.exe
+  artifactName: "Qwen-Code-Desktop-${arch}.${ext}"
+  files:
+    # Exclude binaries for other platforms
+    - "!**/vendor/codex/darwin-*/**"
+    - "!**/vendor/codex/linux-*/**"
+    - "!**/resources/bin/darwin-*/**"
+    - "!**/resources/bin/linux-*/**"
+    # WORKAROUND: Exclude bun, codex, uv, and Qwen Code from regular files on Windows.
+    # electron-builder's npm node module collector causes EBUSY errors when copying
+    # files because it scans/locks files while simultaneously trying to copy them.
+    # Moving them to extraResources avoids this by copying before the collector runs.
+    # See: https://github.com/electron-userland/electron-builder/issues/8250
+    - "!vendor/bun/**/*"
+    - "!vendor/codex/**/*"
+    - "!vendor/qwen-code/**/*"
+    - "!**/resources/bin/win32-x64/**"
+  # Copy executables as extraResources to avoid EBUSY file locking (see comment above)
+  extraResources:
+    - from: vendor/bun/bun.exe
+      to: vendor/bun/bun.exe
+    - from: vendor/codex/win32-x64
+      to: app/vendor/codex/win32-x64
+    - from: vendor/qwen-code
+      to: app/vendor/qwen-code
+    - from: resources/bin/win32-x64
+      to: app/resources/bin/win32-x64
+    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
+    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
+      to: messaging-whatsapp-worker/worker.cjs
+
+nsis:
+  oneClick: true
+  # Per-user install to %LOCALAPPDATA%\Programs\ (not Program Files).
+  # Bun subprocess cannot read/write files in Program Files due to Windows permissions.
+  perMachine: false
+  deleteAppDataOnUninstall: true
+
+linux:
+  icon: resources/brands/qwen-code/icon.png
+  category: Utility
+  maintainer: "Alibaba Group"
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: "Qwen-Code-Desktop-${arch}.${ext}"
+  extraResources:
+    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
+    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
+      to: messaging-whatsapp-worker/worker.cjs
+  # Exclude binaries for other platforms
+  files:
+    - "!**/vendor/codex/darwin-*/**"
+    - "!**/vendor/codex/win32-*/**"
+    - "!**/resources/bin/darwin-*/**"
+    - "!**/resources/bin/win32-*/**"

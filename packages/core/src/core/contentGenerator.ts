@@ -125,14 +125,15 @@ export type ContentGeneratorConfig = {
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
-  // When true, media parts in MCP tool responses are split into a follow-up
-  // `role: "user"` message instead of being embedded inside the `role: "tool"`
-  // message. The OpenAI Chat Completions spec only permits string / text-part
-  // content on tool messages; strict OpenAI-compatible servers (notably
-  // LM Studio) reject anything else with HTTP 400 "Invalid 'messages' in
-  // payload". Enable this for any provider that strictly validates tool
-  // message content. Default: false (preserves prior behavior for permissive
-  // providers). See QwenLM/qwen-code#3616.
+  // When true, media parts in tool responses (including the built-in read_file
+  // and MCP tools) are split into a follow-up `role: "user"` message instead of
+  // being embedded inside the `role: "tool"` message. The OpenAI Chat
+  // Completions spec only permits string / text-part content on tool messages;
+  // strict OpenAI-compatible servers (e.g. doubao / new-api / LM Studio) drop or
+  // reject anything else (HTTP 400 "Invalid 'messages' in payload"), so an image
+  // read via read_file never reaches the model. Default: true (spec-compliant
+  // and safe for permissive providers); set false to restore the legacy
+  // embed-in-tool-message behavior. See QwenLM/qwen-code#4876, #3616.
   splitToolMedia?: boolean;
 };
 

@@ -307,5 +307,24 @@ describe('yaml-parser', () => {
         expect(typeof result['description']).toBe('string');
       });
     });
+
+    describe('nested YAML', () => {
+      it('parses array-of-records', () => {
+        const yaml =
+          'mcpServers:\n  - filesystem:\n      type: stdio\n      command: node';
+        const result = parse(yaml);
+        expect(result['mcpServers']).toEqual([
+          { filesystem: { type: 'stdio', command: 'node' } },
+        ]);
+      });
+
+      it('parses record-of-records with arrays', () => {
+        const yaml = 'hooks:\n  PreToolUse:\n    - matcher: Read';
+        const result = parse(yaml);
+        expect(result['hooks']).toEqual({
+          PreToolUse: [{ matcher: 'Read' }],
+        });
+      });
+    });
   });
 });

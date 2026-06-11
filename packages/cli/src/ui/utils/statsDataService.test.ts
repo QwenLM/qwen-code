@@ -312,12 +312,13 @@ describe('loadStatsData - new fields', () => {
       now.getMonth(),
       now.getDate(),
     );
+    const todayTimestamp = Math.max(todayStart.getTime(), now.getTime() - 1000);
     const yesterdayMid = todayStart.getTime() - 12 * 60 * 60 * 1000; // yesterday noon
 
     const todayRecord = makeRecord({
       sessionId: 'today-1',
-      timestamp: todayStart.getTime() + 3600000,
-      startTime: todayStart.getTime() + 3600000 - 60000,
+      timestamp: todayTimestamp,
+      startTime: todayTimestamp - 60000,
       durationMs: 60000,
       totalLatencyMs: 1000,
       models: {
