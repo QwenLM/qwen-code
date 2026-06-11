@@ -787,10 +787,11 @@ describe('OpenAIContentConverter', () => {
       expect(img?.image_url?.url).toBe('data:image/png;base64,xxx');
     });
 
-    it('should preserve prior embedded-media behavior when splitToolMedia is false (default) on parallel tool calls (issue #3616)', () => {
+    it('should preserve embedded-media behavior when splitToolMedia is explicitly false (opt-out) on parallel tool calls (issue #3616, #4876)', () => {
       // Same input as the parallel-tool-calls split test, but with the flag
-      // off. Asserts that the opt-in is actually opt-in: media stays embedded
-      // in the tool message and no follow-up user message is synthesised.
+      // explicitly off. Since #4876 the default is true (spec-compliant), so
+      // this asserts the opt-out path: media stays embedded in the tool
+      // message and no follow-up user message is synthesised.
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -826,11 +827,10 @@ describe('OpenAIContentConverter', () => {
         ],
       };
 
-      // requestContext default has splitToolMedia undefined / false
-      const messages = converter.convertGeminiRequestToOpenAI(
-        request,
-        requestContext,
-      );
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: false,
+      });
 
       const toolMessages = messages.filter((m) => m.role === 'tool');
       const userMessages = messages.filter((m) => m.role === 'user');

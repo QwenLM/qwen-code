@@ -127,6 +127,23 @@ export interface SubagentConfig {
   background?: boolean;
 
   /**
+   * Optional Claude-Code-compatible permission mode (`acceptEdits`, `auto`,
+   * `bypassPermissions`, `default`, `dontAsk`, `plan`). Carried through from
+   * frontmatter for parity with `.claude/agents/*.md` files. At parse time it
+   * is normalised to {@link approvalMode} via
+   * `claudePermissionModeToApprovalMode()`; if both `permissionMode` and
+   * `approvalMode` are present in frontmatter, `approvalMode` wins.
+   */
+  permissionMode?: string;
+
+  /**
+   * Optional maximum number of turns before the agent halts. Positive integer.
+   * Top-level promotion of the legacy `runConfig.max_turns` field; when both
+   * are set, top-level `maxTurns` wins.
+   */
+  maxTurns?: number;
+
+  /**
    * Indicates whether this is a built-in agent.
    * Built-in agents cannot be modified or deleted.
    */

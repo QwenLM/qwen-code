@@ -11,7 +11,6 @@ import * as os from 'os';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
@@ -22,6 +21,7 @@ import type {
 import {
   SkillError,
   SkillErrorCode,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
   validateSkillName,
@@ -688,34 +688,18 @@ export class SkillManager {
       const description = String(descriptionRaw);
 
       // Extract optional fields
-      const allowedToolsRaw = frontmatter['allowedTools'] as
-        | unknown[]
-        | undefined;
-      let allowedTools: string[] | undefined;
-
-      if (allowedToolsRaw !== undefined) {
-        if (Array.isArray(allowedToolsRaw)) {
-          allowedTools = allowedToolsRaw.map(String);
-        } else {
-          throw new Error('"allowedTools" must be an array');
-        }
-      }
+      const allowedTools = parseAllowedToolsField(frontmatter);
 
       // Extract hooks configuration
-      // Use full YAML parser for hooks as they have nested structures
       let hooks: SkillHooksSettings | undefined;
-      if (frontmatterYaml.includes('hooks:')) {
-        // Re-parse with full YAML parser to get nested hooks structure
-        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
-          string,
-          unknown
-        >;
-        const hooksRaw = fullFrontmatter['hooks'] as
-          | Record<string, unknown>
-          | undefined;
-        if (hooksRaw !== undefined) {
-          hooks = this.parseHooksConfig(hooksRaw);
-        }
+      const hooksRaw = frontmatter['hooks'];
+      if (
+        hooksRaw !== undefined &&
+        typeof hooksRaw === 'object' &&
+        hooksRaw !== null &&
+        !Array.isArray(hooksRaw)
+      ) {
+        hooks = this.parseHooksConfig(hooksRaw as Record<string, unknown>);
       }
 
       // Set skillRoot to the directory containing SKILL.md

@@ -7,8 +7,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-// Note: yaml package would need to be added as a dependency
-// For now, we'll use a simple YAML parser implementation
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -50,6 +48,13 @@ import {
 } from '../utils/modelId.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
+import {
+  COLOR_VALUES,
+  isColor,
+  isPermissionMode,
+  parseMaxTurns,
+  claudePermissionModeToApprovalMode,
+} from './agent-frontmatter-schema.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
@@ -637,6 +642,19 @@ export class SubagentManager {
       frontmatter['background'] = true;
     }
 
+    // CC 2.1.168 declarative-agent fields (round-trip parity).
+    // Skip permissionMode when approvalMode is already being written: on the
+    // next load the parser takes approvalMode (explicit wins over bridge),
+    // making permissionMode dead frontmatter that silently ignores any
+    // later user edits.
+    if (config.permissionMode && frontmatter['approvalMode'] === undefined) {
+      frontmatter['permissionMode'] = config.permissionMode;
+    }
+
+    if (config.maxTurns !== undefined) {
+      frontmatter['maxTurns'] = config.maxTurns;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -830,6 +848,10 @@ export class SubagentManager {
 
     const runConfig: RunConfig = {
       ...config.runConfig,
+      // Top-level CC-style `maxTurns` wins over legacy nested
+      // `runConfig.max_turns`. Both are kept for backward compatibility, but
+      // when both are set, the top-level field is the authoritative source.
+      ...(config.maxTurns !== undefined ? { max_turns: config.maxTurns } : {}),
     };
 
     let toolConfig: ToolConfig | undefined;
@@ -1159,7 +1181,22 @@ function parseSubagentContent(
     const runConfig = frontmatter['runConfig'] as
       | Record<string, unknown>
       | undefined;
-    const color = frontmatter['color'] as string | undefined;
+    const colorRaw = frontmatter['color'];
+    // CC silently drops colors outside the allowlist (_Y). Preserve the
+    // legacy qwen `auto` sentinel for backward compat with existing files.
+    const color =
+      typeof colorRaw === 'string' && (isColor(colorRaw) || colorRaw === 'auto')
+        ? colorRaw
+        : undefined;
+    if (
+      colorRaw !== undefined &&
+      color === undefined &&
+      typeof colorRaw === 'string'
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid color '${colorRaw}'. Valid options: ${COLOR_VALUES.join(', ')}, auto. Dropping field.`,
+      );
+    }
     const approvalModeRaw = frontmatter['approvalMode'];
     if (
       approvalModeRaw !== undefined &&
@@ -1201,12 +1238,43 @@ function parseSubagentContent(
     const background =
       backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
 
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    // permissionMode: CC enum carried verbatim. Bridges to approvalMode only
+    // when approvalMode is unset.
+    const permissionModeRaw = frontmatter['permissionMode'];
+    const permissionMode = isPermissionMode(permissionModeRaw)
+      ? permissionModeRaw
+      : undefined;
+    if (
+      permissionModeRaw !== undefined &&
+      permissionModeRaw !== null &&
+      permissionMode === undefined
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid permissionMode '${permissionModeRaw}'. Dropping field.`,
+      );
+    }
+    const bridgedApprovalMode =
+      approvalMode === undefined && permissionMode !== undefined
+        ? claudePermissionModeToApprovalMode(permissionMode)
+        : undefined;
+    const effectiveApprovalMode = approvalMode ?? bridgedApprovalMode;
+
+    // maxTurns: positive integer (or numeric string).
+    const maxTurns = parseMaxTurns(frontmatter['maxTurns']);
+    if (frontmatter['maxTurns'] !== undefined && maxTurns === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid maxTurns '${frontmatter['maxTurns']}'. Dropping field.`,
+      );
+    }
+
     const config: SubagentConfig = {
       name,
       description,
       tools,
       disallowedTools,
-      approvalMode,
+      approvalMode: effectiveApprovalMode,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
@@ -1214,6 +1282,8 @@ function parseSubagentContent(
       color,
       level,
       ...(background ? { background } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
     };
 
     // Validate the parsed configuration

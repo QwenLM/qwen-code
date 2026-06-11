@@ -646,6 +646,124 @@ You are weird.
       );
       expect(reparsed.approvalMode).toBe('bubble');
     });
+
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    it('should parse valid permissionMode and bridge to approvalMode', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBe('bypassPermissions');
+      expect(config.approvalMode).toBe('yolo');
+    });
+
+    it('should prefer explicit approvalMode over permissionMode bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'plan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\napprovalMode: plan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.approvalMode).toBe('plan');
+      expect(config.permissionMode).toBe('bypassPermissions');
+    });
+
+    it('should drop invalid permissionMode and not bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'not-a-mode',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: not-a-mode\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBeUndefined();
+      expect(config.approvalMode).toBeUndefined();
+    });
+
+    it('should parse maxTurns as number', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: 42,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: 42\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should parse maxTurns from numeric string', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: '42',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: "42"\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should drop negative or zero maxTurns', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: -1,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: -1\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBeUndefined();
+    });
+
+    it('should preserve color from allowlist', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'cyan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: cyan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBe('cyan');
+    });
+
+    it('should drop color not in allowlist (matches CC _Y silent drop)', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'magenta',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: magenta\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBeUndefined();
+    });
   });
 
   describe('serializeSubagent', () => {
@@ -754,6 +872,53 @@ You are weird.
       );
 
       expect(parsed.background).toBe(true);
+    });
+
+    // --- CC 2.1.168 declarative-agent fields serialization ---
+
+    it('should serialize permissionMode when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+      });
+      expect(serialized).toContain('permissionMode: bypassPermissions');
+    });
+
+    it('should serialize maxTurns when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        maxTurns: 25,
+      });
+      expect(serialized).toContain('maxTurns: 25');
+    });
+
+    it('should NOT emit permissionMode when approvalMode is also being emitted (avoid round-trip drift)', () => {
+      // Regression for PR #4842 round-2 review: if both fields land on the
+      // serialised frontmatter, the next parse takes approvalMode (explicit
+      // wins over bridge) and silently ignores any user edits to
+      // permissionMode in the file.
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'yolo',
+      });
+      expect(serialized).toContain('approvalMode: yolo');
+      expect(serialized).not.toContain('permissionMode:');
+    });
+
+    it('should still emit permissionMode when approvalMode is unset (faithful round-trip of the user intent)', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'plan',
+      });
+      expect(serialized).toContain('permissionMode: plan');
+      expect(serialized).not.toContain('approvalMode:');
+    });
+
+    it('should not include new fields when undefined', () => {
+      const serialized = manager.serializeSubagent(validConfig);
+      expect(serialized).not.toContain('permissionMode:');
+      expect(serialized).not.toContain('maxTurns:');
     });
   });
 
@@ -1497,6 +1662,38 @@ System prompt 3`);
         const runtimeConfig = await manager.convertToRuntimeConfig(fastConfig);
 
         expect(runtimeConfig.modelConfig).toEqual({});
+      });
+
+      // --- CC 2.1.168 maxTurns top-level promotion ---
+
+      it('should populate runConfig.max_turns from top-level maxTurns', async () => {
+        const cfg: SubagentConfig = { ...validConfig, maxTurns: 42 };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(42);
+      });
+
+      it('should prefer top-level maxTurns over nested runConfig.max_turns', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          maxTurns: 99,
+          runConfig: { max_turns: 5 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(99);
+      });
+
+      it('should fall back to nested runConfig.max_turns when maxTurns is unset', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          runConfig: { max_turns: 7 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(7);
+      });
+
+      it('should leave max_turns undefined when neither is set', async () => {
+        const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
+        expect(runtimeConfig.runConfig.max_turns).toBeUndefined();
       });
     });
 
