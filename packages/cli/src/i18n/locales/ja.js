@@ -1754,6 +1754,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '履歴を折りたたみました：{{n}} 件のメッセージが非表示です。/history expand-now で表示します。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（モデルレジストリにありません）',

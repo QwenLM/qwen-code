@@ -1988,6 +1988,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Geschichte eingeklappt: {{n}} Nachrichten ausgeblendet. Verwenden Sie /history expand-now zum Anzeigen.',
 
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',

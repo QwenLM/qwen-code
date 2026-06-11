@@ -1966,6 +1966,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'История свёрнута: {{n}} сообщений скрыто. Используйте /history expand-now для отображения.',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': ' (не в реестре моделей)',

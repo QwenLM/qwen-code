@@ -1739,6 +1739,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     '用法：/history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '歷史記錄已摺疊：{{n}} 條訊息已隱藏。使用 /history expand-now 展開。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',

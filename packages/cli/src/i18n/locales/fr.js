@@ -1985,6 +1985,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Historique réduit : {{n}} messages masqués. Utilisez /history expand-now pour afficher.',
 
   // === Same-as-English optimization ===
   Auth: 'Authentification',

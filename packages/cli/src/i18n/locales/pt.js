@@ -1975,6 +1975,7 @@ export default {
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Histórico recolhido: {{n}} mensagens ocultas. Use /history expand-now para mostrar.',
 
   // === Same-as-English optimization ===
   '(workspace)': '(espaço de trabalho)',
