@@ -90,7 +90,7 @@ jobs:
             # Triage bots comment on most new issues, so "unattended" means:
             # no comments at all, or every commenter is a known bot account.
             jq -c --argjson bots "${KNOWN_BOTS}" \
-              '[ .[] | select([(.comments // [])[].author.login] - $bots == []) ] | .[0:10] | map(del(.comments))' \
+              '[ .[] | select(([(.comments // [])[].author.login] | map(select(. != null))) - $bots == []) ] | .[0:10] | map(del(.comments))' \
               "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"
           fi
 
@@ -181,6 +181,7 @@ jobs:
           ${{ steps.scan.outputs.has_candidates == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
         run: |-
           if [[ ! -s "${WORKDIR}/decision.json" ]] || ! jq -e . "${WORKDIR}/decision.json" > /dev/null; then
             echo "❌ Assessment produced no valid decision.json"
@@ -195,20 +196,37 @@ jobs:
             exit 0
           fi
 
+          CANDIDATE_NUMS="$(jq -r '.[].number' "${WORKDIR}/candidates.json")"
+          if [[ -n "${GO}" ]] && ! grep -qx "${GO}" <<< "${CANDIDATE_NUMS}"; then
+            echo "❌ Assessment selected issue #${GO} which is not in the candidate list"
+            echo "go_issue=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           echo "go_issue=${GO}" >> "${GITHUB_OUTPUT}"
           echo "🧭 Decision: go=${GO:-none}"
           jq -r '.reason // empty' "${WORKDIR}/decision.json"
 
           # Label permanently-skipped issues so future scans move past them.
-          gh label create 'autofix/skip' --repo "${REPO}" \
-            --description 'Not eligible for the scheduled autofix agent' \
-            --color 'ededed' 2> /dev/null || true
-          jq -c '(.skip // [])[] | select(.permanent == true)' "${WORKDIR}/decision.json" \
-            | while read -r row; do
-                NUM="$(jq -r '.number' <<< "${row}")"
-                echo "🏷️ Skipping #${NUM} permanently: $(jq -r '.reason' <<< "${row}")"
-                gh issue edit "${NUM}" --repo "${REPO}" --add-label 'autofix/skip' || true
-              done
+          if [[ "${DRY_RUN}" != "true" ]]; then
+            gh label create 'autofix/skip' --repo "${REPO}" \
+              --description 'Not eligible for the scheduled autofix agent' \
+              --color 'ededed' 2> /dev/null || true
+            jq -c '(.skip // [])[] | select(.permanent == true)' "${WORKDIR}/decision.json" \
+              | while read -r row; do
+                  NUM="$(jq -r '.number' <<< "${row}")"
+                  if [[ ! "${NUM}" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "⚠️ Invalid skip number: ${NUM}"
+                    continue
+                  fi
+                  if ! grep -qx "${NUM}" <<< "${CANDIDATE_NUMS}"; then
+                    echo "⚠️ Skip issue #${NUM} is not in the candidate list"
+                    continue
+                  fi
+                  echo "🏷️ Skipping #${NUM} permanently: $(jq -r '.reason' <<< "${row}")"
+                  gh issue edit "${NUM}" --repo "${REPO}" --add-label 'autofix/skip' || true
+                done
+          fi
 
       - name: 'Claim issue'
         id: 'claim'
@@ -368,7 +386,7 @@ jobs:
           # red or flaky test elsewhere on main must not block every fix.
           # Cross-package regressions are covered by regular CI on the PR.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u)"
+            | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo "❌ Fix does not touch any package"
             exit 1
@@ -417,7 +435,7 @@ jobs:
         run: |-
           BRANCH="autofix/issue-${ISSUE}"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git push origin "${BRANCH}"
+          git push --force-with-lease origin "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -430,25 +448,27 @@ jobs:
 
       - name: 'Withdraw claim on failure'
         if: |-
-          ${{ failure() && steps.claim.outcome == 'success' }}
+          ${{ (failure() || cancelled()) && steps.claim.outcome == 'success' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           COMMENT_ID: '${{ steps.claim.outputs.comment_id }}'
         run: |-
-          REASON='no further automated attempts will be made on this issue.'
           if [[ -f "${WORKDIR}/failure.md" ]]; then
+            REASON='no further automated attempts will be made on this issue.'
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
+            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           else
+            REASON='the issue will be eligible for a future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'
+            LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi
           gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
 
           What the agent found, in case it helps a human contributor:
 
           ${DETAIL}"
-          gh issue edit "${ISSUE}" --repo "${REPO}" \
-            --remove-label 'autofix/in-progress' --add-label 'autofix/skip' || true
+          gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
           if [[ -n "${COMMENT_ID}" ]]; then
             gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
           fi
