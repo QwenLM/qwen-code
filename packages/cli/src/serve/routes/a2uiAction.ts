@@ -123,7 +123,7 @@ export async function findFromSettingsFile(
 }
 
 /** Build a one-shot transport from the config shape: stdio (command) or streamable HTTP (httpUrl). */
-function buildTransport(cfg: McpServerConfigLike): Transport {
+export function buildTransport(cfg: McpServerConfigLike): Transport {
   if (typeof cfg.httpUrl === 'string') {
     return new StreamableHTTPClientTransport(new URL(cfg.httpUrl));
   }
@@ -183,7 +183,7 @@ export function extractA2uiActionResult(
 }
 
 /** Call the UI MCP server's action tool directly and extract the A2UI continuation commands plus fallback text. */
-async function callA2uiAction(
+export async function callA2uiAction(
   cfg: McpServerConfigLike,
   args: A2uiActionArgs,
 ): Promise<A2uiActionResult> {
