@@ -114,6 +114,22 @@ describe('QuotaStore compaction', () => {
     expect(await wal.load()).toEqual([]);
   });
 
+  it('still increments memory and never throws when the WAL append fails', async () => {
+    // A WAL whose append always rejects (e.g. disk full) must not break consume.
+    const failingWal: import('./quotas.js').QuotaWal = {
+      append: () => Promise.reject(new Error('disk full')),
+      load: () => Promise.resolve([]),
+      rewrite: () => Promise.resolve(),
+    };
+    const store = await QuotaStore.create(
+      failingWal,
+      limitsFrom({ a: { count: 2, windowSec: 60 } }),
+    );
+    await expect(store.consume('a', T0)).resolves.toBeUndefined();
+    // The in-memory counter advanced even though persistence failed.
+    expect(store.remaining('a', T0)).toBe(1);
+  });
+
   it('auto-compacts once the WAL exceeds the floor, and stays correct', async () => {
     const wal = new MemoryQuotaWal();
     const store = await QuotaStore.create(

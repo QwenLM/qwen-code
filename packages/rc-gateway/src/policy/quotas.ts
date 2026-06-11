@@ -157,9 +157,15 @@ export class QuotaStore {
     const arr = this.hits.get(ruleId);
     if (arr) arr.push(nowMs);
     else this.hits.set(ruleId, [nowMs]);
-    await this.wal.append({ ruleId, ms: nowMs });
-    this.walLines += 1;
-    if (this.walLines > this.floor) await this.compact(nowMs);
+    // Persistence is best-effort: the in-memory counter has already advanced, so
+    // even a contract-violating WAL that throws must not break the decision path.
+    try {
+      await this.wal.append({ ruleId, ms: nowMs });
+      this.walLines += 1;
+      if (this.walLines > this.floor) await this.compact(nowMs);
+    } catch {
+      /* swallow — counter stands in memory; the lost line just won't persist */
+    }
   }
 
   /**
@@ -181,7 +187,11 @@ export class QuotaStore {
         survivors.push({ ruleId, ms });
       }
     }
-    await this.wal.rewrite(survivors);
+    try {
+      await this.wal.rewrite(survivors);
+    } catch {
+      /* swallow — memory is already pruned; the on-disk WAL just stays larger */
+    }
     this.walLines = survivors.length;
     this.floor = Math.max(this.floor, 2 * survivors.length);
   }

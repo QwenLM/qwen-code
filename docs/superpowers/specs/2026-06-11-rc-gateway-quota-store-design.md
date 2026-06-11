@@ -66,13 +66,16 @@ used)`; `state(ruleId, now) → 'room' | 'exhausted' | 'untracked'` (untracked =
   malformed/torn line** — and SHAPE-validate each parsed record (`typeof r.r ===
 'string' && Number.isFinite(r.t)`), not merely `JSON.parse` success, so a
   well-formed-JSON-but-wrong-shape line can't poison a counter. A `kill -9`
-  mid-append leaves at most one partial trailing line → skipped. Then rebuild
-  memory, prune to each rule's window via `limitsFor`, and **compact** (rewrite
-  the file with only the surviving records). Records for an unknown ruleId are
-  dropped on compaction (rule deleted/renamed). **Runtime compaction too:** track
-  appends-since-load; when WAL lines exceed `max(64, 2× live entries)`, rewrite
-  from pruned memory — otherwise a long-lived daemon's WAL grows unbounded between
-  restarts (construction-only compaction is not enough).
+  mid-append leaves at most one partial trailing line → skipped. Construction
+  rebuilds memory from the survivors but does NOT prune/compact at load (no `now`
+  is injected at construct — pruning is LAZY on first access, which is correct and
+  avoids startup I/O). **Compaction is RUNTIME + amortized:** `consume` tracks
+  appends; when WAL lines exceed `max(floor, 2× live entries)` it prunes every
+  rule to its window via `limitsFor`+`now`, DROPS records for an unknown ruleId
+  (rule deleted/renamed), and rewrites the file with only the survivors — bounding
+  growth for a long-lived daemon. (`floor` is monotonic via `Math.max`, so the
+  threshold tracks the historical-max live set, not the instantaneous one — still
+  bounded.)
 - **D4 — Fail-direction (SECURITY FORK — advisor-reviewed, rationale CORRECTED).**
   - **`ENOENT` at load is NORMAL, not a failure:** no WAL yet → empty counters,
     no warn (empty IS the correct state).
