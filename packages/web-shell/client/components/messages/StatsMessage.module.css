@@ -1,0 +1,170 @@
+.panel {
+  display: flex;
+  width: min(100%, 720px);
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 16px;
+  margin-left: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-x: auto;
+}
+
+.title {
+  margin-bottom: 8px;
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.sectionTitle {
+  margin-top: 8px;
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.spacer {
+  height: 8px;
+}
+
+/* ---------- Pivoted table (metric rows × model columns) ---------- */
+
+.pivotRow {
+  display: flex;
+  align-items: baseline;
+  min-height: 20px;
+}
+
+.metricCell {
+  flex: 0 0 24ch;
+  min-width: 24ch;
+  color: var(--accent-color);
+  white-space: nowrap;
+}
+
+.metricCellSection {
+  flex: 0 0 24ch;
+  min-width: 24ch;
+  color: var(--text-primary);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.metricCellSub {
+  flex: 0 0 24ch;
+  min-width: 24ch;
+  padding-left: 2ch;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.modelCell {
+  flex: 1 1 20ch;
+  min-width: 16ch;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.modelCellHeader {
+  flex: 1 1 20ch;
+  min-width: 16ch;
+  color: var(--text-primary);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.divider {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border-color);
+}
+
+/* ---------- Summary rows (key-value) ---------- */
+
+.kvRow {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 24ch minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.kvSubRow {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 22ch minmax(0, 1fr);
+  align-items: baseline;
+  padding-left: 2ch;
+}
+
+.kvLabel {
+  color: var(--accent-color);
+}
+
+.kvValue {
+  justify-self: end;
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---------- Simple table rows (model usage & tool stats) ---------- */
+
+.tableRow {
+  display: flex;
+  align-items: baseline;
+  min-height: 20px;
+}
+
+.tableNameCol {
+  flex: 0 0 35ch;
+  min-width: 20ch;
+  color: var(--text-primary);
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tableToolCol {
+  flex: 0 0 25ch;
+  min-width: 15ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tableNumCol {
+  flex: 1 1 15ch;
+  min-width: 10ch;
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---------- Semantic colors ---------- */
+
+.success {
+  color: var(--success-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.secondary {
+  color: var(--text-secondary);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+@media (max-width: 720px) {
+  .panel {
+    font-size: 12px;
+  }
+}

@@ -28,6 +28,11 @@ import type {
 import type { Status } from '../core/coreToolScheduler.js';
 import type { AgentResultDisplay, FileDiff } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
+import type {
+  FileHistorySnapshot,
+  SerializedFileHistorySnapshot,
+} from './fileHistoryService.js';
+import { serializeSnapshot } from './fileHistoryService.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -235,7 +240,8 @@ export interface ChatRecord {
     | 'custom_title'
     | 'rewind'
     | 'agent_bootstrap'
-    | 'agent_launch_prompt';
+    | 'agent_launch_prompt'
+    | 'file_history_snapshot';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -281,7 +287,8 @@ export interface ChatRecord {
     | CustomTitleRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
-    | AgentBootstrapRecordPayload;
+    | AgentBootstrapRecordPayload
+    | FileHistorySnapshotRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -426,6 +433,14 @@ export interface AttributionSnapshotPayload {
 export interface RewindRecordPayload {
   /** Number of UI history items truncated. */
   truncatedCount: number;
+}
+
+/**
+ * Stored payload for file history snapshot persistence.
+ * Each entry records one or more snapshots for session resume.
+ */
+export interface FileHistorySnapshotRecordPayload {
+  snapshots: SerializedFileHistorySnapshot[];
 }
 
 /**
@@ -810,6 +825,16 @@ export class ChatRecordingService {
   }
 
   /**
+   * Clears cached filesystem paths after Config swaps to a new working
+   * directory. The recorder keeps session state, but future appends must
+   * resolve the JSONL path through the updated Config.storage.
+   */
+  resetStoragePaths(): void {
+    this.chatsDirEnsured = false;
+    this.cachedConversationFile = undefined;
+  }
+
+  /**
    * Records a user message.
    * Writes immediately to disk.
    *
@@ -955,9 +980,15 @@ export class ChatRecordingService {
     // Headless/one-shot CLI flows (`qwen -p "…"`, cron, CI scripts) run a
     // single prompt and throw the session away. Spending fast-model tokens
     // on a title no one will ever resume is pure waste; skip entirely.
-    // Checked before `getFastModel()` because it's strictly cheaper (a bool
-    // field read vs. a method that looks up available models).
-    if (!this.config.isInteractive()) return;
+    // Daemon (ACP) sessions are long-lived and user-resumable, so they
+    // DO need auto-titles even though `isInteractive()` returns false
+    // (the ACP child is spawned with pipe stdio, not a TTY).
+    if (
+      !this.config.isInteractive() &&
+      !this.config.getExperimentalZedIntegration()
+    ) {
+      return;
+    }
     const fastModel = this.config.getFastModel();
     if (!fastModel) return;
 
@@ -1134,7 +1165,11 @@ export class ChatRecordingService {
    *   nothing before it), 1 means keep the first user turn, etc.
    * @param payload Additional metadata to persist with the rewind record.
    */
-  rewindRecording(targetTurnIndex: number, payload: RewindRecordPayload): void {
+  rewindRecording(
+    targetTurnIndex: number,
+    payload: RewindRecordPayload,
+    survivingFileHistorySnapshots?: FileHistorySnapshot[],
+  ): void {
     try {
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
@@ -1155,6 +1190,12 @@ export class ChatRecordingService {
       };
 
       this.appendRecord(record);
+
+      // Re-record surviving file history snapshots on the active branch so
+      // they are visible to reconstructHistory on resume.
+      if (survivingFileHistorySnapshots?.length) {
+        this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
+      }
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
     }
@@ -1338,6 +1379,25 @@ export class ChatRecordingService {
         this.lastAttributionSnapshotJson = undefined;
       }
       debugLogger.error('Error saving attribution snapshot:', error);
+    }
+  }
+
+  recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
+    this.recordFileHistorySnapshotBatch([snapshot]);
+  }
+
+  recordFileHistorySnapshotBatch(snapshots: FileHistorySnapshot[]): void {
+    if (snapshots.length === 0) return;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: snapshots.map(serializeSnapshot) },
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving file history snapshot batch:', error);
     }
   }
 }

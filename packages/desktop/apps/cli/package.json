@@ -1,0 +1,25 @@
+{
+  "name": "@craft-agent/cli",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "description": "Terminal client for Qwen Code server",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "craft-cli": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/"
+  },
+  "dependencies": {
+    "@craft-agent/shared": "workspace:*",
+    "@craft-agent/server-core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "@types/node": "^22.0.0",
+    "@types/bun": "latest"
+  }
+}

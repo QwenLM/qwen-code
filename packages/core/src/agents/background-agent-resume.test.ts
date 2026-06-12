@@ -92,6 +92,7 @@ describe('BackgroundAgentResumeService', () => {
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
+      getSkillManager: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
@@ -430,7 +431,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager, hookSystem } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
     hookSystem.fireSubagentStartEvent.mockResolvedValue({
       getAdditionalContext: () => 'resume-context',
     });
@@ -518,7 +522,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
@@ -653,7 +660,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager, hookSystem } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
@@ -734,7 +744,10 @@ describe('BackgroundAgentResumeService', () => {
     const { service, subagentManager, hookSystem } = createService({
       stopHookBlockingCap: 2,
     });
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
     hookSystem.fireSubagentStopEvent.mockResolvedValue(stopOutput);
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
@@ -801,15 +814,18 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     const createAgentHeadless = vi.fn().mockResolvedValue({
-      execute: vi.fn(async () => undefined),
-      setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({
-        totalTokens: 0,
-        totalDurationMs: 0,
-      }),
-      getTerminateMode: () => AgentTerminateMode.GOAL,
-      getFinalText: () => 'done',
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
     });
 
     const { service, subagentManager } = createService();
@@ -890,7 +906,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const first = service.resumeBackgroundAgent(agentId, 'first message');
     const second = service.resumeBackgroundAgent(agentId, 'second message');
@@ -971,7 +990,10 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'done',
     };
     const { service, subagentManager, monitorRegistry } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resume = service.resumeBackgroundAgent(agentId, 'continue');
     await vi.waitFor(() => {
@@ -1080,7 +1102,10 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'done',
     };
     const { service, subagentManager, monitorRegistry } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     await expect(
       service.resumeBackgroundAgent(agentId, 'continue'),
@@ -1484,7 +1509,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
@@ -1559,7 +1587,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
@@ -1654,7 +1685,10 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
 
     await service.resumeBackgroundAgent(agentId, 'continue work');
 

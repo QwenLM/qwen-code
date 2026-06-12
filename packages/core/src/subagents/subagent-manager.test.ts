@@ -126,15 +126,18 @@ describe('SubagentManager', () => {
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
       // Check disallowedTools before tools to avoid substring match
-      if (yamlString.includes('disallowedTools: write_file')) {
-        // Scalar form
-        return {
-          name: 'test-agent',
-          description: 'A test subagent',
-          disallowedTools: 'write_file',
-        };
-      }
       if (yamlString.includes('disallowedTools:')) {
+        const dtLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('disallowedTools:'));
+        const dtInline = dtLine?.replace('disallowedTools:', '').trim();
+        if (dtInline && dtInline !== '') {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            disallowedTools: dtInline,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -142,6 +145,21 @@ describe('SubagentManager', () => {
         };
       }
       if (yamlString.includes('tools:')) {
+        const toolsLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('tools:'));
+        const inlineValue = toolsLine?.replace('tools:', '').trim();
+        if (
+          inlineValue &&
+          !inlineValue.startsWith('\n') &&
+          inlineValue !== ''
+        ) {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            tools: inlineValue,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -297,6 +315,52 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse comma-separated tools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+tools: Read, Bash, Grep, Glob, WebSearch, WebFetch, mcp__context7__*
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual([
+        'Read',
+        'Bash',
+        'Grep',
+        'Glob',
+        'WebSearch',
+        'WebFetch',
+        'mcp__context7__*',
+      ]);
+    });
+
+    it('should parse single tool string into array', () => {
+      const markdownWithSingle = `---
+name: test-agent
+description: A test subagent
+tools: Read
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithSingle,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual(['Read']);
+    });
+
     it('should parse content with disallowedTools array', () => {
       const markdownWithDisallowed = `---
 name: test-agent
@@ -335,6 +399,29 @@ You are a helpful assistant.
       );
 
       expect(config.disallowedTools).toEqual(['write_file']);
+    });
+
+    it('should parse comma-separated disallowedTools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+disallowedTools: write_file, mcp__slack, Bash
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual([
+        'write_file',
+        'mcp__slack',
+        'Bash',
+      ]);
     });
 
     it('should parse content with model selector', () => {
@@ -684,6 +771,71 @@ You are an agent.
       expect(config.maxTurns).toBeUndefined();
     });
 
+    it('should parse nested mcpServers as a record', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+        github: { type: 'http', url: 'https://example.com' },
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers:\n  filesystem:\n    type: stdio\n    command: node\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should drop mcpServers of the wrong top-level shape', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers: 'just-a-string',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers: just-a-string\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toBeUndefined();
+    });
+
+    it('should parse nested hooks as a record of arrays', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toEqual(hooks);
+    });
+
+    it('should drop hooks with non-array values per event', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks: { PreToolUse: 'not-an-array' },
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse: not-an-array\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toBeUndefined();
+    });
+
     it('should preserve color from allowlist', () => {
       mockParseYaml.mockReturnValueOnce({
         name: 'a',
@@ -803,6 +955,40 @@ You are an agent.
     it('should not serialize background when undefined', () => {
       const serialized = manager.serializeSubagent(validConfig);
       expect(serialized).not.toContain('background');
+    });
+
+    it('should include mcpServers in the frontmatter object passed to stringifyYaml', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, mcpServers });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should include hooks in the frontmatter object passed to stringifyYaml', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, hooks });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.hooks).toEqual(hooks);
+    });
+
+    it('should omit mcpServers / hooks when the record is empty', () => {
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({
+        ...validConfig,
+        mcpServers: {},
+        hooks: {},
+      });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toBeUndefined();
+      expect(frontmatterArg.hooks).toBeUndefined();
     });
 
     it('should roundtrip background through serialize and parse', () => {
@@ -1854,6 +2040,160 @@ System prompt 3`);
           mockAgentHeadlessCreate.mock.calls[0],
         );
         expect(runtimeView).toBeUndefined();
+      });
+    });
+
+    describe('createAgentHeadless — caller-driven dispose contract', () => {
+      // Regression for self-inflicted leaks (review #4996 round 1):
+      //   1. `wrapAgentHooksForCleanup` relied on `AgentHeadless.execute()`'s
+      //      inner finally firing `onStop`. Two execute() early-exit paths
+      //      (`createChat()` → null and `prepareTools()` throwing) bypass
+      //      that finally, so ephemeral hook entries leaked into the global
+      //      registry for the rest of the session.
+      //   2. The forced tool-registry rebuild for per-agent `mcpServers`
+      //      spawned real MCP client connections (stdio child processes,
+      //      sockets) on a registry distinct from the parent's, but nothing
+      //      stopped it — every subagent invocation declaring `mcpServers`
+      //      orphaned its server processes.
+      //
+      // The unified fix is to return `{ subagent, dispose }` from
+      // `createAgentHeadless` and have callers run `dispose()` in a
+      // `finally` that they already own around `subagent.execute()`. These
+      // tests assert that contract.
+
+      const baseConfig: SubagentConfig = {
+        name: 'cleanup-agent',
+        description: 'dispose contract test',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+      });
+
+      it('returns { subagent, dispose }; dispose unregisters per-agent hooks', async () => {
+        const unregisterSpy = vi.fn();
+        const addAgentHooksSpy = vi.fn().mockReturnValue(unregisterSpy);
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        // The whole point: callers need an explicit cleanup handle they can
+        // invoke from the outer `finally`. A return shape of just
+        // `AgentHeadless` (the pre-fix contract) gives them no way to do
+        // that, because the inner onStop wrap doesn't fire on every
+        // execute() exit path.
+        expect(result).toHaveProperty('subagent');
+        expect(result).toHaveProperty('dispose');
+        expect(typeof result.dispose).toBe('function');
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        expect(unregisterSpy).not.toHaveBeenCalled();
+
+        await result.dispose();
+
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {
+        // Caller pattern:
+        //   const { subagent, dispose } = await createAgentHeadless(...);
+        //   try { await subagent.execute(...); } finally { await dispose(); }
+        // We never call execute() in this test — that simulates the
+        // createChat-returns-null and prepareTools-throws paths where the
+        // pre-fix `onStop` wrapping never fired its cleanup.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const { dispose } = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: '*',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        await dispose();
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose is a safe no-op when neither hooks nor mcpServers are declared', async () => {
+        const result = await manager.createAgentHeadless(
+          baseConfig,
+          mockConfig,
+        );
+        expect(typeof result.dispose).toBe('function');
+        // Must not throw — the caller's `finally` always invokes dispose,
+        // even for agents that triggered no cleanup-bearing setup.
+        await expect(result.dispose()).resolves.toBeUndefined();
+      });
+
+      it('runs cleanup when AgentHeadless.create throws — caller never gets dispose', async () => {
+        // Constructor-failure path inside createAgentHeadless: the caller
+        // never receives `{ subagent, dispose }`, so the inner catch must
+        // run the same cleanup itself. Without that, a transient
+        // AgentHeadless.create failure (e.g. ContentGenerator init blows
+        // up) would orphan the hook entries we just registered.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockRejectedValueOnce(
+          new Error('synthetic constructor failure'),
+        );
+
+        await expect(
+          manager.createAgentHeadless(
+            {
+              ...baseConfig,
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: '*',
+                    hooks: [{ type: 'command', command: 'echo' }],
+                  },
+                ],
+              },
+            },
+            mockConfig,
+          ),
+        ).rejects.toThrow(/synthetic constructor failure/);
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
       });
     });
   });

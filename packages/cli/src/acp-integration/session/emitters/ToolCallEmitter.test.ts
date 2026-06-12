@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolCallEmitter } from './ToolCallEmitter.js';
-import type { SessionContext } from '../types.js';
+import type { SessionContext, SubagentMeta } from '../types.js';
 import type {
   Config,
   ToolRegistry,
@@ -77,7 +77,7 @@ describe('ToolCallEmitter', () => {
         locations: [],
         kind: 'other',
         rawInput: { arg1: 'value1' },
-        _meta: { toolName: 'unknown_tool' },
+        _meta: { toolName: 'unknown_tool', provenance: 'builtin' },
       });
     });
 
@@ -101,7 +101,7 @@ describe('ToolCallEmitter', () => {
         locations: [{ path: '/test/file.ts', line: 10 }],
         kind: 'edit',
         rawInput: { path: '/test.ts' },
-        _meta: { toolName: 'edit_file' },
+        _meta: { toolName: 'edit_file', provenance: 'builtin' },
       });
     });
 
@@ -125,7 +125,7 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           rawInput: {},
-          _meta: { toolName: 'test_tool' },
+          _meta: { toolName: 'test_tool', provenance: 'builtin' },
         }),
       );
     });
@@ -153,7 +153,7 @@ describe('ToolCallEmitter', () => {
         locations: [], // Fallback to empty
         kind: 'other', // Fallback to other
         rawInput: { invalid: true },
-        _meta: { toolName: 'failing_tool' },
+        _meta: { toolName: 'failing_tool', provenance: 'builtin' },
       });
     });
   });
@@ -174,7 +174,7 @@ describe('ToolCallEmitter', () => {
           toolCallId: 'call-123',
           status: 'completed',
           rawOutput: 'Tool completed successfully',
-          _meta: { toolName: 'test_tool' },
+          _meta: { toolName: 'test_tool', provenance: 'builtin' },
         }),
       );
     });
@@ -198,7 +198,7 @@ describe('ToolCallEmitter', () => {
             content: { type: 'text', text: 'Something went wrong' },
           },
         ],
-        _meta: { toolName: 'test_tool' },
+        _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
     });
 
@@ -228,7 +228,7 @@ describe('ToolCallEmitter', () => {
               newText: 'new content',
             },
           ],
-          _meta: { toolName: 'edit_file' },
+          _meta: { toolName: 'edit_file', provenance: 'builtin' },
         }),
       );
     });
@@ -263,7 +263,7 @@ describe('ToolCallEmitter', () => {
               },
             },
           ],
-          _meta: { toolName: 'edit_file' },
+          _meta: { toolName: 'edit_file', provenance: 'builtin' },
         }),
       );
     });
@@ -289,7 +289,7 @@ describe('ToolCallEmitter', () => {
             },
           ],
           rawOutput: 'raw output',
-          _meta: { toolName: 'test_tool' },
+          _meta: { toolName: 'test_tool', provenance: 'builtin' },
         }),
       );
     });
@@ -307,7 +307,7 @@ describe('ToolCallEmitter', () => {
         toolCallId: 'call-empty',
         status: 'completed',
         content: [],
-        _meta: { toolName: 'test_tool' },
+        _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
     });
 
@@ -399,7 +399,7 @@ describe('ToolCallEmitter', () => {
             content: { type: 'text', text: 'Connection timeout' },
           },
         ],
-        _meta: { toolName: 'test_tool' },
+        _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
     });
   });
@@ -543,7 +543,7 @@ describe('ToolCallEmitter', () => {
               },
             ],
             rawOutput: { unknownField: 'value', nested: { data: 123 } },
-            _meta: { toolName: 'test_tool' },
+            _meta: { toolName: 'test_tool', provenance: 'builtin' },
           }),
         );
       });
@@ -565,7 +565,7 @@ describe('ToolCallEmitter', () => {
             toolCallId: 'call-extra',
             status: 'completed',
             rawOutput: 'Result text',
-            _meta: { toolName: 'test_tool' },
+            _meta: { toolName: 'test_tool', provenance: 'builtin' },
           }),
         );
       });
@@ -580,7 +580,10 @@ describe('ToolCallEmitter', () => {
 
         const call = sendUpdateSpy.mock.calls[0][0];
         expect(call.rawOutput).toBeUndefined();
-        expect(call._meta).toEqual({ toolName: 'test_tool' });
+        expect(call._meta).toEqual({
+          toolName: 'test_tool',
+          provenance: 'builtin',
+        });
       });
     });
 
@@ -671,7 +674,7 @@ describe('ToolCallEmitter', () => {
               content: { type: 'text', text: 'Text content from message' },
             },
           ],
-          _meta: { toolName: 'test_tool' },
+          _meta: { toolName: 'test_tool', provenance: 'builtin' },
         });
       });
 
@@ -703,10 +706,121 @@ describe('ToolCallEmitter', () => {
               },
             ],
             rawOutput: 'raw result',
-            _meta: { toolName: 'test_tool' },
+            _meta: { toolName: 'test_tool', provenance: 'builtin' },
           }),
         );
       });
+    });
+  });
+
+  describe('resolveToolProvenance (#4175 F4 prereq, chiga0 #19 P0)', () => {
+    // Pure static utility — exercise without an emitter instance.
+    it('classifies a plain tool name as builtin (no serverId)', () => {
+      const out = ToolCallEmitter.resolveToolProvenance('shell');
+      expect(out).toEqual({ provenance: 'builtin' });
+    });
+
+    it('classifies a tool name without mcp__ prefix as builtin', () => {
+      const out = ToolCallEmitter.resolveToolProvenance('read_file');
+      expect(out).toEqual({ provenance: 'builtin' });
+    });
+
+    it('classifies mcp__<server>__<tool> as mcp with serverId', () => {
+      const out = ToolCallEmitter.resolveToolProvenance(
+        'mcp__filesystem__read',
+      );
+      expect(out).toEqual({ provenance: 'mcp', serverId: 'filesystem' });
+    });
+
+    it('preserves underscores in the tool segment', () => {
+      // Server segment is `playwright`; tool segment is `take_screenshot`
+      // (with underscore inside the tool name — `split("__")` handles
+      // this because we split on the double-underscore delimiter).
+      const out = ToolCallEmitter.resolveToolProvenance(
+        'mcp__playwright__take_screenshot',
+      );
+      expect(out).toEqual({ provenance: 'mcp', serverId: 'playwright' });
+    });
+
+    it('classifies malformed mcp__ prefix (only one segment) as builtin', () => {
+      // No double-underscore delimiter past the prefix → not a valid
+      // mcp tool name; fall back to builtin rather than stamping
+      // garbage serverId.
+      const out = ToolCallEmitter.resolveToolProvenance('mcp__just_one');
+      expect(out).toEqual({ provenance: 'builtin' });
+    });
+
+    it('classifies mcp__<empty>__<tool> as builtin (empty server segment)', () => {
+      const out = ToolCallEmitter.resolveToolProvenance('mcp____read');
+      expect(out).toEqual({ provenance: 'builtin' });
+    });
+
+    it('classifies any tool as subagent when subagentMeta is present', () => {
+      // subagent takes precedence over mcp__ naming — a sub-agent
+      // calling an MCP tool is rendered as "subagent block" not
+      // "MCP block" in the UI.
+      const out = ToolCallEmitter.resolveToolProvenance('mcp__fs__read', {
+        agentType: 'researcher',
+      } as unknown as SubagentMeta);
+      expect(out).toEqual({ provenance: 'subagent' });
+    });
+
+    it('classifies a plain builtin tool with subagentMeta as subagent', () => {
+      const out = ToolCallEmitter.resolveToolProvenance('shell', {
+        agentType: 'coder',
+      } as unknown as SubagentMeta);
+      expect(out).toEqual({ provenance: 'subagent' });
+    });
+  });
+
+  describe('provenance stamping on emit (#4175 F4 prereq)', () => {
+    it('stamps provenance:mcp + serverId on emitStart for mcp__ tools', async () => {
+      await emitter.emitStart({
+        toolName: 'mcp__github__create_issue',
+        callId: 'call-mcp',
+        args: { title: 'bug' },
+      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          _meta: expect.objectContaining({
+            toolName: 'mcp__github__create_issue',
+            provenance: 'mcp',
+            serverId: 'github',
+          }),
+        }),
+      );
+    });
+
+    it('stamps provenance:subagent (no serverId) when subagentMeta present', async () => {
+      await emitter.emitStart({
+        toolName: 'shell',
+        callId: 'call-sub',
+        args: {},
+        subagentMeta: { agentType: 'researcher' } as unknown as SubagentMeta,
+      });
+      const call = sendUpdateSpy.mock.calls[0][0];
+      expect(call._meta.provenance).toBe('subagent');
+      expect(call._meta.serverId).toBeUndefined();
+    });
+
+    it('stamps provenance on emitResult so reconnecting clients can re-derive it', async () => {
+      await emitter.emitResult({
+        toolName: 'mcp__db__query',
+        callId: 'call-r',
+        success: true,
+        message: [],
+      });
+      const call = sendUpdateSpy.mock.calls[0][0];
+      expect(call._meta.provenance).toBe('mcp');
+      expect(call._meta.serverId).toBe('db');
+    });
+
+    it('stamps provenance on emitError as well', async () => {
+      await emitter.emitError('call-e', 'mcp__fs__write', new Error('boom'));
+      const call = sendUpdateSpy.mock.calls[0][0];
+      expect(call._meta.provenance).toBe('mcp');
+      expect(call._meta.serverId).toBe('fs');
     });
   });
 });

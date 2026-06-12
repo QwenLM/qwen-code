@@ -198,37 +198,23 @@ function parseSimple(yamlString: string): Record<string, unknown> {
 }
 
 /**
- * Converts a JavaScript object to a simple YAML string.
+ * Serializes a record back to YAML using the full eemeli/yaml stringifier so
+ * arbitrarily nested values (e.g. CC-style `mcpServers` / `hooks`) round-trip
+ * cleanly. The previous hand-rolled formatter only walked one level of
+ * nesting and emitted `[object Object]` for anything deeper, corrupting the
+ * file on save — see `docs/yaml-parser-replacement.md` for the audit.
  *
- * @param obj - Object to stringify
- * @param options - Stringify options
- * @returns YAML string
+ * `lineWidth: 0` disables automatic line wrapping so multi-line strings are
+ * preserved as-is, matching the stable-output posture the test suite assumes.
  */
 export function stringify(
   obj: Record<string, unknown>,
-  _options?: { lineWidth?: number; minContentWidth?: number },
+  options?: { lineWidth?: number; minContentWidth?: number },
 ): string {
-  const lines: string[] = [];
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (Array.isArray(value)) {
-      lines.push(`${key}:`);
-      for (const item of value) {
-        lines.push(`  - ${formatValue(item)}`);
-      }
-    } else if (typeof value === 'object' && value !== null) {
-      lines.push(`${key}:`);
-      for (const [subKey, subValue] of Object.entries(
-        value as Record<string, unknown>,
-      )) {
-        lines.push(`  ${subKey}: ${formatValue(subValue)}`);
-      }
-    } else {
-      lines.push(`${key}: ${formatValue(value)}`);
-    }
-  }
-
-  return lines.join('\n');
+  return yaml.stringify(obj, {
+    lineWidth: options?.lineWidth ?? 0,
+    minContentWidth: options?.minContentWidth ?? 20,
+  });
 }
 
 /**
@@ -255,26 +241,4 @@ function parseValue(value: string): unknown {
 
   // Return as string
   return value;
-}
-
-/**
- * Formats a value for YAML output.
- */
-function formatValue(value: unknown): string {
-  if (typeof value === 'string') {
-    // Quote strings that might be ambiguous or contain special characters
-    if (
-      value.includes(':') ||
-      value.includes('#') ||
-      value.includes('"') ||
-      value.includes('\\') ||
-      value.trim() !== value
-    ) {
-      // Escape backslashes THEN quotes
-      return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    }
-    return value;
-  }
-
-  return String(value);
 }

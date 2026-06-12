@@ -16,6 +16,7 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -1962,6 +1963,16 @@ const SETTINGS_SCHEMA = {
         description: 'The number of lines to keep when truncating tool output.',
         showInDialog: false,
       },
+      toolOutputBatchBudget: {
+        type: 'number',
+        label: 'Tool Output Batch Budget',
+        category: 'General',
+        requiresRestart: true,
+        default: DEFAULT_TOOL_OUTPUT_BATCH_BUDGET,
+        description:
+          'Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.',
+        showInDialog: false,
+      },
       computerUse: {
         type: 'object',
         label: 'Computer Use',
@@ -1982,6 +1993,81 @@ const SETTINGS_SCHEMA = {
               'When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.',
             showInDialog: true,
           },
+        },
+      },
+    },
+  },
+
+  policy: {
+    type: 'object',
+    label: 'Daemon Policy',
+    category: 'Daemon',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Daemon multi-client coordination policies. Tool-level allow/deny rules ' +
+      'live under `permissions`; this section is for runtime mediation behavior ' +
+      'between concurrent HTTP clients sharing one `qwen serve` daemon.',
+    showInDialog: false,
+    properties: {
+      permissionStrategy: {
+        type: 'enum',
+        label: 'Permission Mediation Policy',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: 'first-responder',
+        description:
+          'How permission requests resolve when multiple clients are attached. ' +
+          '`first-responder` (default) = any client decides, first wins. ' +
+          '`designated` = only the prompt originator decides; falls back to ' +
+          'first-responder if originator is anonymous. ' +
+          'NOTE: client identity comes from self-declared X-Qwen-Client-Id ' +
+          'with no proof-of-possession (pair-token identity is not implemented yet), ' +
+          'so any client observing originatorClientId on SSE frames can ' +
+          'register with the same id and impersonate the originator. ' +
+          '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
+          'which means UNANIMITY for M=2 (quorum=2, both must agree) and ' +
+          'supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). ' +
+          'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
+          '`local-only` = only loopback clients can RESOLVE; remote clients ' +
+          'can still ABORT a pending permission via the cancel sentinel ' +
+          '({outcome:"cancelled"}) — cancel stays cross-policy for ' +
+          'consistency. Strict-cancel-too deployments need a dedicated ' +
+          'loopback-bound daemon. ' +
+          'Requires daemon restart — read once at boot.',
+        showInDialog: true,
+        options: [
+          { value: 'first-responder', label: 'First Responder' },
+          { value: 'designated', label: 'Designated Originator' },
+          { value: 'consensus', label: 'Consensus Quorum' },
+          { value: 'local-only', label: 'Local Only' },
+        ],
+      },
+      consensusQuorum: {
+        type: 'number',
+        label: 'Consensus Quorum Override',
+        category: 'Daemon',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        description:
+          'Optional fixed quorum size for consensus policy. Capped at M ' +
+          '(count of registered voters at request issue time) to prevent ' +
+          'unreachable quorum. Unset = floor(M/2)+1. ' +
+          'Requires daemon restart — read once at boot.',
+        showInDialog: false,
+        // runQwenServe.ts validates `Number.isInteger(n) && n >= 1` and
+        // refuses to boot otherwise. Override the generated schema so IDE
+        // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
+        // BEFORE the user restarts the daemon. The bare `type:'number'`
+        // mapping accepts all of these.
+        jsonSchemaOverride: {
+          type: 'integer',
+          minimum: 1,
+          description:
+            'Optional fixed quorum size for consensus policy. Capped at M ' +
+            '(count of registered voters at request issue time) to prevent ' +
+            'unreachable quorum. Unset = floor(M/2)+1. ' +
+            'Requires daemon restart — read once at boot.',
         },
       },
     },

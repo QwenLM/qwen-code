@@ -16,7 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
-import type { HttpAcpBridge } from './httpAcpBridge.js';
+import type { AcpSessionBridge } from './acpSessionBridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
@@ -57,7 +57,7 @@ import {
  */
 
 export interface WorkspaceMemoryRouteDeps {
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   boundWorkspace: string;
   /**
    * `mutate({ strict: true })`-style middleware factory from PR 15.
@@ -323,7 +323,7 @@ interface DiscoveredFile {
  * 16.5's responsibility per scope decision in issue #4175. Path-
  * based rules (`.qwen/rules/`) are also out of scope for v1.
  */
-async function collectWorkspaceMemoryStatus(
+export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
 ): Promise<ServeWorkspaceMemoryStatus> {
   const filenames = new Set(getAllGeminiMdFilenames());

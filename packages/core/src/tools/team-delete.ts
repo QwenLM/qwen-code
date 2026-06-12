@@ -13,6 +13,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { deleteTeamDirs } from '../agents/team/teamHelpers.js';
+import { disposeInboxLocks } from '../agents/team/mailbox.js';
 import { unregisterLeader } from '../agents/team/leaderPermissionBridge.js';
 import { isTeammate } from '../agents/team/identity.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -85,6 +86,12 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     await deleteTeamDirs(teamName);
     await new Promise((r) => setTimeout(r, 250));
     await deleteTeamDirs(teamName);
+
+    // Drop this team's in-process inbox locks now that its inboxes are
+    // gone, so the lock map doesn't retain a dead Mutex per inbox for
+    // the process lifetime. After the final dir sweep so a late
+    // writeMessage can't immediately re-create an entry.
+    disposeInboxLocks(teamName);
 
     this.config.setTeamManager(null);
     this.config.setTeamContext(null);

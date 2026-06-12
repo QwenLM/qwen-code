@@ -7482,4 +7482,138 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
     });
   });
+
+  describe('compressFast', () => {
+    const userMsg = (text: string): Content => ({
+      role: 'user' as const,
+      parts: [{ text }],
+    });
+    const modelMsg = (text: string): Content => ({
+      role: 'model' as const,
+      parts: [{ text }],
+    });
+    const modelMsgWithThinking = (
+      text: string | null,
+      thinking: string,
+    ): Content => ({
+      role: 'model' as const,
+      parts: [{ thought: true, text: thinking }, ...(text ? [{ text }] : [])],
+    });
+    const toolCall = (name: string): Content => ({
+      role: 'model' as const,
+      parts: [{ functionCall: { name, args: {} } }],
+    });
+    const toolResult = (name: string, output: string): Content => ({
+      role: 'user' as const,
+      parts: [{ functionResponse: { name, response: { output } } }],
+    });
+
+    beforeEach(() => {
+      (mockConfig as unknown as Record<string, unknown>)[
+        'getClearContextOnIdle'
+      ] = vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      });
+    });
+
+    it('strips thinking from model turns', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsgWithThinking('response text', 'internal reasoning'),
+        userMsg('next'),
+        modelMsg('plain reply'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // Thinking parts should be stripped from the first model message
+      const history = chat.getHistory();
+      const firstModel = history.find((c) => c.role === 'model');
+      expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
+    });
+
+    it('NOOP when nothing is compressible', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsg('hi'),
+        userMsg('how are you'),
+        modelMsg('good'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    });
+
+    it('clears old tool results via microcompaction', () => {
+      const history: Content[] = [];
+      // Create many tool calls so keepRecent=5 kicks in
+      for (let i = 0; i < 8; i++) {
+        history.push(toolCall('read_file'));
+        history.push(
+          toolResult('read_file', `content for file ${i} `.repeat(50)),
+        );
+      }
+      history.push(userMsg('final'));
+      history.push(modelMsg('done'));
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(5000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.microcompactMeta).toBeDefined();
+      expect(result.microcompactMeta!.toolsCleared).toBeGreaterThan(0);
+    });
+
+    it('adjusts lastPromptTokenCount by estimated delta on COMPRESSED', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      const apiBaseline = 50000;
+      chat.setLastPromptTokenCount(apiBaseline);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeLessThan(apiBaseline);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
+      expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
+    });
+
+    it('falls back to estimateContentTokens when lastPromptTokenCount is 0', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(0);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.originalTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(
+        result.info.originalTokenCount,
+      );
+    });
+  });
 });
