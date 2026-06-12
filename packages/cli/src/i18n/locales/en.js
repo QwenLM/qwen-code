@@ -12,6 +12,10 @@ export default {
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
     'Cleared authentication for "{{name}}".',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    'Enable extension "{{name}}" to manage this MCP server.',
+  'Extension-provided MCP servers cannot be favorited.':
+    'Extension-provided MCP servers cannot be favorited.',
 
   'User level': 'User level',
   'Project level': 'Project level',

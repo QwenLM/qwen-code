@@ -209,7 +209,7 @@ export const McpServerActionsView = ({
       } else {
         if (server.source === 'extension') {
           onStatus({
-            type: 'error',
+            type: 'info',
             text: t('Cannot disable an extension-provided MCP server here.'),
           });
           return;

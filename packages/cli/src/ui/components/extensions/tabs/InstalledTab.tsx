@@ -4,16 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import {
   type Config,
   type Extension,
   type ExtensionScope,
+  type MCPServerConfig,
   SettingScope,
   getMCPServerStatus,
   createDebugLogger,
@@ -129,20 +131,44 @@ export const InstalledTab = ({
         };
       });
 
-      // Standalone MCP servers (those owned by extensions are surfaced as the
-      // plugin's components, so they are excluded here).
-      const mcpItems: InstalledItem[] = [];
+      // MCP servers: standalone ones are top-level rows; extension-bundled
+      // ones are nested under their parent extension.
       const mcpServers = config.getMcpServers() ?? {};
-      const standaloneNames = Object.keys(mcpServers).filter(
-        (name) => !mcpServers[name].extensionName,
-      );
-      // Only touch settings/tool registry when there are standalone MCP servers.
-      const workspaceMcp = standaloneNames.length
+      const hasAnyMcp =
+        Object.keys(mcpServers).length > 0 ||
+        extensions.some((ext) => Object.keys(ext.mcpServers ?? {}).length > 0);
+      // Only touch settings/tool registry when there are MCP servers.
+      const workspaceMcp = hasAnyMcp
         ? loadSettings().forScope(CliSettingScope.Workspace).settings.mcpServers
         : undefined;
-      const toolRegistry = standaloneNames.length
-        ? config.getToolRegistry()
-        : undefined;
+      const toolRegistry = hasAnyMcp ? config.getToolRegistry() : undefined;
+
+      const buildMcpInfo = (
+        name: string,
+        serverConfig: MCPServerConfig,
+        scope: InstalledMcpInfo['scope'],
+        isDisabled: boolean,
+      ): InstalledMcpInfo => ({
+        name,
+        status: getMCPServerStatus(name),
+        scope,
+        isDisabled,
+        transport: serverConfig.command
+          ? 'stdio'
+          : serverConfig.httpUrl
+            ? 'http'
+            : serverConfig.url
+              ? 'sse'
+              : 'unknown',
+        toolCount:
+          toolRegistry
+            ?.getAllTools()
+            .filter(
+              (tool) => (tool as { serverName?: string }).serverName === name,
+            ).length ?? 0,
+      });
+
+      const mcpItems: InstalledItem[] = [];
       for (const [name, serverConfig] of Object.entries(mcpServers)) {
         if (serverConfig.extensionName) continue;
         const scope: InstalledMcpInfo['scope'] = workspaceMcp?.[name]
@@ -150,46 +176,69 @@ export const InstalledTab = ({
           : 'user';
         const isDisabled = config.isMcpServerDisabled(name);
         const isFavorite = favorites.has(name);
-        const toolCount =
-          toolRegistry
-            ?.getAllTools()
-            .filter(
-              (tool) => (tool as { serverName?: string }).serverName === name,
-            ).length ?? 0;
-        const transport = serverConfig.command
-          ? 'stdio'
-          : serverConfig.httpUrl
-            ? 'http'
-            : serverConfig.url
-              ? 'sse'
-              : 'unknown';
-        const mcp: InstalledMcpInfo = {
-          name,
-          status: getMCPServerStatus(name),
-          scope,
-          isDisabled,
-          transport,
-          toolCount,
-        };
         mcpItems.push({
           kind: 'mcp',
           key: `mcp:${name}`,
           name,
-          mcp,
+          mcp: buildMcpInfo(name, serverConfig, scope, isDisabled),
           isActive: !isDisabled,
           isFavorite,
           group: groupFor(!isDisabled, isFavorite, scope),
         });
       }
 
-      const all = [...pluginItems, ...mcpItems];
+      // Extension-bundled MCP servers, keyed by parent extension name. They
+      // inherit the parent's group so they always render right under it.
+      const childMcpItems = new Map<string, InstalledItem[]>();
+      for (const item of pluginItems) {
+        if (item.kind !== 'plugin') continue;
+        const ext = item.extension;
+        const children: InstalledItem[] = [];
+        for (const name of Object.keys(ext.mcpServers ?? {})) {
+          const merged = mcpServers[name];
+          // The merged runtime config wins on name collisions (a user/project
+          // server, or another extension's, shadows this one) — don't render a
+          // child row for a server this extension didn't actually contribute.
+          if (merged && merged.extensionName !== ext.name) continue;
+          // Active extension but absent from the runtime config: blocked by
+          // the MCP allow-list. Hide it, matching standalone behavior.
+          if (!merged && ext.isActive) continue;
+          const isDisabled = !ext.isActive || config.isMcpServerDisabled(name);
+          children.push({
+            kind: 'mcp',
+            key: `mcp:${ext.name}:${name}`,
+            name,
+            mcp: buildMcpInfo(
+              name,
+              merged ?? ext.mcpServers![name],
+              'extension',
+              isDisabled,
+            ),
+            isActive: !isDisabled,
+            isFavorite: false,
+            group: item.group,
+            parentExtension: ext.name,
+          });
+        }
+        if (children.length) childMcpItems.set(ext.name, children);
+      }
+
+      const topLevel = [...pluginItems, ...mcpItems];
       // Stable sort by group order then name.
-      all.sort((a, b) => {
+      topLevel.sort((a, b) => {
         const ga = GROUP_ORDER.indexOf(a.group);
         const gb = GROUP_ORDER.indexOf(b.group);
         if (ga !== gb) return ga - gb;
         return a.name.localeCompare(b.name);
       });
+      // Expand each extension's bundled MCP servers directly beneath it.
+      const all: InstalledItem[] = [];
+      for (const item of topLevel) {
+        all.push(item);
+        if (item.kind === 'plugin') {
+          all.push(...(childMcpItems.get(item.name) ?? []));
+        }
+      }
       setItems(all);
       // Re-point the cursor at the same item by key (it may have moved groups).
       const prevKey = selectedKeyRef.current;
@@ -218,18 +267,103 @@ export const InstalledTab = ({
     selectedKeyRef.current = selectedItem?.key ?? null;
   }, [selectedItem]);
 
+  const { rows: terminalRows } = useTerminalSize();
+  // One line per display row; reserve space for the dialog border, tab bar,
+  // scroll hints, status line (which may wrap) and footer around this tab.
+  const visibleCount = Math.max(6, (terminalRows || 24) - 12);
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  // Flatten the grouped list into display rows (headers, items, gaps) so the
+  // list can be windowed to the terminal height.
+  type DisplayRow =
+    | { type: 'header'; group: InstalledGroup; count: number }
+    | { type: 'item'; item: InstalledItem }
+    | { type: 'gap' };
+  const displayRows = useMemo(() => {
+    const out: DisplayRow[] = [];
+    for (const group of GROUP_ORDER) {
+      const rows = items.filter((it) => it.group === group);
+      if (!rows.length) continue;
+      out.push({
+        type: 'header',
+        group,
+        // Bundled MCP rows travel with their extension; the header counts
+        // only top-level entries.
+        count: rows.filter((it) => !(it.kind === 'mcp' && it.parentExtension))
+          .length,
+      });
+      for (const item of rows) out.push({ type: 'item', item });
+      out.push({ type: 'gap' });
+    }
+    if (out.at(-1)?.type === 'gap') out.pop();
+    return out;
+  }, [items]);
+
+  // Keep the cursor — and its group header when directly above — visible,
+  // and re-clamp the offset when the list shrinks or the window grows.
+  useEffect(() => {
+    const maxOffset = Math.max(0, displayRows.length - visibleCount);
+    if (scrollOffset > maxOffset) {
+      setScrollOffset(maxOffset);
+      return;
+    }
+    const idx = displayRows.findIndex(
+      (r) => r.type === 'item' && r.item.key === selectedItem?.key,
+    );
+    if (idx < 0) return;
+    const top = displayRows[idx - 1]?.type === 'header' ? idx - 1 : idx;
+    if (top < scrollOffset) {
+      setScrollOffset(top);
+    } else if (idx >= scrollOffset + visibleCount) {
+      setScrollOffset(idx - visibleCount + 1);
+    }
+  }, [displayRows, selectedItem, scrollOffset, visibleCount]);
+
   const goToList = useCallback(() => {
     setView('list');
     onLockChange(false);
   }, [onLockChange]);
 
+  // If a reload removed (or re-typed) the item whose detail is open, fall back
+  // to the list — otherwise the tab stays locked with no active key handler.
+  useEffect(() => {
+    if (view === 'list' || loading) return;
+    const matches =
+      selectedItem && (view === 'mcp-detail') === (selectedItem.kind === 'mcp');
+    if (!matches) goToList();
+  }, [view, loading, selectedItem, goToList]);
+
+  const isParentExtensionActive = useCallback(
+    (item: Extract<InstalledItem, { kind: 'mcp' }>): boolean =>
+      items.some(
+        (p) =>
+          p.kind === 'plugin' && p.name === item.parentExtension && p.isActive,
+      ),
+    [items],
+  );
+
   const enterDetail = useCallback(
     (item: InstalledItem) => {
+      // A disabled extension's servers are not loaded into the runtime config,
+      // so the MCP detail view would have nothing to show.
+      if (
+        item.kind === 'mcp' &&
+        item.parentExtension &&
+        !isParentExtensionActive(item)
+      ) {
+        onStatus({
+          type: 'info',
+          text: t('Enable extension "{{name}}" to manage this MCP server.', {
+            name: item.parentExtension,
+          }),
+        });
+        return;
+      }
       onStatus(null);
       setView(item.kind === 'plugin' ? 'plugin-detail' : 'mcp-detail');
       onLockChange(true);
     },
-    [onLockChange, onStatus],
+    [onLockChange, onStatus, isParentExtensionActive],
   );
 
   const togglePlugin = useCallback(
@@ -270,6 +404,27 @@ export const InstalledTab = ({
   const toggleMcp = useCallback(
     async (item: Extract<InstalledItem, { kind: 'mcp' }>) => {
       if (mutatingRef.current) return;
+      if (item.parentExtension) {
+        if (!isParentExtensionActive(item)) {
+          onStatus({
+            type: 'info',
+            text: t('Enable extension "{{name}}" to manage this MCP server.', {
+              name: item.parentExtension,
+            }),
+          });
+          return;
+        }
+        if (item.isActive) {
+          // Disabling a bundled server is done by disabling its extension.
+          onStatus({
+            type: 'info',
+            text: t('Cannot disable an extension-provided MCP server here.'),
+          });
+          return;
+        }
+        // An individually-excluded server under an active extension may be
+        // re-enabled; fall through to the normal enable path.
+      }
       const toolRegistry = config.getToolRegistry();
       mutatingRef.current = true;
       // Enabling rediscovers the server's tools, which can take a while.
@@ -332,7 +487,7 @@ export const InstalledTab = ({
         mutatingRef.current = false;
       }
     },
-    [config, load, onStatus],
+    [config, load, onStatus, isParentExtensionActive],
   );
 
   const toggleFavorite = useCallback(
@@ -368,8 +523,17 @@ export const InstalledTab = ({
           void toggleMcp(selectedItem);
         }
       } else if (key.sequence === 'f' && !key.ctrl && !key.meta) {
-        if (selectedItem && !mutatingRef.current)
-          void toggleFavorite(selectedItem);
+        if (!selectedItem || mutatingRef.current) return;
+        // Bundled MCP servers stay nested under their extension, so they
+        // cannot be favorited independently.
+        if (selectedItem.kind === 'mcp' && selectedItem.parentExtension) {
+          onStatus({
+            type: 'info',
+            text: t('Extension-provided MCP servers cannot be favorited.'),
+          });
+          return;
+        }
+        void toggleFavorite(selectedItem);
       }
     },
     { isActive: isActive && view === 'list' },
@@ -419,60 +583,72 @@ export const InstalledTab = ({
     );
   }
 
-  // Grouped list rendering.
-  const groups = GROUP_ORDER.map((group) => ({
-    group,
-    rows: items.filter((it) => it.group === group),
-  })).filter((g) => g.rows.length > 0);
+  // Windowed list rendering. A gap row at the window's top edge would render
+  // as a stray blank line under the "more above" hint, so trim it.
+  const visibleRows = displayRows.slice(
+    scrollOffset,
+    scrollOffset + visibleCount,
+  );
+  while (visibleRows[0]?.type === 'gap') visibleRows.shift();
+  const hasAbove = scrollOffset > 0;
+  const hasBelow = scrollOffset + visibleCount < displayRows.length;
 
   return (
     <Box flexDirection="column">
-      {groups.map(({ group, rows }) => (
-        <Box key={group} flexDirection="column" marginBottom={1}>
-          <Text color={theme.text.accent} bold>
-            {groupLabel(group)} ({rows.length})
-          </Text>
-          {rows.map((item) => {
-            const globalIndex = items.indexOf(item);
-            const isSelected = globalIndex === selectedIndex;
-            const marker = isSelected ? '●' : ' ';
-            const kindBadge =
-              item.kind === 'mcp'
-                ? t('MCP')
-                : t('Extension v{{version}}', {
-                    version: item.extension.version,
-                  });
-            const statusColor = item.isActive
-              ? theme.status.success
-              : theme.text.secondary;
-            return (
-              <Box key={item.key}>
-                <Box minWidth={2} flexShrink={0}>
-                  <Text
-                    color={isSelected ? theme.text.accent : theme.text.primary}
-                  >
-                    {marker}
-                  </Text>
-                </Box>
-                <Box flexGrow={1}>
-                  <Text
-                    color={isSelected ? theme.text.accent : theme.text.primary}
-                  >
-                    {item.name}
-                  </Text>
-                  {item.isFavorite ? (
-                    <Text color={theme.status.warning}> ★</Text>
-                  ) : null}
-                </Box>
-                <Text color={theme.text.secondary}>{kindBadge} </Text>
-                <Text color={statusColor}>
-                  ({item.isActive ? t('active') : t('disabled')})
-                </Text>
-              </Box>
-            );
-          })}
-        </Box>
-      ))}
+      {hasAbove ? (
+        <Text color={theme.text.secondary}>{t('↑ more above')}</Text>
+      ) : null}
+      {visibleRows.map((row, i) => {
+        if (row.type === 'gap') {
+          return <Box key={`gap-${scrollOffset + i}`} height={1} />;
+        }
+        if (row.type === 'header') {
+          return (
+            <Text key={`header-${row.group}`} color={theme.text.accent} bold>
+              {groupLabel(row.group)} ({row.count})
+            </Text>
+          );
+        }
+        const item = row.item;
+        const globalIndex = items.indexOf(item);
+        const isSelected = globalIndex === selectedIndex;
+        const marker = isSelected ? '●' : ' ';
+        const isChild = item.kind === 'mcp' && !!item.parentExtension;
+        const kindBadge =
+          item.kind === 'mcp'
+            ? t('MCP')
+            : t('Extension v{{version}}', {
+                version: item.extension.version,
+              });
+        const statusColor = item.isActive
+          ? theme.status.success
+          : theme.text.secondary;
+        return (
+          <Box key={item.key}>
+            <Box minWidth={2} flexShrink={0}>
+              <Text color={isSelected ? theme.text.accent : theme.text.primary}>
+                {marker}
+              </Text>
+            </Box>
+            <Box flexGrow={1}>
+              <Text color={isSelected ? theme.text.accent : theme.text.primary}>
+                {isChild ? '  └ ' : ''}
+                {item.name}
+              </Text>
+              {item.isFavorite ? (
+                <Text color={theme.status.warning}> ★</Text>
+              ) : null}
+            </Box>
+            <Text color={theme.text.secondary}>{kindBadge} </Text>
+            <Text color={statusColor}>
+              ({item.isActive ? t('active') : t('disabled')})
+            </Text>
+          </Box>
+        );
+      })}
+      {hasBelow ? (
+        <Text color={theme.text.secondary}>{t('↓ more below')}</Text>
+      ) : null}
     </Box>
   );
 };

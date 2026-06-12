@@ -73,12 +73,14 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
-    // 始终显示启用/禁用选项
-    result.push({
-      key: 'toggle-disable',
-      label: server?.isDisabled ? t('Enable') : t('Disable'),
-      value: 'toggle-disable',
-    });
+    // 扩展提供的服务器随扩展启停，不提供"禁用"操作（重新启用仍允许）
+    if (server.source !== 'extension' || server.isDisabled) {
+      result.push({
+        key: 'toggle-disable',
+        label: server.isDisabled ? t('Enable') : t('Disable'),
+        value: 'toggle-disable',
+      });
+    }
 
     // 已认证的服务器显示"重新认证"，未认证的显示"认证"
     if (!server.isDisabled) {

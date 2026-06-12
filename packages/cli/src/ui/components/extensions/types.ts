@@ -63,6 +63,9 @@ export type InstalledItem =
       isActive: boolean;
       isFavorite: boolean;
       group: InstalledGroup;
+      /** Set when the MCP server is bundled with an extension; the row is
+       * rendered indented under that extension. */
+      parentExtension?: string;
     };
 
 /**

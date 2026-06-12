@@ -23,6 +23,20 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { ExtensionUpdateState } from '../../state/extensions.js';
 
+// The Installed tab reads real user/workspace settings from disk when MCP
+// servers exist; stub loadSettings to keep these tests hermetic.
+vi.mock('../../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: vi.fn(() => ({
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    })),
+  };
+});
+
 const mockExtension = (name: string, isActive = true): Extension =>
   ({
     id: name,
@@ -72,11 +86,15 @@ const createManager = (o: ManagerOverrides = {}) => {
   };
 };
 
-const createConfig = (manager: ReturnType<typeof createManager>): Config =>
+const createConfig = (
+  manager: ReturnType<typeof createManager>,
+  overrides: { mcpServers?: Record<string, unknown> } = {},
+): Config =>
   ({
     getExtensionManager: () => manager,
-    getMcpServers: () => ({}),
+    getMcpServers: () => overrides.mcpServers ?? {},
     getToolRegistry: () => undefined,
+    getPromptRegistry: () => undefined,
     isMcpServerDisabled: () => false,
     getExcludedMcpServers: () => [],
     setExcludedMcpServers: vi.fn(),
@@ -294,6 +312,42 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Extension v1.0.0');
   });
 
+  it('nests extension-bundled MCP servers under their extension on the Installed tab', async () => {
+    const ext = mockExtension('alpha', true);
+    (ext as unknown as { mcpServers: Record<string, unknown> }).mcpServers = {
+      'alpha-mcp': { command: 'node' },
+    };
+    const config = createConfig(
+      createManager({ extensions: [ext, mockExtension('beta', true)] }),
+      {
+        mcpServers: {
+          'alpha-mcp': { command: 'node', extensionName: 'alpha' },
+        },
+      },
+    );
+    const { stdin, lastFrame } = renderDialog(config, {
+      initialTab: EXTENSIONS_TABS.INSTALLED,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha-mcp');
+    });
+    const frame = lastFrame()!;
+    // Bundled MCP renders indented under its parent extension.
+    expect(frame).toContain('└ alpha-mcp');
+    // The group count only includes top-level items (the two extensions).
+    expect(frame).toContain('User level (2)');
+    // Enter on the nested row opens the MCP detail view with Extension source.
+    stdin.write('\x1B[B'); // down: alpha -> alpha-mcp
+    await waitFor(() => {
+      expect(lastFrame()).toMatch(/●\s+└ alpha-mcp/);
+    });
+    stdin.write('\r');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Source:');
+    });
+    expect(lastFrame()).toContain('Extension');
+  });
+
   it('toggles favorite when pressing f on the Installed tab', async () => {
     const manager = createManager({
       extensions: [mockExtension('alpha', true)],
@@ -409,7 +463,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Update marketplace');
     expect(frame).toContain('Remove marketplace');
     // The footer advertises the R refresh shortcut once the detail has loaded.
-    expect(frame).toContain('R refresh');
+    await waitFor(() => {
+      expect(lastFrame()).toContain('R refresh');
+    });
   });
 
   it('collapses a long installed-plugins list in the marketplace detail', async () => {
@@ -485,7 +541,9 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       expect(lastFrame()).toContain('Could not load this marketplace.');
     });
     // The retry hint shows both inline and in the bottom footer.
-    expect((lastFrame()?.split('Press R to retry').length ?? 1) - 1).toBe(2);
+    await waitFor(() => {
+      expect((lastFrame()?.split('Press R to retry').length ?? 1) - 1).toBe(2);
+    });
     stdin.write('r'); // retry -> second load succeeds
     await waitFor(() => {
       expect(lastFrame()).toContain('1 available extensions');

@@ -12,6 +12,10 @@ export default {
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    '啟用擴展 "{{name}}" 後才能管理此 MCP 伺服器。',
+  'Extension-provided MCP servers cannot be favorited.':
+    '擴展提供的 MCP 伺服器無法單獨收藏。',
 
   'User level': '使用者層級',
   'Project level': '專案層級',
