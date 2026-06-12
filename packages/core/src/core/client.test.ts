@@ -3630,6 +3630,7 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
+      client.recordCompletedToolCall('mcp__ata__article-list-query');
 
       const stream = client.sendMessageStream(
         [{ text: 'Please answer tersely' }],
@@ -3646,6 +3647,7 @@ hello
         expect.objectContaining({
           config: mockConfig,
           excludedFilePaths: expect.any(Set),
+          recentTools: ['mcp__ata__article-list-query'],
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(

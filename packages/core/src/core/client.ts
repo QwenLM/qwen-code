@@ -128,6 +128,7 @@ import { type File, type IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
+const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -211,6 +212,7 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
@@ -286,7 +288,10 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
+      replayUiTelemetryFromConversation(
+        resumedSessionData.conversation,
+        this.config.getSessionId(),
+      );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
@@ -1494,6 +1499,16 @@ export class GeminiClient {
     toolName: string,
     args?: Record<string, unknown>,
   ): void {
+    const normalizedToolName = toolName.trim();
+    if (normalizedToolName) {
+      this.recentCompletedToolNames = [
+        ...this.recentCompletedToolNames.filter(
+          (name) => name !== normalizedToolName,
+        ),
+        normalizedToolName,
+      ].slice(-MAX_RECENT_TOOL_NAMES_FOR_MEMORY);
+    }
+
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
       if (
@@ -1692,6 +1707,7 @@ export class GeminiClient {
             .recall(this.config.getProjectRoot(), partToString(request), {
               config: this.config,
               excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+              recentTools: [...this.recentCompletedToolNames],
               abortSignal: controller.signal,
             })
             .catch((error: unknown) => {
