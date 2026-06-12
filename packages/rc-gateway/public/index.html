@@ -46,7 +46,8 @@
         margin: 0 0 0.4rem;
         font-size: 0.8rem;
       }
-      #log {
+      #log,
+      #events {
         background: #111;
         color: #ddd;
         padding: 0.5rem;
@@ -55,6 +56,10 @@
         white-space: pre-wrap;
         font-family: ui-monospace, monospace;
         font-size: 0.85rem;
+      }
+      #events {
+        height: 30vh;
+        color: #aee;
       }
     </style>
   </head>
@@ -71,6 +76,15 @@
     </section>
     <section>
       <button id="enable">Enable notifications</button>
+    </section>
+    <section id="owner-events">
+      <strong>Owner event stream</strong> (live audit feed; requires owner
+      scope)
+      <div>
+        <button id="watch-events">Watch events</button>
+        <button id="stop-events" disabled>Stop</button>
+      </div>
+      <pre id="events">(not connected)</pre>
     </section>
     <div id="status"></div>
     <div id="cards"></div>
@@ -395,6 +409,88 @@
       }
 
       $('enable').onclick = enableNotifications;
+
+      // Owner event stream (cycle 54): fetch-based SSE consumer of GET
+      // /rc/events (cycle 49). EventSource can't set Authorization, so this
+      // mirrors the `watch` handler's reader loop. Self-contained: touches no
+      // other handler. The server frames are `data: {type:'audit',record}`,
+      // an `event: resync` + `data:{dropped}` backpressure marker, and `:`
+      // comment heartbeats (`: ok` / `: ping`) which carry no data line.
+      let eventsController = null;
+      const eventLog = (m) => {
+        const el = $('events');
+        if (el.textContent === '(not connected)') el.textContent = '';
+        el.textContent += m + '\n';
+        el.scrollTop = el.scrollHeight;
+      };
+      $('stop-events').onclick = () => {
+        if (eventsController) eventsController.abort();
+      };
+      $('watch-events').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        eventsController = new AbortController();
+        $('watch-events').disabled = true;
+        $('stop-events').disabled = false;
+        $('events').textContent = '';
+        eventLog('connecting…');
+        try {
+          const res = await fetch('/rc/events', {
+            headers: { Authorization: 'Bearer ' + token() },
+            signal: eventsController.signal,
+          });
+          if (!res.ok) {
+            eventLog(
+              'not authorized (' + res.status + ') — needs an owner token',
+            );
+            return;
+          }
+          eventLog('streaming');
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const blocks = buf.split('\n\n');
+            buf = blocks.pop() || '';
+            for (const block of blocks) {
+              const lines = block.split('\n');
+              const isResync = lines.some((l) => l.startsWith('event: resync'));
+              const dataLine = lines.find((l) => l.startsWith('data:'));
+              if (!dataLine) continue; // `: ok` / `: ping` heartbeat comment
+              let frame;
+              try {
+                frame = JSON.parse(dataLine.slice(5).trim());
+              } catch {
+                continue;
+              }
+              if (isResync) {
+                eventLog(
+                  'resync: dropped ' +
+                    (frame.dropped ?? '?') +
+                    ' frame(s) — query /rc/audit for the gap',
+                );
+                continue;
+              }
+              const rec = frame.record || frame;
+              const parts = [rec.ts, rec.action];
+              if (rec.actorTokenId) parts.push('by=' + rec.actorTokenId);
+              if (rec.target) parts.push('target=' + rec.target);
+              if (rec.detail) parts.push(JSON.stringify(rec.detail));
+              eventLog(parts.join('  '));
+            }
+          }
+          eventLog('stream ended');
+        } catch (e) {
+          eventLog(
+            eventsController.signal.aborted ? 'stopped' : 'stream error: ' + e,
+          );
+        } finally {
+          $('watch-events').disabled = false;
+          $('stop-events').disabled = true;
+        }
+      };
     </script>
   </body>
 </html>
