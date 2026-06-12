@@ -441,7 +441,11 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats, startNewSession } = useSessionStats();
+  const {
+    stats: sessionStats,
+    startNewSession,
+    seedPromptCount,
+  } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
@@ -548,6 +552,15 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Seed the prompt counter from the resumed conversation so new
+        // promptIds don't collide with restored file history snapshots.
+        const userTurnCount = resumedSessionData.conversation.messages.filter(
+          (m) => m.type === 'user' && m.subtype !== 'mid_turn_user_message',
+        ).length;
+        if (userTurnCount > 0) {
+          seedPromptCount(userTurnCount);
+        }
 
         // Re-arm any `/goal` that was active when the prior session ended.
         try {
@@ -2622,9 +2635,16 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
-          });
+          config.getChatRecordingService()?.rewindRecording(
+            targetTurnIndex,
+            { truncatedCount: originalLength - truncatedUi.length },
+            !hasRestoreFailure
+              ? config
+                  .getFileHistoryService()
+                  .getSnapshots()
+                  .slice(0, targetTurnIndex + 1)
+              : undefined,
+          );
         }
 
         // Show file restore result after conversation truncation so the

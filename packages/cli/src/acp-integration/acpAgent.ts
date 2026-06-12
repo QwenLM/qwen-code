@@ -6768,6 +6768,12 @@ class QwenAgent implements Agent {
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
     );
+    // ACP sessions run with piped stdio (non-TTY), so the default
+    // interactive-based gating disables file checkpointing. Enable it
+    // explicitly so /rewind works across daemon session resume.
+    if (typeof config.enableFileCheckpointing === 'function') {
+      config.enableFileCheckpointing();
+    }
     // Inject the workspace-shared MCP transport pool BEFORE
     // `config.initialize()` so the ToolRegistry picks it up.
     if (

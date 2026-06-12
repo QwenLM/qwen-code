@@ -614,9 +614,20 @@ export class Session implements SessionContext {
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
-    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
-    });
+    const fileHistoryService = this.config.getFileHistoryService();
+    const survivingSnapshots = fileHistoryService
+      .getSnapshots()
+      .slice(0, targetTurnIndex + 1);
+
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        survivingSnapshots,
+      );
 
     return { targetTurnIndex, apiTruncateIndex };
   }
@@ -1052,6 +1063,27 @@ export class Session implements SessionContext {
               if (additionalContext) {
                 parts = [...parts, { text: additionalContext }];
               }
+            }
+
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in GeminiClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
+            try {
+              const fileHistoryService = this.config.getFileHistoryService();
+              await fileHistoryService.makeSnapshot(promptId);
+              try {
+                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+                if (latestSnapshot) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordFileHistorySnapshot(latestSnapshot);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
