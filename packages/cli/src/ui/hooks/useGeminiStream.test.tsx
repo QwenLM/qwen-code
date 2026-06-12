@@ -5611,6 +5611,10 @@ describe('useGeminiStream', () => {
     });
 
     it('renders active goal StopHookLoop as a goal_status checking card', async () => {
+      const recordSlashCommand = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordSlashCommand,
+      });
       mockGetActiveGoal.mockReturnValue({
         condition: 'finish the refactor',
         iterations: 7,
@@ -5649,6 +5653,19 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         );
+      });
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/goal',
+        outputHistoryItems: [
+          expect.objectContaining({
+            type: 'goal_status',
+            kind: 'checking',
+            condition: 'finish the refactor',
+            iterations: 7,
+            lastReason: 'not enough evidence yet',
+          }),
+        ],
       });
       expect(mockAddItem).not.toHaveBeenCalledWith(
         expect.objectContaining({ type: 'stop_hook_loop' }),
