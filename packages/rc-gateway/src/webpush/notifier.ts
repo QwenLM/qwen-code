@@ -208,25 +208,29 @@ export class PushNotifier {
         // suppressed. DISABLED by default (window 0) -> tryPass always true ->
         // no behavior change. Pure/total (never throws -> no try/catch). Audited
         // (so "why no push" stays visible) but NOT a new action (reason VALUE).
-        if (
-          this.coalescer &&
-          !this.coalescer.tryPass(
+        if (this.coalescer) {
+          const { allowed, firstSuppress } = this.coalescer.tryPass(
             r.id,
             payload.kind,
             ctx.sessionId,
             now.getTime(),
-          )
-        ) {
-          void this.audit?.record({
-            action: 'push_suppressed',
-            target: ctx.sessionId,
-            detail: {
-              kind: payload.kind,
-              reason: 'coalesced',
-              subscriptionId: r.id,
-            },
-          });
-          return;
+          );
+          if (!allowed) {
+            // Audit only the transition into coalescing (firstSuppress) so a
+            // storm produces one row, not thousands (mirrors the rate limiter).
+            if (firstSuppress) {
+              void this.audit?.record({
+                action: 'push_suppressed',
+                target: ctx.sessionId,
+                detail: {
+                  kind: payload.kind,
+                  reason: 'coalesced',
+                  subscriptionId: r.id,
+                },
+              });
+            }
+            return;
+          }
         }
         // Per-subscription rate limit (cycle 46): cap actual sends to maxPerHour
         // within a rolling hour (default 30). Runs LAST — only pushes that
