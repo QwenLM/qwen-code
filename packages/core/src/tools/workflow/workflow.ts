@@ -56,7 +56,31 @@ const WORKFLOW_PARAM_SCHEMA = {
       description:
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
-        '`agent(prompt, { label? })`, and read `args`. ' +
+        '`agent(prompt, opts?)`, and read `args`. ' +
+        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation? }`. ' +
+        '`schema` (JSON Schema object): the subagent must deliver its result ' +
+        'by calling `structured_output` with arguments matching the schema; ' +
+        'agent() resolves to the validated object. Two failed attempts produce ' +
+        'a terminal error "subagent completed without calling StructuredOutput ' +
+        '(after 2 in-conversation nudges)". ' +
+        '`agentType` (string): resolves against the declarative-agents registry ' +
+        '(`.qwen/agents/<name>.md`, project then user then built-in). Unresolved ' +
+        'names throw "agent({agentType}): agent type ' +
+        "'X'" +
+        ' not found". ' +
+        '`model` (string): per-call model override; routes provider correctly ' +
+        'via the subagent runtime view. ' +
+        '`isolation`: `' +
+        "'worktree'" +
+        '` provisions a fresh git worktree under ' +
+        '`<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed ' +
+        'if no changes, otherwise the path and branch are returned alongside the ' +
+        "result. `'remote'` throws \"agent({isolation:'remote'}) is not available " +
+        'in this build" (parity with upstream). isolation=worktree refuses to ' +
+        'run when the parent working tree has uncommitted changes (the subagent ' +
+        'would see a stale HEAD). ' +
+        'Workflow subagents always have SendMessage / ExitPlanMode in their ' +
+        'disallowed-tool floor regardless of agentType. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
         'through a shared per-run window (default ' +
         '`max(1, min(16, cpus-2))` agents in flight; override via ' +
@@ -262,13 +286,16 @@ export class WorkflowTool extends BaseDeclarativeTool<
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
       'Execute a workflow script that orchestrates subagents. ' +
-        'Supports `phase`, `log`, sequential `agent`, and concurrent fan-out ' +
-        'via `parallel(thunks)` / `pipeline(items, ...stages)` (default ' +
+        'Supports `phase`, `log`, sequential `agent`, concurrent fan-out via ' +
+        '`parallel(thunks)` / `pipeline(items, ...stages)` (default ' +
         '`max(1, min(16, cpus-2))` agents in flight per run, up to 1000 ' +
-        'agents total; both env-overridable). No schema, no resume, no ' +
-        'background execution yet. Scripts run in a node:vm sandbox without ' +
-        'access to the filesystem or shell; all I/O happens through the ' +
-        'spawned agents.',
+        'agents total; both env-overridable), per-call `agent({ schema, ' +
+        "agentType, model, isolation: 'worktree' })` for structured-output " +
+        'contracts, declarative-agent selection, model override, and git-' +
+        'worktree-isolated subagents. No resume and no background execution ' +
+        'yet (scheduled for later phases). Scripts run in a node:vm sandbox ' +
+        'without access to the filesystem or shell; all I/O happens through ' +
+        'the spawned agents.',
       Kind.Other,
       WORKFLOW_PARAM_SCHEMA,
       /* isOutputMarkdown */ true,

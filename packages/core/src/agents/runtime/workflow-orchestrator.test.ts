@@ -721,3 +721,345 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
     });
   });
 });
+
+// ─── P3 (PR #5xxx): agentType + model + isolation + schema ──────────
+//
+// These tests exercise `createProductionDispatch`'s override path. The
+// fast path (no agentType / model / isolation / schema) is covered by the
+// existing tests above and the vi.mock('./agent-headless.js') used there;
+// the override path goes through SubagentManager.createAgentHeadless, so
+// each test wires a fake Config whose `getSubagentManager()` returns a
+// stub matching just enough surface (findSubagentByName +
+// createAgentHeadless) for the path under test.
+describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', () => {
+  type StubSubagentCall = {
+    config: { name?: string; model?: string; disallowedTools?: string[] };
+    runtimeContextSame: boolean;
+    options?: { runConfigOverrides?: unknown };
+    eventEmitterAttached: boolean;
+  };
+
+  function fakeConfigWithMgr(opts: {
+    findSubagentByName?: (name: string) => Promise<{
+      name: string;
+      description: string;
+      systemPrompt: string;
+      level: string;
+      tools?: string[];
+      disallowedTools?: string[];
+      model?: string;
+    } | null>;
+    onCreate?: (
+      call: StubSubagentCall,
+      ee?: {
+        on(event: string, cb: (payload: unknown) => void): void;
+      },
+    ) => Promise<{
+      // The mock subagent's contract is the minimal surface
+      // createProductionDispatch reads after createAgentHeadless returns.
+      finalText: string;
+      terminateMode: string;
+      // Hook for schema-mode tests: the override path attaches an
+      // AgentEventEmitter that the dispatch listens to for `structured_output`
+      // calls. The test can drive that emitter to simulate model behavior.
+      runWithEmitter?: (emitter: {
+        emit(event: string, payload: unknown): void;
+      }) => void;
+    }>;
+  }): {
+    config: Config;
+    calls: StubSubagentCall[];
+    disposed: number;
+  } {
+    const calls: StubSubagentCall[] = [];
+    let disposed = 0;
+    // Schema mode goes through createSchemaConfigOverride → rebuildToolRegistryOnOverride,
+    // which calls ov.createToolRegistry() and then copies tools from base.getToolRegistry().
+    // The override carries the result. We don't care about the registry contents in unit
+    // tests — only that the override flow doesn't crash on the missing methods — so the
+    // stub registry just answers the API surface those helpers call.
+    const fakeRegistry = {
+      copyDiscoveredToolsFrom: () => {},
+      registerTool: () => {},
+    };
+    const cfg = {
+      createToolRegistry: async () => fakeRegistry,
+      getToolRegistry: () => fakeRegistry,
+      getSubagentManager: () => ({
+        findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        createAgentHeadless: async (
+          subagentConfig: {
+            name?: string;
+            model?: string;
+            disallowedTools?: string[];
+          },
+          runtimeContext: Config,
+          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+        ) => {
+          const call: StubSubagentCall = {
+            config: subagentConfig,
+            runtimeContextSame: runtimeContext === cfg,
+            options: { runConfigOverrides: options?.runConfigOverrides },
+            eventEmitterAttached: options?.eventEmitter !== undefined,
+          };
+          calls.push(call);
+          const outcome = await opts.onCreate!(
+            call,
+            options?.eventEmitter as
+              | { on(event: string, cb: (payload: unknown) => void): void }
+              | undefined,
+          );
+          const finalText = outcome.finalText;
+          const terminateMode = outcome.terminateMode;
+          return {
+            subagent: {
+              execute: async (
+                _ctx: unknown,
+                signal?: AbortSignal,
+              ): Promise<void> => {
+                if (outcome.runWithEmitter && options?.eventEmitter) {
+                  outcome.runWithEmitter(
+                    options.eventEmitter as {
+                      emit(event: string, payload: unknown): void;
+                    },
+                  );
+                }
+                // Honor signal abort if it fires.
+                if (signal?.aborted) return;
+              },
+              getFinalText: () => finalText,
+              getTerminateMode: () => terminateMode,
+            },
+            dispose: async () => {
+              disposed += 1;
+            },
+          };
+        },
+      }),
+    } as unknown as Config;
+    return {
+      config: cfg,
+      calls,
+      get disposed() {
+        return disposed;
+      },
+    } as {
+      config: Config;
+      calls: StubSubagentCall[];
+      disposed: number;
+    };
+  }
+
+  it('agentType resolves SubagentConfig and routes through createAgentHeadless', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+        tools: ['Read', 'Grep'],
+        disallowedTools: [],
+      }),
+      onCreate: async () => ({
+        finalText: 'explore-output',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('find foo', { agentType: 'Explore' });
+    expect(result).toBe('explore-output');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].config.name).toBe('Explore');
+    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].config.disallowedTools).toEqual(
+      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+    );
+  });
+
+  it('agentType not found throws upstream-aligned error', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => null,
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('whatever', { agentType: 'NotARealAgent' }),
+    ).rejects.toThrow(
+      /^agent\(\{agentType\}\): agent type 'NotARealAgent' not found\.$/,
+    );
+  });
+
+  it('opts.model is threaded into SubagentConfig.model for provider routing', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('hi', { model: 'qwen3-max' });
+    // No agentType → ephemeral default config built, then opts.model applied.
+    expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'remote' })).rejects.toThrow(
+      /agent\(\{isolation:'remote'\}\) is not available in this build\./,
+    );
+  });
+
+  it('floor disallowedTools always unioned (agentType cannot re-enable them)', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Permissive',
+        description: 'tries to override floor',
+        systemPrompt: 'permissive prompt',
+        level: 'project',
+        // A user-defined agentType that EXPLICITLY allows the very tools
+        // workflow forbids. The floor must still apply.
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('hi', { agentType: 'Permissive' });
+    const disallowed = calls[0].config.disallowedTools ?? [];
+    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    expect(disallowed).toEqual(
+      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+    );
+  });
+
+  it('schema-mode: subagent calls structured_output successfully → returns validated args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema dispatch aborts after capture
+        runWithEmitter: (emitter) => {
+          // Simulate the subagent calling structured_output with valid args.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, value: 42 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    expect(result).toEqual({ ok: true, value: 42 });
+  });
+
+  it('schema-mode: 3 failed structured_output calls → upstream-aligned terminal error', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          // 3 failed structured_output calls = original attempt + 2 nudges.
+          for (let i = 1; i <= 3; i++) {
+            emitter.emit('tool_call', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              args: { bad: 'shape' },
+              description: '',
+              isOutputMarkdown: false,
+              timestamp: i,
+            });
+            emitter.emit('tool_result', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              success: false,
+              error: 'validation failed',
+              responseParts: [],
+              resultDisplay: '',
+              durationMs: 1,
+              timestamp: i,
+            });
+          }
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('extract', {
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow(
+      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+    );
+  });
+
+  it('schema-mode: subagent never calls structured_output → same terminal error', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: 'plain-text answer the script will discard',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(
+      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+    );
+  });
+
+  it('schema-mode attaches an event emitter to the subagent', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', { schema: { type: 'object' } });
+    expect(calls[0].eventEmitterAttached).toBe(true);
+  });
+});
