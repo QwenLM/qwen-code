@@ -995,6 +995,51 @@ describe('session-tracing', () => {
       expect(exec?.attributes['session.id']).toBe('session-A');
     });
 
+    it('stamps a blocked-on-user span with the owning session id via the tool parent', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+        call_id: 'c1',
+      });
+      endToolBlockedOnUserSpan(blockedSpan, { decision: 'proceed_once' });
+      endToolSpan(toolSpan, { success: true });
+
+      const blocked = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      );
+      expect(blocked?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps a hook span with the owning session id via the logical parent', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      let hookSpan!: ReturnType<typeof startHookSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        hookSpan = startHookSpan({
+          hookEvent: 'PreToolUse',
+          toolName: 'Bash',
+          toolUseId: 'use-1',
+        });
+      });
+      endHookSpan(hookSpan, { success: true, shouldProceed: true });
+      endToolSpan(toolSpan, { success: true });
+
+      const hook = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hook?.attributes['session.id']).toBe('session-A');
+    });
+
     it('isolates concurrent sessions: each tool span carries its own session id', async () => {
       // Two interactions for two different sessions while the global is stale.
       setSessionContext(undefined, 'stale-global');
