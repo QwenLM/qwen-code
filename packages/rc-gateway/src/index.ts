@@ -160,6 +160,11 @@ export {
   type SearchOptions,
 } from './search/transcripts.js';
 export { createSearchRoute } from './routes/search.js';
+export {
+  parseSearchArgs,
+  formatSearchResults,
+  type ParsedSearchArgs,
+} from './search/searchCli.js';
 export { createForkRoute, type ForkRouteDeps } from './routes/fork.js';
 export {
   // The single canonical chats-path resolver: sanitizeCwd + runtime-base exact,
