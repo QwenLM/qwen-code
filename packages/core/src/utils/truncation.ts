@@ -402,6 +402,7 @@ export async function persistAndTruncateToolResult(
   // Reserve budget before async write; rollback on failure below.
   config.trackToolResultBytes(byteSize);
 
+  // eslint-disable-next-line no-control-regex
   const safeCallId = path.basename(callId).replace(/\x00/g, '_');
   if (!safeCallId || safeCallId === '.' || safeCallId === '..') {
     debugLogger.warn(`Invalid callId for disk persistence: ${JSON.stringify(callId)}`);
