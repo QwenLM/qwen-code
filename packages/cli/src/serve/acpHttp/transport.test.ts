@@ -1925,7 +1925,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
 
     it('_qwen/sessions/delete sanitizes stderr close errors', async () => {
-      bridge.closeError = new Error('close\nFAILED\r\x1b[31m');
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      bridge.closeError = new Error(
+        `close\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`,
+      );
       const connId = await initialize();
       const streamRes = openStream(connId);
       await new Promise((r) => setTimeout(r, 30));
@@ -1933,7 +1937,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 67,
         method: '_qwen/sessions/delete',
-        params: { sessionIds: ['sess\nFAKE\r\x1b[31m'] },
+        params: { sessionIds: [`sess${lineSep}FAKE\r\x1b[31m`] },
       });
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({
@@ -1948,10 +1952,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(deleteLog).not.toContain('\n');
       expect(deleteLog).not.toContain('\r');
       expect(deleteLog).not.toContain('\x1b');
+      expect(deleteLog).not.toContain(lineSep);
+      expect(deleteLog).not.toContain(bidiOverride);
     });
 
     it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
-      const sessionId = 'sess\nFAKE\r\x1b[31m';
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
+      const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
       const removeSessionsSpy = vi
         .spyOn(SessionService.prototype, 'removeSessions')
         .mockResolvedValueOnce({
@@ -1960,7 +1969,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           errors: [
             {
               sessionId,
-              error: new Error('remove\nFAILED\r\x1b[31m'),
+              error: removeError as unknown as Error,
             },
           ],
         });
@@ -1980,7 +1989,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           result: {
             removed: [],
             notFound: [],
-            errors: [{ sessionId, error: 'remove\nFAILED\r\x1b[31m' }],
+            errors: [{ sessionId, error: removeError }],
           },
         });
         expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
@@ -1994,6 +2003,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(deleteLog).not.toContain('\n');
         expect(deleteLog).not.toContain('\r');
         expect(deleteLog).not.toContain('\x1b');
+        expect(deleteLog).not.toContain(lineSep);
+        expect(deleteLog).not.toContain(bidiOverride);
       } finally {
         removeSessionsSpy.mockRestore();
       }

@@ -1733,7 +1733,7 @@ export class AcpDispatcher {
           const removeResult = await svc.removeSessions(closedIds);
           for (const e of removeResult.errors) {
             const safeSessionId = logSafe(e.sessionId.slice(0, 8));
-            const safeMessage = logSafe(e.error.message);
+            const safeMessage = logSafe(errMsg(e.error));
             writeStderrLine(
               `qwen serve: /acp sessions/delete removeSessions(${safeSessionId}) failed: ${safeMessage}`,
             );
@@ -1745,7 +1745,7 @@ export class AcpDispatcher {
               ...closeErrors,
               ...removeResult.errors.map((e) => ({
                 sessionId: e.sessionId,
-                error: e.error.message,
+                error: errMsg(e.error),
               })),
             ],
           } as unknown);

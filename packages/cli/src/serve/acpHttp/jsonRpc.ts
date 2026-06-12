@@ -121,13 +121,16 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
 }
 
 /**
- * Strip C0 control chars + DEL from values interpolated into operator-facing
+ * Strip terminal control chars from values interpolated into operator-facing
  * stderr logs, so a client-controlled `sessionId`/`method`/error string can't
  * forge or split log lines (log injection). Shared by the transport modules.
  */
 export function logSafe(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f\u0080-\u009f]/g, ' ');
+  return s.replace(
+    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g,
+    ' ',
+  );
 }
 
 export function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {
