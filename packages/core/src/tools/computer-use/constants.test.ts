@@ -73,7 +73,9 @@ describe('resolveAssetUrls', () => {
   it('orders sources OSS-first, GitHub-fallback by default', () => {
     const urls = resolveAssetUrls('a.tar.gz', {});
     expect(urls).toHaveLength(2);
-    expect(urls[0]).toContain('aliyuncs.com');
+    expect(urls[0]).toContain(
+      'qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/computer-use',
+    );
     expect(urls[0]).toContain(`/cua-driver-rs/v${CUA_DRIVER_VERSION}/a.tar.gz`);
     expect(urls[1]).toContain('github.com/trycua/cua/releases/download');
   });
