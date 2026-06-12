@@ -2,12 +2,15 @@
 # .fork/apply.sh — Apply all fork patches in series order.
 #
 # Usage:
-#   bash .fork/apply.sh              # stop on first failure
-#   bash .fork/apply.sh --continue   # apply remaining patches after failure
-#   bash .fork/apply.sh --check      # dry-run: check if patches apply cleanly
+#   bash .fork/apply.sh                  # stop on first failure
+#   bash .fork/apply.sh --continue       # apply remaining patches after failure
+#   bash .fork/apply.sh --check          # dry-run: check if patches apply cleanly
+#   bash .fork/apply.sh --check-applied  # verify patches are ALREADY applied
+#                                        # (reverse dry-run; forward --check always
+#                                        # fails on an already-patched tree)
 #
 # Exit codes:
-#   0  all patches applied (or --check passed)
+#   0  all patches applied (or check passed)
 #   1  one or more patches failed
 
 set -euo pipefail
@@ -48,6 +51,18 @@ while IFS= read -r patch; do
     continue
   fi
 
+  # 已应用校验：patch 能干净地反向 apply，说明其全部 hunk 都已存在于工作区
+  if [ "$MODE" = "--check-applied" ]; then
+    if git apply --reverse --check "$PATCH_FILE" 2>/dev/null; then
+      echo "OK:      $patch (already applied)"
+    else
+      echo "FAIL:    $patch (not fully applied)"
+      FAILED=$((FAILED + 1))
+      FAILED_LIST+=("$patch")
+    fi
+    continue
+  fi
+
   if git apply --check "$PATCH_FILE" 2>/dev/null; then
     if git apply "$PATCH_FILE"; then
       echo "APPLIED: $patch"
@@ -76,7 +91,7 @@ while IFS= read -r patch; do
 done < "$SERIES"
 
 echo ""
-if [ "$MODE" = "--check" ]; then
+if [ "$MODE" = "--check" ] || [ "$MODE" = "--check-applied" ]; then
   echo "Check complete: $FAILED failed"
 else
   echo "Applied: $APPLIED  Failed: $FAILED"

@@ -266,7 +266,8 @@ jobs:
 
           if [ "$APPLY_RC" -ne 0 ]; then
             echo "⚠️ patch apply 失败（exit $APPLY_RC），尝试 LLM 辅助修复..."
-            FAILED_PATCHES=$(bash .fork/apply.sh --check 2>&1 | grep "^FAIL:" | awk '{print $2}' || true)
+            # 用 --check-applied 找出未完整应用的 patch；正向 --check 在已打补丁的树上会把成功的 patch 也误报为失败
+            FAILED_PATCHES=$(bash .fork/apply.sh --check-applied 2>&1 | grep "^FAIL:" | awk '{print $2}' || true)
             echo "   失败的 patches: $FAILED_PATCHES"
 
             # 尝试 LLM 修复：让它读 .rej 文件并手动应用
@@ -285,13 +286,15 @@ jobs:
 
               # 全量验证所有 patch 是否已正确 apply（不仅检查 .rej 文件）
               # "already exists" 等错误不产生 .rej，仅靠 .rej 数量会误判成功
+              # 注意：此时多数 patch 已经打上，正向 --check 必然全部 FAIL，
+              # 必须用 --check-applied（反向 dry-run）验证"已应用"状态
               REJ_REMAINING=$(find . -name "*.rej" | wc -l | tr -d ' ')
-              STILL_FAILING=$(bash .fork/apply.sh --check 2>&1 | grep -c "^FAIL:" || true)
+              STILL_FAILING=$(bash .fork/apply.sh --check-applied 2>&1 | grep -c "^FAIL:" || true)
               if [ "$REJ_REMAINING" -eq 0 ] && [ "$STILL_FAILING" -eq 0 ]; then
                 echo "✅ LLM 成功修复所有 patch apply 失败"
                 APPLY_RC=0
               else
-                echo "⚠️ 修复后仍有问题: $REJ_REMAINING 个 .rej 文件, $STILL_FAILING 个 patch 未通过 --check"
+                echo "⚠️ 修复后仍有问题: $REJ_REMAINING 个 .rej 文件, $STILL_FAILING 个 patch 未通过 --check-applied"
               fi
             fi
 
