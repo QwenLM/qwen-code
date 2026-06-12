@@ -68,6 +68,10 @@ import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
+  isAlreadyTruncated,
+  persistAndTruncateToolResult,
+} from '../utils/truncation.js';
+import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
@@ -128,6 +132,49 @@ import {
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+
+const GATE_HEADROOM = 3000;
+const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+
+function recalcContentLength(c: PartListUnion): number | undefined {
+  if (typeof c === 'string') return c.length;
+  if (Array.isArray(c)) {
+    const parts = toParts(c);
+    return parts.reduce((n, p) => n + (p.text?.length ?? 0), 0);
+  }
+  if (c && typeof c === 'object' && 'text' in c) {
+    const text = (c as { text?: string }).text;
+    if (typeof text === 'string') return text.length;
+  }
+  return undefined;
+}
+
+function extractTextFromPartListUnion(c: PartListUnion): string {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    const parts = toParts(c);
+    return parts.map((p) => p.text ?? '').join('\n');
+  }
+  if (c && typeof c === 'object') {
+    if ('text' in c) {
+      const text = (c as { text?: string }).text;
+      if (typeof text === 'string') return text;
+    }
+    if ('functionResponse' in c) {
+      const fr = (
+        c as {
+          functionResponse?: { response?: Record<string, unknown> };
+        }
+      ).functionResponse;
+      const resp = fr?.response;
+      if (resp) {
+        if (typeof resp['output'] === 'string') return resp['output'];
+        if (typeof resp['content'] === 'string') return resp['content'];
+      }
+    }
+  }
+  return '';
+}
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -3121,6 +3168,8 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
+        let contentLength: number | undefined =
+          typeof content === 'string' ? content.length : undefined;
 
         // Deferred metadata: PostToolUse hook context and skill/rule reminders
         // are captured here and appended AFTER the model-facing truncation
@@ -3197,6 +3246,15 @@ export class CoreToolScheduler {
             return;
           }
         }
+
+        // Universal post-execution truncation gate — persists oversized
+        // tool results to disk before system-reminders are appended.
+        content = await this.maybePersistLargeToolResult(
+          callId,
+          toolName,
+          content,
+        );
+        contentLength = recalcContentLength(content) ?? contentLength;
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
@@ -3420,9 +3478,9 @@ export class CoreToolScheduler {
           );
         }
 
-        // Computed AFTER truncation so it reflects the model-facing length,
+        // Recompute AFTER truncation so it reflects the model-facing length,
         // consistent with the batch-offload path (which also updates it).
-        const contentLength =
+        contentLength =
           typeof content === 'string' ? content.length : undefined;
 
         const response = convertToFunctionResponse(toolName, callId, content);
@@ -3478,6 +3536,22 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             errorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+        }
+
+        // Truncate oversized error messages (e.g., large stderr)
+        const errorGateThreshold =
+          this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+        if (
+          errorMessage.length > errorGateThreshold &&
+          !isAlreadyTruncated(errorMessage)
+        ) {
+          const persistResult = await persistAndTruncateToolResult(
+            callId,
+            toolName,
+            errorMessage,
+            this.config,
+          );
+          errorMessage = persistResult.content;
         }
 
         addToolResultAttributes(
@@ -3733,6 +3807,47 @@ export class CoreToolScheduler {
     }
   }
 
+  private async maybePersistLargeToolResult(
+    callId: string,
+    toolName: string,
+    content: PartListUnion,
+  ): Promise<PartListUnion> {
+    if (GATE_EXEMPT_TOOLS.has(toolName)) return content;
+
+    const text = extractTextFromPartListUnion(content);
+    if (!text || isAlreadyTruncated(text)) return content;
+
+    const gateThreshold =
+      this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+    if (text.length <= gateThreshold) return content;
+
+    const result = await persistAndTruncateToolResult(
+      callId,
+      toolName,
+      text,
+      this.config,
+    );
+
+    if (result.outputFile) {
+      debugLogger.debug(
+        `Persisted ${toolName} result (${result.bytesWritten} bytes) to ${result.outputFile}`,
+      );
+    }
+
+    // Preserve non-text parts (media) when content is Part[]
+    if (Array.isArray(content)) {
+      const mediaParts = content.filter(
+        (p) =>
+          (p as { inlineData?: unknown }).inlineData ||
+          (p as { fileData?: unknown }).fileData,
+      );
+      const stubPart: Part = { text: result.content };
+      return mediaParts.length > 0 ? [stubPart, ...mediaParts] : [stubPart];
+    }
+
+    return result.content;
+  }
+
   /**
    * Records tool results to the chat recording service.
    * This captures both the raw Content (for API reconstruction) and
@@ -3826,6 +3941,7 @@ export class CoreToolScheduler {
     if (typeof output !== 'string') return null;
     if (fr.parts && fr.parts.length > 0) return null; // media present
     if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
+    if (output.startsWith('<persisted-output>')) return null;
 
     let truncated: { content: string; outputFile?: string };
     try {
