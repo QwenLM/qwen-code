@@ -63,7 +63,16 @@
         // in history; sessionStorage uses a key DISTINCT from index.html's
         // localStorage owner token (same origin) and is per-tab/ephemeral.
         var parts = location.pathname.split('/').filter(Boolean);
-        var fromPath = parts.length >= 3 ? decodeURIComponent(parts[2]) : null;
+        var fromPath = null;
+        if (parts.length >= 3) {
+          // base64url tokens never contain '%', but guard a hand-mangled URL so
+          // a lone '%' (URIError) can't kill the page at "redeeming…".
+          try {
+            fromPath = decodeURIComponent(parts[2]);
+          } catch (e) {
+            fromPath = parts[2];
+          }
+        }
         if (fromPath) {
           try {
             sessionStorage.setItem(STORE_KEY, fromPath);
