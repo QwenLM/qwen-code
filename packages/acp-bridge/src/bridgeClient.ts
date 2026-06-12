@@ -499,7 +499,7 @@ export class BridgeClient implements Client {
           type: 'session_metadata_updated',
           data: {
             sessionId,
-            title,
+            displayName: title,
             ...(typeof params['titleSource'] === 'string'
               ? { titleSource: params['titleSource'] }
               : {}),

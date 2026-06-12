@@ -6601,9 +6601,9 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('extNotification — session title update', () => {
-    const titleFactory = (
-      capture: (conn: AgentSideConnection) => void,
-    ): ChannelFactory => async () => {
+    const titleFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
         return {
@@ -6644,7 +6644,7 @@ describe('createAcpSessionBridge', () => {
       expect(collected[0]?.type).toBe('session_metadata_updated');
       expect(collected[0]?.data).toMatchObject({
         sessionId: session.sessionId,
-        title: 'Fix login button on mobile',
+        displayName: 'Fix login button on mobile',
         titleSource: 'auto',
       });
       abort.abort();
