@@ -245,12 +245,16 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
-      const relativePathWithExt = path.relative(dir, path.join(dir, file));
-      const relativePath = relativePathWithExt.substring(
-        0,
-        relativePathWithExt.length - 3,
-      );
+    const tomlFiles = await glob('**/*.toml', {
+      ...globOptions,
+      cwd: dir,
+    });
+
+    const allFiles = [...mdFiles, ...tomlFiles];
+
+    const commandNames = allFiles.map((file) => {
+      const ext = path.extname(file);
+      const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
         .split(path.sep)
         .map((segment) => segment.replaceAll(':', '_'))
@@ -259,7 +263,7 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
       return commandName;
     });
 
-    return commandNames;
+    return [...new Set(commandNames)];
   } catch (error) {
     const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
     const isAbortError = error instanceof Error && error.name === 'AbortError';
