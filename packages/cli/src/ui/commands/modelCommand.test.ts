@@ -175,18 +175,28 @@ describe('modelCommand', () => {
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      'qwen-max',
+      { name: 'qwen-max' },
       undefined,
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
-      'model.name',
+      'model.id',
       'qwen-max',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'Qwen Max',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.provider',
+      AuthType.QWEN_OAUTH,
     );
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: qwen-max',
+      content: 'Model: Qwen Max',
     });
   });
 
@@ -257,7 +267,7 @@ describe('modelCommand', () => {
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      'qwen-max',
+      { name: 'qwen-max' },
       undefined,
     );
     expect(setValue).not.toHaveBeenCalled();
@@ -375,7 +385,7 @@ describe('modelCommand', () => {
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
-      'gpt-4',
+      { name: 'gpt-4' },
       undefined,
     );
     expect(setValue).toHaveBeenCalledWith(
@@ -385,13 +395,23 @@ describe('modelCommand', () => {
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
-      'model.name',
+      'model.id',
       'gpt-4',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.name',
+      'GPT-4',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.provider',
+      AuthType.USE_OPENAI,
     );
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Model: gpt-4',
+      content: 'Model: GPT-4',
     });
   });
 
@@ -569,13 +589,23 @@ describe('modelCommand', () => {
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
-      '--fast-model',
+      { name: '--fast-model' },
       undefined,
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.id',
+      '--fast-model',
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.name',
       '--fast-model',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'model.provider',
+      AuthType.USE_OPENAI,
     );
     expect(result).toEqual({
       type: 'message',
