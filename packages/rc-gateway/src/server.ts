@@ -22,6 +22,7 @@ import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute } from './routes/prompt.js';
 import { createForkRoute } from './routes/fork.js';
 import { createLineageRoute } from './routes/lineage.js';
+import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import {
   createListTokensRoute,
@@ -172,6 +173,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/session/:id/lineage',
     requireScope(OWNER, audit),
     createLineageRoute(async () => {
+      try {
+        return (await deps.daemon.capabilities()).workspaceCwd;
+      } catch {
+        return undefined;
+      }
+    }, audit),
+  );
+  // Flat workspace-wide session list with fork lineage (parentSessionId +
+  // derived forks[]). OWNER-scoped like lineage. Scans the on-disk chats dir
+  // (NOT the daemon's active-only listWorkspaceSessions) so dormant parents
+  // appear in the tree.
+  app.get(
+    '/rc/sessions',
+    requireScope(OWNER, audit),
+    createSessionListRoute(async () => {
       try {
         return (await deps.daemon.capabilities()).workspaceCwd;
       } catch {

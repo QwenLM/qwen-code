@@ -772,6 +772,37 @@ try {
       nr.status === 403
         ? ok('lineage GET as non-owner -> 403')
         : bad(`lineage non-owner expected 403, got ${nr.status}`);
+
+      // Session listing (cycle 50): an OWNER token GETs /rc/sessions; the flat
+      // list (over the REAL on-disk chats dir, which holds other sessions too)
+      // must contain the parent with forks=[fork] AND the fork with
+      // parentSessionId=parent. Tolerant: match specific ids, never a length.
+      const slr = await fetch(`${gw}/rc/sessions`, {
+        headers: { Authorization: `Bearer ${lineageToken}` },
+      });
+      const slb = await slr.json().catch(() => ({}));
+      const items = Array.isArray(slb.sessions) ? slb.sessions : [];
+      const parentItem = items.find((s) => s.sessionId === parentId);
+      const forkItem = items.find((s) => s.sessionId === newId);
+      slr.status === 200 &&
+      parentItem &&
+      Array.isArray(parentItem.forks) &&
+      parentItem.forks.includes(newId) &&
+      forkItem &&
+      forkItem.parentSessionId === parentId
+        ? ok('sessions GET -> 200 parent has forks=[fork], fork points to parent')
+        : bad(
+            `sessions GET ${slr.status} parent=${JSON.stringify(parentItem)} ` +
+              `fork=${JSON.stringify(forkItem)}`,
+          );
+
+      // A WRITE-but-not-OWNER token is 403 (topology is owner-only).
+      const nsl = await fetch(`${gw}/rc/sessions`, {
+        headers: { Authorization: `Bearer ${forkToken}` },
+      });
+      nsl.status === 403
+        ? ok('sessions GET as non-owner -> 403')
+        : bad(`sessions non-owner expected 403, got ${nsl.status}`);
     }
 
     // Owner event stream (cycle 49): an OWNER token opens GET /rc/events; an
