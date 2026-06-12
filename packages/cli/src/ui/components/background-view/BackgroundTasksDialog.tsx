@@ -1143,6 +1143,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         }
         return;
       }
+      if (approvalActive && approvalUsesQuestionDialog) {
+        return;
+      }
 
       if (dialogMode === 'list') {
         if (keyMatchers[Command.SELECTION_UP](key)) {
@@ -1231,9 +1234,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const hints: string[] = [];
   if (approvalActive) {
     // The embedded ToolConfirmationMessage renders its own selectable
-    // options; surface only the two dialog keys that still work alongside
-    // it (see the approvalActive branch in the keypress handler).
-    hints.push(t('Approve or deny the request above'), '← back', 'x stop');
+    // options; for free-text question dialogs, yield every key to the
+    // embedded dialog so typing and navigation cannot also trigger the
+    // background-task dialog's shortcuts.
+    hints.push(t('Approve or deny the request above'));
+    if (!approvalUsesQuestionDialog) {
+      hints.push('← back', 'x stop');
+    }
   } else if (showCancelConfirmHint) {
     // Force the confirmation step into the hint row so the user sees
     // exactly what the next `x` will do. Phrasing matches the
