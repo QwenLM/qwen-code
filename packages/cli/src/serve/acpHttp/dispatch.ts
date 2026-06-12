@@ -264,20 +264,22 @@ function toRpcError(err: unknown): {
       data: { errorKind: 'upstream_error' },
     };
   }
+  if (err instanceof SessionShellDisabledError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: errMsg(err),
+      data: { errorKind: 'session_shell_disabled' },
+    };
+  }
+  if (err instanceof SessionShellClientRequiredError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: errMsg(err),
+      data: { errorKind: 'client_id_required' },
+    };
+  }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
-    case 'SessionShellDisabledError':
-      return {
-        code: RPC.INVALID_PARAMS,
-        message: errMsg(err),
-        data: { errorKind: 'session_shell_disabled' },
-      };
-    case 'SessionShellClientRequiredError':
-      return {
-        code: RPC.INVALID_PARAMS,
-        message: errMsg(err),
-        data: { errorKind: 'client_id_required' },
-      };
     case 'SessionNotFoundError':
     case 'InvalidSessionScopeError':
     case 'WorkspaceMismatchError':
@@ -292,6 +294,11 @@ function toRpcError(err: unknown): {
         data: { errorKind: 'internal' },
       };
   }
+}
+
+function rpcErrorFrame(id: JsonRpcId, err: unknown) {
+  const { code, message, data } = toRpcError(err);
+  return error(id, code, message, data);
 }
 
 /**
@@ -1097,13 +1104,21 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/shell`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.sessionShellCommandEnabled) {
-            throw new SessionShellDisabledError();
+            if (id !== undefined) {
+              conn.sendConn(rpcErrorFrame(id, new SessionShellDisabledError()));
+            }
+            return;
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
           const binding = conn.sessions.get(sessionId);
           const clientId = binding?.clientId;
           if (!clientId) {
-            throw new SessionShellClientRequiredError();
+            if (id !== undefined) {
+              conn.sendConn(
+                rpcErrorFrame(id, new SessionShellClientRequiredError()),
+              );
+            }
+            return;
           }
           const rawCmd = params['command'];
           if (typeof rawCmd !== 'string' || rawCmd.trim().length === 0) {
@@ -1128,7 +1143,7 @@ export class AcpDispatcher {
             sessionId,
             rawCmd,
             binding.abort.signal,
-            { clientId, fromLoopback: loopback },
+            this.sessionCtx(conn, sessionId, loopback),
           );
           this.replyConn(conn, id, result as unknown);
           return;

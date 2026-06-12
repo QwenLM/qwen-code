@@ -442,6 +442,13 @@ export async function runQwenServe(
       : undefined;
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
+  if (optsIn.enableSessionShell === true && token === undefined) {
+    writeStderrLine(
+      `qwen serve: --enable-session-shell ignored because no bearer token ` +
+        `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
+        `enable direct session shell.`,
+    );
+  }
   // Env-var fallback for the deadline options. Explicit option
   // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
   // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`

@@ -6254,13 +6254,26 @@ describe('runQwenServe', () => {
     );
   });
 
-  it('does not advertise session shell when flag is set but no token is configured', async () => {
-    handle = await runQwenServe({
-      hostname: '127.0.0.1',
-      port: 0,
-      mode: 'http-bridge',
-      enableSessionShell: true,
-    });
+  it('warns and does not advertise session shell when flag is set without a token', async () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        enableSessionShell: true,
+      });
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('--enable-session-shell ignored'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
     const port = (handle.server.address() as { port: number }).port;
     const capsRes = await fetch(`http://127.0.0.1:${port}/capabilities`);
     expect(capsRes.status).toBe(200);

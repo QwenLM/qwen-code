@@ -1788,6 +1788,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           line.includes('/acp session/shell session='),
         ),
       ).toBe(false);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp dispatch error'),
+        ),
+      ).toBe(false);
     });
 
     it('_qwen/session/shell rejects unowned session when enabled', async () => {
@@ -1983,6 +1988,36 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/session/shell does not map arbitrary error names as shell policy errors', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = Object.assign(new Error('fake policy'), {
+        name: 'SessionShellDisabledError',
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32603,
+          data: { errorKind: 'internal' },
+        },
+      });
     });
 
     it('_qwen/session/detach succeeds', async () => {
