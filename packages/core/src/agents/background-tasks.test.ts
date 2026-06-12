@@ -342,6 +342,30 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it('abandons a paused agent and rejects parked approvals', () => {
+    const respond = vi.fn(async () => {});
+
+    registry.register({
+      agentId: 'paused-approval',
+      description: 'paused agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.addPendingApproval(
+      'paused-approval',
+      makeApproval('c1', respond),
+    );
+    registry.get('paused-approval')!.status = 'paused';
+
+    registry.abandon('paused-approval');
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    expect(registry.getPendingApprovals('paused-approval')).toEqual([]);
+  });
+
   it('does not treat paused entries as unfinalized work', () => {
     registry.register({
       agentId: 'paused-1',
@@ -1731,7 +1755,7 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-appr-reset')).toBeUndefined();
     });
 
-    it('fails the agent when a parked approval respond() rejects', async () => {
+    it('fails the agent before aborting when a parked approval respond() rejects', async () => {
       const respond = vi.fn(async () => {
         throw new Error('frames torn down');
       });
@@ -1739,10 +1763,19 @@ describe('BackgroundTaskRegistry', () => {
       const onStatus = vi.fn();
       const onNotify = vi.fn();
       const abortController = new AbortController();
+      const order: string[] = [];
+      abortController.signal.addEventListener('abort', () => {
+        order.push('abort');
+      });
       registry.register(makeRegistration('bg-appr-retry', { abortController }));
       registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
       registry.setApprovalChangeCallback(onChange);
-      registry.setStatusChangeCallback(onStatus);
+      registry.setStatusChangeCallback((entry) => {
+        if (entry?.agentId === 'bg-appr-retry') {
+          order.push(`status:${entry.status}`);
+        }
+        onStatus(entry);
+      });
       registry.setNotificationCallback(onNotify);
 
       const ok = await registry.resolvePendingApproval(
@@ -1758,6 +1791,7 @@ describe('BackgroundTaskRegistry', () => {
         'Failed to resolve background approval: c1',
       );
       expect(abortController.signal.aborted).toBe(true);
+      expect(order).toEqual(['status:failed', 'abort']);
       expect(onChange).toHaveBeenCalledTimes(1);
       expect(onStatus).toHaveBeenCalledOnce();
       expect(onNotify).toHaveBeenCalledOnce();

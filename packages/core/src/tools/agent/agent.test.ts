@@ -2871,6 +2871,32 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('keeps bubble-mode background agents on auto-deny in non-interactive mode', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+
+      const createCalls = vi.mocked(
+        mockSubagentManager.createAgentHeadless,
+      ).mock.calls;
+      const createdConfig = createCalls[createCalls.length - 1][1] as Config;
+      expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',

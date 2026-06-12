@@ -708,8 +708,8 @@ export class BackgroundTaskRegistry {
         `Failed to resolve background approval for ${agentId}/${callId}:`,
         error,
       );
-      entry.abortController.abort();
       this.fail(agentId, `Failed to resolve background approval: ${callId}`);
+      entry.abortController.abort();
       return false;
     }
     return true;
