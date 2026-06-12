@@ -2876,6 +2876,32 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('keeps bubble-mode background agents on auto-deny in non-interactive mode', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+
+      const createCalls = vi.mocked(
+        mockSubagentManager.createAgentHeadless,
+      ).mock.calls;
+      const createdConfig = createCalls[createCalls.length - 1][1] as Config;
+      expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -3095,5 +3121,29 @@ describe('resolveSubagentApprovalMode', () => {
     expect(
       resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, false),
     ).toBe(PermissionMode.Default);
+  });
+
+  it('should resolve the subagent-only "bubble" mode to Default (confirmation required)', () => {
+    // `bubble` is not a privileged mode — it requires confirmation like
+    // `default`, so it resolves to Default in both trusted and untrusted
+    // folders (the background launch path is what flips deny → surface).
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', true),
+    ).toBe(PermissionMode.Default);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'bubble', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should let a permissive parent win over a "bubble" subagent mode', () => {
+    // Consistent with every other mode: a yolo/auto-edit parent wins, so a
+    // bubble agent under such a parent runs permissively (and never bubbles,
+    // since no confirmation is ever requested).
+    expect(resolveSubagentApprovalMode(ApprovalMode.YOLO, 'bubble', true)).toBe(
+      PermissionMode.Yolo,
+    );
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'bubble', true),
+    ).toBe(PermissionMode.AutoEdit);
   });
 });
