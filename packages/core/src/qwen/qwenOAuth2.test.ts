@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
-import { type ChildProcess } from 'child_process';
 import type { Config } from '../config/config.js';
 import {
   generateCodeChallenge,
@@ -35,6 +34,8 @@ interface MockSharedTokenManager {
   getCurrentCredentials(): QwenCredentials | null;
   clearCache(): void;
 }
+
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 
 // Mock SharedTokenManager
 vi.mock('./sharedTokenManager.js', () => ({
@@ -91,9 +92,8 @@ vi.mock('./sharedTokenManager.js', () => ({
   },
 }));
 
-// Mock open
-vi.mock('open', () => ({
-  default: vi.fn(),
+vi.mock('../utils/secure-browser-launcher.js', () => ({
+  openBrowserSecurely: mockOpenBrowserSecurely,
 }));
 
 // Mock process.stdout.write
@@ -117,6 +117,11 @@ vi.mock('node:fs', () => ({
     rename: vi.fn().mockResolvedValue(undefined),
   },
 }));
+
+beforeEach(() => {
+  mockOpenBrowserSecurely.mockReset();
+  mockOpenBrowserSecurely.mockResolvedValue(undefined);
+});
 
 describe('PKCE Code Generation', () => {
   describe('generateCodeVerifier', () => {
@@ -1562,6 +1567,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
 
     expect(client).toBeInstanceOf(Object);
     expect(mockConfig.isBrowserLaunchSuppressed).toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1592,9 +1598,15 @@ describe('Browser Launch and Error Handling', () => {
       new Error('No cached credentials'),
     );
 
-    // Mock open to throw error
-    const open = await import('open');
-    vi.mocked(open.default).mockRejectedValue(
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
+    };
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    mockOpenBrowserSecurely.mockRejectedValue(
       new Error('Browser launch failed'),
     );
 
@@ -1629,27 +1641,26 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 
-  it('should handle browser child process error gracefully', async () => {
+  it('should launch the device flow URL through the shared browser helper', async () => {
     const { promises: fs } = await import('node:fs');
     vi.mocked(fs.readFile).mockRejectedValue(
       new Error('No cached credentials'),
     );
 
-    // Mock open to return a child process that will emit error
-    const open = await import('open');
-    const mockChildProcess = {
-      on: vi.fn((event: string, callback: (error: Error) => void) => {
-        if (event === 'error') {
-          // Call the error handler immediately for testing
-          setTimeout(() => callback(new Error('Process spawn failed')), 0);
-        }
-      }),
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
     };
-    vi.mocked(open.default).mockResolvedValue(
-      mockChildProcess as unknown as ChildProcess,
-    );
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
 
     const mockAuthResponse = {
       ok: true,
@@ -1682,6 +1693,11 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 });
 
