@@ -253,7 +253,6 @@ export class DaemonSessionClient {
       this.sessionId,
       this.promptLimit,
     );
-    let transferredToPending = false;
     let accepted: NonBlockingPromptAccepted | PromptResult;
     try {
       accepted = await this.client.promptNonBlocking(
@@ -263,11 +262,15 @@ export class DaemonSessionClient {
         this.clientId,
       );
       if (!isNonBlockingAccepted(accepted)) {
+        releaseAdmission();
         return accepted;
       }
-      transferredToPending = true;
-    } finally {
-      if (!transferredToPending) releaseAdmission();
+      if (!this.subscriptionActive) {
+        throw Error('SSE stream ended');
+      }
+    } catch (err) {
+      releaseAdmission();
+      throw err;
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
@@ -484,10 +487,7 @@ export class DaemonSessionClient {
     const acquire = () => {
       if (started) return;
       if (this.subscriptionActive) {
-        throw new Error(
-          'Another event subscription is already active on this session. ' +
-            'Reuse the existing AsyncGenerator or create a separate DaemonSessionClient.',
-        );
+        throw new Error('Another event subscription is already active');
       }
       this.subscriptionActive = true;
       started = true;

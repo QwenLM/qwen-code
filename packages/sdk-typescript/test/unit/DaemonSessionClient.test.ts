@@ -93,6 +93,29 @@ function recordingFetch(
   return { fetch: fetchImpl, calls };
 }
 
+function pendingPromptIds(session: DaemonSessionClient): string[] {
+  return [
+    ...(
+      session as unknown as {
+        _pendingPrompts: Map<string, unknown>;
+      }
+    )._pendingPrompts.keys(),
+  ];
+}
+
+async function waitForPendingPrompt(
+  session: DaemonSessionClient,
+  promptId: string,
+): Promise<void> {
+  await vi.waitFor(() => {
+    expect(pendingPromptIds(session)).toContain(promptId);
+  });
+}
+
+function turnCompleteFrame(promptId: string): string {
+  return `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"${promptId}","stopReason":"end_turn"}}\n\n`;
+}
+
 describe('DaemonSessionClient', () => {
   it('creates or attaches a daemon session and exposes session metadata', async () => {
     const { fetch, calls } = recordingFetch(() =>
@@ -548,6 +571,7 @@ describe('DaemonSessionClient', () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>
       | undefined;
+    const encoder = new TextEncoder();
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/events')) {
         return pendingSseResponse(
@@ -593,6 +617,7 @@ describe('DaemonSessionClient', () => {
     await vi.waitFor(() => {
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
     });
+    await waitForPendingPrompt(session, 'p-1');
 
     const secondCtrl = new AbortController();
     const second = session
@@ -606,6 +631,7 @@ describe('DaemonSessionClient', () => {
       expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
     } finally {
+      eventsController?.enqueue(encoder.encode(turnCompleteFrame('p-1')));
       eventsController?.close();
       secondCtrl.abort();
       eventsAbort.abort();
@@ -678,17 +704,80 @@ describe('DaemonSessionClient', () => {
     await vi.waitFor(() => {
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    eventsController!.enqueue(
-      encoder.encode(
-        'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-1","stopReason":"end_turn"}}\n\n',
-      ),
-    );
-    eventsController!.close();
+    await waitForPendingPrompt(session, 'p-1');
+    eventsController!.enqueue(encoder.encode(turnCompleteFrame('p-1')));
 
-    await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
+    try {
+      await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
+    } finally {
+      eventsController?.close();
+      eventsAbort.abort();
+      await eventPump;
+    }
+  });
+
+  it('rejects an accepted subscription prompt if the event stream has ended', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    let resolvePrompt: ((response: Response) => void) | undefined;
+    const promptResponse = new Promise<Response>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    const encoder = new TextEncoder();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/events')) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              eventsController = controller;
+              controller.enqueue(encoder.encode(': keepalive\n\n'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return promptResponse;
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+      maxPendingPromptsPerSession: 1,
+    });
+    const eventPump = (async () => {
+      for await (const _event of session.events()) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+    });
+    const prompt = session
+      .prompt({ prompt: [{ type: 'text', text: 'late accept' }] })
+      .catch((err: unknown) => err);
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+    });
+    eventsController!.close();
     await eventPump;
+    resolvePrompt!(jsonResponse(202, { promptId: 'p-1', lastEventId: 0 }));
+
+    const result = await Promise.race<unknown>([
+      prompt,
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+    ]);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toBe('SSE stream ended');
+    expect(pendingPromptIds(session)).toEqual([]);
   });
 
   it('surfaces permission races and session operation failures', async () => {
