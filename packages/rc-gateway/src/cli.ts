@@ -45,6 +45,9 @@ import {
   formatInsecurePolicyWarning,
 } from './policy/permissions.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
+import { resolveChatsDir } from './sessions/chatsPath.js';
+import { searchTranscriptsDetailed } from './search/transcripts.js';
+import { parseSearchArgs, formatSearchResults } from './search/searchCli.js';
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -403,5 +406,36 @@ if (process.argv[2] === 'serve') {
     // eslint-disable-next-line no-console
     console.error(`routing test: ${(err as Error).message}`);
     process.exit(2);
+  });
+} else if (process.argv[2] === 'search') {
+  // `qwen-rc search <query…> [--cwd=…] [--kind=…] [--since=…] [--until=…]
+  // [--limit=…] [--session=…]` — daemon-free on-disk transcript search. Derives
+  // the chats dir from --cwd (default cwd) via the exact resolveChatsDir and
+  // reuses searchTranscriptsDetailed (identical matcher to the HTTP route). The
+  // bug-prone logic is in the pure, unit-tested parseSearchArgs/
+  // formatSearchResults; this is glue. INSPECTOR: exit 0 on success (incl. 0
+  // hits), 2 on usage. The scan sets no timeout → it never throws; the catch is
+  // a defensive exit 1 only.
+  void (async () => {
+    const parsed = parseSearchArgs(process.argv.slice(3));
+    if (!parsed.ok) {
+      // eslint-disable-next-line no-console
+      console.error(parsed.error);
+      process.exit(2);
+      return;
+    }
+    const chatsDir = resolveChatsDir(parsed.value.cwd ?? process.cwd());
+    const result = await searchTranscriptsDetailed(
+      chatsDir,
+      parsed.value.query,
+      parsed.value.opts,
+    );
+    // eslint-disable-next-line no-console
+    console.log(formatSearchResults(result));
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`search: ${(err as Error).message}`);
+    process.exit(1);
   });
 }
