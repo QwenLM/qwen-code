@@ -65,11 +65,22 @@ function defaultShouldRetry(
   extraRetryErrorCodes?: readonly number[],
 ): boolean {
   const status = getErrorStatus(error);
+  // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
+  // so an explicit `status === 429` check here would be redundant.
   return (
     isRateLimitError(error, extraRetryErrorCodes) ||
-    status === 429 ||
     (status !== undefined && status >= 500 && status < 600)
   );
+}
+
+/**
+ * Statuses that may carry a provider-directed `Retry-After` header. 429 (Too
+ * Many Requests) and 503 (Service Unavailable) both commonly include it per
+ * RFC 7231, and the stream-side path already honors both — the HTTP path stays
+ * consistent by parsing Retry-After for the same set.
+ */
+function hasRetryAfterStatus(status?: number): boolean {
+  return status === 429 || status === 503;
 }
 
 /**
@@ -239,8 +250,25 @@ export async function retryWithBackoff<T>(
     } catch (error) {
       const errorStatus = getErrorStatus(error);
 
+      // Classification drives logging plus one control decision: a 'fail-fast'
+      // verdict keeps a permanent error out of the unbounded persistent loop
+      // (see shouldPersist below). Normal retry control still follows
+      // shouldRetryOnError and the persistent policy. Computed before the Qwen
+      // quota fast-fail so the original error (status, request id, provider
+      // body) is always classified and logged, even when we replace it with a
+      // guidance message.
+      const retryDiagnostics = classifyRetryError(error, {
+        authType,
+        extraRetryErrorCodes,
+      });
+
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
+        debugLogger.error(
+          'Qwen OAuth quota exceeded, fast-failing',
+          retryDiagnostics,
+          error,
+        );
         throw new Error(
           `Qwen OAuth free tier has been discontinued as of 2026-04-15.\n\n` +
             `To continue using Qwen Code, try one of these alternatives:\n` +
@@ -251,13 +279,6 @@ export async function retryWithBackoff<T>(
         );
       }
 
-      // Classification is diagnostic-only in this PR; retry control still
-      // follows shouldRetryOnError and the persistent retry policy below.
-      const retryDiagnostics = classifyRetryError(error, {
-        authType,
-        extraRetryErrorCodes,
-      });
-
       // Determine if this error qualifies for persistent retry.
       // Persistent mode still respects shouldRetryOnError — callers can force
       // fast-fail even for transient errors if they explicitly return false.
@@ -265,7 +286,16 @@ export async function retryWithBackoff<T>(
       const callerAllowsRetry = hasCustomShouldRetryOnError
         ? shouldRetryOnError(error as Error)
         : defaultShouldRetry(error, extraRetryErrorCodes);
-      const shouldPersist = persistent && isTransient && callerAllowsRetry;
+      // A permanent business failure can surface with a transient-looking status
+      // (e.g. DashScope `Throttling.AllocationQuota` arrives as HTTP 429). Such
+      // errors are classified as 'fail-fast'; they must not enter the unbounded
+      // persistent loop, where they would retry for hours and never recover.
+      // Excluding them here falls back to the normal, maxAttempts-bounded retry
+      // path so the request still gets a few attempts but is guaranteed to
+      // terminate.
+      const isFailFast = retryDiagnostics.diagnosis === 'fail-fast';
+      const shouldPersist =
+        persistent && isTransient && callerAllowsRetry && !isFailFast;
 
       // Check if we've exhausted retries or shouldn't retry
       if (!shouldPersist) {
@@ -280,8 +310,9 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
+        const retryAfterMs = hasRetryAfterStatus(errorStatus)
+          ? getRetryAfterDelayMs(error)
+          : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
@@ -320,8 +351,9 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
+        const retryAfterMs = hasRetryAfterStatus(errorStatus)
+          ? getRetryAfterDelayMs(error)
+          : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
           debugLogger.warn(

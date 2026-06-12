@@ -144,6 +144,81 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(2);
   });
 
+  it('honors a custom shouldRetryOnError:false over extraRetryErrorCodes', async () => {
+    const error = Object.assign(new Error('Provider-specific throttle'), {
+      status: 4999,
+    });
+    const mockFn = vi.fn().mockRejectedValue(error);
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      // A custom predicate that returns false must win even though 4999 is in
+      // extraRetryErrorCodes — the caller's fast-fail decision is authoritative.
+      shouldRetryOnError: () => false,
+      extraRetryErrorCodes: [4999],
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertion = expect(promise).rejects.toBe(error);
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  describe('shouldRetryOnContent', () => {
+    it('retries on invalid content then returns the valid result', async () => {
+      const bad = { text: 'bad' } as unknown;
+      const good = { text: 'good' } as unknown;
+      const fn = vi.fn().mockResolvedValueOnce(bad).mockResolvedValueOnce(good);
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 5,
+        initialDelayMs: 10,
+        shouldRetryOnContent: (content) =>
+          (content as { text: string }).text === 'bad',
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe(good);
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('exhausts attempts when content stays invalid', async () => {
+      const bad = { text: 'bad' } as unknown;
+      const fn = vi.fn().mockResolvedValue(bad);
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 3,
+        initialDelayMs: 10,
+        shouldRetryOnContent: () => true,
+      });
+
+      // eslint-disable-next-line vitest/valid-expect
+      const assertion = expect(promise).rejects.toThrow(
+        'Retry attempts exhausted',
+      );
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it('returns immediately when content is valid', async () => {
+      const good = { text: 'good' } as unknown;
+      const fn = vi.fn().mockResolvedValue(good);
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 3,
+        initialDelayMs: 10,
+        shouldRetryOnContent: () => false,
+      });
+
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBe(good);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('should throw an error if all attempts fail', async () => {
     const mockFn = createFailingFunction(3);
 
@@ -698,6 +773,34 @@ describe('retryWithBackoff - persistent mode', () => {
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
+  it('should NOT retry indefinitely for fail-fast quota 429s in persistent mode', async () => {
+    // DashScope allocated-quota exhaustion surfaces as HTTP 429 but is a
+    // permanent business error (classified fail-fast). Persistent mode must
+    // fall back to the bounded maxAttempts path rather than looping forever.
+    const fn = vi.fn(async () => {
+      const error = Object.assign(new Error('Allocated quota exceeded'), {
+        status: 429,
+        code: 'Throttling.AllocationQuota',
+      });
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Allocated quota exceeded',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
   it('should cap single retry backoff at persistentMaxBackoffMs', async () => {
     const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
     let attempts = 0;
@@ -1077,6 +1180,27 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     await expect(promise).resolves.toBe('ok');
 
     expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(600_000);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('should honor Retry-After on 503 responses', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    const error = Object.assign(new Error('Service unavailable'), {
+      status: 503,
+      headers: { 'retry-after': '4' },
+    });
+    const fn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 2,
+      initialDelayMs: 100,
+      maxDelayMs: 1000,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(4000);
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
