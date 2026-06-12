@@ -336,7 +336,7 @@ export async function truncateLlmContent(
 export function isAlreadyTruncated(content: string): boolean {
   return (
     content.includes('... [CONTENT TRUNCATED] ...') ||
-    content.includes('<persisted-output>')
+    content.startsWith('<persisted-output>')
   );
 }
 
@@ -475,10 +475,8 @@ ${preview}
 </persisted-output>`;
   }
 
-  return `<persisted-output>
-Output too large (${sizeKb} KB). ${filePathOrNote}
+  return `Output too large (${sizeKb} KB). ${filePathOrNote}
 
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
-${preview}
-</persisted-output>`;
+${preview}`;
 }

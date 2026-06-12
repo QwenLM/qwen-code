@@ -133,21 +133,13 @@ import {
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 
+// Gap between the persistence gate and per-tool truncation thresholds.
+// Tools that self-truncate to ~25K add headers bringing output to ~25.4K;
+// the headroom ensures the gate only fires for genuinely un-truncated output
+// and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
 const GATE_EXEMPT_TOOLS = new Set(['read_file']);
 
-function recalcContentLength(c: PartListUnion): number | undefined {
-  if (typeof c === 'string') return c.length;
-  if (Array.isArray(c)) {
-    const parts = toParts(c);
-    return parts.reduce((n, p) => n + (p.text?.length ?? 0), 0);
-  }
-  if (c && typeof c === 'object' && 'text' in c) {
-    const text = (c as { text?: string }).text;
-    if (typeof text === 'string') return text.length;
-  }
-  return undefined;
-}
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -3254,7 +3246,6 @@ export class CoreToolScheduler {
           toolName,
           content,
         );
-        contentLength = recalcContentLength(content) ?? contentLength;
 
         // Collect filesystem paths the tool just touched. Different tools
         // use different parameter names: `file_path` (read/edit/write),
