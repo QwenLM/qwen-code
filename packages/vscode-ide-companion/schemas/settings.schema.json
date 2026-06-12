@@ -471,7 +471,19 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "The model to use for conversations.",
+          "description": "The display name of the current model.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The API model identifier sent to the provider (e.g. \"glm-5\").",
+          "type": "string"
+        },
+        "baseUrl": {
+          "description": "The base URL for the model API endpoint.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "The authentication type (authType) for this model (e.g. \"openai\", \"anthropic\").",
           "type": "string"
         },
         "maxSessionTurns": {
@@ -2587,7 +2599,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 4
+      "default": 5
     }
   },
   "additionalProperties": true

@@ -61,7 +61,7 @@ export interface ModelConfigCliInput {
  * Settings-provided configuration values
  */
 export interface ModelConfigSettingsInput {
-  /** Model name from settings.model.name */
+  /** Model id from settings.model.id (fallback: settings.model.name) */
   model?: string;
   /** API key from settings.security.auth.apiKey */
   apiKey?: string;

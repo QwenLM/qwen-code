@@ -436,8 +436,11 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     setValue(key: string, value: unknown): void {
-      // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
-      if (key === 'model.name' && typeof value === 'string') {
+      // Never persist a runtime snapshot ID to model.id or model.name (it re-wraps on restart).
+      if (
+        (key === 'model.id' || key === 'model.name') &&
+        typeof value === 'string'
+      ) {
         value = stripRuntimeSnapshotPrefix(value);
       }
       const parts = key.split('.');

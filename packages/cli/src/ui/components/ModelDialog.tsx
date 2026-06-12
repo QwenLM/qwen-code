@@ -94,10 +94,16 @@ function maskApiKey(apiKey: string | undefined): string {
 
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
-  modelId: string,
+  model: { id: string; name: string; baseUrl?: string },
+  authType: AuthType,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
-  settings.setValue(scope, 'model.name', modelId);
+  settings.setValue(scope, 'model.id', model.id);
+  settings.setValue(scope, 'model.name', model.name);
+  if (model.baseUrl) {
+    settings.setValue(scope, 'model.baseUrl', model.baseUrl);
+  }
+  settings.setValue(scope, 'model.provider', authType);
 }
 
 function persistAuthTypeSelection(
@@ -133,6 +139,7 @@ interface HandleModelSwitchSuccessParams {
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
   isRuntime: boolean;
+  selectedModel: { id: string; name: string; baseUrl?: string };
 }
 
 function handleModelSwitchSuccess({
@@ -142,8 +149,13 @@ function handleModelSwitchSuccess({
   effectiveAuthType,
   effectiveModelId,
   isRuntime,
+  selectedModel,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(
+    settings,
+    selectedModel,
+    effectiveAuthType ?? AuthType.USE_OPENAI,
+  );
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -549,6 +561,11 @@ export function ModelDialog({
         effectiveAuthType,
         effectiveModelId,
         isRuntime,
+        selectedModel: {
+          id: selectedEntry?.model.id ?? effectiveModelId,
+          name: selectedEntry?.model.label ?? effectiveModelId,
+          baseUrl: selectedEntry?.model.baseUrl,
+        },
       });
       onClose();
     },

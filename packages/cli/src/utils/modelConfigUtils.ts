@@ -159,9 +159,11 @@ export function resolveCliGenerationConfig(
   let sourceEnvVar: string | undefined;
   if (argv.model) {
     resolvedModel = argv.model;
-  } else if (settings.model?.name) {
+  } else if (settings.model?.id ?? settings.model?.name) {
     // Self-heal configs already corrupted by older builds.
-    resolvedModel = stripRuntimeSnapshotPrefix(settings.model.name);
+    resolvedModel = stripRuntimeSnapshotPrefix(
+      (settings.model.id ?? settings.model.name)!,
+    );
   } else if (authType && AUTH_ENV_MODEL_VARS[authType]) {
     // Only check env vars for the current auth type
     for (const envVar of AUTH_ENV_MODEL_VARS[authType]) {
@@ -214,9 +216,12 @@ export function resolveCliGenerationConfig(
       baseUrl: argv.openaiBaseUrl,
     },
     settings: {
-      model: settings.model?.name
-        ? stripRuntimeSnapshotPrefix(settings.model.name)
-        : undefined,
+      model:
+        (settings.model?.id ?? settings.model?.name)
+          ? stripRuntimeSnapshotPrefix(
+              (settings.model.id ?? settings.model.name)!,
+            )
+          : undefined,
       apiKey: settings.security?.auth?.apiKey,
       baseUrl: settings.security?.auth?.baseUrl,
       generationConfig: settings.model?.generationConfig as

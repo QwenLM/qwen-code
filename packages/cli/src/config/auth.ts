@@ -82,7 +82,10 @@ function hasApiKeyForAuth(
 
   // Use config.getModelsConfig().getModel() if available for accurate model ID resolution
   // that accounts for CLI args, env vars, and settings. Fall back to settings.model.name.
-  const modelId = config?.getModelsConfig().getModel() ?? settings.model?.name;
+  const modelId =
+    config?.getModelsConfig().getModel() ??
+    settings.model?.id ??
+    settings.model?.name;
 
   // Try to find model-specific envKey from modelProviders
   const modelConfig = findModelConfig(modelProviders, authType, modelId);
@@ -228,7 +231,9 @@ export function validateAuthMethod(
       | undefined;
     // Use config.getModelsConfig().getModel() if available for accurate model ID
     const modelId =
-      config?.getModelsConfig().getModel() ?? settings.merged.model?.name;
+      config?.getModelsConfig().getModel() ??
+      settings.merged.model?.id ??
+      settings.merged.model?.name;
     const modelConfig = findModelConfig(modelProviders, authMethod, modelId);
 
     if (modelConfig && !modelConfig.baseUrl) {

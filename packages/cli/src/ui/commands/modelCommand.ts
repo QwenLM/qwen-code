@@ -48,13 +48,27 @@ async function switchMainModel(
         : undefined,
     );
     persistSetting(settings, 'security.auth.selectedType', parsed.authType);
-    persistSetting(settings, 'model.name', parsed.modelId);
-    return parsed.modelId;
+    const available = config.getAvailableModelsForAuthType(parsed.authType);
+    const matched = available.find((m) => m.id === parsed.modelId);
+    persistSetting(settings, 'model.id', parsed.modelId);
+    persistSetting(settings, 'model.name', matched?.label ?? parsed.modelId);
+    if (matched?.baseUrl) {
+      persistSetting(settings, 'model.baseUrl', matched.baseUrl);
+    }
+    persistSetting(settings, 'model.provider', parsed.authType);
+    return matched?.label ?? parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg);
-  return modelArg;
+  const available = config.getAvailableModelsForAuthType(currentAuthType);
+  const matched = available.find((m) => m.id === modelArg);
+  persistSetting(settings, 'model.id', modelArg);
+  persistSetting(settings, 'model.name', matched?.label ?? modelArg);
+  if (matched?.baseUrl) {
+    persistSetting(settings, 'model.baseUrl', matched.baseUrl);
+  }
+  persistSetting(settings, 'model.provider', currentAuthType);
+  return matched?.label ?? modelArg;
 }
 
 function formatUnavailableModelMessage(
@@ -297,7 +311,8 @@ export const modelCommand: SlashCommand = {
     // Non-interactive/ACP: set model if an arg was provided, otherwise show current model
     if (context.executionMode !== 'interactive') {
       // /model with no args — show current model
-      const currentModel = config.getModel() ?? 'unknown';
+      const currentModel =
+        config.getModelDisplayName?.() ?? config.getModel() ?? 'unknown';
       return {
         type: 'message',
         messageType: 'info',

@@ -2560,7 +2560,19 @@ export class Session implements SessionContext {
 
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
-      this.settings.setValue(persistScope, 'model.name', parsed.modelId);
+      const available =
+        this.config.getAvailableModelsForAuthType(selectedAuthType);
+      const matched = available.find((m) => m.id === parsed.modelId);
+      this.settings.setValue(persistScope, 'model.id', parsed.modelId);
+      this.settings.setValue(
+        persistScope,
+        'model.name',
+        matched?.label ?? parsed.modelId,
+      );
+      if (after?.baseUrl) {
+        this.settings.setValue(persistScope, 'model.baseUrl', after.baseUrl);
+      }
+      this.settings.setValue(persistScope, 'model.provider', selectedAuthType);
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',

@@ -209,7 +209,12 @@ export async function applyProviderInstallPlan(
     // Model selection
     currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
+      settings.setValue('model.id', plan.modelSelection.modelId);
       settings.setValue('model.name', plan.modelSelection.modelId);
+      if (plan.legacyCredentials?.baseUrl) {
+        settings.setValue('model.baseUrl', plan.legacyCredentials.baseUrl);
+      }
+      settings.setValue('model.provider', plan.authType);
     }
 
     // Provider state metadata

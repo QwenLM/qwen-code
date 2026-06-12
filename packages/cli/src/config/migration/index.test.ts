@@ -43,7 +43,7 @@ describe('Migration Framework Integration', () => {
         theme: 'dark',
         accessibility: { enableLoadingPhrases: true },
       });
-      expect(settings['model']).toEqual({ name: 'gemini' });
+      expect(settings['model']).toEqual({ name: 'gemini', id: 'gemini' });
 
       // Check disableAutoUpdate was inverted to enableAutoUpdate: false
       expect(

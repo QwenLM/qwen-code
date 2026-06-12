@@ -1116,7 +1116,36 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: undefined as string | undefined,
-        description: 'The model to use for conversations.',
+        description: 'The display name of the current model.',
+        showInDialog: false,
+      },
+      id: {
+        type: 'string',
+        label: 'Model ID',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'The API model identifier sent to the provider (e.g. "glm-5").',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Base URL',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description: 'The base URL for the model API endpoint.',
+        showInDialog: false,
+      },
+      provider: {
+        type: 'string',
+        label: 'Provider',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'The authentication type (authType) for this model (e.g. "openai", "anthropic").',
         showInDialog: false,
       },
       maxSessionTurns: {

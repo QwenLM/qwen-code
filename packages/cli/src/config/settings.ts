@@ -118,7 +118,7 @@ const lastReloadSnapshot = new Map<string, string>();
 let lastReloadSnapshotSeeded = false;
 
 // Settings version to track migration state
-export const SETTINGS_VERSION = 4;
+export const SETTINGS_VERSION = 5;
 export const SETTINGS_VERSION_KEY = '$version';
 
 /**
