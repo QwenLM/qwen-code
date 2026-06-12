@@ -97,6 +97,10 @@
   </head>
   <body id="rc-app">
     <h1>qwen-rc viewer</h1>
+    <section id="gw-status">
+      <button id="status-btn">Check status</button>
+      <span id="status-result">(unknown)</span>
+    </section>
     <section>
       <label>Pairing code <input id="code" placeholder="paste code" /></label>
       <button id="pair">Pair</button>
@@ -1334,6 +1338,27 @@
           btn.disabled = false;
         }
       }
+      // Gateway status (cycle 74): GET /rc/health (no auth) — confirm the
+      // gateway is reachable + report paired/not-paired (token PRESENCE only,
+      // never its value). textContent-only.
+      $('status-btn').onclick = async () => {
+        const out = $('status-result');
+        out.textContent = ' checking…';
+        const paired = token() ? 'paired' : 'not paired';
+        try {
+          const res = await fetch('/rc/health');
+          if (res.ok) {
+            const b = await res.json();
+            out.textContent =
+              ' gateway: ' + (b.status || 'ok') + ' · ' + paired;
+          } else {
+            out.textContent = ' gateway: error ' + res.status + ' · ' + paired;
+          }
+        } catch (e) {
+          out.textContent = ' unreachable · ' + paired;
+        }
+      };
+
       $('list-commands').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('commands-list');
