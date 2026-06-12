@@ -163,6 +163,9 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
     getEnvironmentContext: vi
       .fn()
       .mockResolvedValue([{ text: 'Mocked env context' }]),
+    getDirectoryContextString: vi
+      .fn()
+      .mockResolvedValue('Mocked directory context'),
     getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
       {
         role: 'user',
@@ -1440,6 +1443,29 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it('refreshes the live system instruction after the working directory changes', async () => {
+      vi.mocked(getRecentGitStatus)
+        .mockReturnValueOnce('Git snapshot A')
+        .mockReturnValueOnce('Git snapshot B');
+      vi.mocked(getRecentGitStatus).mockClear();
+
+      await client.startChat();
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Git snapshot A',
+      );
+
+      await client.addWorkingDirectoryChangedContext(
+        '/test/project/root',
+        '/test/other/root',
+      );
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).not.toContain('Git snapshot A');
+      expect(systemInstruction).toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('clears cached git status so it can be recomputed for the next session', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
