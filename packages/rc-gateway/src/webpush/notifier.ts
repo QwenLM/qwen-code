@@ -14,10 +14,15 @@ import type { WorkingDeviceTracker } from '../routing/workingDevice.js';
 import type { RoutingMatcher } from '../routing/rules.js';
 import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
-import { buildPayload, type PushPayload } from './payload.js';
+import {
+  buildPayload,
+  buildDigestPayload,
+  type PushPayload,
+} from './payload.js';
 import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
 import type { PushCoalescer } from './coalescer.js';
 import type { PushDigest, DigestSummary } from './digest.js';
+import { QuietDigestWatcher } from './quietDigestWatcher.js';
 
 /**
  * Per-kind required scope. A subscription only receives a kind if its owning
@@ -48,9 +53,44 @@ export class PushNotifier {
     private readonly digest?: PushDigest,
   ) {}
 
+  /** Edge-detector for the end-of-quiet-window digest flush (D4, cycle 75). */
+  private readonly quietWatcher = new QuietDigestWatcher();
+
   /** Per-subscription summary of pushes suppressed during quiet hours (D4 read). */
   digestSummary(): DigestSummary[] {
     return this.digest?.summary() ?? [];
+  }
+
+  /**
+   * End-of-quiet-window digest flush (webpush D4, cycle 75). Polled on a timer
+   * by runServe: detects each subscription that just LEFT its quiet window and,
+   * if anything was suppressed while it was quiet, sends one synthetic "while
+   * you were away" digest push and resets that subscription's counts.
+   *
+   * Sends DIRECTLY via the sender, bypassing the gate chain by design: the
+   * digest must bypass the QUIET gate (else it would suppress itself at the
+   * boundary), and it is one low-frequency edge push so it intentionally does
+   * not consume the rate-limit budget, coalesce, or honour an active snooze
+   * (see the cycle-75 design). No cross-session leak — the counts only exist for
+   * pushes that already passed the scope + session-lock gates when recorded.
+   *
+   * Sync and never throws: `sender.send` is best-effort/never-throwing and is
+   * fired-and-forgotten, so a failed digest is simply lost (like all push)
+   * rather than retried next window.
+   */
+  flushQuietDigests(now: Date = new Date()): void {
+    if (!this.digest) return;
+    const records = this.store.listAll();
+    const byId = new Map(records.map((r) => [r.id, r] as const));
+    this.quietWatcher.tick(records, now, (id) => {
+      const summary = this.digest?.summaryFor(id) ?? null;
+      // Reset whether or not we send so a single window-end never re-digests.
+      this.digest?.forget(id);
+      if (!summary || summary.total <= 0) return;
+      const rec = byId.get(id);
+      if (!rec) return;
+      void this.sender.send(rec, buildDigestPayload(summary));
+    });
   }
 
   /**

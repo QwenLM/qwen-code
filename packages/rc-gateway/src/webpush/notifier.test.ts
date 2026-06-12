@@ -16,6 +16,7 @@ import { PushSender, type PushTransport } from './sender.js';
 import { PushNotifier } from './notifier.js';
 import { PushRateLimiter } from './rateLimiter.js';
 import { PushCoalescer } from './coalescer.js';
+import { PushDigest } from './digest.js';
 import type { PushPayload } from './payload.js';
 import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
@@ -1153,5 +1154,91 @@ describe('PushNotifier quiet-hours digest tracking (cycle 71)', () => {
     );
     expect(sent).toHaveLength(1); // delivered
     expect(notifier.digestSummary()).toEqual([]); // nothing recorded
+  });
+});
+
+describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
+  const QUIET = { from: '22:00', to: '07:00', timezone: 'UTC' };
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  async function quietSub(): Promise<{
+    notifier: PushNotifier;
+    endpoint: string;
+  }> {
+    const digest = new PushDigest();
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'a');
+    const endpoint = 'https://push.example.com/a';
+    const sub = await store.add(approver.id, {
+      endpoint,
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    await store.setQuietHours(sub.id, QUIET);
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      digest,
+    );
+    return { notifier, endpoint };
+  }
+
+  it('sends one digest when the window ends, then resets the counts', async () => {
+    const { notifier, endpoint } = await quietSub();
+    // While quiet (02:00) the push is suppressed and recorded into the digest.
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'x' }, requestId: 'r' },
+      },
+      { sessionId: 's1' },
+      new Date('2026-06-09T02:00:00Z'),
+    );
+    expect(sent).toHaveLength(0);
+    expect(notifier.digestSummary()).toHaveLength(1);
+
+    notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet
+    await settle();
+    expect(sent).toHaveLength(0);
+
+    notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z')); // window ended
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].endpoint).toBe(endpoint);
+    expect(sent[0].payload.kind).toBe('digest');
+    expect(sent[0].payload.summary).toContain('while you were away');
+    // Counts reset so the next window-end does not re-digest.
+    expect(notifier.digestSummary()).toEqual([]);
+
+    notifier.flushQuietDigests(new Date('2026-06-09T08:30:00Z'));
+    await settle();
+    expect(sent).toHaveLength(1); // no double-fire
+  });
+
+  it('does not send a digest when nothing was suppressed while quiet', async () => {
+    const { notifier } = await quietSub();
+    notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z')); // seed quiet, no counts
+    notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z')); // exit, empty digest
+    await settle();
+    expect(sent).toHaveLength(0);
+  });
+
+  it('is a no-op (never throws) when no digest is configured', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'a');
+    const sub = await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    await store.setQuietHours(sub.id, QUIET);
+    const notifier = new PushNotifier(tokens, store, sender); // no digest
+    notifier.flushQuietDigests(new Date('2026-06-09T02:30:00Z'));
+    notifier.flushQuietDigests(new Date('2026-06-09T08:00:00Z'));
+    await settle();
+    expect(sent).toHaveLength(0);
   });
 });
