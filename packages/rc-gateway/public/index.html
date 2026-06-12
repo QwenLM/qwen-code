@@ -257,6 +257,19 @@
       ></textarea>
       <button id="send">Send</button>
       <button id="dictate">Dictate</button>
+      <select id="dictate-lang" title="dictation language">
+        <option value="">auto</option>
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="es-ES">Spanish</option>
+        <option value="fr-FR">French</option>
+        <option value="de-DE">German</option>
+        <option value="pt-BR">Portuguese (BR)</option>
+        <option value="hi-IN">Hindi</option>
+        <option value="zh-CN">Chinese</option>
+        <option value="ja-JP">Japanese</option>
+      </select>
+      <span id="dictate-interim" style="color: #888; font-size: 0.85rem"></span>
     </section>
     <pre id="log"></pre>
     <script>
@@ -1622,9 +1635,11 @@
       (function () {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         const dictate = $('dictate');
+        const interimEl = $('dictate-interim');
         if (!SR) {
           dictate.disabled = true;
           dictate.title = 'voice input not supported in this browser';
+          $('dictate-lang').disabled = true;
           return;
         }
         let rec = null;
@@ -1638,22 +1653,35 @@
             return;
           }
           rec = new SR();
-          rec.lang = navigator.language || 'en-US';
-          rec.interimResults = false;
+          // Chosen language, else the browser default (cycle 83).
+          rec.lang = $('dictate-lang').value || navigator.language || 'en-US';
+          // Show partial transcription live (cycle 83); only FINAL text is
+          // appended to the prompt.
+          rec.interimResults = true;
           rec.continuous = false;
           dictate.textContent = 'Stop';
           rec.onresult = (ev) => {
-            let text = '';
+            let interim = '';
+            let final = '';
             for (let i = ev.resultIndex; i < ev.results.length; i++) {
-              text += ev.results[i][0].transcript;
+              const r = ev.results[i];
+              if (r.isFinal) final += r[0].transcript;
+              else interim += r[0].transcript;
             }
-            const ta = $('prompt');
-            // Append (complement typing), never auto-send.
-            ta.value = ta.value ? ta.value + ' ' + text.trim() : text.trim();
+            if (final) {
+              const ta = $('prompt');
+              // Append final text (complement typing), never auto-send.
+              ta.value = ta.value
+                ? ta.value + ' ' + final.trim()
+                : final.trim();
+            }
+            // Live interim preview (cleared on end); textContent → XSS-safe.
+            interimEl.textContent = interim;
           };
           const reset = () => {
             rec = null;
             dictate.textContent = 'Dictate';
+            interimEl.textContent = '';
           };
           rec.onerror = (e) => {
             setStatus('voice: ' + (e && e.error ? e.error : 'error'));
