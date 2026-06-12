@@ -9,6 +9,7 @@ import {
 } from './cronScheduler.js';
 import { getLockFilePath } from './cronTasksLock.js';
 import {
+  getCronFilePath,
   readCronTasks,
   writeCronTasks,
   type DurableCronTask,
@@ -928,6 +929,34 @@ describe('CronScheduler', () => {
       await writeCronTasks(tmpDir, []);
       await reload(false);
       expect(scheduler.list()).toHaveLength(0);
+    });
+
+    it('keeps a just-created durable job when a reload runs before its first persist lands', async () => {
+      await scheduler.enableDurable('session-1');
+
+      // Hold the tasks-file update lock so createDurable's initial write
+      // parks in the lock-retry loop.
+      const updateLock = `${getCronFilePath(tmpDir)}.lock`;
+      await fs.mkdir(path.dirname(updateLock), { recursive: true });
+      await fs.writeFile(updateLock, '99999');
+
+      const creating = scheduler.createDurable('* * * * *', 'in flight', true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      // A concurrent reload (watcher event, takeover) reads the file
+      // without the new task — it must not reconcile the live job away.
+      const reload = (
+        scheduler as unknown as {
+          loadFileTasks(handleMissed: boolean): Promise<void>;
+        }
+      ).loadFileTasks.bind(scheduler);
+      await reload(false);
+      expect(scheduler.list().map((j) => j.prompt)).toContain('in flight');
+
+      // Lock released — the parked write lands and the job is on disk.
+      await fs.unlink(updateLock);
+      const job = await creating;
+      expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(job.id);
     });
 
     it('does not re-fire a missed one-shot installed by an earlier non-owner load', async () => {

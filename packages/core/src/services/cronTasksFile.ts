@@ -31,6 +31,10 @@ const UPDATE_LOCK_RETRY_MS = 15;
 const UPDATE_LOCK_STALE_MS = 2_000;
 const UPDATE_LOCK_TIMEOUT_MS = 3_000;
 
+// Distinguishes the rename-aside targets of concurrent stale-lock clears
+// within this process; cross-process uniqueness comes from the PID.
+let updateStaleSeq = 0;
+
 // In-process serialization: a per-file mutex so concurrent calls from this
 // session never interleave (and never contend on the file lock).
 const updateMutexes = new Map<string, Mutex>();
@@ -60,14 +64,26 @@ export async function readCronTasks(
     throw err;
   }
 
+  // A file that exists but doesn't parse is corruption, not an empty
+  // schedule: returning [] here would let a reload reconcile every loaded
+  // durable job away, and let the next read-modify-write replace the
+  // user's (recoverable) file with a valid-but-empty one. Throw instead —
+  // the scheduler keeps its current view on read failure, and
+  // updateCronTasks refuses to write through it.
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    throw new Error(
+      `Malformed JSON in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
+    );
   }
 
-  if (!Array.isArray(parsed)) return [];
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
+    );
+  }
   return parsed.filter(isValidTask);
 }
 
@@ -117,7 +133,24 @@ async function acquireUpdateLock(
     try {
       const stat = await fs.stat(lockPath);
       if (Date.now() - stat.mtimeMs > UPDATE_LOCK_STALE_MS) {
-        await fs.unlink(lockPath).catch(() => {});
+        // Don't unlink in place: between the stat and the unlink another
+        // contender can clear the stale lock and create a fresh one, and
+        // unlinking would then destroy a live holder's lock — two writers
+        // inside the read-modify-write. Rename aside (atomic, one winner),
+        // verify what was actually moved — rename preserves mtime — and
+        // put back a fresh lock via link(), which fails on EEXIST instead
+        // of clobbering an even newer one (same pattern as cronTasksLock).
+        const stalePath = `${lockPath}.stale.${process.pid}.${updateStaleSeq++}`;
+        try {
+          await fs.rename(lockPath, stalePath);
+        } catch {
+          continue; // another contender cleared it — retry the create
+        }
+        const moved = await fs.stat(stalePath).catch(() => null);
+        if (moved && Date.now() - moved.mtimeMs <= UPDATE_LOCK_STALE_MS) {
+          await fs.link(stalePath, lockPath).catch(() => {});
+        }
+        await fs.unlink(stalePath).catch(() => {});
         continue;
       }
     } catch {

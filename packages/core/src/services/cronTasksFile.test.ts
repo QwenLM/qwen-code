@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
@@ -11,6 +11,27 @@ import {
   updateCronTasks,
   writeCronTasks,
 } from './cronTasksFile.js';
+
+// Hook for the stale-lock race test: runs just before the implementation
+// renames a stale update lock aside, so a test can interleave a competing
+// takeover between the stat and the rename. Pass-through while null.
+const renameHook = vi.hoisted(() => ({
+  current: null as ((src: string) => Promise<void>) | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: (async (
+      src: Parameters<typeof actual.rename>[0],
+      dst: Parameters<typeof actual.rename>[1],
+    ) => {
+      if (renameHook.current) await renameHook.current(String(src));
+      return actual.rename(src, dst);
+    }) as typeof actual.rename,
+  };
+});
 
 function makeTask(overrides?: Partial<DurableCronTask>): DurableCronTask {
   return {
@@ -32,6 +53,7 @@ describe('cronTasksFile', () => {
   });
 
   afterEach(async () => {
+    renameHook.current = null;
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -48,18 +70,21 @@ describe('cronTasksFile', () => {
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
-    it('returns [] for malformed JSON', async () => {
+    // A file that exists but doesn't parse must throw, not read as an
+    // empty schedule: [] would let a reload reconcile every loaded job
+    // away and let the next write clobber the user's recoverable file.
+    it('throws for malformed JSON', async () => {
       const dir = path.join(tmpDir, '.qwen');
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(path.join(dir, 'scheduled_tasks.json'), 'NOT JSON{{{');
-      expect(await readCronTasks(tmpDir)).toEqual([]);
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Malformed JSON/);
     });
 
-    it('returns [] for non-array JSON', async () => {
+    it('throws for non-array JSON', async () => {
       const dir = path.join(tmpDir, '.qwen');
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(path.join(dir, 'scheduled_tasks.json'), '{"foo":1}');
-      expect(await readCronTasks(tmpDir)).toEqual([]);
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/JSON array/);
     });
 
     it('filters out invalid entries', async () => {
@@ -223,6 +248,57 @@ describe('cronTasksFile', () => {
 
       await addCronTask(tmpDir, makeTask());
       expect(await readCronTasks(tmpDir)).toHaveLength(1);
+    });
+
+    it('refuses to clobber a malformed file', async () => {
+      const filePath = getCronFilePath(tmpDir);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, 'NOT JSON{{{');
+
+      await expect(
+        updateCronTasks(tmpDir, (tasks) => tasks.filter(() => true)),
+      ).rejects.toThrow(/Malformed JSON/);
+      // The corrupted (hand-recoverable) content survives untouched.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('NOT JSON{{{');
+    });
+
+    it('does not displace a fresh lock created after the stale inspection', async () => {
+      const lockPath = `${getCronFilePath(tmpDir)}.lock`;
+      await fs.mkdir(path.dirname(lockPath), { recursive: true });
+      await fs.writeFile(lockPath, '99999');
+      const past = new Date(Date.now() - 60_000);
+      await fs.utimes(lockPath, past, past);
+
+      // Between the stat seeing a stale lock and the rename-aside, a
+      // competing process clears the stale lock and creates a fresh one.
+      renameHook.current = async (src) => {
+        if (src !== lockPath) return;
+        renameHook.current = null;
+        await fs.rm(lockPath, { force: true });
+        await fs.writeFile(lockPath, '88888'); // fresh mtime — live holder
+      };
+
+      const update = updateCronTasks(tmpDir, (tasks) => [
+        ...tasks,
+        makeTask({ id: 'after-race' }),
+      ]);
+
+      // The yanked fresh lock must be restored, not destroyed, and the
+      // update must stay blocked behind it.
+      await vi.waitFor(async () => {
+        expect(await fs.readFile(lockPath, 'utf-8')).toBe('88888');
+        const entries = await fs.readdir(path.dirname(lockPath));
+        expect(entries.filter((e) => e.includes('.lock.stale.'))).toEqual([]);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await fs.readFile(lockPath, 'utf-8')).toBe('88888');
+
+      // The live holder releases; the blocked update proceeds.
+      await fs.unlink(lockPath);
+      await update;
+      expect((await readCronTasks(tmpDir)).map((t) => t.id)).toContain(
+        'after-race',
+      );
     });
   });
 });

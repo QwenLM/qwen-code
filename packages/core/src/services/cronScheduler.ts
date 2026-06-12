@@ -9,6 +9,7 @@ import * as path from 'node:path';
 
 import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { DurableCronTask } from './cronTasksFile.js';
 import {
@@ -20,6 +21,8 @@ import {
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
+
+const debugLogger = createDebugLogger('CRON_SCHEDULER');
 
 const MAX_JOBS = 50;
 // Recurring jobs auto-expire this long after creation (claw-code parity:
@@ -152,6 +155,11 @@ export class CronScheduler {
   // Durable ids whose on-disk removal hasn't landed yet — a reload that
   // reads the file before the write completes must not resurrect them.
   private pendingRemoval = new Set<string>();
+  // Durable ids whose initial on-disk write hasn't landed yet — a reload
+  // that reads the file before the write completes must not reconcile
+  // the live job away (or clear its pendingRemoval guard) as if it had
+  // been deleted on disk.
+  private pendingAdd = new Set<string>();
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -214,11 +222,14 @@ export class CronScheduler {
     }
     const job = this.create(cronExpr, prompt, recurring);
     job.durable = true;
+    this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
     } catch (error) {
       this.jobs.delete(job.id);
       throw error;
+    } finally {
+      this.pendingAdd.delete(job.id);
     }
     return job;
   }
@@ -401,12 +412,12 @@ export class CronScheduler {
     try {
       read = await readCronTasks(projectRoot);
     } catch {
-      // readCronTasks already maps the benign cases (missing file,
-      // malformed JSON) to [] — anything thrown here is a real read
-      // failure (EACCES/EIO/...). Treating it as an empty schedule would
-      // wipe every loaded durable job and clear pendingRemoval guards
-      // whose removals are still in flight; keep the current view and
-      // let a later reload retry.
+      // readCronTasks maps only a missing file to []; anything thrown
+      // here is a real read failure (EACCES/EIO/...) or a corrupted file
+      // (malformed JSON throws rather than reading as empty). Treating
+      // either as an empty schedule would wipe every loaded durable job
+      // and clear pendingRemoval guards whose removals are still in
+      // flight; keep the current view and let a later reload retry.
       return;
     }
     if (generation !== this.durableGeneration) {
@@ -476,6 +487,9 @@ export class CronScheduler {
     // forward from the in-memory entry — an in-flight persist may not
     // have landed yet, and regressing it would double-fire.
     const diskIds = new Set(tasks.map((t) => t.id));
+    // Jobs mid-createDurable are on their way to disk — treat them as
+    // present so this reload doesn't delete the live job it can't see yet.
+    for (const id of this.pendingAdd) diskIds.add(id);
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
@@ -572,8 +586,12 @@ export class CronScheduler {
         this.removeMissedFromDisk(pending.jobs.map((j) => j.id));
         break;
       }
-      default:
-        break;
+      default: {
+        // Forces a TS error if PendingFire gains a variant this switch
+        // doesn't handle.
+        const _exhaustive: never = pending;
+        return _exhaustive;
+      }
     }
   }
 
@@ -611,13 +629,18 @@ export class CronScheduler {
 
   /**
    * Chains a background write into pendingPersist so stop() releases the
-   * lock only after it lands. Failures are swallowed — same best-effort
-   * contract as a fire-and-forget persist.
+   * lock only after it lands. Failures are logged but not retried — same
+   * best-effort contract as a fire-and-forget persist; the fire was
+   * already delivered, so a failed stamp degrades to at-least-once.
    */
   private trackPersist(write: Promise<unknown>): void {
     const settled = write.then(
       () => {},
-      () => {},
+      (err) => {
+        debugLogger.warn(
+          `Durable cron persist failed — disk state is stale and the task may fire again in a later session: ${err}`,
+        );
+      },
     );
     this.pendingPersist = this.pendingPersist.then(() => settled);
   }
@@ -645,7 +668,11 @@ export class CronScheduler {
           this.debounceTimer.unref();
         },
       );
-      this.fileWatcher.on('error', () => {});
+      this.fileWatcher.on('error', (err) => {
+        debugLogger.warn(
+          `Tasks-file watcher error — durable task changes from other sessions may not be picked up until restart: ${err}`,
+        );
+      });
     } catch {
       // Directory doesn't exist or can't be watched — fine
     }
@@ -662,6 +689,11 @@ export class CronScheduler {
     }
     if (this.timer) return; // already running
 
+    // Deliberately not unref()'d, unlike lockProbeTimer/debounceTimer: in
+    // headless mode this interval is the only live handle holding the
+    // process open between fires (the cron hold-open in nonInteractiveCli
+    // awaits a promise, which pins nothing by itself). Every exit path
+    // goes through stop(), which clears it.
     this.timer = setInterval(() => {
       this.tick();
     }, 1000);
@@ -882,6 +914,7 @@ export class CronScheduler {
     this.stop();
     this.jobs.clear();
     this.pendingRemoval.clear();
+    this.pendingAdd.clear();
   }
 }
 
