@@ -979,6 +979,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       ? selectedEntry.pendingApprovals?.[0]
       : undefined;
   const approvalActive = isDetailMode && Boolean(selectedApproval);
+  const approvalUsesQuestionDialog =
+    selectedApproval?.confirmationDetails.type === 'ask_user_question';
 
   // Reconstruct the full confirmation details (the parked approval omits
   // the runtime-owned `onConfirm`) and route the user's outcome back
@@ -1123,15 +1125,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (!dialogOpen) return;
       // While a parked approval is shown, the embedded ToolConfirmationMessage
       // owns the selection keys (↑/↓/numbers/Enter, Esc = deny this call).
-      // Keep two escape hatches the confirmation can't provide — without
-      // them an agent that re-parks an approval after every deny would trap
-      // the keyboard in this view:
+      // Keep two escape hatches for compact approvals that don't have their
+      // own free-text or tab-navigation UI:
       //   ← : back to the list (the approval stays parked; the pill keeps
       //       its "needs approval" marker)
       //   x : stop the agent entirely (also auto-rejects its parked calls)
       // Everything else yields so the dialog's own Enter/Esc handlers don't
       // double-fire against the confirmation's.
-      if (approvalActive) {
+      if (approvalActive && !approvalUsesQuestionDialog) {
         if (key.name === 'left') {
           exitDetail();
           return;

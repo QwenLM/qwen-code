@@ -48,7 +48,9 @@ function normalizeBackgroundApprovalOutcome(
   if (
     outcome === ToolConfirmationOutcome.ProceedAlways ||
     outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
-    outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+    outcome === ToolConfirmationOutcome.ProceedAlwaysUser ||
+    outcome === ToolConfirmationOutcome.ProceedAlwaysServer ||
+    outcome === ToolConfirmationOutcome.ProceedAlwaysTool
   ) {
     return ToolConfirmationOutcome.ProceedOnce;
   }
@@ -706,6 +708,7 @@ export class BackgroundTaskRegistry {
         `Failed to resolve background approval for ${agentId}/${callId}:`,
         error,
       );
+      entry.abortController.abort();
       this.fail(agentId, `Failed to resolve background approval: ${callId}`);
       return false;
     }

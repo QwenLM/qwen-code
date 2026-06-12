@@ -1635,26 +1635,35 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.getPendingApprovals('bg-appr-4')).toHaveLength(0);
     });
 
-    it('downgrades persistent approvals to one-time approval', async () => {
-      const respond = vi.fn(async () => {});
-      registry.register(makeRegistration('bg-appr-persistent'));
-      registry.addPendingApproval(
-        'bg-appr-persistent',
-        makeApproval('c1', respond),
-      );
+    it.each([
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      ToolConfirmationOutcome.ProceedAlwaysUser,
+      ToolConfirmationOutcome.ProceedAlwaysServer,
+      ToolConfirmationOutcome.ProceedAlwaysTool,
+    ])(
+      'downgrades persistent approval outcome %s to one-time approval',
+      async (outcome) => {
+        const respond = vi.fn(async () => {});
+        registry.register(makeRegistration(`bg-appr-${outcome}`));
+        registry.addPendingApproval(
+          `bg-appr-${outcome}`,
+          makeApproval('c1', respond),
+        );
 
-      const resolved = await registry.resolvePendingApproval(
-        'bg-appr-persistent',
-        'c1',
-        ToolConfirmationOutcome.ProceedAlwaysProject,
-      );
+        const resolved = await registry.resolvePendingApproval(
+          `bg-appr-${outcome}`,
+          'c1',
+          outcome,
+        );
 
-      expect(resolved).toBe(true);
-      expect(respond).toHaveBeenCalledWith(
-        ToolConfirmationOutcome.ProceedOnce,
-        undefined,
-      );
-    });
+        expect(resolved).toBe(true);
+        expect(respond).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+        );
+      },
+    );
 
     it('returns false when resolving a non-parked call', async () => {
       registry.register(makeRegistration('bg-appr-5'));
@@ -1729,7 +1738,8 @@ describe('BackgroundTaskRegistry', () => {
       const onChange = vi.fn();
       const onStatus = vi.fn();
       const onNotify = vi.fn();
-      registry.register(makeRegistration('bg-appr-retry'));
+      const abortController = new AbortController();
+      registry.register(makeRegistration('bg-appr-retry', { abortController }));
       registry.addPendingApproval('bg-appr-retry', makeApproval('c1', respond));
       registry.setApprovalChangeCallback(onChange);
       registry.setStatusChangeCallback(onStatus);
@@ -1747,6 +1757,7 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-appr-retry')?.error).toBe(
         'Failed to resolve background approval: c1',
       );
+      expect(abortController.signal.aborted).toBe(true);
       expect(onChange).toHaveBeenCalledTimes(1);
       expect(onStatus).toHaveBeenCalledOnce();
       expect(onNotify).toHaveBeenCalledOnce();
