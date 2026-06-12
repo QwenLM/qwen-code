@@ -36,14 +36,35 @@
         font-size: 0.8rem;
         margin-top: 0.5rem;
       }
+      #cards .card {
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+      }
+      #cards .card pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 0.8rem;
+        margin: 0 0 0.5rem;
+      }
+      #cards button {
+        margin-right: 0.5rem;
+      }
+      #cards .note {
+        color: #555;
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+      }
     </style>
   </head>
   <body>
     <h2>Shared session</h2>
     <div id="status">redeeming…</div>
     <div id="meta"></div>
+    <div id="cards"></div>
     <pre id="log"></pre>
-    <div class="watermark">
+    <div class="watermark" id="watermark">
       Read-only shared view. This link expires; do not forward it.
     </div>
     <script>
@@ -105,6 +126,115 @@
           el.scrollTop = el.scrollHeight;
         };
 
+        // An approve-scoped share may vote on its LOCKED session's permission
+        // requests. Set from whoami's scope; a view share never votes.
+        var canApprove = false;
+        var cards = {};
+
+        // POST a vote to the cycle-6 permission route. sessionId is always the
+        // whoami lock (never client input); enforceSessionLock is the backstop.
+        // The token rides the Authorization header (token-in-URL hygiene).
+        function vote(sessionId, requestId, outcome, optionId) {
+          var entry = cards[requestId];
+          var body =
+            outcome === 'selected'
+              ? { outcome: outcome, optionId: optionId }
+              : { outcome: outcome };
+          fetch(
+            '/rc/session/' +
+              encodeURIComponent(sessionId) +
+              '/permission/' +
+              encodeURIComponent(requestId),
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + tok,
+              },
+              body: JSON.stringify(body),
+            },
+          )
+            .then(function (res) {
+              if (!entry) return;
+              entry.disable();
+              if (res.status === 200) entry.note('voted: ' + outcome);
+              else if (res.status === 404) entry.note('already resolved');
+              else if (res.status === 401 || res.status === 403)
+                entry.note('not authorized');
+              else entry.note('vote failed (' + res.status + ')');
+            })
+            .catch(function (e) {
+              if (entry) entry.note('vote error: ' + e);
+            });
+        }
+
+        // Render an approve(once)/deny card for a permission_request. A GUEST is
+        // limited to the one-time 'allow_once' option — NEVER allow_always (a
+        // standing grant that would outlive the share). If no allow_once option
+        // exists, only Deny is offered. All server fields via textContent.
+        function renderPermissionCard(data, sessionId) {
+          var requestId = data.requestId;
+          if (!requestId || cards[requestId]) return;
+          var card = document.createElement('div');
+          card.className = 'card';
+          var summary = document.createElement('pre');
+          summary.textContent =
+            'permission request ' +
+            requestId +
+            '\n' +
+            JSON.stringify(data.toolCall, null, 2);
+          card.appendChild(summary);
+
+          var buttons = [];
+          var once = null;
+          var opts = data.options || [];
+          for (var i = 0; i < opts.length; i++) {
+            if (opts[i] && opts[i].kind === 'allow_once') {
+              once = opts[i];
+              break;
+            }
+          }
+          var note = document.createElement('div');
+          note.className = 'note';
+          if (once) {
+            var ok = document.createElement('button');
+            ok.textContent = 'Approve (once)';
+            ok.onclick = function () {
+              vote(sessionId, requestId, 'selected', once.optionId);
+            };
+            card.appendChild(ok);
+            buttons.push(ok);
+          } else {
+            note.textContent = 'one-time approval unavailable';
+          }
+          var deny = document.createElement('button');
+          deny.textContent = 'Deny';
+          deny.onclick = function () {
+            vote(sessionId, requestId, 'cancelled');
+          };
+          card.appendChild(deny);
+          buttons.push(deny);
+          card.appendChild(note);
+          $('cards').appendChild(card);
+          cards[requestId] = {
+            disable: function () {
+              for (var j = 0; j < buttons.length; j++)
+                buttons[j].disabled = true;
+            },
+            note: function (m) {
+              note.textContent = m;
+            },
+          };
+        }
+
+        function resolveCard(requestId) {
+          var entry = cards[requestId];
+          if (entry) {
+            entry.disable();
+            entry.note('resolved');
+          }
+        }
+
         // Redeem: GET /rc/share/whoami consumes one use (cookie-deduped server
         // side, so a reload does NOT burn a second use).
         authed('/rc/share/whoami')
@@ -133,6 +263,12 @@
                 add('expires', new Date(info.expiresAt).toISOString());
               if (info.usesRemaining !== null && info.usesRemaining !== undefined)
                 add('uses remaining', String(info.usesRemaining));
+              // Gate voting on the share's scope; update the watermark so it
+              // never falsely claims "read-only" on an approve share.
+              canApprove = info.scope === 'approve';
+              $('watermark').textContent = canApprove
+                ? 'You can approve or deny actions in this session. This link expires; do not forward it.'
+                : 'Read-only shared view. This link expires; do not forward it.';
               watch(info.sessionId);
             });
           })
@@ -167,7 +303,34 @@
                     var dataLine = block.split('\n').find(function (l) {
                       return l.indexOf('data:') === 0;
                     });
-                    if (dataLine) log(dataLine.slice(5).trim());
+                    if (!dataLine) return;
+                    var payload = dataLine.slice(5).trim();
+                    var ev = null;
+                    try {
+                      ev = JSON.parse(payload);
+                    } catch (e) {
+                      /* non-JSON frame */
+                    }
+                    if (
+                      canApprove &&
+                      ev &&
+                      ev.type === 'permission_request' &&
+                      ev.data
+                    ) {
+                      // Vote target is the locked session, never client input.
+                      renderPermissionCard(ev.data, sessionId);
+                    } else if (
+                      ev &&
+                      ev.type === 'permission_resolved' &&
+                      ev.data &&
+                      ev.data.requestId
+                    ) {
+                      resolveCard(ev.data.requestId);
+                      log(payload);
+                    } else {
+                      // Every non-permission frame logs exactly as before.
+                      log(payload);
+                    }
                   });
                   return pump();
                 });
