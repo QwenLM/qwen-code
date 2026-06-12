@@ -270,6 +270,46 @@ export abstract class ChannelBase {
       this.config.cwd,
     );
 
+    // 3.5. Bang (!) shell command — direct execution, no LLM
+    if (envelope.text.startsWith('!')) {
+      const cmd = envelope.text.slice(1).trim();
+      const bridgeShellCommand = (this.bridge as unknown as Record<string, unknown>)['shellCommand'];
+      if (cmd && typeof bridgeShellCommand === 'function') {
+        try {
+          const result = (await bridgeShellCommand(sessionId, cmd)) as {
+            exitCode: number | null;
+            output: string;
+            aborted: boolean;
+          };
+          const longestRun = Math.max(
+            0,
+            ...Array.from(
+              (result.output || '').matchAll(/`+/g),
+              (m) => m[0].length,
+            ),
+          );
+          const fence = '`'.repeat(Math.max(3, longestRun + 1));
+          const output = result.output
+            ? `${fence}\n${result.output}\n${fence}`
+            : '(no output)';
+          const exitLine =
+            result.exitCode !== null && result.exitCode !== 0
+              ? `\nExit code: ${result.exitCode}`
+              : '';
+          await this.sendMessage(
+            envelope.chatId,
+            `$ ${cmd}\n${output}${exitLine}`,
+          );
+        } catch (error) {
+          await this.sendMessage(
+            envelope.chatId,
+            `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return;
+      }
+    }
+
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
     if (envelope.referencedText) {

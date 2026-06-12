@@ -283,13 +283,15 @@ can drop a CC agent file into `.qwen/agents/` and have the supported fields
 parse identically. Optional fields with invalid values are silently dropped
 at parse time rather than rejected — the same lenient posture CC uses.
 
-| Field            | Type             | Notes                                                                                                                                                                                                                                         |
-| ---------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                        |
-| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins.                                                                                                                       |
-| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is also preserved for backward compatibility. Other values are silently dropped on parse. |
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                           |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins. The legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                           |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is preserved for backward compatibility. Other values are silently dropped on parse.                                         |
+| `mcpServers`     | record of specs  | Per-agent MCP server overrides. Merged with the session-level MCP server set when the agent spawns; on key collision the agent's spec wins (matching CC's `scope: 'agent'` semantics). Malformed entries are dropped per-key with a warning rather than failing the whole agent. |
+| `hooks`          | record of arrays | Per-agent hooks. Keys are CC hook event names (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, …); values are arrays of `{ matcher?, hooks: [...] }` definitions in the same shape as `settings.json`'s `hooks` field. Registered while the agent runs, removed when it stops.  |
 
-Example:
+Example with all of the above:
 
 ```
 ---
@@ -302,6 +304,17 @@ tools:
   - read_file
   - grep_search
   - glob
+mcpServers:
+  filesystem:
+    type: stdio
+    command: node
+    args: [/usr/local/lib/mcp-fs/server.js]
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo "review-agent about to run a shell command"
 ---
 
 You are a code reviewer. Analyze the code thoroughly and report findings
@@ -309,11 +322,19 @@ ordered by severity.
 ```
 
 The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
-`memory`, `isolation`, `mcpServers`, `hooks` — are documented in the
-declarative-agent design doc and land in follow-up PRs once the prerequisite
-infrastructure exists (`effort` needs a model-layer parameter; `memory`
-needs a scoped memory subsystem; `mcpServers` / `hooks` need a nested-aware
-YAML parser; `--agent` CLI flag enables `initialPrompt`; etc.).
+`memory`, `isolation` — are documented in the declarative-agent design doc
+and land in follow-up PRs once the prerequisite infrastructure exists
+(`effort` needs a model-layer parameter; `memory` needs a scoped memory
+subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
+
+> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
+> its hook entries fire for every matching event in the session, not only
+> for that subagent's own tool calls. If two subagents with different
+> per-agent hook sets run concurrently, both sets fire for both agents.
+> Per-agent scope filtering at hook-firing time is left to a follow-up;
+> for v1, prefer per-agent hooks that are safe to fire globally for the
+> duration of the agent's run (e.g. logging) over hooks that mutate
+> behavior.
 
 #### Example Usage
 

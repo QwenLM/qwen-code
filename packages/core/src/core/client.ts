@@ -18,7 +18,10 @@ import process from 'node:process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
-import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -81,10 +84,15 @@ import {
 import {
   formatDateForContext,
   buildAddedMcpToolsReminder,
+  buildAddedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
 } from '../utils/environmentContext.js';
+import {
+  collectAvailableSkillEntries,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
@@ -208,6 +216,35 @@ export class GeminiClient {
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
+  // Dedup state for the per-turn skill/command "now available" delta reminders
+  // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
+  // set is seeded on the first drain from the current skills (the startup
+  // snapshot already listed them) and reset whenever the startup prelude is
+  // rebuilt (startChat), so a resumed/compacted session re-seeds from its fresh
+  // snapshot instead of re-announcing — mirrors Claude Code's
+  // suppressNextSkillListing / "don't re-inject on compact".
+  private announcedSkillReminderKeys = new Set<string>();
+  private skillRemindersInitialized = false;
+
+  private static skillEntryKey(e: AvailableSkillEntry): string {
+    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+  }
+
+  /**
+   * Seeds skill-reminder dedup from the entries actually rendered into the
+   * startup snapshot. Mirrors `rememberAnnouncedDeferredTools`: the dedup is
+   * seeded from what the model actually SAW, not from whatever happens to be
+   * current at the first drain (which may include late-registered MCP
+   * prompts/commands the snapshot never listed).
+   */
+  private seedSkillReminderDedupFromSnapshot(
+    snapshotEntries: AvailableSkillEntry[],
+  ): void {
+    this.announcedSkillReminderKeys = new Set(
+      snapshotEntries.map(GeminiClient.skillEntryKey),
+    );
+    this.skillRemindersInitialized = true;
+  }
 
   /**
    * Tracks the most recently injected date string to prevent injecting
@@ -249,7 +286,7 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation);
+      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
@@ -647,6 +684,29 @@ export class GeminiClient {
     });
   }
 
+  async addWorkingDirectoryChangedContext(
+    oldDir: string,
+    newDir: string,
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    this.cachedGitStatus = undefined;
+    await this.refreshSystemInstruction();
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [
+        {
+          text:
+            `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
+            `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
+        },
+      ],
+    });
+    await this.addDirectoryContext();
+  }
+
   private getCachedGitStatus(): string | null {
     if (this.cachedGitStatus === undefined) {
       // Mirror claude-code: append git status (branch + recent commits) to the
@@ -696,7 +756,10 @@ export class GeminiClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
     );
@@ -727,7 +790,10 @@ export class GeminiClient {
       return;
     }
 
-    const [startupContext] = await getInitialChatHistory(this.config);
+    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+      this.config,
+    );
+    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
     }
@@ -850,6 +916,103 @@ export class GeminiClient {
     });
   }
 
+  /**
+   * Per-turn delta for skills/commands that became invocable after session start
+   * — skills enabled mid-session (e.g. via `/skills`) and MCP prompts added after
+   * startup. Emitted as a tail `<system-reminder>` only, so it never mutates the
+   * cached tools/system/messages prefix. Deduped via `announcedSkillReminderKeys`.
+   *
+   * The first call after a (re)built startup prelude seeds the announced set from
+   * the current skills and emits nothing — the startup snapshot already listed
+   * them (mirrors Claude Code's `suppressNextSkillListing` and its decision not
+   * to re-inject the listing after compaction). Conditional path-activations are
+   * announced inline on the tool result by `coreToolScheduler`, so they are
+   * recorded here as announced (not re-queued) to avoid a double announcement.
+   */
+  private async drainSkillAndCommandReminders(): Promise<void> {
+    const toolRegistry = this.config.getToolRegistry();
+    // Only relevant when the model can actually invoke skills (subagents often
+    // run without the Skill tool).
+    if (!toolRegistry?.getTool(ToolNames.SKILL)) {
+      return;
+    }
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+
+    let entries: AvailableSkillEntry[];
+    try {
+      ({ entries } = await collectAvailableSkillEntries(
+        skillManager,
+        this.config,
+      ));
+    } catch (error) {
+      debugLogger.warn(
+        'drainSkillAndCommandReminders: collectAvailableSkillEntries failed',
+        error,
+      );
+      return;
+    }
+
+    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+
+    // Prune announced keys no longer present so a later re-enable / reconnect
+    // re-announces (mirrors the MCP added-tools prune above).
+    for (const key of this.announcedSkillReminderKeys) {
+      if (!currentKeys.has(key)) {
+        this.announcedSkillReminderKeys.delete(key);
+      }
+    }
+
+    // Safety net: if seedSkillReminderDedupFromSnapshot was never called (e.g.
+    // edge-case construction path), mark initialized but do NOT seed from
+    // current entries — no startup snapshot was shown to the model, so all
+    // entries are genuinely new and should be announced by the code below.
+    // Seeding here used to silently swallow late registrations (cmd:* keys
+    // and MCP prompts discovered after startChat) by marking them as
+    // "already announced" when the model had never seen them.
+    if (!this.skillRemindersInitialized) {
+      this.skillRemindersInitialized = true;
+    }
+
+    // Consume skill keys that coreToolScheduler announced inline on a tool
+    // result this turn (e.g. path-activated conditional skills). Mark them as
+    // announced so the drain below does not re-announce them. This fixes the
+    // subagent shared-SkillManager case: the inline reminder lands in the
+    // subagent's discarded transcript, but the parent's drain now skips those
+    // keys because the scheduler recorded them on the shared Config.
+    const inlineKeys = this.config.consumeInlineAnnouncedSkillKeys();
+    for (const key of inlineKeys) {
+      this.announcedSkillReminderKeys.add(key);
+    }
+
+    // Announce every genuinely new skill/command that was not already
+    // announced — either in the startup snapshot, a prior drain, or inline
+    // by coreToolScheduler above.
+    const newEntries: AvailableSkillEntry[] = [];
+    for (const entry of entries) {
+      const key = GeminiClient.skillEntryKey(entry);
+      if (this.announcedSkillReminderKeys.has(key)) {
+        continue;
+      }
+      this.announcedSkillReminderKeys.add(key);
+      newEntries.push(entry);
+    }
+
+    if (newEntries.length === 0) {
+      return;
+    }
+    const reminder = buildAddedSkillsReminder(newEntries);
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+  }
+
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
     switch (approvalMode) {
       case ApprovalMode.DEFAULT:
@@ -937,7 +1100,12 @@ export class GeminiClient {
       }
       const deferredTools = this.resolveDeferredToolsForReminder();
       this.rememberAnnouncedDeferredTools(deferredTools);
-      history = await getInitialChatHistory(this.config, extraHistory);
+      let snapshotEntries: AvailableSkillEntry[];
+      [history, snapshotEntries] = await getInitialChatHistory(
+        this.config,
+        extraHistory,
+      );
+      this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(
@@ -1353,49 +1521,7 @@ export class GeminiClient {
 
       const m = mcResult.meta;
       this.getChat().setHistory(mcResult.history);
-      // Disarm only the blanked files' fast-path, keeping
-      // read-before-write state intact (issue #4239; rationale on
-      // FileReadEntry.readResidentInHistory). Any blanked read we
-      // can't disarm surgically forces the old blanket wipe so a
-      // later Read can't get a dangling file_unchanged placeholder.
-      const fileReadCache = this.config.getFileReadCache();
-      if (m.unresolvedEvictedReads > 0) {
-        debugLogger.debug(
-          `[FILE_READ_CACHE] clear after microcompaction ` +
-            `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-        );
-        fileReadCache.clear();
-      } else {
-        // Concurrent stats — don't serialize N FS round-trips
-        // before the next turn.
-        const statResults = await Promise.all(
-          m.evictedReadPaths.map((p) =>
-            fsPromises.stat(p).catch(() => undefined),
-          ),
-        );
-        // A path is surgically disarmed only if it stats AND its
-        // inode matches the recorded entry. A failed stat or inode
-        // miss could leave a stale entry armed, so fall back to the
-        // blanket wipe if any path is unresolvable.
-        let fullyDisarmed = true;
-        for (const stats of statResults) {
-          if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-            fullyDisarmed = false;
-          }
-        }
-        if (fullyDisarmed) {
-          debugLogger.debug(
-            `[FILE_READ_CACHE] disarmed fast-path for ` +
-              `${m.evictedReadPaths.length} file(s) after microcompaction`,
-          );
-        } else {
-          debugLogger.debug(
-            '[FILE_READ_CACHE] clear after microcompaction ' +
-              '(an evicted path was unresolvable)',
-          );
-          fileReadCache.clear();
-        }
-      }
+      await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       debugLogger.debug(
         `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
           `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
@@ -1427,7 +1553,7 @@ export class GeminiClient {
       // submission, lastPrompt === fr parts) closes the pair via the real
       // `functionResponse` before we synthesize an error one. Doing the
       // repair here would happen pre-push and race against the user
-      // content's own pairing — see PR #4176 review for the corner.
+      // content's own pairing.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1661,6 +1787,19 @@ export class GeminiClient {
         if (messageType === SendMessageType.UserQuery) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+            try {
+              const latestSnapshot = this.config
+                .getFileHistoryService()
+                .getSnapshots()
+                .at(-1);
+              if (latestSnapshot) {
+                this.config
+                  .getChatRecordingService()
+                  ?.recordFileHistorySnapshot(latestSnapshot);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+            }
           } catch (e) {
             debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
           }
@@ -1720,7 +1859,7 @@ export class GeminiClient {
       // Prevent context updates from being sent while a tool call is
       // waiting for a response. The Qwen API requires that a functionResponse
       // part from the user immediately follows a functionCall part from the model
-      // in the conversation history . The IDE context is not discarded; it will
+      // in the conversation history. The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
       const historyLength = this.getHistoryLength();
       const lastMessage = this.peekLastHistoryEntry();
@@ -1769,6 +1908,7 @@ export class GeminiClient {
           messageType === SendMessageType.Cron)
       ) {
         this.drainPendingAddedMcpToolsReminder();
+        await this.drainSkillAndCommandReminders();
       }
 
       const turn = new Turn(this.getChat(), prompt_id);
@@ -2390,11 +2530,82 @@ export class GeminiClient {
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
-      // Re-send a full IDE context blob on the next regular message —
+      // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;
     }
+    return info;
+  }
+
+  /**
+   * Surgically disarm FileReadCache entries for files evicted by
+   * microcompaction. Falls back to a blanket clear() when any evicted
+   * path can't be resolved.
+   *
+   * Shared by the time-based microcompaction path and /compress-fast.
+   */
+  private async disarmFileReadCacheAfterEviction(
+    meta: MicrocompactMeta,
+    logTag: string,
+  ): Promise<void> {
+    const fileReadCache = this.config.getFileReadCache();
+    if (meta.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          `(${meta.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+      return;
+    }
+    if (meta.evictedReadPaths.length === 0) {
+      return;
+    }
+    const statResults = await Promise.all(
+      meta.evictedReadPaths.map((p) =>
+        fsPromises.stat(p).catch(() => undefined),
+      ),
+    );
+    let fullyDisarmed = true;
+    for (const stats of statResults) {
+      if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+        fullyDisarmed = false;
+      }
+    }
+    if (fullyDisarmed) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
+      );
+    } else {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          '(an evicted path was unresolvable)',
+      );
+      fileReadCache.clear();
+    }
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * FileReadCache disarming.
+   */
+  async tryCompressChatFast(): Promise<ChatCompressionInfo> {
+    const { info, microcompactMeta } = this.getChat().compressFast();
+
+    if (info.compressionStatus !== CompressionStatus.COMPRESSED) {
+      return info;
+    }
+
+    if (microcompactMeta) {
+      await this.disarmFileReadCacheAfterEviction(
+        microcompactMeta,
+        'compress-fast',
+      );
+    }
+    this.forceFullIdeContext = true;
+
     return info;
   }
 }

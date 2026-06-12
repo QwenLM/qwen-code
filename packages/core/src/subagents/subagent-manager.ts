@@ -7,6 +7,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { randomUUID } from 'crypto';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -35,8 +36,9 @@ import type {
   AgentEventEmitter,
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
-import type { Config } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
+import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -52,6 +54,8 @@ import {
   COLOR_VALUES,
   isColor,
   isPermissionMode,
+  parseAgentHooks,
+  parseAgentMcpServers,
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
@@ -655,6 +659,16 @@ export class SubagentManager {
       frontmatter['maxTurns'] = config.maxTurns;
     }
 
+    // Nested CC fields. Safe to round-trip with the eemeli/yaml parser; the
+    // previous skip-list carve-out is gone (see docs/yaml-parser-replacement.md).
+    if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+      frontmatter['mcpServers'] = config.mcpServers;
+    }
+
+    if (config.hooks && Object.keys(config.hooks).length > 0) {
+      frontmatter['hooks'] = config.hooks;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -666,11 +680,29 @@ export class SubagentManager {
   }
 
   /**
-   * Creates an AgentHeadless from a subagent configuration.
+   * Creates an AgentHeadless from a subagent configuration and returns a
+   * `dispose` callback that releases the per-spawn cleanup-bearing resources
+   * (ephemeral hook entries registered against the session's HookRegistry,
+   * the per-agent tool registry created when `mcpServers` triggers a force
+   * rebuild and the MCP child processes / sockets it owns).
+   *
+   * Callers MUST invoke `dispose` in a `finally` block around the
+   * `subagent.execute()` call. This is the only reliable way to clean up
+   * across every execute() exit path: the inner try/finally inside
+   * `AgentHeadless.execute()` does not fire `onStop` on the early-exit
+   * paths (`createChat()` returning null, `prepareTools()` throwing), and a
+   * leaked HookRegistry entry would fire globally for every matching event
+   * for the rest of the session; a leaked ToolRegistry would leave stdio
+   * child processes alive until process exit.
+   *
+   * `dispose` is idempotent — calling it twice is safe (the unregister
+   * callback filters by `agentScope` and is a no-op the second time; the
+   * registry's `stop()` is itself documented idempotent).
    *
    * @param config - Subagent configuration
    * @param runtimeContext - Runtime context
-   * @returns Promise resolving to AgentHeadless
+   * @returns the AgentHeadless and a `dispose` callback to run in the
+   *          caller's `finally` block.
    */
   async createAgentHeadless(
     config: SubagentConfig,
@@ -683,7 +715,38 @@ export class SubagentManager {
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
     },
-  ): Promise<AgentHeadless> {
+  ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
+    // Track per-spawn cleanup callbacks declared outside the inner
+    // `try/catch` so the catch can fire them on a constructor failure
+    // before the caller ever receives the return value. The successful
+    // path puts the same callbacks behind `dispose`. Both inner callbacks
+    // are idempotent at the source (`HookRegistry.addAgentHooks` filters
+    // by `agentScope`; `ToolRegistry.stop` is documented idempotent), so
+    // `runCleanup` doesn't need its own null-out guards — a duplicate
+    // invocation is at worst wasted work, never a re-fire of side effects.
+    let unregisterAgentHooks: (() => void) | undefined;
+    let disposeSubagentRegistry: (() => Promise<void>) | undefined;
+    const runCleanup = async (): Promise<void> => {
+      if (unregisterAgentHooks) {
+        try {
+          unregisterAgentHooks();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to unregister per-agent hooks: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (disposeSubagentRegistry) {
+        try {
+          await disposeSubagentRegistry();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to stop per-agent ToolRegistry: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    };
+
     try {
       const runtimeConfig = await this.convertToRuntimeConfig(
         config,
@@ -713,20 +776,57 @@ export class SubagentManager {
         runtimeContext,
       );
 
-      const subagentContext =
-        await this.buildSubagentContextOverride(runtimeContext);
+      const { context: subagentContext, cleanup } =
+        await this.buildSubagentContextOverride(runtimeContext, config);
+      disposeSubagentRegistry = cleanup;
 
-      return await AgentHeadless.create(
-        config.name,
-        subagentContext,
-        promptConfig,
-        modelConfig,
-        runConfig,
-        toolConfig,
-        options?.eventEmitter,
-        options?.hooks,
-        runtimeView,
-      );
+      // Register per-agent frontmatter hooks. The returned unregister callback
+      // is invoked from `dispose` (and from the catch block below on a
+      // constructor failure). v1 limitation: while the entries live in the
+      // registry they fire for every event of their declared type, regardless
+      // of which agent is currently active — proper per-agent scope filtering
+      // is deferred.
+      const hookSystem = runtimeContext.getHookSystem();
+      const hookRegistry = hookSystem?.getRegistry();
+      if (config.hooks && Object.keys(config.hooks).length > 0) {
+        if (hookRegistry) {
+          const agentScope = `agent:${config.name}:${randomUUID()}`;
+          unregisterAgentHooks = hookRegistry.addAgentHooks(
+            config.hooks as { [K in HookEventName]?: HookDefinition[] },
+            agentScope,
+          );
+        } else {
+          // Single outer guard; nested branch on hookRegistry. The pre-fix
+          // structure repeated the `config.hooks && Object.keys(...).length`
+          // predicate across two `if`/`else if` arms, which made it easy to
+          // drift one side during future edits.
+          debugLogger.warn(
+            `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
+          );
+        }
+      }
+
+      try {
+        const subagent = await AgentHeadless.create(
+          config.name,
+          subagentContext,
+          promptConfig,
+          modelConfig,
+          runConfig,
+          toolConfig,
+          options?.eventEmitter,
+          options?.hooks,
+          runtimeView,
+        );
+        return { subagent, dispose: runCleanup };
+      } catch (innerError) {
+        // The caller never received the return value — `dispose` cannot
+        // possibly fire. Run the cleanup ourselves so the registered hook
+        // entries and the rebuilt ToolRegistry don't leak past this
+        // constructor failure.
+        await runCleanup();
+        throw innerError;
+      }
     } catch (error) {
       if (error instanceof Error) {
         throw new SubagentError(
@@ -762,13 +862,97 @@ export class SubagentManager {
    */
   private async buildSubagentContextOverride(
     runtimeContext: Config,
-  ): Promise<Config> {
+    config: SubagentConfig,
+  ): Promise<{
+    context: Config;
+    /**
+     * Set only when this call force-rebuilt the registry to land per-agent
+     * MCP server connections. The freshly built registry owns stdio child
+     * processes / sockets that the parent's `Config.shutdown` cannot reach,
+     * so the caller (`createAgentHeadless`) carries this callback through
+     * to its `dispose` closure and runs it when the subagent terminates.
+     *
+     * Field name matches the `cleanup` field on
+     * `ApprovalModeOverrideHandle` (the sibling override-builder return
+     * shape) for cross-API consistency.
+     */
+    cleanup?: () => Promise<void>;
+  }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const subagentContext = Object.create(runtimeContext) as any as Config;
-    if (!hasRebuiltToolRegistry(runtimeContext)) {
+
+    // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
+    // session-level servers on key collision (more-specific-wins, matching
+    // CC's `scope: 'agent'` semantics). The runtime MCP loader still owns
+    // the per-spec discriminated union validation; this only widens the set
+    // of servers visible to the subagent's tool registry.
+    const hasAgentMcpServers =
+      config.mcpServers && Object.keys(config.mcpServers).length > 0;
+    if (hasAgentMcpServers) {
+      const sessionServers = runtimeContext.getMcpServers() ?? {};
+      // Cast: per-frontmatter specs share the same record-of-records shape as
+      // MCPServerConfig but the type assertion at this boundary is intentional
+      // — the discovery layer downstream will refuse malformed specs at
+      // connect time, surfacing a precise error instead of a typecheck noise.
+      const merged: Record<string, MCPServerConfig> = {
+        ...sessionServers,
+        ...(config.mcpServers as Record<string, MCPServerConfig>),
+      };
+      subagentContext.getMcpServers = () => merged;
+    }
+
+    // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed
+    // when per-agent `mcpServers` are present: without a fresh rebuild
+    // anchored on `subagentContext`, the existing wrapper-owned registry's
+    // McpClientManager would resolve `cliConfig.getMcpServers()` to the
+    // parent's session list and never see our merged override, so the
+    // discovery loop below would silently no-op. Forcing a rebuild here
+    // ties the manager to `subagentContext`, which is the only config in
+    // the chain that knows about the per-agent servers.
+    if (hasAgentMcpServers || !hasRebuiltToolRegistry(runtimeContext)) {
       await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
     }
-    return subagentContext;
+
+    // The freshly rebuilt subagent ToolRegistry is constructed with
+    // `skipDiscovery: true` and then back-fills tools by copying from the
+    // parent's registry — which only knows about the session-level MCP
+    // servers. Per-agent servers (or per-agent overrides of an existing
+    // server) therefore need explicit discovery here so their tools land in
+    // the subagent's registry before AgentHeadless runs. The discovery
+    // method is idempotent and de-dupes in-flight calls, so a key shared
+    // with the session set is safe to discover again — it picks up the
+    // override spec rather than the session one.
+    if (hasAgentMcpServers && config.mcpServers) {
+      const subagentRegistry = subagentContext.getToolRegistry();
+      const serverNames = Object.keys(config.mcpServers);
+      // Parallel discovery: one misbehaving server (e.g. a stdio command
+      // that hangs at startup) shouldn't serialise behind the others and
+      // delay the subagent spawn by the sum of every per-server timeout.
+      // Each call still carries the MCP layer's own per-server connect
+      // timeout (stdio default 30s, remote default 5s, per-spec override
+      // via `discoveryTimeoutMs`); `allSettled` only removes the
+      // serialisation between siblings. Rejections are logged-and-dropped
+      // so a single bad server doesn't block the others' tools from
+      // landing in the subagent's registry.
+      const results = await Promise.allSettled(
+        serverNames.map((name) =>
+          subagentRegistry.discoverToolsForServer(name),
+        ),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === 'rejected') {
+          debugLogger.warn(
+            `Failed to discover per-agent MCP server "${serverNames[i]}" for subagent "${config.name}": ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+          );
+        }
+      }
+      return {
+        context: subagentContext,
+        cleanup: () => subagentRegistry.stop(),
+      };
+    }
+    return { context: subagentContext };
   }
 
   /**
@@ -1163,7 +1347,15 @@ function parseSubagentContent(
     const description = String(descriptionRaw);
 
     // Extract optional fields
-    const tools = frontmatter['tools'] as string[] | undefined;
+    const toolsRaw = frontmatter['tools'];
+    const tools: string[] | undefined = Array.isArray(toolsRaw)
+      ? toolsRaw.filter((item): item is string => typeof item === 'string')
+      : typeof toolsRaw === 'string'
+        ? toolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined;
     const disallowedToolsRaw = frontmatter['disallowedTools'];
     const disallowedTools: string[] | undefined = Array.isArray(
       disallowedToolsRaw,
@@ -1172,7 +1364,10 @@ function parseSubagentContent(
           (item): item is string => typeof item === 'string',
         )
       : typeof disallowedToolsRaw === 'string'
-        ? [disallowedToolsRaw]
+        ? disallowedToolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
         : undefined;
     const modelRaw = frontmatter['model'];
     const legacyModelConfig = frontmatter['modelConfig'] as
@@ -1269,6 +1464,26 @@ function parseSubagentContent(
       );
     }
 
+    // mcpServers: record-of-records shape (CC `gS8` shallow validation).
+    // Strict per-spec union is deferred to the runtime MCP loader.
+    const mcpServersRaw = frontmatter['mcpServers'];
+    const mcpServers = parseAgentMcpServers(mcpServersRaw);
+    if (mcpServersRaw !== undefined && mcpServers === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid mcpServers (expected an object of server-name → spec). Dropping field.`,
+      );
+    }
+
+    // hooks: record-of-arrays shape (CC `TKO` shallow validation).
+    // Strict per-matcher union is deferred to the runtime hook subsystem.
+    const hooksRaw = frontmatter['hooks'];
+    const hooks = parseAgentHooks(hooksRaw);
+    if (hooksRaw !== undefined && hooks === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid hooks (expected an object of HookEventName → matcher array). Dropping field.`,
+      );
+    }
+
     const config: SubagentConfig = {
       name,
       description,
@@ -1284,6 +1499,8 @@ function parseSubagentContent(
       ...(background ? { background } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
     };
 
     // Validate the parsed configuration

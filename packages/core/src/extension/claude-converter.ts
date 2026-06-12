@@ -67,8 +67,10 @@ export interface ClaudeAgentConfig {
   permissionMode?: string;
   /** Skills to load into the subagent's context at startup */
   skills?: string[];
-  /** Hooks configuration */
+  /** Hooks configuration (CC `TKO` shape; nested per HookEventName) */
   hooks?: unknown;
+  /** Per-agent MCP server overrides (CC `gS8` shape; record of server-name → spec) */
+  mcpServers?: unknown;
   /** System prompt content */
   systemPrompt?: string;
   /** subagent color */
@@ -209,6 +211,9 @@ export function convertClaudeAgentConfig(
   if (claudeAgent.hooks) {
     qwenAgent['hooks'] = claudeAgent.hooks;
   }
+  if (claudeAgent.mcpServers) {
+    qwenAgent['mcpServers'] = claudeAgent.mcpServers;
+  }
   if (claudeAgent.skills && claudeAgent.skills.length > 0) {
     qwenAgent['skills'] = claudeAgent.skills;
   }
@@ -262,7 +267,10 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         model: frontmatter['model'] as string | undefined,
         permissionMode: frontmatter['permissionMode'] as string | undefined,
         skills: parseStringOrArray(frontmatter['skills']),
-        hooks: frontmatter['hooks'],
+        hooks: frontmatter['hooks'] as ClaudeAgentConfig['hooks'],
+        mcpServers: frontmatter[
+          'mcpServers'
+        ] as ClaudeAgentConfig['mcpServers'],
         color: frontmatter['color'] as string | undefined,
         systemPrompt: body.trim(),
       };
@@ -270,7 +278,7 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
       // Convert to Qwen format
       const qwenAgent = convertClaudeAgentConfig(claudeAgent);
 
-      // Build new frontmatter (excluding systemPrompt as it goes in body)
+      // Build new frontmatter (excluding systemPrompt as it goes in body).
       const newFrontmatter: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(qwenAgent)) {
         if (key !== 'systemPrompt' && value !== undefined) {
@@ -278,8 +286,12 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         }
       }
 
-      // Write converted content back
-      const newYaml = stringifyYaml(newFrontmatter);
+      // Write converted content back. Trim to drop the trailing newline
+      // `yaml.stringify` appends so the assembled file has the same single
+      // blank line between the closing `---` and the body that
+      // `subagent-manager.ts:serializeSubagent` produces — without `.trim()`
+      // the converter emits an extra blank line before the closing `---`.
+      const newYaml = stringifyYaml(newFrontmatter).trim();
       const systemPrompt = (qwenAgent['systemPrompt'] as string) || body.trim();
       const newContent = `---
 ${newYaml}
