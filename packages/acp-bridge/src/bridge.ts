@@ -3262,21 +3262,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 : ''),
           );
           // Persist to session JSONL so it survives daemon restart
-          if (nextDisplayName !== undefined) {
-            entry.connection
-              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
-                sessionId,
-                displayName: nextDisplayName,
-                titleSource: 'manual',
-              })
-              .catch((err: unknown) => {
-                writeStderrLine(
-                  `qwen serve: failed to persist displayName for ${sessionId}: ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
-                );
-              });
-          }
+          entry.connection
+            .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+              sessionId,
+              displayName: nextDisplayName ?? '',
+              titleSource: 'manual',
+            })
+            .catch((err: unknown) => {
+              writeStderrLine(
+                `qwen serve: failed to persist displayName for ${sessionId}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            });
           try {
             entry.events.publish({
               type: 'session_metadata_updated',

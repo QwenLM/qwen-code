@@ -945,7 +945,7 @@ export class ChatRecordingService {
    * as a user-visible error or interrupt recording.
    */
   private maybeTriggerAutoTitle(): void {
-    if (this.currentTitleSource === 'manual') return;
+    if (this.currentCustomTitle) return;
     if (this.autoTitleController) return;
     if (this.autoTitleAttempts >= AUTO_TITLE_ATTEMPT_CAP) return;
     // Opt-out env var — lets users silence auto-titling without having to
@@ -981,7 +981,7 @@ export class ChatRecordingService {
         if (controller.signal.aborted) return;
         // Re-check in case a /rename landed while the LLM call was in flight —
         // manual wins. In-process is the common path.
-        if (this.currentTitleSource === 'manual') return;
+        if ((this.currentTitleSource ?? 'manual') === 'manual') return;
         // Cross-process guard: another CLI tab writing to the same JSONL
         // could have renamed (manually) since we started. Re-read the file's
         // latest title record before we append so we don't clobber it.

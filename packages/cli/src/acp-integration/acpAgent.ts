@@ -5431,9 +5431,9 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const source =
           titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
-        const ok = session
-          .getChatRecordingService()
-          .recordCustomTitle(displayName, source);
+        const recording = session.getConfig().getChatRecordingService();
+        const ok = recording?.recordCustomTitle(displayName, source) ?? false;
+        if (ok) await recording!.flush();
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {

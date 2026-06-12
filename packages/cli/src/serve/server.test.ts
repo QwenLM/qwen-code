@@ -3200,14 +3200,13 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: storedOnlyId,
             workspaceCwd: WS_BOUND,
-            title: 'stored only prompt',
+            displayName: 'stored only prompt',
             clientCount: 0,
             hasActivePrompt: false,
           }),
           expect.objectContaining({
             sessionId: liveAndStoredId,
             workspaceCwd: WS_BOUND,
-            title: 'stored live prompt',
             displayName: 'Live display name',
             clientCount: 3,
             hasActivePrompt: true,
