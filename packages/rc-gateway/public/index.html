@@ -233,6 +233,11 @@
       </div>
       <div id="snooze-status">(unknown)</div>
     </section>
+    <section id="digest">
+      <strong>Missed while quiet (digest)</strong> (requires owner scope)
+      <div><button id="digest-btn">Refresh digest</button></div>
+      <div id="digest-list">(not loaded)</div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -1341,6 +1346,48 @@
           }
         } catch (e) {
           out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Push digest (cycle 72): GET /rc/push/digest (OWNER) — what quiet hours
+      // suppressed, per subscription ("while you were away"). textContent-only.
+      $('digest-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('digest-list');
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/push/digest', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : 'digest failed (' + res.status + ')';
+            return;
+          }
+          const body = await res.json();
+          const digests = Array.isArray(body.digests) ? body.digests : [];
+          out.textContent = '';
+          if (digests.length === 0) {
+            out.textContent = '(nothing missed)';
+            return;
+          }
+          for (const d of digests) {
+            const row = document.createElement('div');
+            row.className = 'token-row';
+            const byKind = Object.keys(d.byKind || {})
+              .map((k) => k + ':' + d.byKind[k])
+              .join(', ');
+            row.textContent =
+              d.subscriptionId +
+              '  total=' +
+              d.total +
+              (byKind ? '  (' + byKind + ')' : '');
+            out.appendChild(row);
+          }
+        } catch (e) {
+          out.textContent = 'digest error: ' + e;
         }
       };
 
