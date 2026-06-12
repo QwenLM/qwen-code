@@ -428,7 +428,9 @@ jobs:
                   echo "::error::Published macOS desktop releases require APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID for notarization."
                   exit 1
                 fi
-                append_env "NOTARIZE" "true"
+                # electron-builder (>=24) auto-notarizes via notarytool when
+                # APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID are present
+                # in the env (appended below); no explicit flag is required.
               fi
 
               append_env "CSC_LINK" "$mac_csc_link"
