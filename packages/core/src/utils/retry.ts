@@ -270,6 +270,12 @@ export async function retryWithBackoff<T>(
   let iterationCount = 0;
   let retryTotalDelayMs = 0;
 
+  // Tracks the most recent response that failed `shouldRetryOnContent`, so that
+  // when content retries exhaust the attempt budget we can return that
+  // best-effort result (with its real content) instead of a context-free error.
+  let lastContentResult: T | undefined;
+  let hadContentRetry = false;
+
   while (attempt < maxAttempts) {
     attempt++;
     iterationCount++;
@@ -284,6 +290,8 @@ export async function retryWithBackoff<T>(
         shouldRetryOnContent &&
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
+        lastContentResult = result;
+        hadContentRetry = true;
         const delayMs = getRetryDelayMs({
           // attempt: 1 — currentDelay already tracks exponential growth;
           // getRetryDelayMs is called here only for jitter calculation.
@@ -493,8 +501,15 @@ export async function retryWithBackoff<T>(
       }
     }
   }
-  // This line should theoretically be unreachable due to the throw in the catch block.
-  // Added for type safety and to satisfy the compiler that a promise is always returned.
+  // The loop only falls through here when `shouldRetryOnContent` retries
+  // exhausted the attempt budget — the error path always throws inside the
+  // catch, and persistent mode clamps `attempt` so it never exits normally.
+  // Return the last response we received (best-effort) so the caller keeps the
+  // actual content and its context rather than a context-free error.
+  if (hadContentRetry) {
+    return lastContentResult as T;
+  }
+  // Defensive fallback for type safety; not expected to be reached.
   throw new Error('Retry attempts exhausted');
 }
 

@@ -205,7 +205,7 @@ describe('retryWithBackoff', () => {
       expect(fn).toHaveBeenCalledTimes(2);
     });
 
-    it('exhausts attempts when content stays invalid', async () => {
+    it('returns the last response when content stays invalid through all attempts', async () => {
       const bad = { text: 'bad' } as unknown;
       const fn = vi.fn().mockResolvedValue(bad);
 
@@ -215,12 +215,10 @@ describe('retryWithBackoff', () => {
         shouldRetryOnContent: () => true,
       });
 
-      // eslint-disable-next-line vitest/valid-expect
-      const assertion = expect(promise).rejects.toThrow(
-        'Retry attempts exhausted',
-      );
       await vi.runAllTimersAsync();
-      await assertion;
+      // Best-effort: after exhausting content retries, the caller gets the last
+      // (still-invalid) response with its real content, not a context-free error.
+      await expect(promise).resolves.toBe(bad);
       expect(fn).toHaveBeenCalledTimes(3);
     });
 
