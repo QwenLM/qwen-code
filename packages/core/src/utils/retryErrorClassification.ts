@@ -108,14 +108,38 @@ export function classifyRetryError(
     };
   }
 
+  // Check transport-level codes before the HTTP status block, but only when the
+  // status is itself transient (5xx) or absent. An error can carry both an HTTP
+  // status and a transport cause (e.g. an SDK error with status 500 whose
+  // `cause` is ECONNRESET); the socket-level failure is the more fundamental
+  // classification, so it wins, with the HTTP status reported as secondary
+  // context. A definitive 4xx status (auth/client error) stays authoritative —
+  // a transient socket code must not relabel a permanent failure as retryable.
+  const transportCode = getTransportCode(error);
+  if (
+    transportCode !== undefined &&
+    (statusCode === undefined || statusCode >= 500)
+  ) {
+    return {
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'transport-error',
+      transportCode,
+      ...(statusCode !== undefined ? { statusCode } : {}),
+    };
+  }
+
   if (statusCode !== undefined) {
     const kind: RetryErrorKind =
       details.transport === 'sse' ? 'sse-provider' : 'http';
 
     if (statusCode === 529) {
+      // Retryable here: this PR retries 529 via isTransientCapacityError and
+      // does not implement model/provider fallback. Labeling it
+      // "fallback-eligible" would imply behavior that does not exist yet.
       return {
         kind,
-        diagnosis: 'fallback-eligible',
+        diagnosis: 'retryable',
         reason: 'capacity-overload',
         ...common,
       };
@@ -153,16 +177,6 @@ export function classifyRetryError(
       diagnosis: 'unknown',
       reason: 'http-status',
       ...common,
-    };
-  }
-
-  const transportCode = getTransportCode(error);
-  if (transportCode !== undefined) {
-    return {
-      kind: 'transport',
-      diagnosis: 'retryable',
-      reason: 'transport-error',
-      transportCode,
     };
   }
 

@@ -208,12 +208,12 @@ describe('classifyRetryError', () => {
     });
   });
 
-  it('classifies 529 as fallback-eligible capacity overload', () => {
+  it('classifies 529 as retryable capacity overload', () => {
     expect(
       classifyRetryError({ status: 529, message: 'Overloaded' }),
     ).toMatchObject({
       kind: 'http',
-      diagnosis: 'fallback-eligible',
+      diagnosis: 'retryable',
       statusCode: 529,
       reason: 'capacity-overload',
     });
@@ -226,7 +226,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'sse-provider',
-      diagnosis: 'fallback-eligible',
+      diagnosis: 'retryable',
       statusCode: 529,
       providerCode: 'Overloaded',
       providerMessage: 'Provider overloaded',
@@ -293,6 +293,61 @@ describe('classifyRetryError', () => {
       diagnosis: 'retryable',
       transportCode: 'ECONNRESET',
       reason: 'transport-error',
+    });
+  });
+
+  it('prefers a transport cause over an HTTP status when both are present', () => {
+    // An SDK error can surface an HTTP status while its underlying cause is a
+    // socket-level failure. The transport cause is the more fundamental
+    // classification and wins, with the HTTP status reported as secondary.
+    const error = Object.assign(new Error('upstream failed'), {
+      status: 500,
+      cause: Object.assign(new Error('socket reset'), {
+        code: 'ECONNRESET',
+      }),
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'transport',
+      diagnosis: 'retryable',
+      transportCode: 'ECONNRESET',
+      statusCode: 500,
+      reason: 'transport-error',
+    });
+  });
+
+  it('keeps a definitive 4xx status authoritative over a transport cause', () => {
+    // A 401 that also carries a socket-level cause must stay fail-fast: the
+    // server reached a verdict, so a transient cause must not relabel it
+    // retryable.
+    const error = Object.assign(new Error('unauthorized'), {
+      status: 401,
+      cause: Object.assign(new Error('socket reset'), {
+        code: 'ECONNRESET',
+      }),
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'http',
+      diagnosis: 'fail-fast',
+      statusCode: 401,
+      reason: 'auth-error',
+    });
+  });
+
+  it('classifies allocated-quota errors from direct properties as fail-fast', () => {
+    expect(
+      classifyRetryError({
+        status: 429,
+        code: 'Throttling.AllocationQuota',
+        message: 'Allocated quota exceeded',
+      }),
+    ).toMatchObject({
+      kind: 'provider-business',
+      diagnosis: 'fail-fast',
+      reason: 'allocated-quota-exceeded',
+      statusCode: 429,
+      providerCode: 'Throttling.AllocationQuota',
     });
   });
 
