@@ -318,7 +318,7 @@ jobs:
         run: |
           VERDICT_FILE="$TRIAGE_RESULTS_DIR/product-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
-            VERDICT=$(jq -r '.verdict // "pass"' "$VERDICT_FILE")
+            VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
           else
             if [ "$RUN_OUTCOME" = "success" ]; then
               VERDICT="pass"
@@ -523,7 +523,7 @@ jobs:
     permissions:
       contents: 'read'
     outputs:
-      verdict: '${{ steps.run.outputs.verdict }}'
+      verdict: '${{ steps.run.outputs.verdict || steps.skip_verdict.outputs.verdict }}'
     steps:
       # Guard: the PR may have been merged or closed while review was running.
       # refs/pull/N/merge disappears when the PR is not open or has conflicts,
@@ -543,6 +543,11 @@ jobs:
           else
             echo "should_test=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: 'Set skipped verdict'
+        if: "steps.pr_state.outputs.should_test != 'true'"
+        id: 'skip_verdict'
+        run: 'echo "verdict=skipped" >> "$GITHUB_OUTPUT"'
 
       - name: 'Checkout PR code'
         if: "steps.pr_state.outputs.should_test == 'true'"
@@ -690,7 +695,7 @@ jobs:
           # fail only when no verdict was produced, so fallback-comment fires.
           VERDICT_FILE="/tmp/triage-results/approval-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
-            VERDICT=$(jq -r '.verdict // "approve"' "$VERDICT_FILE")
+            VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
             echo "::notice::Approval decision verdict: $VERDICT"
             if [ "$RUN_OUTCOME" != "success" ]; then
               echo "::warning::approval-decision action exited non-zero (likely the session-turn limit) but the verdict file is present — treating the stage as complete."
@@ -702,7 +707,7 @@ jobs:
 
   # ─── Fallback: post comment if pipeline fails unexpectedly ─────────
   fallback-comment:
-    needs: ['resolve', 'product-decision', 'review', 'approval-decision']
+    needs: ['resolve', 'product-decision', 'review', 'tmux-testing', 'approval-decision']
     if: >-
       failure() &&
       needs.resolve.outputs.pr_number != ''
