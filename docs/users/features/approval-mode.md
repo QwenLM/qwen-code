@@ -362,10 +362,10 @@ qwen --prompt "Run the test suite, fix all failing tests, then commit changes"
 
 ### Keyboard Shortcut Switching
 
-During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the four modes:
+During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the five modes:
 
 ```
-Ask Permissions Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Ask Permissions Mode
+Plan Mode → Ask Permissions Mode → Auto-Edit Mode → Auto Mode → YOLO Mode → Plan Mode
 ```
 
 ### Persistent Configuration
