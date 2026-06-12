@@ -2600,6 +2600,144 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('tryCompressChatFast', () => {
+    let mcTmpDir: string;
+
+    // Real on-disk files so client.ts's `fsPromises.stat(filePath)` succeeds.
+    // `node:fs` is mocked but `node:fs/promises` is not.
+    beforeEach(async () => {
+      mcTmpDir = await mkdtemp(join(tmpdir(), 'qwen-compress-fast-'));
+    });
+    afterEach(async () => {
+      await rm(mcTmpDir, { recursive: true, force: true });
+    });
+
+    it('returns early on NOOP without touching FileReadCache', async () => {
+      const { clear } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(compressFast).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(false);
+    });
+
+    it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 2,
+          evictedReadPaths: [],
+          toolsCleared: 3,
+          mediaCleared: 0,
+          tokensSaved: 800,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('performs surgical disarm and falls back to clear() on inode miss', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValueOnce(false); // inode mismatch
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 300,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 2,
+          mediaCleared: 0,
+          tokensSaved: 700,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).toHaveBeenCalledOnce();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValue(true); // all match
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 400,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          toolsCleared: 1,
+          mediaCleared: 0,
+          tokensSaved: 600,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      await writeFile(join(mcTmpDir, 'test-file.ts'), 'test content');
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+  });
+
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
   // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
