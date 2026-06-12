@@ -581,6 +581,68 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
     });
 
+    it('seeds recently completed tools from resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_pending',
+                      name: 'write_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
+    });
+
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
@@ -1644,6 +1706,14 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
+
+    it('clears recently completed tools', async () => {
+      client.recordCompletedToolCall('read_file');
+
+      await client.resetChat();
+
+      expect(client['recentCompletedToolNames']).toEqual([]);
     });
   });
 

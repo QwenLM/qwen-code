@@ -297,6 +297,7 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
@@ -641,6 +642,7 @@ export class GeminiClient {
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     this.lastHookMicrocompactionTimestamp = null;
+    this.recentCompletedToolNames = [];
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
@@ -1499,15 +1501,7 @@ export class GeminiClient {
     toolName: string,
     args?: Record<string, unknown>,
   ): void {
-    const normalizedToolName = toolName.trim();
-    if (normalizedToolName) {
-      this.recentCompletedToolNames = [
-        ...this.recentCompletedToolNames.filter(
-          (name) => name !== normalizedToolName,
-        ),
-        normalizedToolName,
-      ].slice(-MAX_RECENT_TOOL_NAMES_FOR_MEMORY);
-    }
+    this.rememberCompletedToolName(toolName);
 
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
@@ -1519,6 +1513,45 @@ export class GeminiClient {
       }
     }
     this.toolCallCount += 1;
+  }
+
+  private rememberCompletedToolName(toolName: string): void {
+    const normalizedToolName = toolName.trim();
+    if (!normalizedToolName) {
+      return;
+    }
+    this.recentCompletedToolNames = [
+      ...this.recentCompletedToolNames.filter(
+        (name) => name !== normalizedToolName,
+      ),
+      normalizedToolName,
+    ].slice(-MAX_RECENT_TOOL_NAMES_FOR_MEMORY);
+  }
+
+  private seedRecentCompletedToolNamesFromHistory(history: Content[]): void {
+    const completedCallIds = new Set<string>();
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const responseId = part.functionResponse?.id;
+        if (responseId) {
+          completedCallIds.add(responseId);
+        }
+      }
+    }
+
+    this.recentCompletedToolNames = [];
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const call = part.functionCall;
+        if (!call?.name) {
+          continue;
+        }
+        if (call.id && !completedCallIds.has(call.id)) {
+          continue;
+        }
+        this.rememberCompletedToolName(call.name);
+      }
+    }
   }
 
   private async microcompactIdleHistory(
