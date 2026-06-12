@@ -747,7 +747,12 @@
         const row = document.createElement('div');
         row.className = 'token-row';
         const head = document.createElement('div');
-        const date = new Date(s.createdAt).toISOString().slice(0, 16);
+        // Guard a hand-corrupted store: a bad createdAt must degrade THIS row,
+        // not throw and blank the whole list (the loop runs inside one try).
+        const d = new Date(s.createdAt);
+        const date = Number.isNaN(d.getTime())
+          ? '?'
+          : d.toISOString().slice(0, 16);
         head.textContent =
           s.id +
           '  created ' +
