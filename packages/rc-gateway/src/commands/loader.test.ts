@@ -345,3 +345,30 @@ describe('CommandLoader mtime cache (cycle 78)', () => {
     expect(r2[0].description).toBe('does a much more thoroughly');
   });
 });
+
+describe('CommandLoader parse_failed dedup survives a cache miss (cycle 78)', () => {
+  it('does not re-audit a still-broken file when an unrelated change invalidates the cache', async () => {
+    const audit = new FakeAudit();
+    // A broken command file (invalid scope) → parse_failed once on first load.
+    await writeFile(
+      join(workspaceDir, 'bad.md'),
+      '---\nname: bad\ndescription: bad\nscope: owner\n---\nbody',
+    );
+    const l = loader(audit);
+    await l.load();
+    const countAfterFirst = audit.entries.filter(
+      (e) => e.action === 'slash_command_parse_failed',
+    ).length;
+    expect(countAfterFirst).toBe(1);
+
+    // Force a cache MISS via an unrelated valid file → the broken file is
+    // re-parsed, but the warnedParseFailures dedup must suppress a re-audit.
+    await writeFile(join(userDir, 'ok.md'), VALID('ok'));
+    const cmds = await l.load();
+    expect(cmds.map((c) => c.name)).toContain('ok'); // proves the cache missed
+    const countAfterMiss = audit.entries.filter(
+      (e) => e.action === 'slash_command_parse_failed',
+    ).length;
+    expect(countAfterMiss).toBe(1); // still once across the genuine re-parse
+  });
+});
