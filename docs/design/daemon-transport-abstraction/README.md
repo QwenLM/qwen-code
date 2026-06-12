@@ -365,40 +365,25 @@ Parallel `AcpSessionProvider` + `ChatBridgeContext` + `SessionBridgeContext`.
 
 ---
 
-## 6. Implementation plan
+## 6. Implementation plan (single PR)
 
-### PR 1: DaemonTransport interface + RestSseTransport extraction (~178 lines)
+All changes land in one PR. Estimated ~1300 lines total.
 
 | File | Change | Lines |
 |------|--------|-------|
-| `packages/sdk-typescript/src/daemon/DaemonTransport.ts` | New: interface + types + `DaemonTransportClosedError` | ~50 |
-| `packages/sdk-typescript/src/daemon/RestSseTransport.ts` | New: wraps `globalThis.fetch` + SSE logic extracted from DaemonClient | ~80 |
+| `packages/sdk-typescript/src/daemon/DaemonTransport.ts` | Interface + types + `DaemonTransportClosedError` + `negotiate()` factory | ~110 |
+| `packages/sdk-typescript/src/daemon/RestSseTransport.ts` | Wraps `globalThis.fetch` + SSE logic extracted from DaemonClient | ~80 |
+| `packages/sdk-typescript/src/daemon/AcpWsTransport.ts` | WS multiplexer + URL→JSON-RPC mapping + request correlation | ~400 |
+| `packages/sdk-typescript/src/daemon/AcpHttpTransport.ts` | POST /acp + conn/session SSE management | ~300 |
+| `packages/sdk-typescript/src/daemon/AcpEventDenormalizer.ts` | JSON-RPC notification → DaemonEvent mapping | ~150 |
+| `packages/sdk-typescript/src/daemon/AutoReconnectTransport.ts` | Opt-in wrapper: reconnect + fallback | ~150 |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Constructor + 6 `_fetch` sites + subscribeEvents rewrite | ~40 net |
-| `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~5 |
+| `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~10 |
+| `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` | ~5 |
+| Tests | Transport unit + integration tests | ~200 |
 
-**Zero behavioral change**: all existing tests pass unchanged.
-
-### PR 2: AcpWsTransport (~400-600 lines, follow-up)
-
-| File | Change |
-|------|--------|
-| `packages/sdk-typescript/src/daemon/AcpWsTransport.ts` | WS multiplexer + URL→JSON-RPC mapping |
-| `packages/sdk-typescript/src/daemon/AcpEventDenormalizer.ts` | JSON-RPC notification → DaemonEvent |
-| Tests | WS integration tests |
-
-### PR 3: AcpHttpTransport (optional, ~800 lines, follow-up)
-
-### PR 4: Transport auto-detection + runtime fallback (~250 lines)
-
-| File | Change | Lines |
-|------|--------|-------|
-| `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` response | ~5 |
-| `packages/sdk-typescript/src/daemon/DaemonTransport.ts` | Add `negotiate()` static factory | ~60 |
-| `packages/sdk-typescript/src/daemon/AutoReconnectTransport.ts` | Optional wrapper: reconnect + fallback | ~150 |
-| `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~3 |
-
-**Zero impact on existing**: `GET /capabilities` adds a field (additive);
-`negotiate()` and `AutoReconnectTransport` are new opt-in APIs.
+**Backward compatibility**: `new DaemonClient({ baseUrl, token })` without
+`transport` = identical REST+SSE behavior. All existing tests pass unchanged.
 
 ---
 
