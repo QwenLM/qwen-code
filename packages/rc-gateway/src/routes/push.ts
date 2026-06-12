@@ -283,5 +283,19 @@ export function createPushRouter(
     res.status(200).json({ sent: store.listFor(req.rcClient!.id).length });
   });
 
+  // GET /digest — owner-only summary of pushes suppressed during quiet hours
+  // ("what you missed while away", the read half of design D4). The router is
+  // mounted under session:read; owner is required in-handler (mirrors the
+  // ?all=true subscriptions path). Counts/ids/kind only — no secret material.
+  router.get('/digest', (req, res) => {
+    if (!req.rcClient!.scopes.includes(OWNER)) {
+      res
+        .status(403)
+        .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+      return;
+    }
+    res.status(200).json({ digests: notifier.digestSummary() });
+  });
+
   return router;
 }

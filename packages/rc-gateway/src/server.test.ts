@@ -328,6 +328,36 @@ describe('gateway app', () => {
     expect(withCoalesce.notifier).toBeDefined();
   });
 
+  it('GET /rc/push/digest returns {digests:[]} for owner, 403 for non-owner (cycle 71)', async () => {
+    const { url, pairing } = await boot();
+    const owner = pairing.mint([OWNER, SESSION_READ]);
+    const ownerToken = await (
+      await fetch(`${url}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: owner.code, label: 'owner' }),
+      })
+    ).json();
+    const dr = await fetch(`${url}/rc/push/digest`, {
+      headers: { Authorization: `Bearer ${ownerToken.token}` },
+    });
+    expect(dr.status).toBe(200);
+    expect(await dr.json()).toEqual({ digests: [] });
+
+    const reader = pairing.mint([SESSION_READ]);
+    const readerToken = await (
+      await fetch(`${url}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: reader.code, label: 'reader' }),
+      })
+    ).json();
+    const dr2 = await fetch(`${url}/rc/push/digest`, {
+      headers: { Authorization: `Bearer ${readerToken.token}` },
+    });
+    expect(dr2.status).toBe(403);
+  });
+
   it('createGatewayApp returns the audit instance', async () => {
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });

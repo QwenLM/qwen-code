@@ -46,6 +46,7 @@ import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
 import { PushCoalescer } from './webpush/coalescer.js';
+import { PushDigest } from './webpush/digest.js';
 import type { SnoozeStore } from './routing/snooze.js';
 import type { RoutingMatcher } from './routing/rules.js';
 import {
@@ -300,6 +301,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     const coalesceWindowMs =
       deps.coalesceWindowMs ?? (Number(process.env.QWEN_RC_COALESCE_MS) || 0);
     const coalescer = new PushCoalescer(coalesceWindowMs);
+    // Always-on digest tracker (cycle 71): records what quiet hours suppressed
+    // ("while you were away"); record-only, never affects delivery.
+    const digest = new PushDigest();
     notifier = new PushNotifier(
       deps.store,
       deps.pushStore,
@@ -310,6 +314,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       deps.routing,
       rateLimiter,
       coalescer,
+      digest,
     );
     app.use(
       '/rc/push',
