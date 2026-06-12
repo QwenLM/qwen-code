@@ -650,6 +650,29 @@ export class GeminiClient {
     });
   }
 
+  async addWorkingDirectoryChangedContext(
+    oldDir: string,
+    newDir: string,
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    this.cachedGitStatus = undefined;
+    await this.refreshSystemInstruction();
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [
+        {
+          text:
+            `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
+            `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
+        },
+      ],
+    });
+    await this.addDirectoryContext();
+  }
+
   private getCachedGitStatus(): string | null {
     if (this.cachedGitStatus === undefined) {
       // Mirror claude-code: append git status (branch + recent commits) to the

@@ -115,6 +115,8 @@ export default {
     'List available Qwen Code tools. Usage: /tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     'Open the skills panel (browse, search, toggle, pick).',
+  'Move this session to a new working directory':
+    'Move this session to a new working directory',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',

@@ -23,6 +23,13 @@ vi.mock('../ui/commands/approvalModeCommand.js', () => ({
     kind: 'built-in',
   },
 }));
+vi.mock('../ui/commands/cdCommand.js', () => ({
+  cdCommand: {
+    name: 'cd',
+    description: 'Change directory command',
+    kind: 'built-in',
+  },
+}));
 
 vi.mock('../ui/commands/ideCommand.js', async () => {
   const { CommandKind } = await import('../ui/commands/types.js');
@@ -177,6 +184,10 @@ describe('BuiltinCommandLoader', () => {
     const approvalModeCmd = commands.find((c) => c.name === 'approval-mode');
     expect(approvalModeCmd).toBeDefined();
     expect(approvalModeCmd?.kind).toBe(CommandKind.BUILT_IN);
+
+    const cdCmd = commands.find((c) => c.name === 'cd');
+    expect(cdCmd).toBeDefined();
+    expect(cdCmd?.kind).toBe(CommandKind.BUILT_IN);
 
     const ideCmd = commands.find((c) => c.name === 'ide');
     expect(ideCmd).toBeDefined();
