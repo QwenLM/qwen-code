@@ -412,6 +412,18 @@ jobs:
             fail "Qwen review completed but produced no output."
           fi
 
+          if grep -Eq '^\[API Error:' "$LOG_PATH"; then
+            fail "Qwen review log contains a top-level API error."
+          fi
+
+          last_result="$(grep '"type":"result"' "$LOG_PATH" | tail -n 1 || true)"
+          if [ -n "$last_result" ] && printf '%s\n' "$last_result" | grep -Eq '"is_error":[[:space:]]*true'; then
+            fail "Qwen review result reported is_error=true."
+          fi
+          if [ -n "$last_result" ] && printf '%s\n' "$last_result" | grep -Eq '\[API Error:'; then
+            fail "Qwen review result contains an API error."
+          fi
+
       - name: 'Post fallback comment on failure'
         if: |-
           failure() &&
