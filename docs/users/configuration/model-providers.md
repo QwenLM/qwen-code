@@ -303,6 +303,7 @@ When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth
 | ---------------------- | -------------------- | --------------------------------------------------------- |
 | `qwen3.5-plus`         | qwen3.5-plus         | Advanced model with thinking enabled                      |
 | `qwen3.6-plus`         | qwen3.6-plus         | Latest model with thinking enabled (Pro subscribers only) |
+| `qwen3.7-plus`         | qwen3.7-plus         | Advanced model with thinking enabled                      |
 | `qwen3-coder-plus`     | qwen3-coder-plus     | Optimized for coding tasks                                |
 | `qwen3-coder-next`     | qwen3-coder-next     | Experimental coding model                                 |
 | `qwen3-max-2026-01-23` | qwen3-max-2026-01-23 | Latest max model with thinking enabled                    |
