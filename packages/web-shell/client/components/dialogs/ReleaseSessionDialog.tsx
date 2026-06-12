@@ -44,7 +44,7 @@ export function ReleaseSessionDialog({
     ? sessions.filter((s) => {
         const q = searchQuery.toLowerCase();
         return (
-          (s.displayName || s.title || '').toLowerCase().includes(q) ||
+          (s.displayName || '').toLowerCase().includes(q) ||
           s.sessionId.toLowerCase().includes(q)
         );
       })
@@ -274,7 +274,7 @@ export function ReleaseSessionDialog({
                     {i === selectedIdx && !searchMode ? '›' : ' '}
                   </span>
                   <span className={dp('resume-picker-item-title')}>
-                    {s.displayName || s.title || s.sessionId.slice(0, 8)}
+                    {s.displayName || s.sessionId.slice(0, 8)}
                   </span>
                   {isCurrent && (
                     <span className={dp('resume-picker-item-badge')}>
