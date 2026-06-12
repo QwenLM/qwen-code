@@ -724,7 +724,10 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -3030,7 +3033,10 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -3119,7 +3125,10 @@ describe('CoreToolScheduler', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -8103,7 +8112,10 @@ describe('Fire hook functions integration', () => {
         }),
         storage: {
           getProjectTempDir: () => '/tmp',
+          getToolResultsDir: () => '/tmp/tool-results',
         },
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
