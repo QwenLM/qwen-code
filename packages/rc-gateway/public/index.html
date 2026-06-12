@@ -47,7 +47,8 @@
         font-size: 0.8rem;
       }
       #log,
-      #events {
+      #events,
+      #audit {
         background: #111;
         color: #ddd;
         padding: 0.5rem;
@@ -60,6 +61,10 @@
       #events {
         height: 30vh;
         color: #aee;
+      }
+      #audit {
+        height: 30vh;
+        color: #cea;
       }
     </style>
   </head>
@@ -85,6 +90,39 @@
         <button id="stop-events" disabled>Stop</button>
       </div>
       <pre id="events">(not connected)</pre>
+    </section>
+    <section id="audit-log">
+      <strong>Audit log</strong> (history; requires owner scope)
+      <div>
+        <label
+          >action
+          <select id="audit-action">
+            <option value="">(any)</option>
+            <option>pairing_redeemed</option>
+            <option>token_minted</option>
+            <option>token_revoked</option>
+            <option>auth_failed</option>
+            <option>scope_denied</option>
+            <option>permission_voted</option>
+            <option>prompt_sent</option>
+            <option>push_sent</option>
+            <option>push_suppressed</option>
+            <option>policy_decision</option>
+            <option>session_list_read</option>
+          </select>
+        </label>
+        <label
+          >limit
+          <input
+            id="audit-limit"
+            type="number"
+            value="50"
+            min="1"
+            style="width: 5rem"
+        /></label>
+        <button id="audit-query">Query</button>
+      </div>
+      <pre id="audit">(not queried)</pre>
     </section>
     <div id="status"></div>
     <div id="cards"></div>
@@ -493,6 +531,49 @@
         } finally {
           $('watch-events').disabled = false;
           $('stop-events').disabled = true;
+        }
+      };
+
+      // Audit-log history (cycle 55): GET /rc/audit?action&limit, newest-first.
+      // Read-only OWNER query — the historical complement to the cycle-54 live
+      // /rc/events stream (the deferred "replay path"). Self-contained: shares
+      // only the read-only token()/$ helpers.
+      $('audit-query').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const params = new URLSearchParams();
+        const action = $('audit-action').value;
+        if (action) params.set('action', action);
+        const limit = $('audit-limit').value;
+        if (limit) params.set('limit', limit);
+        const out = $('audit');
+        out.textContent = 'querying…';
+        try {
+          const res = await fetch('/rc/audit?' + params.toString(), {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : 'query failed (' + res.status + ')';
+            return;
+          }
+          const rows = await res.json();
+          if (!Array.isArray(rows) || rows.length === 0) {
+            out.textContent = '(no matching records)';
+            return;
+          }
+          out.textContent = rows
+            .map((rec) => {
+              const parts = [rec.ts, rec.action];
+              if (rec.actorTokenId) parts.push('by=' + rec.actorTokenId);
+              if (rec.target) parts.push('target=' + rec.target);
+              if (rec.detail) parts.push(JSON.stringify(rec.detail));
+              return parts.join('  ');
+            })
+            .join('\n');
+        } catch (e) {
+          out.textContent = 'query error: ' + e;
         }
       };
     </script>
