@@ -127,35 +127,68 @@ function isGitUrl(source: string): boolean {
 const MARKETPLACE_FETCH_TIMEOUT_MS = 10000;
 
 /**
- * Fetch content from a URL. Resolves to null on non-200, error, or timeout so a
- * slow/unreachable marketplace can never hang discovery indefinitely.
+ * Thrown when a marketplace manifest could not be fetched because the source
+ * was unreachable (network error / timeout) or refused (rate limit, auth, 5xx)
+ * — as opposed to the source simply not containing a marketplace manifest
+ * (HTTP 404), which is reported as a `null` result instead. Lets callers tell
+ * "couldn't reach it" apart from "it isn't a marketplace".
+ */
+export class MarketplaceFetchError extends Error {
+  constructor(
+    message = 'Could not fetch the marketplace manifest (network error or rate limit).',
+  ) {
+    super(message);
+    this.name = 'MarketplaceFetchError';
+  }
+}
+
+/** Outcome of a single fetch attempt. */
+interface FetchOutcome {
+  /** Response body on HTTP 200, otherwise null. */
+  body: string | null;
+  /**
+   * True when the attempt failed in a way that does NOT mean "definitely
+   * absent": a timeout, connection error, or a non-404 status (rate limit,
+   * auth, 5xx). A plain 404 leaves this false.
+   */
+  unavailable: boolean;
+}
+
+/**
+ * Fetch content from a URL. Never rejects and always settles (honoring a
+ * timeout) so a slow/unreachable marketplace can't hang discovery; the
+ * {@link FetchOutcome} distinguishes a missing resource (404) from one that
+ * couldn't be reached.
  */
 function fetchUrl(
   url: string,
   headers: Record<string, string>,
-): Promise<string | null> {
+): Promise<FetchOutcome> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (value: string | null) => {
+    const done = (outcome: FetchOutcome) => {
       if (settled) return;
       settled = true;
-      resolve(value);
+      resolve(outcome);
     };
     const req = https.get(url, { headers }, (res) => {
-      if (res.statusCode !== 200) {
+      const status = res.statusCode;
+      if (status !== 200) {
         res.resume(); // drain so the socket can be freed
-        done(null);
+        done({ body: null, unavailable: status !== 404 });
         return;
       }
       const chunks: Buffer[] = [];
       res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => done(Buffer.concat(chunks).toString()));
-      res.on('error', () => done(null));
+      res.on('end', () =>
+        done({ body: Buffer.concat(chunks).toString(), unavailable: false }),
+      );
+      res.on('error', () => done({ body: null, unavailable: true }));
     });
-    req.on('error', () => done(null));
+    req.on('error', () => done({ body: null, unavailable: true }));
     req.setTimeout(MARKETPLACE_FETCH_TIMEOUT_MS, () => {
       req.destroy();
-      done(null);
+      done({ body: null, unavailable: true });
     });
   });
 }
@@ -186,7 +219,7 @@ async function fetchGitHubFile(
   owner: string,
   repo: string,
   filePath: string,
-): Promise<string | null> {
+): Promise<FetchOutcome> {
   const token = process.env['GITHUB_TOKEN'];
 
   // Primary: GitHub API (works for private repos, but has rate limits)
@@ -199,37 +232,48 @@ async function fetchGitHubFile(
     apiHeaders['Authorization'] = `token ${token}`;
   }
 
-  let content = await fetchUrl(apiUrl, apiHeaders);
-
-  // Fallback: raw.githubusercontent.com (no rate limit, public repos only)
-  if (!content) {
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${filePath}`;
-    const rawHeaders: Record<string, string> = {
-      'User-Agent': 'qwen-code',
-    };
-    content = await fetchUrl(rawUrl, rawHeaders);
+  const api = await fetchUrl(apiUrl, apiHeaders);
+  if (api.body !== null) {
+    return api;
   }
 
-  return content;
+  // Fallback: raw.githubusercontent.com (no rate limit, public repos only)
+  const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${filePath}`;
+  const raw = await fetchUrl(rawUrl, { 'User-Agent': 'qwen-code' });
+  if (raw.body !== null) {
+    return raw;
+  }
+
+  // Both endpoints failed: stay "absent" only when both said 404; if either was
+  // unreachable/refused, report the file as unavailable.
+  return { body: null, unavailable: api.unavailable || raw.unavailable };
 }
 
 /**
  * Fetch marketplace config from a GitHub repository, probing the Qwen-native
- * manifest first and falling back to the Claude one.
+ * manifest first and falling back to the Claude one. Throws
+ * {@link MarketplaceFetchError} when no manifest was found but at least one
+ * fetch couldn't be reached (network error / rate limit), so the caller can
+ * distinguish that from a repo that simply has no marketplace manifest.
  */
 async function fetchGitHubMarketplaceConfig(
   owner: string,
   repo: string,
 ): Promise<MarketplaceConfig | null> {
+  let unavailable = false;
   for (const manifestPath of MARKETPLACE_MANIFEST_PATHS) {
-    const content = await fetchGitHubFile(owner, repo, manifestPath);
-    if (!content) {
-      continue;
+    const outcome = await fetchGitHubFile(owner, repo, manifestPath);
+    if (outcome.body !== null) {
+      const config = parseMarketplaceJson(outcome.body);
+      if (config) {
+        return config;
+      }
+    } else if (outcome.unavailable) {
+      unavailable = true;
     }
-    const config = parseMarketplaceJson(content);
-    if (config) {
-      return config;
-    }
+  }
+  if (unavailable) {
+    throw new MarketplaceFetchError();
   }
   return null;
 }
@@ -308,11 +352,14 @@ export async function loadMarketplaceConfigFromSource(
     } catch {
       // Not a github.com repo URL — fall through to direct-JSON fetch.
     }
-    const content = await fetchUrl(trimmed, { 'User-Agent': 'qwen-code' });
-    if (!content) {
-      return null;
+    const outcome = await fetchUrl(trimmed, { 'User-Agent': 'qwen-code' });
+    if (outcome.body !== null) {
+      return parseMarketplaceJson(outcome.body);
     }
-    return parseMarketplaceJson(content);
+    if (outcome.unavailable) {
+      throw new MarketplaceFetchError();
+    }
+    return null;
   }
 
   // Priority 3: ssh/sso git URLs -> resolve owner/repo via github.

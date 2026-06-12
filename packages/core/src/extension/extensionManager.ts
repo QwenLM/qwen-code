@@ -61,6 +61,7 @@ import {
 import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
+  MarketplaceFetchError,
 } from './marketplace.js';
 import {
   type MarketplaceConfig,
@@ -609,7 +610,23 @@ export class ExtensionManager {
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
     }
-    const config = await loadMarketplaceConfigFromSource(trimmed);
+    let config: MarketplaceConfig | null;
+    try {
+      config = await loadMarketplaceConfigFromSource(trimmed);
+    } catch (error) {
+      if (error instanceof MarketplaceFetchError) {
+        // The manifest couldn't be fetched (network / rate limit) — don't
+        // mislead the user into thinking it isn't a marketplace.
+        const redacted = redactUrlCredentials(trimmed);
+        throw new Error(
+          `Could not fetch a marketplace manifest from "${redacted}" — this looks ` +
+            `like a network error or GitHub rate limit, not a missing marketplace. ` +
+            `Check your connection, or set GITHUB_TOKEN to raise the API rate ` +
+            `limit, then try again.`,
+        );
+      }
+      throw error;
+    }
     if (!config) {
       // A "marketplace" is a collection manifest (qwen-marketplace.json or
       // .claude-plugin/marketplace.json). A single extension repo

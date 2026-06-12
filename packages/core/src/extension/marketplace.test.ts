@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseInstallSource,
   loadMarketplaceConfigFromSource,
+  MarketplaceFetchError,
 } from './marketplace.js';
 import * as fs from 'node:fs/promises';
 import * as https from 'node:https';
@@ -407,6 +408,36 @@ describe('parseInstallSource', () => {
         name: 'ssh-marketplace',
       });
       expect(result?.entries.map((e) => e.name)).toEqual(['p1']);
+    });
+
+    // Settle every fetch with a fixed status (no body) using a fully-formed
+    // request mock (setTimeout/destroy present) so the fetch layer runs.
+    const mockHttpStatus = (status: number) => {
+      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+        const mockRes = { statusCode: status, resume: vi.fn(), on: vi.fn() };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn(), setTimeout: vi.fn(), destroy: vi.fn() } as never;
+      });
+    };
+
+    it('throws MarketplaceFetchError when the manifest cannot be fetched (e.g. 403 rate limit)', async () => {
+      vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+      mockHttpStatus(403);
+
+      await expect(
+        loadMarketplaceConfigFromSource('owner/repo'),
+      ).rejects.toBeInstanceOf(MarketplaceFetchError);
+    });
+
+    it('returns null (not an error) when the manifest is absent (404)', async () => {
+      vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+      mockHttpStatus(404);
+
+      await expect(
+        loadMarketplaceConfigFromSource('owner/repo'),
+      ).resolves.toBeNull();
     });
   });
 });
