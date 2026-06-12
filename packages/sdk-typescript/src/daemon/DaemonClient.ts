@@ -1495,6 +1495,9 @@ export class DaemonClient {
    * `timeoutMs` when their threat model needs a tighter cap, or `0`
    * to disable the timeout entirely.
    *
+   * `entryIndex` targets one pooled entry by index. Use `'*'` to
+   * restart all entries for a pooled server.
+   *
    * Pre-flight `caps.features.workspace_mcp_restart` before calling.
    */
   async restartMcpServer(

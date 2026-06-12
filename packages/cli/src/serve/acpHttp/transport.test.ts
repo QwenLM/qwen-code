@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { SessionService } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -1947,6 +1948,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(deleteLog).not.toContain('\n');
       expect(deleteLog).not.toContain('\r');
       expect(deleteLog).not.toContain('\x1b');
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
+      const sessionId = 'sess\nFAKE\r\x1b[31m';
+      const removeSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'removeSessions')
+        .mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            {
+              sessionId,
+              error: new Error('remove\nFAILED\r\x1b[31m'),
+            },
+          ],
+        });
+
+      try {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 68,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          result: {
+            removed: [],
+            notFound: [],
+            errors: [{ sessionId, error: 'remove\nFAILED\r\x1b[31m' }],
+          },
+        });
+        expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
+
+        const deleteLog = stdioMocks.writeStderrLine.mock.calls
+          .map(([line]) => line)
+          .find((line) => line.includes('sessions/delete'));
+        expect(deleteLog).toContain(
+          'removeSessions(sess FAK) failed: remove FAILED  [31m',
+        );
+        expect(deleteLog).not.toContain('\n');
+        expect(deleteLog).not.toContain('\r');
+        expect(deleteLog).not.toContain('\x1b');
+      } finally {
+        removeSessionsSpy.mockRestore();
+      }
     });
   });
 

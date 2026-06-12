@@ -1724,6 +1724,22 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('forwards wildcard entryIndex unchanged', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          entries: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.restartMcpServer('docs', { entryIndex: '*' });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/docs/restart?entryIndex=*',
+      );
+    });
+
     it('throws on 404 when the daemon reports an unknown server', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'no such server' }),
