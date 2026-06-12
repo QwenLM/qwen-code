@@ -1084,7 +1084,7 @@ export class AgentCore {
     name: string;
     args: Record<string, unknown>;
     errorMessage: string | undefined;
-    responseParts: Part[];
+    errorMessage: string;
     resultDisplay: ToolResultDisplay | undefined;
     currentRound: number;
     durationMs?: number;
