@@ -102,7 +102,7 @@ async function vendorLocalCheckout(repoRoot: string): Promise<void> {
   console.log(`Building Qwen Code CLI from ${repoRoot}...`);
 
   const npm = npmCommand();
-  await run([npm, 'run', 'build'], repoRoot);
+  await run([npm, 'run', 'build', '--', '--cli-only'], repoRoot);
   await run([npm, 'run', 'bundle'], repoRoot);
   await run([npm, 'run', 'prepare:package'], repoRoot);
 

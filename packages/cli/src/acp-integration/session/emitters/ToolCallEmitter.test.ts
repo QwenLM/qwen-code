@@ -436,6 +436,12 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('should map enter_plan_mode tool to switch_mode kind', () => {
+      expect(emitter.mapToolKind(Kind.Think, 'enter_plan_mode')).toBe(
+        'switch_mode',
+      );
+    });
+
     it('should not affect other tools with Kind.Think', () => {
       // Other tools with Kind.Think should still map to think
       expect(emitter.mapToolKind(Kind.Think, 'todo_write')).toBe('think');

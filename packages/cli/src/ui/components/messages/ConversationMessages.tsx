@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import stringWidth from 'string-width';
 import {
   MarkdownDisplay,
@@ -16,9 +16,15 @@ import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
+import {
+  resolveColor,
+  subtleBandColor,
+  supportsTrueColor,
+} from '../../themes/color-utils.js';
 
 interface UserMessageProps {
   text: string;
+  width?: number;
 }
 
 interface UserShellMessageProps {
@@ -185,16 +191,66 @@ const ContinuationMarkdownMessage: React.FC<
   );
 };
 
-export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
-  <PrefixedTextMessage
-    text={text}
-    prefix=">"
-    prefixColor={theme.text.accent}
-    textColor={theme.text.accent}
-    ariaLabel={SCREEN_READER_USER_PREFIX}
-    alignSelf="flex-start"
-  />
-);
+export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
+  const isScreenReaderEnabled = useIsScreenReaderEnabled();
+
+  const useBand =
+    width !== undefined &&
+    width > 0 &&
+    !isScreenReaderEnabled &&
+    !!theme.background.primary &&
+    supportsTrueColor();
+
+  const fallback = (
+    <PrefixedTextMessage
+      text={text}
+      prefix=">"
+      prefixColor={theme.text.accent}
+      textColor={theme.text.accent}
+      ariaLabel={SCREEN_READER_USER_PREFIX}
+      alignSelf="flex-start"
+      marginTop={1}
+    />
+  );
+
+  if (!useBand) {
+    return fallback;
+  }
+
+  const bg = resolveColor(theme.background.primary) || theme.background.primary;
+  const bandColor = subtleBandColor(bg);
+  if (!bandColor) {
+    return fallback;
+  }
+
+  const prefix = '> ';
+  const lines = text.split('\n');
+
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text color={bandColor}>{'▄'.repeat(width)}</Text>
+      {lines.map((line, i) => {
+        const linePrefix = i === 0 ? prefix : '  ';
+        const lineWidth = stringWidth(linePrefix + line);
+        const pad = Math.max(0, width - lineWidth);
+        return (
+          <Text
+            key={i}
+            backgroundColor={bandColor}
+            aria-label={i === 0 ? SCREEN_READER_USER_PREFIX : undefined}
+          >
+            <Text color={theme.text.accent}>
+              {linePrefix}
+              {line}
+            </Text>
+            {pad > 0 ? ' '.repeat(pad) : ''}
+          </Text>
+        );
+      })}
+      <Text color={bandColor}>{'▀'.repeat(width)}</Text>
+    </Box>
+  );
+};
 
 export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
   const commandToDisplay = text.startsWith('!') ? text.substring(1) : text;

@@ -532,6 +532,7 @@ export class Session implements SessionContext {
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -614,9 +615,20 @@ export class Session implements SessionContext {
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
 
-    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
-    });
+    const fileHistoryService = this.config.getFileHistoryService();
+    const survivingSnapshots = fileHistoryService
+      .getSnapshots()
+      .slice(0, targetTurnIndex + 1);
+
+    fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+
+    this.config
+      .getChatRecordingService()
+      ?.rewindRecording(
+        targetTurnIndex,
+        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+        survivingSnapshots,
+      );
 
     return { targetTurnIndex, apiTruncateIndex };
   }
@@ -1052,6 +1064,27 @@ export class Session implements SessionContext {
               if (additionalContext) {
                 parts = [...parts, { text: additionalContext }];
               }
+            }
+
+            // Snapshot file state before this turn (mirrors the makeSnapshot
+            // block in GeminiClient.sendMessageStream). Placed after
+            // slash-command and hook early-returns so locally handled commands
+            // don't create phantom snapshots that desync the snapshot index.
+            try {
+              const fileHistoryService = this.config.getFileHistoryService();
+              await fileHistoryService.makeSnapshot(promptId);
+              try {
+                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+                if (latestSnapshot) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordFileHistorySnapshot(latestSnapshot);
+                }
+              } catch (e) {
+                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+              }
+            } catch (e) {
+              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
             }
 
             // Prepend session-level system reminders (plan mode / subagent /
@@ -2120,6 +2153,31 @@ export class Session implements SessionContext {
         kind: 'shell',
       });
     });
+
+    // Session title recorded (auto-generated after a turn, or an in-process
+    // /rename) → notify attached clients. A title update is NOT an ACP
+    // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
+    // would reject an unknown kind at validation), so — like
+    // `current_model_update` above — it goes over the agent→bridge
+    // `extNotification` side-channel. The bridge demuxes it into the
+    // canonical `session_metadata_updated` bus event so HTTP clients can
+    // refresh their session list immediately instead of discovering the
+    // new title on their next poll.
+    this.config
+      .getChatRecordingService()
+      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+        void this.client
+          .extNotification('qwen/notify/session/title-update', {
+            v: 1,
+            sessionId: this.sessionId,
+            title: customTitle,
+            titleSource,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the title
+            // until the client's next session-list refresh.
+          });
+      });
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
@@ -2844,6 +2902,7 @@ export class Session implements SessionContext {
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
+        const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
 
         // Track cleanup functions for sub-agent event listeners
         let subAgentCleanupFunctions: Array<() => void> = [];
@@ -3078,6 +3137,7 @@ export class Session implements SessionContext {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               return earlyErrorResponse(
@@ -3331,6 +3391,23 @@ export class Session implements SessionContext {
 
           // Clean up event listeners
           subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
+          // approval mode inside execute() without going through the user-confirmation
+          // branch above, so notify the client of the current mode explicitly.
+          // Only send when the mode actually changed (a gate "blocked" result keeps
+          // the mode at PLAN, and a redundant notification would be misleading).
+          if (
+            (isEnterPlanModeTool || isExitPlanModeTool) &&
+            !didRequestPermission &&
+            !toolResult.error &&
+            this.config.getApprovalMode() !== approvalMode
+          ) {
+            await this.sendUpdate({
+              sessionUpdate: 'current_mode_update',
+              currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
+            });
+          }
 
           // Create response parts first (needed for emitResult and recordToolResult)
           const responseParts = convertToFunctionResponse(

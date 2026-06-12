@@ -490,6 +490,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.GREP;
 
+  override get maxOutputChars(): number {
+    return 20_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       RipGrepTool.Name,

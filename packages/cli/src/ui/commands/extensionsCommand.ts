@@ -14,11 +14,11 @@ import {
 import { t } from '../../i18n/index.js';
 import {
   ExtensionManager,
+  openBrowserSecurely,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
@@ -85,7 +85,7 @@ async function exploreAction(context: CommandContext, args: string) {
       Date.now(),
     );
     try {
-      await open(extensionsUrl);
+      await openBrowserSecurely(extensionsUrl);
     } catch (_error) {
       context.ui.addItem(
         {
@@ -144,10 +144,11 @@ async function listTextAction(context: CommandContext, _args: string) {
   }
 
   const active = extensions.filter((e) => e.isActive);
-  let output = t('**Installed Extensions ({{total}} total, {{active}} active)**', {
-    total: String(extensions.length),
-    active: String(active.length),
-  }) + '\n\n';
+  let output =
+    t('**Installed Extensions ({{total}} total, {{active}} active)**', {
+      total: String(extensions.length),
+      active: String(active.length),
+    }) + '\n\n';
 
   for (const ext of extensions) {
     const status = ext.isActive ? '✓' : '✗';
@@ -155,9 +156,7 @@ async function listTextAction(context: CommandContext, _args: string) {
       ? ` (${redactUrlCredentials(ext.installMetadata.source)})`
       : '';
     const caps: string[] = [];
-    const mcpCount = ext.mcpServers
-      ? Object.keys(ext.mcpServers).length
-      : 0;
+    const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
     if (mcpCount > 0) {
       caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
     }
@@ -165,7 +164,9 @@ async function listTextAction(context: CommandContext, _args: string) {
       caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
     }
     if (ext.commands && ext.commands.length > 0) {
-      caps.push(t('{{count}} commands', { count: String(ext.commands.length) }));
+      caps.push(
+        t('{{count}} commands', { count: String(ext.commands.length) }),
+      );
     }
     const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
     output += `- [${status}] **${ext.name}** v${ext.version}${source}${capsStr}\n`;

@@ -199,6 +199,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    setTitleRecordedCallback: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
@@ -265,6 +266,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       rewindRecording: vi.fn(),
+      setTitleRecordedCallback: vi.fn(),
     };
 
     mockToolRegistry = {
@@ -307,6 +309,12 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getFileHistoryService: vi.fn().mockReturnValue({
+        makeSnapshot: vi.fn().mockResolvedValue(undefined),
+        getSnapshots: vi.fn().mockReturnValue([]),
+        restoreFromSnapshots: vi.fn(),
+        rewind: vi.fn(),
+      }),
     } as unknown as Config;
 
     mockClient = {
@@ -446,9 +454,11 @@ describe('Session', () => {
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(1, {
-        truncatedCount: 2,
-      });
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        [],
+      );
     });
 
     it('preserves startup context when rewinding to the first user turn', () => {

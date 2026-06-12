@@ -52,6 +52,8 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   RestoreInProgressError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -107,6 +109,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_create',
   'session_scope_override',
   'session_load',
+  'session_resume',
   'unstable_session_resume',
   'session_list',
   'session_prompt',
@@ -226,6 +229,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_mcp_restart',
   'session_recap',
   'session_btw',
+  'session_shell_command',
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
@@ -411,6 +415,12 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => BridgeHeartbeatResult;
   heartbeatStateImpl?: (sessionId: string) => BridgeHeartbeatState | undefined;
+  shellImpl?: (
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
 }
 
 interface FakeBridge extends AcpSessionBridge {
@@ -479,6 +489,12 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     mode: ApprovalMode;
     opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  shellCalls: Array<{
+    sessionId: string;
+    command: string;
+    signal?: AbortSignal;
     context?: BridgeClientRequestContext;
   }>;
   generateSessionRecapCalls: Array<{
@@ -750,6 +766,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       refreshed: params.syncOutputLanguage,
     }));
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
+  const shellCalls: FakeBridge['shellCalls'] = [];
   const setApprovalModeImpl =
     opts.setApprovalModeImpl ??
     (async (
@@ -837,6 +854,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionLastSeenAt: 1_700_000_000_000,
       clientLastSeenAt: new Map<string, number>(),
     }));
+  const shellImpl =
+    opts.shellImpl ??
+    (async (_sessionId: string, command: string) => ({
+      exitCode: 0,
+      output: `$ ${command}`,
+      aborted: false,
+    }));
   return {
     // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
@@ -864,6 +888,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setModelCalls,
     setLanguageCalls,
     setApprovalModeCalls,
+    shellCalls,
     generateSessionRecapCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
@@ -1070,6 +1095,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async generateSessionBtw(sessionId, _question, _signal, _context) {
       return { sessionId, answer: 'mock btw answer' };
+    },
+    async executeShellCommand(sessionId, command, signal, context) {
+      shellCalls.push({
+        sessionId,
+        command,
+        ...(signal ? { signal } : {}),
+        ...(context ? { context } : {}),
+      });
+      return shellImpl(sessionId, command, signal, context);
     },
     async setWorkspaceToolEnabled(
       toolName: string,
@@ -1416,6 +1450,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'session_shell_command') {
+          expect(predicate({ sessionShellCommandEnabled: true })).toBe(true);
+          expect(predicate({ sessionShellCommandEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionShellCommandEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_reload') {
           expect(predicate({ reloadAvailable: true })).toBe(true);
           expect(predicate({ reloadAvailable: false })).toBe(false);
@@ -1601,6 +1649,54 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret');
       expect(res.status).toBe(200);
       expect(res.body.features).toContain('require_auth');
+    });
+
+    it('omits `session_shell_command` by default', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_shell_command');
+    });
+
+    it('omits `session_shell_command` when enabled without a token', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        enableSessionShell: true,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_shell_command');
+    });
+
+    it('advertises `session_shell_command` only when enabled with a token', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        token: 'secret',
+        enableSessionShell: true,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body.features).toContain('session_shell_command');
+    });
+
+    it('treats an empty token string as no token for session shell capability', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        token: '',
+        enableSessionShell: true,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('session_shell_command');
     });
   });
 
@@ -3477,9 +3573,7 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(
-          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=0`,
-        )
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=0`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
@@ -3493,9 +3587,7 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(
-          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=200`,
-        )
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=200`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
     });
@@ -3701,6 +3793,179 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send();
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe('POST /session/:id/shell', () => {
+    const tokenOpts: ServeOptions = {
+      ...baseOpts,
+      token: 'secret',
+      enableSessionShell: true,
+    };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 token_required on a no-token daemon before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, enableSessionShell: true },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('403 session_shell_disabled when token auth is present but flag is off', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge,
+      });
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'session_shell_disabled',
+        errorKind: 'session_shell_disabled',
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('403 client_id_required before command validation when enabled without X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/shell'),
+      ).send({ command: '' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'client_id_required',
+        errorKind: 'client_id_required',
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_client_id for malformed X-Qwen-Client-Id before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/session-A/shell'))
+        .set('X-Qwen-Client-Id', 'bad client id')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('400 for empty command after a valid client id is present', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/session-A/shell'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: '   ' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('`command` is required');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('calls the bridge with a session-bound client context on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/session-A/shell'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        exitCode: 0,
+        output: '$ pwd',
+        aborted: false,
+      });
+      expect(bridge.shellCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          command: 'pwd',
+          signal: expect.any(AbortSignal),
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('maps bridge InvalidClientIdError to the existing invalid_client_id response', async () => {
+      const bridge = fakeBridge({
+        shellImpl: async () => {
+          throw new InvalidClientIdError('session-A', 'client-2');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/session/session-A/shell'))
+        .set('X-Qwen-Client-Id', 'client-2')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-2',
+      });
+    });
+
+    it('treats an empty token string as no token on the strict shell route', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: '', enableSessionShell: true },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('maps bridge shell policy errors to stable REST error kinds', async () => {
+      const disabledBridge = fakeBridge({
+        shellImpl: async () => {
+          throw new SessionShellDisabledError();
+        },
+      });
+      const disabledApp = createServeApp(tokenOpts, undefined, {
+        bridge: disabledBridge,
+      });
+      const disabled = await auth(
+        request(disabledApp).post('/session/session-A/shell'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(disabled.status).toBe(403);
+      expect(disabled.body.errorKind).toBe('session_shell_disabled');
+
+      const clientRequiredBridge = fakeBridge({
+        shellImpl: async () => {
+          throw new SessionShellClientRequiredError();
+        },
+      });
+      const clientRequiredApp = createServeApp(tokenOpts, undefined, {
+        bridge: clientRequiredBridge,
+      });
+      const clientRequired = await auth(
+        request(clientRequiredApp).post('/session/session-A/shell'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(clientRequired.status).toBe(403);
+      expect(clientRequired.body.errorKind).toBe('client_id_required');
     });
   });
 
@@ -5950,6 +6215,87 @@ describe('runQwenServe', () => {
     );
     expect(res.headers.get('access-control-expose-headers')).toBe(
       'Retry-After',
+    );
+  });
+
+  it('uses normalized token for session shell capability across REST and ACP initialize', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: '  secret  ',
+      enableSessionShell: true,
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const capsRes = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: { Authorization: 'Bearer secret' },
+    });
+    expect(capsRes.status).toBe(200);
+    const caps = (await capsRes.json()) as { features: string[] };
+    expect(caps.features).toContain('session_shell_command');
+
+    const initRes = await fetch(`http://127.0.0.1:${port}/acp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        Authorization: 'Bearer secret',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+      }),
+    });
+    expect(initRes.status).toBe(200);
+    const init = (await initRes.json()) as {
+      result: { agentCapabilities: { _meta: { qwen: { methods: string[] } } } };
+    };
+    expect(init.result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/shell',
+    );
+  });
+
+  it('warns and does not advertise session shell when flag is set without a token', async () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        enableSessionShell: true,
+      });
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('--enable-session-shell ignored'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const port = (handle.server.address() as { port: number }).port;
+    const capsRes = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(capsRes.status).toBe(200);
+    const caps = (await capsRes.json()) as { features: string[] };
+    expect(caps.features).not.toContain('session_shell_command');
+
+    const initRes = await fetch(`http://127.0.0.1:${port}/acp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+      }),
+    });
+    expect(initRes.status).toBe(200);
+    const init = (await initRes.json()) as {
+      result: { agentCapabilities: { _meta: { qwen: { methods: string[] } } } };
+    };
+    expect(init.result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/shell',
     );
   });
 
