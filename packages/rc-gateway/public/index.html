@@ -181,6 +181,20 @@
       </div>
       <div id="search-results">(not searched)</div>
     </section>
+    <section id="share-create">
+      <strong>Create share link</strong> (requires owner scope)
+      <div>
+        <input id="share-session" placeholder="session id" />
+        <input id="share-ttl" type="number" placeholder="ttl (sec)" value="3600" />
+        <select id="share-scope">
+          <option value="view">view</option>
+          <option value="approve">approve</option>
+        </select>
+        <input id="share-max" type="number" placeholder="max uses" />
+        <button id="share-create-btn">Create</button>
+      </div>
+      <div id="share-result"></div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -1030,6 +1044,68 @@
       $('search-q').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runSearch();
       });
+
+      // Create share link (cycle 64): owner mints a /ui/share/<token> link via
+      // POST /rc/share, completing the round-trip with the cycle-62 guest page.
+      // The token (in the URL) is shown to the OWNER who is creating it — that
+      // is the point. textContent-only.
+      $('share-create-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('share-result');
+        const sessionId = $('share-session').value.trim();
+        const ttlSec = Number($('share-ttl').value);
+        if (!sessionId) {
+          out.textContent = 'enter a session id';
+          return;
+        }
+        if (!Number.isFinite(ttlSec) || ttlSec <= 0) {
+          out.textContent = 'enter a ttl in seconds (> 0)';
+          return;
+        }
+        const scope = $('share-scope').value;
+        const maxRaw = $('share-max').value.trim();
+        const body = { sessionId, ttlSec, scope };
+        if (maxRaw !== '') body.maxUses = Number(maxRaw);
+        out.textContent = 'creating…';
+        try {
+          const res = await fetch('/rc/share', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              out.textContent = 'not authorized — needs an owner token';
+            } else {
+              let code = res.status;
+              try {
+                const b = await res.json();
+                if (b && b.code) code = b.code;
+              } catch {
+                /* non-JSON error body */
+              }
+              out.textContent = 'create failed: ' + code;
+            }
+            return;
+          }
+          const data = await res.json();
+          out.textContent = '';
+          const link = document.createElement('div');
+          link.style.userSelect = 'all';
+          link.textContent = location.origin + data.url; // server hex token
+          const exp = document.createElement('div');
+          exp.textContent = data.expiresAt
+            ? 'expires ' + new Date(data.expiresAt).toISOString()
+            : '';
+          out.appendChild(link);
+          out.appendChild(exp);
+        } catch (e) {
+          out.textContent = 'create error: ' + e;
+        }
+      };
     </script>
   </body>
 </html>
