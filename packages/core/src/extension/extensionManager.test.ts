@@ -405,7 +405,7 @@ describe('extension tests', () => {
         expect(ext?.commands).toHaveLength(2);
       });
 
-      it('should deduplicate when both .md and .toml exist for same command', async () => {
+      it('should list both entries when .md and .toml exist for same command name', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'dedup-commands-ext',
@@ -426,7 +426,9 @@ describe('extension tests', () => {
         const ext = extensions.find(
           (e) => e.config.name === 'dedup-commands-ext',
         );
-        expect(ext?.commands).toEqual(['greet']);
+        // No dedup at discovery level — both entries surface so the consent
+        // UI shows the true count; downstream CommandService handles conflicts.
+        expect(ext?.commands).toEqual(['greet', 'greet']);
       });
 
       it('should discover nested .toml command files with colon-separated names', async () => {

@@ -240,30 +240,23 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   };
 
   try {
-    const mdFiles = await glob('**/*.md', {
+    const allFiles = await glob('**/*.{md,toml}', {
       ...globOptions,
       cwd: dir,
     });
-
-    const tomlFiles = await glob('**/*.toml', {
-      ...globOptions,
-      cwd: dir,
-    });
-
-    const allFiles = [...mdFiles, ...tomlFiles];
 
     const commandNames = allFiles.map((file) => {
       const ext = path.extname(file);
       const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
-        .split(path.sep)
+        .split(/[/\\]/)
         .map((segment) => segment.replaceAll(':', '_'))
         .join(':');
 
       return commandName;
     });
 
-    return [...new Set(commandNames)];
+    return commandNames;
   } catch (error) {
     const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
     const isAbortError = error instanceof Error && error.name === 'AbortError';
