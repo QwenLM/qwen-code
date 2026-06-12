@@ -8,6 +8,9 @@ import {
 } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
+// Circular import with ToolGroup (agents render tool rows; agent tool
+// rows render SubAgentPanel). Safe only while both modules dereference
+// each other's exports at render time — never in top-level code.
 import { ToolLine } from '../ToolGroup';
 import { Markdown } from '../Markdown';
 import {

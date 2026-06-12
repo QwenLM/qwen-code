@@ -5,6 +5,9 @@ import type {
   TodoItem,
 } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
+// Circular import with SubAgentPanel (its SubToolLine renders ToolLine
+// from this module). Safe only while both modules dereference each
+// other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
 import { ToolApproval } from './ToolApproval';
