@@ -296,8 +296,10 @@ export class DaemonSessionClient {
     return await this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(promptId: string): Promise<DaemonRewindResult> {
-    return await this.client.rewindSession(this.sessionId, promptId, {
+  async rewind(
+    target: string | { targetTurnIndex: number; promptId?: string },
+  ): Promise<DaemonRewindResult> {
+    return await this.client.rewindSession(this.sessionId, target, {
       clientId: this.clientId,
     });
   }

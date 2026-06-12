@@ -95,6 +95,7 @@ export type {
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,
   DaemonUiReplayCompleteEvent,
+  DaemonUiSessionRewoundEvent,
   DaemonUiPromptCancelledEvent,
   // Daemon assist push (server-side ghost-text suggestion)
   DaemonUiFollowupSuggestionEvent,

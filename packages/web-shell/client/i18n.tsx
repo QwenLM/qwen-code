@@ -288,6 +288,8 @@ const EN: Messages = {
     '↑↓ to navigate · / to search · c for custom · Enter to set fast model · Esc to cancel',
   'dialog.footer.navSelectCancel':
     '↑↓ to navigate · Enter to select · Esc to cancel',
+  'dialog.footer.navSelectBack':
+    '↑↓ to navigate · Enter to select · Esc to go back',
   'dialog.footer.navSelectClose':
     '↑↓ to navigate · Enter to select · Esc to close',
   'dialog.footer.navSelectMenu':
@@ -440,6 +442,28 @@ const EN: Messages = {
   'rename.success': (v) => `Session renamed to ${v?.name ?? ''}`,
   'local.reset': 'Reset current conversation',
   'local.resume': 'Resume a previous session',
+  'local.rewind': 'Rewind conversation to a previous turn',
+  'rewind.blocked': 'Cannot rewind while streaming. Cancel first (Esc).',
+  'rewind.title': 'Rewind Conversation',
+  'rewind.titleWithCount': (v) =>
+    `Rewind Conversation (${v?.count ?? 0} turns)`,
+  'rewind.none': 'No user turns to rewind to.',
+  'rewind.to': 'Rewind to:',
+  'rewind.restoreBoth': 'Restore conversation and captured file changes.',
+  'rewind.option.both': 'Restore code and conversation',
+  'rewind.option.conversation': 'Restore conversation only',
+  'rewind.option.cancel': 'Never mind',
+  'rewind.option.fileDetail': (v) =>
+    `(+${v?.insertions ?? 0} -${v?.deletions ?? 0} in ${v?.files ?? 0} file(s))`,
+  'rewind.filesUnavailable':
+    'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
+  'rewind.filesNote':
+    'Rewinding does not affect files edited manually or via shell commands.',
+  'rewind.restoring': 'Restoring...',
+  'rewind.turn': (v) => `Turn ${v?.turn ?? ''}`,
+  'rewind.files': (v) =>
+    `${v?.files ?? 0} file(s), +${v?.insertions ?? 0} -${v?.deletions ?? 0}`,
+  'rewind.footer.confirm': 'Enter/Y confirm · N/Esc cancel',
   'local.skills': 'View available skills',
   'local.stats': 'Show session statistics',
   'local.tasks': 'View background tasks',
@@ -1094,6 +1118,7 @@ const ZH: Messages = {
   'dialog.footer.modelFast':
     '↑↓ 导航 · / 搜索 · c 自定义 · Enter 设置 fast model · Esc 取消',
   'dialog.footer.navSelectCancel': '↑↓ 导航 · Enter 选择 · Esc 取消',
+  'dialog.footer.navSelectBack': '↑↓ 导航 · Enter 选择 · Esc 返回',
   'dialog.footer.navSelectClose': '↑↓ 导航 · Enter 选择 · Esc 关闭',
   'dialog.footer.navSelectMenu': '↑↓ 导航 · Enter 选择 · Esc 返回菜单',
   'dialog.footer.navOpenClose': '↑↓ 导航 · Enter 打开 · Esc 关闭',
@@ -1237,6 +1262,26 @@ const ZH: Messages = {
   'rename.success': (v) => `会话已重命名为 ${v?.name ?? ''}`,
   'local.reset': '重置当前对话',
   'local.resume': '恢复历史会话',
+  'local.rewind': '将对话回退到之前的轮次',
+  'rewind.blocked': '流式输出中无法 rewind，请先按 Esc 取消。',
+  'rewind.title': '回退对话',
+  'rewind.titleWithCount': (v) => `回退对话 (${v?.count ?? 0} turns)`,
+  'rewind.none': '没有可回退的用户对话轮次。',
+  'rewind.to': '回退到：',
+  'rewind.restoreBoth': '恢复对话和已捕获的文件变更。',
+  'rewind.option.both': '恢复代码和对话',
+  'rewind.option.conversation': '仅恢复对话',
+  'rewind.option.cancel': '算了',
+  'rewind.option.fileDetail': (v) =>
+    `(+${v?.insertions ?? 0} -${v?.deletions ?? 0}，${v?.files ?? 0} 个文件)`,
+  'rewind.filesUnavailable':
+    '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
+  'rewind.filesNote': '回退不会影响手动编辑或通过 shell 命令修改的文件。',
+  'rewind.restoring': '正在恢复...',
+  'rewind.turn': (v) => `第 ${v?.turn ?? ''} 轮`,
+  'rewind.files': (v) =>
+    `${v?.files ?? 0} 个文件，+${v?.insertions ?? 0} -${v?.deletions ?? 0}`,
+  'rewind.footer.confirm': 'Enter/Y 确认 · N/Esc 取消',
   'local.skills': '查看可用 skills',
   'local.stats': '查看会话统计',
   'local.tasks': '查看后台任务',

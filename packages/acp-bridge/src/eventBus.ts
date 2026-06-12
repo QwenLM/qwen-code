@@ -28,6 +28,7 @@ export interface SessionReplaySnapshot {
 export interface CompactionEngine {
   ingest(event: BridgeEvent): void;
   snapshot(): SessionReplaySnapshot;
+  rewindToTurn(targetTurnIndex: number): void;
   close(): void;
 }
 
@@ -194,6 +195,10 @@ export class EventBus {
 
   snapshotReplay(): SessionReplaySnapshot | undefined {
     return this.compactionEngine?.snapshot();
+  }
+
+  rewindReplay(targetTurnIndex: number): void {
+    this.compactionEngine?.rewindToTurn(targetTurnIndex);
   }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */

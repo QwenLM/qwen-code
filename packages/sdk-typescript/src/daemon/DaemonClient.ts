@@ -1284,9 +1284,15 @@ export class DaemonClient {
 
   async rewindSession(
     sessionId: string,
-    promptId: string,
+    req:
+      | string
+      | {
+          promptId?: string;
+          targetTurnIndex?: number;
+        },
     opts?: { clientId?: string },
   ): Promise<DaemonRewindResult> {
+    const body = typeof req === 'string' ? { promptId: req } : req;
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/rewind`,
       {
@@ -1295,7 +1301,7 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ promptId }),
+        body: JSON.stringify(body),
       },
       async (res) => {
         if (!res.ok) {

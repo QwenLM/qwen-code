@@ -4149,7 +4149,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
-              { sessionId, promptId: req.promptId, rewindFiles: true },
+              {
+                sessionId,
+                ...(req.promptId ? { promptId: req.promptId } : {}),
+                ...(Number.isInteger(req.targetTurnIndex)
+                  ? { targetTurnIndex: req.targetTurnIndex }
+                  : {}),
+                rewindFiles: req.promptId !== undefined,
+              },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionRewind,
@@ -4174,6 +4181,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];
       const filesFailed = (response['filesFailed'] as string[]) ?? [];
+
+      entry.events.rewindReplay(targetTurnIndex);
 
       try {
         entry.events.publish({

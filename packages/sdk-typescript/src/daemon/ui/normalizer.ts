@@ -282,6 +282,9 @@ export function normalizeDaemonEvent(
     case 'auth_device_flow_cancelled':
       return normalizeAuthDeviceFlowCancelled(event, base);
 
+    case 'session_rewound':
+      return normalizeSessionRewound(event, base);
+
     default:
       // Emit a single `debug` block instead
       // of `status + debug`. In long sessions where the daemon adds
@@ -347,6 +350,34 @@ function normalizeFollowupSuggestion(
       sessionId,
       suggestion,
       promptId,
+    },
+  ];
+}
+
+function normalizeSessionRewound(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
+  const filesChanged = stringArrayField(event.data, 'filesChanged');
+  const filesFailed = stringArrayField(event.data, 'filesFailed');
+  if (
+    !sessionId ||
+    targetTurnIndex === undefined ||
+    !filesChanged ||
+    !filesFailed
+  ) {
+    return fallbackDebug(event, base, 'malformed session_rewound payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'session.rewound',
+      sessionId,
+      targetTurnIndex,
+      filesChanged,
+      filesFailed,
     },
   ];
 }
@@ -1378,4 +1409,12 @@ function stringField(value: unknown, key: string): string | undefined {
   if (!isRecord(value)) return undefined;
   const v = value[key];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function stringArrayField(value: unknown, key: string): string[] | undefined {
+  if (!isRecord(value)) return undefined;
+  const v = value[key];
+  return Array.isArray(v) && v.every((item) => typeof item === 'string')
+    ? v
+    : undefined;
 }

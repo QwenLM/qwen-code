@@ -276,9 +276,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -2703,10 +2701,17 @@ export function createServeApp(
       const sessionId = req.params['id'];
       const body = safeBody(req);
       const promptId = body['promptId'];
-      if (typeof promptId !== 'string' || promptId.length === 0) {
+      const targetTurnIndex = body['targetTurnIndex'];
+      const hasPromptId = typeof promptId === 'string' && promptId.length > 0;
+      const hasTargetTurnIndex =
+        typeof targetTurnIndex === 'number' &&
+        Number.isInteger(targetTurnIndex) &&
+        targetTurnIndex >= 0;
+      if (!hasPromptId && !hasTargetTurnIndex) {
         res.status(400).json({
-          error: '`promptId` is required and must be a non-empty string',
-          code: 'missing_prompt_id',
+          error:
+            '`promptId` or `targetTurnIndex` is required for session rewind',
+          code: 'missing_rewind_target',
         });
         return;
       }
@@ -2715,7 +2720,10 @@ export function createServeApp(
       try {
         const response = await bridge.rewindSession(
           sessionId,
-          { promptId },
+          {
+            ...(hasPromptId ? { promptId } : {}),
+            ...(hasTargetTurnIndex ? { targetTurnIndex } : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);

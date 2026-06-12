@@ -626,6 +626,68 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('loads trimmed replay after rewinding an attached session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/rewind') {
+              return {
+                targetTurnIndex: params['targetTurnIndex'],
+                filesChanged: [],
+                filesFailed: [],
+              };
+            }
+            return {};
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'second' }],
+    });
+
+    const before = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
+    const beforeReplayText = [
+      ...(before.compactedReplay ?? []),
+      ...(before.liveJournal ?? []),
+    ]
+      .map((event) => JSON.stringify(event.data))
+      .join('\n');
+    expect(beforeReplayText).toContain('first');
+    expect(beforeReplayText).toContain('second');
+
+    await bridge.rewindSession(session.sessionId, { targetTurnIndex: 0 });
+    const loaded = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    const replayText = [
+      ...(loaded.compactedReplay ?? []),
+      ...(loaded.liveJournal ?? []),
+    ]
+      .map((event) => JSON.stringify(event.data))
+      .join('\n');
+    expect(loaded.attached).toBe(true);
+    expect(replayText).not.toContain('first');
+    expect(replayText).not.toContain('second');
+    expect(loaded.liveJournal?.map((event) => event.type)).toEqual([
+      'session_rewound',
+    ]);
+
+    await bridge.shutdown();
+  });
+
   it('buffers load replay events until the restored session is registered', async () => {
     let capturedConn: AgentSideConnection | undefined;
     const factory: ChannelFactory = async () => {

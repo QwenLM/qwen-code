@@ -461,6 +461,26 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(texts).toContain('Bye');
       expect(texts).toContain('Goodbye');
     });
+
+    it('rewinds compacted replay to the requested user turn', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeUserMessage(1, 'Hello'));
+      engine.ingest(makeTextChunk(2, 'Hi'));
+      engine.ingest(makeTurnComplete(3));
+      engine.ingest(makeUserMessage(4, 'Again'));
+      engine.ingest(makeTextChunk(5, 'Second'));
+      engine.ingest(makeTurnComplete(6));
+
+      engine.rewindToTurn(1);
+
+      const snap = engine.snapshot();
+      const texts = extractTexts(snap.compactedTurns);
+      expect(texts).toContain('Hello');
+      expect(texts).toContain('Hi');
+      expect(texts).not.toContain('Again');
+      expect(texts).not.toContain('Second');
+      expect(snap.liveJournal).toHaveLength(0);
+    });
   });
 
   describe('turn_error compaction', () => {
@@ -733,6 +753,37 @@ describe('EventBus + CompactionEngine integration', () => {
     expect(snapshot.compactedTurns).toHaveLength(0);
     expect(snapshot.liveJournal).toHaveLength(2);
     expect(snapshot.lastEventId).toBe(2);
+  });
+
+  it('session_rewound trims active replay cache and stale live journal', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.publish(makeUserMessage(0, 'first'));
+    bus.publish(makeTextChunk(0, 'first reply'));
+    bus.publish({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
+    bus.publish(makeUserMessage(0, 'second'));
+    bus.publish(makeTextChunk(0, 'second reply'));
+    bus.publish({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
+    bus.publish({
+      type: 'followup_suggestion',
+      data: { suggestion: 'stale followup' },
+    });
+    bus.publish({
+      type: 'session_rewound',
+      data: {
+        sessionId: 'session-1',
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+      },
+    });
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(extractTexts(snapshot.compactedTurns)).toEqual([]);
+    expect(snapshot.liveJournal).toHaveLength(1);
+    expect(snapshot.liveJournal[0]?.type).toBe('session_rewound');
+    expect(snapshot.lastEventId).toBe(8);
   });
 
   it('compaction engine is closed when bus closes', () => {

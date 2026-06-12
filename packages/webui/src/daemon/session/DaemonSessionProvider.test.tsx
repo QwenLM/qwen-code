@@ -50,6 +50,24 @@ interface MockSession {
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
   shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
+  getRewindSnapshots: () => Promise<{
+    snapshots: Array<{
+      promptId?: string;
+      turnIndex: number;
+      timestamp: string;
+      diffStats: {
+        filesChanged: number;
+        insertions: number;
+        deletions: number;
+      };
+    }>;
+  }>;
+  rewind: (req: { targetTurnIndex: number; promptId?: string }) => Promise<{
+    rewound: boolean;
+    targetTurnIndex: number;
+    filesChanged: string[];
+    filesFailed: string[];
+  }>;
   context: () => Promise<{
     v: 1;
     sessionId: string;
@@ -179,7 +197,7 @@ const sdkMocks = vi.hoisted(() => {
       });
       workspaceProviders.mockReset();
       workspaceProviders.mockResolvedValue({
-        v: 1,
+        v: 1 as const,
         workspaceCwd: '/mock-workspace',
         initialized: true,
         providers: [],
@@ -663,6 +681,86 @@ describe('DaemonSessionProvider', () => {
       },
       expect.any(AbortSignal),
     );
+  });
+
+  it('loads rewind snapshots and reloads the session after rewind', async () => {
+    const getRewindSnapshots = vi.fn(async () => ({
+      snapshots: [
+        {
+          promptId: 'prompt-1',
+          turnIndex: 3,
+          timestamp: '2026-06-11T00:00:00.000Z',
+          diffStats: { filesChanged: 1, insertions: 2, deletions: 3 },
+        },
+      ],
+    }));
+    const rewind = vi.fn(async () => ({
+      rewound: true,
+      targetTurnIndex: 3,
+      filesChanged: ['README.md'],
+      filesFailed: [],
+    }));
+    const session = createMockSession({
+      sessionId: 'session-rewind',
+      getRewindSnapshots,
+      rewind,
+      events: createIdleEvents(),
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-rewind',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session, reloadedSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = actions;
+    if (!providerActions) throw new Error('actions were not initialized');
+
+    await act(async () => {
+      await expect(providerActions.getRewindSnapshots()).resolves.toEqual({
+        snapshots: [
+          expect.objectContaining({
+            promptId: 'prompt-1',
+            turnIndex: 3,
+          }),
+        ],
+      });
+    });
+    let rewindPromise: ReturnType<DaemonSessionActions['rewind']> | undefined;
+    act(() => {
+      rewindPromise = providerActions.rewind(3, 'prompt-1');
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await expect(rewindPromise).resolves.toMatchObject({
+      rewound: true,
+      targetTurnIndex: 3,
+    });
+
+    expect(getRewindSnapshots).toHaveBeenCalledTimes(1);
+    expect(rewind).toHaveBeenCalledWith({
+      targetTurnIndex: 3,
+      promptId: 'prompt-1',
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'session-rewind',
+      { workspaceCwd: '/mock-workspace' },
+      expect.any(String),
+    );
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-rewind',
+    });
   });
 
   it('submits permission selections with optional answers', async () => {
@@ -2989,20 +3087,9 @@ describe('DaemonSessionProvider', () => {
         ],
         liveJournal: [],
       },
-      events: async function* reloadedIdleEvents(
-        opts: { signal?: AbortSignal } = {},
-      ) {
+      events: function reloadedIdleEvents(opts: { signal?: AbortSignal } = {}) {
         reloaded.resolve();
-        await new Promise<void>((resolve) => {
-          if (opts.signal?.aborted) {
-            resolve();
-            return;
-          }
-          opts.signal?.addEventListener('abort', () => resolve(), {
-            once: true,
-          });
-        });
-        yield* [];
+        return createIdleEvents()(opts);
       },
     });
     sdkMocks.sessions.push(firstSession, reloadedSession);
@@ -3045,6 +3132,95 @@ describe('DaemonSessionProvider', () => {
         expect.objectContaining({
           kind: 'error',
           text: expect.stringContaining('State resync required'),
+        }),
+      ]),
+    );
+  });
+
+  it('reloads the session snapshot after a conversation-only rewind event', async () => {
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-rewound',
+      lastEventId: 20,
+      events: async function* rewindEvents() {
+        yield {
+          id: 21,
+          v: 1,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session-rewound',
+            targetTurnIndex: 1,
+            filesChanged: [],
+            filesFailed: [],
+          },
+        };
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-rewound',
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 22,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'rewound history' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: function reloadedIdleEvents(opts: { signal?: AbortSignal } = {}) {
+        reloaded.resolve();
+        return createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'session-rewound',
+      { workspaceCwd: '/mock-workspace' },
+      expect.any(String),
+    );
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'rewound history',
+        }),
+        expect.objectContaining({
+          kind: 'status',
+          text: 'Conversation rewound.',
+          source: 'conversation_rewind',
+        }),
+      ]),
+    );
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining('session_rewound'),
         }),
       ]),
     );
@@ -3776,7 +3952,7 @@ describe('DaemonSessionProvider', () => {
     ) {
       callCount += 1;
       if (callCount === 1) {
-        yield {
+        const event: DaemonEvent = {
           id: 5,
           v: 1 as const,
           type: 'session_update' as const,
@@ -3787,10 +3963,11 @@ describe('DaemonSessionProvider', () => {
             },
           },
         };
+        yield event;
         throw new Error('network timeout');
       }
       // Second call: delta resume succeeds with new content
-      yield {
+      const event: DaemonEvent = {
         id: 6,
         v: 1 as const,
         type: 'session_update' as const,
@@ -3801,6 +3978,7 @@ describe('DaemonSessionProvider', () => {
           },
         },
       };
+      yield event;
       await new Promise<void>((resolve) => {
         if (opts.signal?.aborted) {
           resolve();
@@ -4118,6 +4296,19 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       })),
     heartbeat: opts.heartbeat ?? vi.fn(async () => ({ ok: true })),
     shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),
+    getRewindSnapshots:
+      opts.getRewindSnapshots ??
+      vi.fn(async () => ({
+        snapshots: [],
+      })),
+    rewind:
+      opts.rewind ??
+      vi.fn(async () => ({
+        rewound: true,
+        targetTurnIndex: 1,
+        filesChanged: [],
+        filesFailed: [],
+      })),
     context:
       opts.context ??
       vi.fn(async () => ({

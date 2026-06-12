@@ -79,6 +79,18 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     if (TRANSIENT_TYPES.has(event.type)) return;
 
+    if (event.type === 'session_rewound') {
+      const targetTurnIndex = getRewindTargetTurnIndex(event);
+      if (targetTurnIndex !== undefined) {
+        this.rewindToTurn(targetTurnIndex);
+        if (event.id !== undefined) {
+          this.lastEventId = event.id;
+        }
+      }
+      this.liveJournal.push(event);
+      return;
+    }
+
     this.liveJournal.push(event);
 
     if (TURN_BOUNDARY_TYPES.has(event.type)) {
@@ -110,6 +122,41 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.slots = [];
     this.toolSlotIndex.clear();
     this.textSlotIndex.clear();
+  }
+
+  rewindToTurn(targetTurnIndex: number): void {
+    if (this.closed) return;
+    if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) return;
+
+    let completedUserTurns = 0;
+    let activeUserTurn = false;
+    let truncateIndex = -1;
+
+    for (let i = 0; i < this.compactedTurns.length; i++) {
+      const event = this.compactedTurns[i]!;
+      if (isUserMessageEvent(event) && !activeUserTurn) {
+        if (completedUserTurns >= targetTurnIndex) {
+          truncateIndex = i;
+          break;
+        }
+        activeUserTurn = true;
+      }
+      if (TURN_BOUNDARY_TYPES.has(event.type) && activeUserTurn) {
+        completedUserTurns += 1;
+        activeUserTurn = false;
+      }
+    }
+
+    if (truncateIndex >= 0) {
+      this.compactedTurns = this.compactedTurns.slice(0, truncateIndex);
+    }
+    this.liveJournal = [];
+    this.slots = [];
+    this.toolSlotIndex.clear();
+    this.textSlotIndex.clear();
+    const lastKeptId = this.compactedTurns.at(-1)?.id;
+    this.lastEventId =
+      typeof lastKeptId === 'number' ? lastKeptId : this.lastEventId;
   }
 
   close(): void {
@@ -296,6 +343,19 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.toolSlotIndex.clear();
     this.textSlotIndex.clear();
   }
+}
+
+function isUserMessageEvent(event: BridgeEvent): boolean {
+  const data = event.data as SessionUpdateData | undefined;
+  return data?.update?.sessionUpdate === 'user_message_chunk';
+}
+
+function getRewindTargetTurnIndex(event: BridgeEvent): number | undefined {
+  const data = event.data as { targetTurnIndex?: unknown } | undefined;
+  const targetTurnIndex = data?.targetTurnIndex;
+  return Number.isInteger(targetTurnIndex) && (targetTurnIndex as number) >= 0
+    ? (targetTurnIndex as number)
+    : undefined;
 }
 
 function makeMergedSessionUpdateEvent(

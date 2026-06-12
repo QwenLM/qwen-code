@@ -925,8 +925,8 @@ function appendStatusBlock(
     ...(event?.type === 'error' && event.promptId
       ? { promptId: event.promptId }
       : {}),
-    ...(event?.type === 'error' && event.source
-      ? { source: event.source }
+    ...(event && 'source' in event && event.source
+      ? { source: event.source as DaemonStatusTranscriptBlock['source'] }
       : {}),
   };
   appendBlock(state, block);

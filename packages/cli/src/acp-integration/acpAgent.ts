@@ -5027,7 +5027,7 @@ class QwenAgent implements Agent {
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
         const prefix = (sessionId as string) + '########';
-        const results = await Promise.all(
+        const fileSnapshotsByTurn = new Map(
           snapshots
             .map((s, idx) => ({ s, idx }))
             .filter(
@@ -5035,19 +5035,25 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .map(async ({ s, idx }) => {
-              const stats = await fhs.getDiffStats(s.promptId);
-              return {
-                promptId: s.promptId,
-                turnIndex: idx,
-                timestamp: s.timestamp.toISOString(),
-                diffStats: {
-                  filesChanged: stats?.filesChanged?.length ?? 0,
-                  insertions: stats?.insertions ?? 0,
-                  deletions: stats?.deletions ?? 0,
-                },
-              };
-            }),
+            .map(({ s, idx }) => [idx, s] as const),
+        );
+        const results = await Promise.all(
+          session.getRewindableTurns().map(async ({ turnIndex }) => {
+            const snapshot = fileSnapshotsByTurn.get(turnIndex);
+            const stats = snapshot
+              ? await fhs.getDiffStats(snapshot.promptId)
+              : undefined;
+            return {
+              ...(snapshot ? { promptId: snapshot.promptId } : {}),
+              turnIndex,
+              timestamp: (snapshot?.timestamp ?? new Date()).toISOString(),
+              diffStats: {
+                filesChanged: stats?.filesChanged?.length ?? 0,
+                insertions: stats?.insertions ?? 0,
+                deletions: stats?.deletions ?? 0,
+              },
+            };
+          }),
         );
         return { snapshots: results } as unknown as Record<string, unknown>;
       }
@@ -6074,6 +6080,7 @@ class QwenAgent implements Agent {
         let rewindResult;
         try {
           rewindResult = session.rewindToTurn(turnIndex as number);
+          await session.getConfig().getChatRecordingService()?.flush();
         } catch (err) {
           if (err instanceof RequestError) {
             const msg = err.message;

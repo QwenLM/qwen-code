@@ -194,6 +194,11 @@ interface BackgroundNotificationQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 
+export interface RewindableTurn {
+  turnIndex: number;
+  text: string;
+}
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -636,6 +641,21 @@ export class Session implements SessionContext {
     return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
+  getRewindableTurns(): RewindableTurn[] {
+    const apiHistory = this.captureHistorySnapshot();
+    const startIndex = getStartupContextLength(apiHistory);
+    const turns: RewindableTurn[] = [];
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (this.#isUserTextContent(apiHistory[i]!)) {
+        const text = this.#getUserText(apiHistory[i]!);
+        if (text.trim()) {
+          turns.push({ turnIndex: turns.length, text });
+        }
+      }
+    }
+    return turns;
+  }
+
   restoreHistory(history: Content[]): void {
     if (
       this.pendingPrompt ||
@@ -700,6 +720,15 @@ export class Session implements SessionContext {
     if (isSystemReminderContent(content)) return false;
 
     return content.parts.some((part) => 'text' in part && part.text);
+  }
+
+  #getUserText(content: Content): string {
+    if (!content.parts) return '';
+    return content.parts
+      .filter((part): part is Part & { text: string } => 'text' in part)
+      .map((part) => part.text)
+      .join(' ')
+      .trim();
   }
 
   async cancelPendingPrompt(): Promise<void> {

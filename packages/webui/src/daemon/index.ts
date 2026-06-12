@@ -97,7 +97,10 @@ export {
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on
 // @qwen-code/webui without importing @qwen-code/sdk/daemon directly.
-export { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+export {
+  DAEMON_APPROVAL_MODES,
+  isDaemonTurnError,
+} from '@qwen-code/sdk/daemon';
 export type {
   DaemonApprovalMode,
   DaemonAuthProviderBaseUrlOption,
@@ -111,6 +114,8 @@ export type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
   DaemonContextToolDetail,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
   DaemonSessionStatsModelMetrics,

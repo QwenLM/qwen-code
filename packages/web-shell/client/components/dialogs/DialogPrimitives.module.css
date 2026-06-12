@@ -10,6 +10,11 @@
   overflow: hidden;
 }
 
+.resume-picker-compact {
+  height: auto;
+  max-height: calc(100% - 48px);
+}
+
 .resume-picker-header {
   display: flex;
   align-items: center;
@@ -91,7 +96,32 @@
   padding: 4px 0;
 }
 
+.resume-picker-list-compact {
+  flex: 0 0 auto;
+  overflow-y: visible;
+}
+
 .resume-picker-empty {
+  padding: 16px 12px;
+  color: var(--text-dimmed);
+  font-size: 13px;
+}
+
+.resume-picker-target {
+  padding: 16px 12px;
+  font-size: 13px;
+}
+
+.resume-picker-target-label {
+  color: var(--text-primary);
+}
+
+.resume-picker-target-text {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.resume-picker-description {
   padding: 16px 12px;
   color: var(--text-dimmed);
   font-size: 13px;

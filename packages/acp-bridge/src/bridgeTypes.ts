@@ -31,14 +31,15 @@ import type {
 } from './status.js';
 
 export interface RewindSnapshotInfo {
-  promptId: string;
+  promptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
 }
 
 export interface RewindRequest {
-  promptId: string;
+  promptId?: string;
+  targetTurnIndex?: number;
 }
 
 export interface RewindResponse {

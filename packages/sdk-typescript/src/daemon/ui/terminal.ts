@@ -77,6 +77,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `caught up (${event.replayedCount} replayed)`,
         '2',
       );
+    case 'session.rewound':
+      return terminalLine(
+        'rewound',
+        `session rewound to turn ${event.targetTurnIndex}`,
+        '33',
+      );
     case 'prompt.cancelled':
       return terminalLine('cancelled', 'prompt cancelled', '33');
     case 'followup.suggestion':

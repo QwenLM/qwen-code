@@ -11,7 +11,7 @@ import type {
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonUserShellTranscriptBlock,
-} from '@qwen-code/sdk/daemon';
+} from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonMessage,
   DaemonMessageToolCall,

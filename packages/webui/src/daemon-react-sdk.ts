@@ -182,6 +182,8 @@ export type {
   DaemonAuthProviderModel,
   DaemonContextCategoryBreakdown,
   DaemonContextMemoryDetail,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
   DaemonContextSkillDetail,
   DaemonContextToolDetail,
   DaemonSessionContextUsage,
@@ -274,11 +276,15 @@ export type {
   DaemonSettingUpdateResult,
 } from './daemon/index.js';
 
+export { isDaemonTurnError } from './daemon/index.js';
+
 // ── Types: SDK Transcript Blocks (low-level) ─────────────────────
 
 export type {
   /** Shell output block: stdout/stderr text stream. */
   DaemonShellTranscriptBlock,
+  /** User-entered shell command block. */
+  DaemonUserShellTranscriptBlock,
   /** Status/error/debug informational block. */
   DaemonStatusTranscriptBlock,
   /** User, assistant, or thought text block (may be streaming). */
@@ -287,7 +293,7 @@ export type {
   DaemonToolTranscriptBlock,
   /** Discriminated union of all transcript block types. */
   DaemonTranscriptBlock,
-  /** Block kind tag: `'user' | 'assistant' | 'thought' | 'tool' | 'shell' | 'permission' | 'status' | 'error' | 'debug'`. */
+  /** Block kind tag: `'user' | 'assistant' | 'thought' | 'tool' | 'shell' | 'user_shell' | 'permission' | 'status' | 'error' | 'debug'`. */
   DaemonTranscriptBlockKind,
   /** Interactive question block (ask_user_question tool preview). */
   DaemonTranscriptQuestion,

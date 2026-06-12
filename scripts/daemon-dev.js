@@ -6,13 +6,23 @@
 
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { platform } from 'node:os';
+import { platform, tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
+const acpBridgeLoaderDir = mkdtempSync(join(tmpdir(), 'qwen-daemon-dev-'));
+const acpBridgeLoaderPath = join(acpBridgeLoaderDir, 'acp-bridge-loader.mjs');
+const acpBridgeRegisterPath = join(
+  acpBridgeLoaderDir,
+  'acp-bridge-register.mjs',
+);
+const acpBridgeSourceRootUrl = pathToFileURL(
+  join(root, 'packages', 'acp-bridge', 'src'),
+).href;
 const args = process.argv.slice(2);
 const isWin = platform() === 'win32';
 const serveOptionNames = new Set([
@@ -179,12 +189,21 @@ function shutdown(code) {
     pending += 1;
     child.on('close', () => {
       pending -= 1;
-      if (pending <= 0) process.exit(code);
+      if (pending <= 0) exit(code);
     });
     killChild(child);
   }
-  if (pending === 0) process.exit(code);
-  setTimeout(() => process.exit(code), 5_000).unref();
+  if (pending === 0) exit(code);
+  setTimeout(() => exit(code), 5_000).unref();
+}
+
+function exit(code) {
+  try {
+    rmSync(acpBridgeLoaderDir, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup errors.
+  }
+  process.exit(code);
 }
 
 const children = [];
@@ -196,7 +215,7 @@ try {
   console.error(
     `[daemon-dev] ${err instanceof Error ? err.message : String(err)}`,
   );
-  process.exit(1);
+  exit(1);
 }
 
 const port = readOption('--port') || '4170';
@@ -204,7 +223,7 @@ if (port === '0') {
   console.error(
     'daemon-dev: --port 0 is not supported; the launcher needs a fixed port to poll for health.',
   );
-  process.exit(1);
+  exit(1);
 }
 
 const hostname = readOption('--hostname') || '127.0.0.1';
@@ -220,7 +239,48 @@ if (!hasOption('--workspace')) serveArgs.push('--workspace', workspace);
 const tsxLoaderUrl = pathToFileURL(
   join(root, 'node_modules', 'tsx', 'dist', 'esm', 'index.mjs'),
 ).href;
-const nodeOptions = [process.env.NODE_OPTIONS, `--import ${tsxLoaderUrl}`]
+writeFileSync(
+  acpBridgeLoaderPath,
+  `
+const acpBridgeSourceRootUrl = '${acpBridgeSourceRootUrl}';
+
+export function resolve(specifier, context, nextResolve) {
+  if (specifier === '@qwen-code/acp-bridge') {
+    return {
+      shortCircuit: true,
+      url: acpBridgeSourceRootUrl + '/index.ts',
+      format: 'module',
+    };
+  }
+  if (specifier.startsWith('@qwen-code/acp-bridge/')) {
+    return {
+      shortCircuit: true,
+      url:
+        acpBridgeSourceRootUrl +
+        '/' +
+        specifier.slice('@qwen-code/acp-bridge/'.length) +
+        '.ts',
+      format: 'module',
+    };
+  }
+  return nextResolve(specifier, context);
+}
+`,
+);
+writeFileSync(
+  acpBridgeRegisterPath,
+  `
+import { register } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+register('${pathToFileURL(acpBridgeLoaderPath).href}', pathToFileURL('./'));
+`,
+);
+const nodeOptions = [
+  process.env.NODE_OPTIONS,
+  `--import ${tsxLoaderUrl}`,
+  `--import ${pathToFileURL(acpBridgeRegisterPath).href}`,
+]
   .filter(Boolean)
   .join(' ');
 

@@ -127,8 +127,10 @@ const MAX_PENDING_PER_SESSION = 64;
 export type DaemonKnownEventType =
   (typeof DAEMON_KNOWN_EVENT_TYPE_VALUES)[number];
 
-export interface DaemonEventEnvelope<TType extends string, TData>
-  extends Omit<DaemonEvent, 'type' | 'data'> {
+export interface DaemonEventEnvelope<TType extends string, TData> extends Omit<
+  DaemonEvent,
+  'type' | 'data'
+> {
   type: TType;
   data: TData;
 }
@@ -635,7 +637,7 @@ export interface DaemonTurnErrorData {
 
 export interface DaemonSessionRewoundData {
   sessionId: string;
-  promptId: string;
+  promptId?: string;
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
@@ -1445,7 +1447,7 @@ function isSessionRewoundData(
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['promptId']) &&
+    (value['promptId'] === undefined || isNonEmptyString(value['promptId'])) &&
     isFiniteNumber(value['targetTurnIndex']) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])

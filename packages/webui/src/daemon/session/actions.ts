@@ -545,6 +545,56 @@ export function createDaemonSessionActions({
       }
     },
 
+    async getRewindSnapshots() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load rewind snapshots failed',
+        'load_rewind_snapshots',
+      );
+      try {
+        return await withActionTimeout(
+          session.getRewindSnapshots(),
+          'Load rewind snapshots timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load rewind snapshots failed',
+          error,
+          'load_rewind_snapshots',
+        );
+      }
+    },
+
+    async rewind(targetTurnIndex, promptId) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Rewind failed',
+        'rewind_session',
+      );
+      const sessionId = session.sessionId;
+      try {
+        const result = await withActionTimeout(
+          session.rewind({
+            targetTurnIndex,
+            ...(promptId ? { promptId } : {}),
+          }),
+          'Rewind timed out',
+        );
+        void startSessionSwitch(sessionId, 'load').catch(() => {});
+        return result;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Rewind failed',
+          error,
+          'rewind_session',
+        );
+      }
+    },
+
     async recapSession(): Promise<DaemonSessionRecapResult> {
       const session = requireSessionForAction(
         addNotice,
