@@ -11,6 +11,11 @@ import type { AddressInfo } from 'node:net';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  InvalidClientIdError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -91,6 +96,7 @@ class FakeBridge {
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  spawnClientId: string | undefined = 'client-1';
 
   closedSessions: string[] = [];
 
@@ -101,7 +107,7 @@ class FakeBridge {
       sessionId: 'sess-1',
       workspaceCwd: '/ws',
       attached: false,
-      clientId: 'client-1',
+      clientId: this.spawnClientId,
     };
   }
   async killSession(sessionId: string) {
@@ -221,7 +227,24 @@ class FakeBridge {
   async generateSessionBtw(sessionId: string, question: string) {
     return { sessionId, answer: `re: ${question}` };
   }
-  async executeShellCommand(sessionId: string, command: string) {
+  shellCalls: Array<{
+    sessionId: string;
+    command: string;
+    context?: unknown;
+  }> = [];
+  shellError: unknown;
+  async executeShellCommand(
+    sessionId: string,
+    command: string,
+    _signal?: AbortSignal,
+    context?: unknown,
+  ) {
+    this.shellCalls.push({
+      sessionId,
+      command,
+      ...(context !== undefined ? { context } : {}),
+    });
+    if (this.shellError !== undefined) throw this.shellError;
     return { exitCode: 0, output: `$ ${command}`, aborted: false };
   }
   async getSessionContextUsageStatus(sessionId: string) {
@@ -410,7 +433,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
 
-  async function initialize(): Promise<string> {
+  async function restartServer(opts: {
+    sessionShellCommandEnabled?: boolean;
+    nextBridge?: FakeBridge;
+  }): Promise<void> {
+    server.closeAllConnections?.();
+    await new Promise<void>((r) => server.close(() => r()));
+    bridge = opts.nextBridge ?? new FakeBridge();
+    const app = express();
+    app.use(express.json());
+    mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+      boundWorkspace: '/ws',
+      workspace: fakeWorkspace,
+      enabled: true,
+      sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
+    });
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = server.address() as AddressInfo;
+    base = `http://127.0.0.1:${addr.port}`;
+  }
+
+  async function initializeRaw(): Promise<{
+    connId: string;
+    body: Record<string, unknown>;
+  }> {
     const res = await fetch(`${base}/acp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -419,9 +467,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(res.status).toBe(200);
     const connId = res.headers.get('acp-connection-id');
     expect(connId).toBeTruthy();
-    const body = (await res.json()) as { result: { protocolVersion: number } };
-    expect(body.result.protocolVersion).toBe(1);
-    return connId!;
+    const body = (await res.json()) as Record<string, unknown>;
+    return { connId: connId!, body };
+  }
+
+  async function initialize(): Promise<string> {
+    const { connId, body } = await initializeRaw();
+    const result = body['result'] as { protocolVersion: number };
+    expect(result.protocolVersion).toBe(1);
+    return connId;
   }
 
   function post(connId: string, msg: unknown) {
@@ -464,6 +518,31 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/new',
     });
     expect(bad.status).toBe(404);
+  });
+
+  it('initialize omits _qwen/session/shell by default', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/shell',
+    );
+  });
+
+  it('initialize advertises _qwen/session/shell when enabled', async () => {
+    await restartServer({ sessionShellCommandEnabled: true });
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/shell',
+    );
   });
 
   it('session/new reply rides the connection-scoped stream', async () => {
@@ -1684,7 +1763,59 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/shell rejects empty command', async () => {
+    it('_qwen/session/shell returns stable disabled error by default', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 53,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: '' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          code: -32600,
+          data: { errorKind: 'session_shell_disabled' },
+        },
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp session/shell session='),
+        ),
+      ).toBe(false);
+    });
+
+    it('_qwen/session/shell rejects unowned session when enabled', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 54,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+      expect(bridge.shellCalls).toHaveLength(0);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp session/shell session='),
+        ),
+      ).toBe(false);
+    });
+
+    it('_qwen/session/shell requires an owned bridge-stamped clientId when enabled', async () => {
+      const nextBridge = new FakeBridge();
+      nextBridge.spawnClientId = undefined;
+      await restartServer({
+        sessionShellCommandEnabled: true,
+        nextBridge,
+      });
       const connId = await initialize();
       const streamRes = openStream(connId);
       await new Promise((r) => setTimeout(r, 30));
@@ -1697,15 +1828,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
-        id: 53,
+        id: 55,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          data: { errorKind: 'client_id_required' },
+        },
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('_qwen/session/shell rejects empty command when enabled', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 56,
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command: '' },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+      expect(bridge.shellCalls).toHaveLength(0);
     });
 
     it('_qwen/session/shell returns result', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
       const connId = await initialize();
       const streamRes = openStream(connId);
       const command = 'ls\nFAKE\r\x1b[31m';
@@ -1719,7 +1880,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
-        id: 54,
+        id: 57,
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command },
       });
@@ -1734,6 +1895,90 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(shellLog).not.toContain('\n');
       expect(shellLog).not.toContain('\r');
       expect(shellLog).not.toContain('\x1b');
+      expect(bridge.shellCalls).toEqual([
+        {
+          sessionId: 'sess-1',
+          command,
+          context: { clientId: 'client-1', fromLoopback: true },
+        },
+      ]);
+    });
+
+    it('_qwen/session/shell maps bridge shell policy errors to RPC errorKind', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new SessionShellDisabledError();
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const disabledFrames = await takeFrames(await streamRes, 2);
+      expect(disabledFrames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          data: { errorKind: 'session_shell_disabled' },
+        },
+      });
+
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new SessionShellClientRequiredError();
+      const connId2 = await initialize();
+      const streamRes2 = openStream(connId2);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId2, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId2, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const clientRequiredFrames = await takeFrames(await streamRes2, 2);
+      expect(clientRequiredFrames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          data: { errorKind: 'client_id_required' },
+        },
+      });
+    });
+
+    it('_qwen/session/shell preserves InvalidClientIdError invalid params mapping', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new InvalidClientIdError('sess-1', 'client-2');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
     });
 
     it('_qwen/session/detach succeeds', async () => {

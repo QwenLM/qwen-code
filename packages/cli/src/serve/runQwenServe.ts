@@ -440,6 +440,8 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const sessionShellCommandEnabled =
+    optsIn.enableSessionShell === true && token !== undefined;
   // Env-var fallback for the deadline options. Explicit option
   // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
   // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
@@ -852,6 +854,7 @@ export async function runQwenServe(
         ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
         : {}),
       boundWorkspace,
+      sessionShellCommandEnabled,
       childEnvOverrides,
       channelFactory,
       onDiagnosticLine: diagnosticSink,

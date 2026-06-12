@@ -113,6 +113,11 @@ export interface ServeOptions {
    */
   requireAuth?: boolean;
   /**
+   * Opt in to direct session shell execution. The effective policy also
+   * requires a configured bearer token and a session-bound client id.
+   */
+  enableSessionShell?: boolean;
+  /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
    * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
