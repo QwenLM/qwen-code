@@ -1050,8 +1050,11 @@
       // The token (in the URL) is shown to the OWNER who is creating it — that
       // is the point. textContent-only.
       $('share-create-btn').onclick = async () => {
-        if (!token()) return setStatus('pair first');
         const out = $('share-result');
+        if (!token()) {
+          out.textContent = 'pair first';
+          return;
+        }
         const sessionId = $('share-session').value.trim();
         const ttlSec = Number($('share-ttl').value);
         if (!sessionId) {
