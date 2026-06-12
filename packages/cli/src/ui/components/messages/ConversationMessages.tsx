@@ -411,7 +411,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     return (
       <Box flexDirection="column">
         <Text dimColor italic>
-          ✧ {t('Thinking')}…{durationSuffix}
+          ✦ {t('Thinking')}…{durationSuffix}
         </Text>
         <Box paddingLeft={2}>
           <Text dimColor wrap="truncate">
