@@ -195,6 +195,23 @@ describe('textBufferReducer', () => {
       expect(state2.cursorRow).toBe(0);
       expect(state2.cursorCol).toBe(5);
     });
+
+    it('should undo a join operation', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world'],
+        cursorRow: 1,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const joined = textBufferReducer(stateWithText, action);
+      expect(joined.lines).toEqual(['helloworld']);
+
+      const undone = textBufferReducer(joined, { type: 'undo' });
+      expect(undone.lines).toEqual(['hello', 'world']);
+      expect(undone.cursorRow).toBe(1);
+      expect(undone.cursorCol).toBe(0);
+    });
   });
 
   describe('undo/redo actions', () => {
