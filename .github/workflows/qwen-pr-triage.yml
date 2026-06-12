@@ -274,9 +274,11 @@ jobs:
       - name: 'Run product-decision'
         id: 'run'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          # Same credentials as the review / tmux-testing stages — all three
-          # run the local qwen CLI on the self-hosted runner.
+          # Read-only token ONLY: this agent reads untrusted PR content, so it
+          # must never hold a write-capable credential. The write PAT lives in
+          # the "Publish product-decision" step below (no agent). See the review
+          # job for the full analyze/publish split rationale.
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -291,8 +293,21 @@ jobs:
           # /tmp which persists across runs and is shared between runner
           # instances on the same host (stale or cross-PR verdicts).
           TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+          # Publish-separation: emit the comment body + verdict (with
+          # review_action) to files instead of posting. The "Publish
+          # product-decision" step posts them with the PAT.
+          QWEN_PRODUCT_EMIT_ONLY: '1'
         run: |
           set -euo pipefail
+          # Refuse to run the untrusted-content agent without an explicit
+          # read-only token: an empty GH_TOKEN makes gh fall back to the
+          # runner's stored credentials. Isolate gh config too.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::QWEN_REVIEW_READ_TOKEN is not set; refusing to run the product-decision agent without an explicit read-only token."
+            exit 1
+          fi
+          export GH_CONFIG_DIR="$RUNNER_TEMP/gh-readonly-config"
+          mkdir -p "$GH_CONFIG_DIR"
 
           if ! command -v qwen >/dev/null 2>&1; then
             echo "::error::qwen CLI not found on runner"
@@ -330,6 +345,57 @@ jobs:
           # default the verdict to "pass", silently waving the PR through.
           exit "$EXIT_CODE"
 
+      # Publish the product-decision comment / review with the write PAT. No
+      # agent runs here and it only reads files the agent emitted, so untrusted
+      # PR content cannot reach the PAT. Best-effort: posting failures warn but
+      # do not mask the gate verdict (set by the capture step below).
+      - name: 'Publish product-decision'
+        if: 'always()'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          TRIAGE_RESULTS_DIR: '${{ runner.temp }}/triage-results'
+        run: |
+          set -uo pipefail
+          DIR="$TRIAGE_RESULTS_DIR"
+          BODY="$DIR/product-comment.md"
+          VERDICT_FILE="$DIR/product-decision.json"
+          if [ ! -f "$BODY" ]; then
+            echo "::notice::No product-decision comment to publish"
+            exit 0
+          fi
+          ACTION="none"
+          if [ -f "$VERDICT_FILE" ]; then
+            ACTION="$(jq -r '.review_action // "none"' "$VERDICT_FILE" 2>/dev/null || echo none)"
+          fi
+          if [ "$ACTION" = "request_changes" ]; then
+            # Dedup: if the bot already has a CHANGES_REQUESTED review on this
+            # PR, don't stack another one on a re-run. Best-effort — on a query
+            # failure we fall through and post (better a duplicate than silently
+            # dropping the gate).
+            BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+            ALREADY=""
+            if [ -n "$BOT_LOGIN" ]; then
+              ALREADY="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json latestReviews \
+                --jq "[.latestReviews[] | select(.author.login == \"$BOT_LOGIN\" and .state == \"CHANGES_REQUESTED\")] | length" 2>/dev/null || echo '')"
+            fi
+            if [ "$ALREADY" = "0" ] || [ -z "$ALREADY" ]; then
+              gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes --body-file "$BODY" \
+                || echo "::warning::Failed to submit request-changes review"
+            else
+              echo "::notice::Bot already has a CHANGES_REQUESTED review — skipping duplicate"
+            fi
+          else
+            EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- qwen-triage:product -->")) | .id' 2>/dev/null | head -1 || true)"
+            if [ -n "$EXISTING" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY" >/dev/null \
+                || echo "::warning::Failed to update product comment"
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY" >/dev/null \
+                || echo "::warning::Failed to post product comment"
+            fi
+          fi
+
       - name: 'Read verdict from skill output'
         if: 'always()'
         id: 'capture'
@@ -351,8 +417,17 @@ jobs:
           echo "::notice::Product decision verdict: $VERDICT"
 
   # ─── Stage 2: Code Review ───────────────────────────────────────────
-  # Security: review reads PR diff via API (no code execution). Fork PRs
-  # are safe here because settings_json restricts commands to gh/curl only.
+  # Security model (analyze/publish split): the review AGENT runs with only a
+  # read-only token (QWEN_REVIEW_READ_TOKEN) and is told via QWEN_REVIEW_EMIT_ONLY
+  # to write its verdict + inline comments to a JSON file instead of posting.
+  # A separate "Publish review" step (no agent, holds the write-capable PAT)
+  # posts that JSON. So a prompt injection in untrusted PR content cannot reach
+  # the write-capable GitHub PAT — that is the severe credential, and it is now
+  # out of the agent's reach. Deterministic analysis is skipped
+  # (QWEN_REVIEW_SKIP_DETERMINISTIC), so the review itself executes no PR code.
+  # RESIDUAL RISK (accepted / follow-up): OPENAI_API_KEY is still in the agent
+  # env, so an injection could exfiltrate it via egress (e.g. curl). Mitigate
+  # later with an egress allowlist + a spend-limited, rotatable model key.
   review:
     needs: ['resolve', 'product-decision']
     if: >-
@@ -441,7 +516,10 @@ jobs:
         if: "steps.pr_state.outputs.should_review == 'true'"
         id: 'run'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          # Read-only token ONLY: the agent reads untrusted PR content, so it
+          # must never hold a write-capable credential. QWEN_REVIEW_READ_TOKEN
+          # is a zero-scope PAT (authenticated public reads, cannot write).
+          GH_TOKEN: '${{ secrets.QWEN_REVIEW_READ_TOKEN }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -451,8 +529,23 @@ jobs:
           QWEN_REVIEW_SKIP_DETERMINISTIC: '1'
           QWEN_REVIEW_MAX_REVERSE_ROUNDS: '1'
           REVIEW_TIMEOUT_MIN: '${{ needs.resolve.outputs.review_timeout }}'
+          # Publish-separation: emit the review JSON to this file instead of
+          # posting it. The "Publish review" step below posts it with the PAT.
+          QWEN_REVIEW_EMIT_ONLY: '1'
+          QWEN_REVIEW_OUTPUT_FILE: '${{ runner.temp }}/review-result.json'
         run: |
           set -euo pipefail
+          # Refuse to run the untrusted-content agent without an explicit
+          # read-only token: an empty GH_TOKEN makes gh fall back to the
+          # runner's stored credentials, which could be a write-capable account
+          # — silently defeating the analyze/publish split. Also isolate gh's
+          # config dir so it cannot read the runner's ambient auth.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::QWEN_REVIEW_READ_TOKEN is not set; refusing to run the review agent without an explicit read-only token."
+            exit 1
+          fi
+          export GH_CONFIG_DIR="$RUNNER_TEMP/gh-readonly-config"
+          mkdir -p "$GH_CONFIG_DIR"
           REPO="${GITHUB_REPOSITORY}"
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           # Leave a 5-minute buffer under the job timeout for the
@@ -490,18 +583,55 @@ jobs:
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Review exited with code $EXIT_CODE"
           fi
-          # Propagate: a crashed or timed-out review must fail this job.
-          # Otherwise the verdict step finds no CHANGES_REQUESTED review
-          # (because none ran to completion) and defaults to "pass",
-          # waving the PR through to tmux-testing and approval unreviewed.
+          # Propagate: a crashed or timed-out review must fail this job, so the
+          # Publish step does not fire on a partial result and the fallback
+          # comment runs instead of waving the PR through unreviewed.
           exit "$EXIT_CODE"
+
+      # Publish the review with the write-capable PAT. This step runs NO agent
+      # and reads only the JSON the agent emitted — untrusted PR content cannot
+      # reach it, so holding the PAT here is safe.
+      - name: 'Publish review'
+        # Explicit success(): only publish when the review agent step above
+        # finished cleanly. GitHub would imply success() here anyway, but
+        # spelling it out keeps the "never publish a partial result" guarantee
+        # from depending on that implicit rule.
+        if: "success() && steps.pr_state.outputs.should_review == 'true'"
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+          REVIEW_FILE: '${{ runner.temp }}/review-result.json'
+        run: |
+          set -euo pipefail
+          RESULT="$REVIEW_FILE"
+          # Fallback to the skill's in-workspace default path if the agent did
+          # not honor QWEN_REVIEW_OUTPUT_FILE.
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(ls "$GITHUB_WORKSPACE"/.qwen/tmp/qwen-review-*-review.json 2>/dev/null | head -1 || true)"
+          fi
+          if [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; then
+            echo "::error::Review agent produced no review JSON; nothing to publish"
+            exit 1
+          fi
+          echo "::notice::Publishing review from $RESULT"
+          for attempt in 1 2 3; do
+            if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input "$RESULT"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to publish review after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::Publish failed (attempt ${attempt}/3), retrying..."
+            sleep $((attempt * 15))
+          done
 
       - name: 'Check review verdict'
         id: 'verdict'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
           SHOULD_REVIEW: '${{ steps.pr_state.outputs.should_review }}'
+          REVIEW_FILE: '${{ runner.temp }}/review-result.json'
         run: |
           if [ "$SHOULD_REVIEW" != "true" ]; then
             # PR was closed/merged/drafted during the debounce wait — the
@@ -510,41 +640,24 @@ jobs:
             exit 0
           fi
 
-          # Check if the bot's latest review requested changes. Derive the
-          # bot login from the token actually used to post the review,
-          # rather than hardcoding the account name — if the PAT is ever
-          # rotated to a different account, a hardcoded login would silently
-          # match nothing and this gate would always pass.
-          BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "qwen-code-ci-bot")
-          export BOT_LOGIN
+          # The verdict is the `event` the agent wrote into the review JSON
+          # (the same JSON that was just published) — no post-hoc API read of
+          # the bot's review is needed. Fail closed: anything other than an
+          # explicit APPROVE/COMMENT blocks tmux + approval.
+          RESULT="$REVIEW_FILE"
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(ls "$GITHUB_WORKSPACE"/.qwen/tmp/qwen-review-*-review.json 2>/dev/null | head -1 || true)"
+          fi
+          EVENT=""
+          if [ -n "${RESULT:-}" ] && [ -f "$RESULT" ]; then
+            EVENT="$(jq -r '.event // ""' "$RESULT" 2>/dev/null || echo "")"
+          fi
 
-          # Fail closed on network errors: "NONE" must mean "the bot posted
-          # no review" (jq's else branch), never "the API call failed" — a
-          # flaky connection from the ECS runner must not be mistaken for a
-          # passing review. Retry, then fail the job so the fallback comment
-          # fires instead of silently waving the PR through.
-          REVIEW_STATE=""
-          for attempt in 1 2 3; do
-            if REVIEW_STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-              --json latestReviews --jq '
-                [.latestReviews[] | select(.author.login == env.BOT_LOGIN)] |
-                if length > 0 then .[0].state else "NONE" end
-              '); then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::Failed to read review state after 3 attempts"
-              exit 1
-            fi
-            echo "::warning::gh pr view failed (attempt ${attempt}/3), retrying..."
-            sleep $((attempt * 15))
-          done
-
-          if [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
-            echo "verdict=fail" >> "$GITHUB_OUTPUT"
-            echo "::notice::Review requested changes — skipping tmux testing"
-          else
+          if [ "$EVENT" = "APPROVE" ] || [ "$EVENT" = "COMMENT" ]; then
             echo "verdict=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review event=${EVENT:-<none>} — not a clean pass; skipping tmux testing"
           fi
 
   # ─── Stage 2b: Tmux Testing (after review, internal PRs only) ───────
@@ -687,6 +800,7 @@ jobs:
     if: >-
       always() &&
       needs.resolve.outputs.should_run == 'true' &&
+      needs.resolve.outputs.is_fork == 'false' &&
       ((needs.product-decision.result == 'success' &&
         needs.product-decision.outputs.verdict == 'pass') ||
        needs.resolve.outputs.trigger_type == 'review_only') &&

@@ -49,6 +49,8 @@ Compare required headings against the PR body. Missing required sections → pos
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/template-fail.md
 ```
 
+**Publish-separation mode** — if `QWEN_PRODUCT_EMIT_ONLY` is set (CI keeps this agent free of any write credential), do NOT run `gh pr review`. Instead write the request-changes body to `$RESULTS_DIR/product-comment.md` and set `"review_action": "request_changes"` in the verdict JSON (Step 7). A separate privileged CI step posts it. Then output verdict `fail` and stop.
+
 Output verdict `fail` and exit. Do not continue to direction/approach evaluation.
 
 ### 3. Product Direction
@@ -129,6 +131,8 @@ On approach: <honest assessment — scope feels right / could be simpler / sugge
 — _Qwen Code · qwen3.7-max_
 ```
 
+**Publish-separation mode** — if `QWEN_PRODUCT_EMIT_ONLY` is set, do NOT post the comment yourself. Write the full marker comment body (including `<!-- qwen-triage:product -->`) to `$RESULTS_DIR/product-comment.md`, set `"review_action": "none"` in the verdict JSON, and skip Step 6. A separate privileged CI step dedups and posts it.
+
 ### 6. Comment Dedup
 
 Before posting, check for an existing comment with `<!-- qwen-triage:product -->`:
@@ -153,10 +157,17 @@ cat > "$RESULTS_DIR/product-decision.json" << 'VERDICT_EOF'
 {
   "verdict": "pass",
   "summary": "<one-line summary of decision>",
-  "blocking_reasons": []
+  "blocking_reasons": [],
+  "review_action": "none"
 }
 VERDICT_EOF
 ```
+
+`review_action` tells the CI publish step what to post (only used in
+publish-separation mode; harmless otherwise):
+
+- `"none"` — post/update the `<!-- qwen-triage:product -->` comment written to `$RESULTS_DIR/product-comment.md`
+- `"request_changes"` — submit a CHANGES_REQUESTED review with that file as the body (template-check failure)
 
 Possible `verdict` values:
 

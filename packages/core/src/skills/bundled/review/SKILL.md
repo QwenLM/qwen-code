@@ -564,14 +564,21 @@ Rules:
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 
-Then submit:
+Then submit.
+
+**CI publish-separation mode** — if the environment variable `QWEN_REVIEW_EMIT_ONLY` is set, the review agent must hold no write credential: do NOT call the submit API. Instead copy the review JSON to `QWEN_REVIEW_OUTPUT_FILE` and STOP Step 9 — a separate privileged CI step posts it. This applies to the no-findings case below too. The copied file is read by CI, so do not rely on Step 11 cleanup removing it (it lives outside `.qwen/tmp`).
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
-  --input .qwen/tmp/qwen-review-{target}-review.json
+if [ -n "${QWEN_REVIEW_EMIT_ONLY:-}" ]; then
+  cp .qwen/tmp/qwen-review-{target}-review.json "${QWEN_REVIEW_OUTPUT_FILE:?set in emit-only mode}"
+  echo "Emit-only: wrote review JSON to $QWEN_REVIEW_OUTPUT_FILE (not submitted)"
+else
+  gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+    --input .qwen/tmp/qwen-review-{target}-review.json
+fi
 ```
 
-If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body:
+If there are **no confirmed findings**, submit a single-line review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. **In emit-only mode**, build the same `{commit_id, event, body}` object and write it to `QWEN_REVIEW_OUTPUT_FILE` instead of calling `gh api`:
 
 ```bash
 # downgradeApprove=false (non-self PR, green CI):
