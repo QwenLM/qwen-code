@@ -878,6 +878,28 @@ export default {
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
   'Current tasks': '現在のタスク',
+  'Background tasks': 'バックグラウンドタスク',
+  'No tasks currently running': '現在実行中のタスクはありません',
+  'No entry to show.': '表示するエントリはありません。',
+  'needs approval': '承認待ち',
+  'Background agent needs approval':
+    'バックグラウンドエージェントが承認待ちです',
+  'Approve or deny the request above':
+    '上のリクエストを承認または拒否してください',
+  Running: '実行中',
+  Paused: '一時停止中',
+  Completed: '完了',
+  Failed: '失敗',
+  Stopped: '停止済み',
+  Shell: 'シェル',
+  Monitor: 'モニター',
+  Command: 'コマンド',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] メモリ統合',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':

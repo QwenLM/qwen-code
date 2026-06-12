@@ -1496,6 +1496,26 @@ export default {
   'Found {{count}} TOML command files:':
     "S'han trobat {{count}} fitxers d'ordres TOML:",
   'Current tasks': 'Tasques actuals',
+  'Background tasks': 'Tasques en segon pla',
+  'No tasks currently running': 'No hi ha cap tasca en execució',
+  'No entry to show.': 'No hi ha cap entrada per mostrar.',
+  'needs approval': 'necessita aprovació',
+  'Background agent needs approval': "L'agent en segon pla necessita aprovació",
+  'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  Running: 'En execució',
+  Paused: 'En pausa',
+  Completed: 'Completada',
+  Failed: 'Fallida',
+  Stopped: 'Aturada',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Ordre',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidació de memòria',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidació de memòria (revisant {{count}} sessió)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidació de memòria (revisant {{count}} sessions)',
   '... and {{count}} more': '... i {{count}} més',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'El format TOML és obsolet. Voleu migrar-los al format Markdown?',
