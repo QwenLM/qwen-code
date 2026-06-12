@@ -18,6 +18,11 @@ import {
   loadResolvedRoutingRules,
   formatResolvedRouting,
 } from './routing/rules.js';
+import {
+  parseRoutingTest,
+  evaluateRoutingTest,
+  formatRoutingTest,
+} from './routing/test.js';
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import {
@@ -259,6 +264,15 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   process.on('SIGTERM', shutdown);
 }
 
+/** Read all of stdin as UTF-8 (used by `routing test` when no positional). */
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 // Entrypoint: `qwen-rc serve`
 if (process.argv[2] === 'serve') {
   runServe().catch((err) => {
@@ -332,4 +346,33 @@ if (process.argv[2] === 'serve') {
     console.log(formatResolvedRouting(rules));
     process.exit(0);
   });
+} else if (process.argv[2] === 'routing' && process.argv[3] === 'test') {
+  // `qwen-rc routing test [<event-json>] [--sub=<scopes>[@id]]... [--resolved]`
+  // Daemon-free dry-run of the routing.yaml DROP layer ONLY (the output carries
+  // a NOTE that downstream gates - snooze/prefs/quiet-hours/working-device/
+  // rate-limit - are NOT considered). INSPECTOR: exit 0 on success, 2 on a
+  // usage/parse error. The routing config FAIL-OPENS, so there is no exit 1.
+  void (async () => {
+    // Read stdin only when piped, so a positional invocation never blocks.
+    const stdin = process.stdin.isTTY ? null : await readAllStdin();
+    const parsed = parseRoutingTest(process.argv.slice(4), stdin);
+    if (!parsed.ok) {
+      // eslint-disable-next-line no-console
+      console.error(parsed.error);
+      process.exit(2);
+      return;
+    }
+    const { request } = parsed;
+    const { matcher, ruleCount } = await loadLayeredRoutingMatcher(
+      join(homedir(), '.qwen', 'rc', 'routing.yaml'),
+      request.resolved ? process.cwd() : undefined,
+      // eslint-disable-next-line no-console
+      (msg) => console.warn(msg),
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      formatRoutingTest(evaluateRoutingTest(matcher, request, ruleCount)),
+    );
+    process.exit(0);
+  })();
 }
