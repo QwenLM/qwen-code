@@ -30,8 +30,6 @@ CLAUDE.md
 
 # Qwen Code Configs
 .qwen/*
-!.qwen/design/
-!.qwen/design/tui-thinking-display-pr2.md
 !.qwen/commands/
 !.qwen/commands/**
 !.qwen/skills/
