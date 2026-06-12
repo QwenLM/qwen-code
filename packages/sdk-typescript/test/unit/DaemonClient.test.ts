@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   abortTimeout,
   composeAbortSignals,
 } from '../../src/daemon/DaemonClient.js';
@@ -41,6 +42,19 @@ function sseResponse(frames: string): Response {
     start(controller) {
       controller.enqueue(encoder.encode(frames));
       controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+function pendingSseResponse(): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(': keepalive\n\n'));
     },
   });
   return new Response(body, {
@@ -846,6 +860,259 @@ describe('DaemonClient', () => {
           ctrl.signal,
         ),
       ).rejects.toThrow();
+    });
+
+    it('rejects locally when a session reaches the pending prompt cap', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return pendingSseResponse();
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      const first = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'first' }] },
+          ctrl.signal,
+        )
+        .catch((err: unknown) => err);
+
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+      const secondCtrl = new AbortController();
+      const second = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'second' }] },
+          secondCtrl.signal,
+        )
+        .catch((err: unknown) => err);
+      try {
+        const secondResult = await Promise.race<unknown>([
+          second,
+          new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+        ]);
+        expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
+        expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+      } finally {
+        ctrl.abort();
+        secondCtrl.abort();
+        await first;
+        await second;
+      }
+    });
+
+    it('does not reserve a local prompt slot for a pre-aborted signal', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return pendingSseResponse();
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const aborted = new AbortController();
+      aborted.abort();
+
+      await expect(
+        client.prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'pre-aborted' }] },
+          aborted.signal,
+        ),
+      ).rejects.toThrow();
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(0);
+
+      const activeAbort = new AbortController();
+      const active = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'active' }] },
+          activeAbort.signal,
+        )
+        .catch((err: unknown) => err);
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+
+      activeAbort.abort();
+      await active;
+    });
+
+    it('releases the local pending prompt slot after turn completion', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          const promptId = `p-${nextPromptId}`;
+          return sseResponse(
+            `id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"${promptId}","stopReason":"end_turn"}}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot after turn_error', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          const promptId = `p-${nextPromptId}`;
+          const eventType = promptId === 'p-1' ? 'turn_error' : 'turn_complete';
+          const data =
+            promptId === 'p-1'
+              ? { promptId, message: 'failed', code: 'turn_failed' }
+              : { promptId, stopReason: 'end_turn' };
+          return sseResponse(
+            `id: 1\nevent: ${eventType}\ndata: ${JSON.stringify({
+              id: 1,
+              v: 1,
+              type: eventType,
+              data,
+            })}\n\n`,
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).rejects.toThrow('failed');
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot when SSE ends', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          if (nextPromptId === 1) return sseResponse('');
+          return sseResponse(
+            'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-2","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'first' }] }),
+      ).rejects.toThrow('SSE stream ended');
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
+    });
+
+    it('releases the local pending prompt slot after caller abort', async () => {
+      let nextPromptId = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          nextPromptId += 1;
+          return jsonResponse(202, {
+            promptId: `p-${nextPromptId}`,
+            lastEventId: 0,
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          if (nextPromptId === 1) return pendingSseResponse();
+          return sseResponse(
+            'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-2","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        if (req.url.endsWith('/session/s-1/cancel')) {
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 1,
+      });
+      const ctrl = new AbortController();
+      const first = client.prompt(
+        's-1',
+        { prompt: [{ type: 'text', text: 'first' }] },
+        ctrl.signal,
+      );
+      await vi.waitFor(() => {
+        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      });
+
+      ctrl.abort();
+      await expect(first).rejects.toThrow();
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'second' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
   });
 

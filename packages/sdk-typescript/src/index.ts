@@ -11,6 +11,7 @@ export {
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   DaemonSessionClient,
   asKnownDaemonEvent,
   createDaemonSessionViewState,

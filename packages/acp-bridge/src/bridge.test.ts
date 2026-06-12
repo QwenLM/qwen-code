@@ -30,6 +30,7 @@ import {
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
+  PromptQueueFullError,
   RestoreInProgressError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -2507,6 +2508,180 @@ describe('createAcpSessionBridge', () => {
         'end:second',
       ]);
 
+      await bridge.shutdown();
+    });
+
+    it('rejects prompts past the default per-session pending cap synchronously', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async (p) => {
+            const text =
+              (p.prompt[0] as { text?: string } | undefined)?.text ?? '';
+            if (text === 'hold') {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const accepted = Array.from({ length: 5 }, (_, i) =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: i === 0 ? 'hold' : `queued-${i}` }],
+        }),
+      );
+
+      expect(() =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'overflow' }],
+        }),
+      ).toThrow(PromptQueueFullError);
+
+      await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+      releaseFirst!();
+      await Promise.all(accepted);
+      await bridge.shutdown();
+    });
+
+    it('releases a pending prompt slot after a failed prompt settles', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let calls = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            calls += 1;
+            if (calls === 1) {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+              throw new Error('first prompt failed');
+            }
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxPendingPromptsPerSession: 1,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const failed = bridge
+        .sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        })
+        .catch((err: unknown) => err);
+
+      expect(() =>
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'overflow' }],
+        }),
+      ).toThrow(PromptQueueFullError);
+
+      await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+      releaseFirst!();
+      await expect(failed).resolves.toMatchObject({ code: -32603 });
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after-failure' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      await bridge.shutdown();
+    });
+
+    it('does not count pre-aborted prompts against the pending cap', async () => {
+      let releaseFirst: (() => void) | undefined;
+      let calls = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            calls += 1;
+            if (calls === 1) {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxPendingPromptsPerSession: 1,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const active = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+
+      const aborted = new AbortController();
+      aborted.abort();
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'aborted' }],
+          },
+          aborted.signal,
+        ),
+      ).toThrow(/Prompt aborted/);
+
+      await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+      releaseFirst!();
+      await active;
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after-abort' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
+    it('does not count queued branchSession work against the prompt cap', async () => {
+      let releaseBranch: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== 'qwen/control/session/branch') return {};
+            await new Promise<void>((resolve) => {
+              releaseBranch = resolve;
+            });
+            return { newSessionId: 'branch-1', title: 'Branch 1' };
+          },
+          resumeSessionImpl: () => ({}),
+        }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxPendingPromptsPerSession: 1,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = bridge.branchSession(session.sessionId, {
+        name: 'Branch 1',
+      });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'after-branch' }],
+      });
+
+      await vi.waitFor(() => expect(releaseBranch).toBeDefined());
+      releaseBranch!();
+      await expect(branch).resolves.toMatchObject({
+        sessionId: 'branch-1',
+        title: 'Branch 1',
+      });
+      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 

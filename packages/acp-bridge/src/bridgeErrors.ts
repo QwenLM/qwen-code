@@ -124,6 +124,28 @@ export class SessionLimitExceededError extends Error {
 }
 
 /**
+ * Thrown by `sendPrompt` when a session already has too many accepted
+ * prompts waiting or running. The REST route maps this to 503 with
+ * `Retry-After`; SDK clients can retry after observing a turn completion.
+ */
+export class PromptQueueFullError extends Error {
+  readonly limit: number;
+  readonly pendingCount: number;
+  readonly sessionId: string;
+
+  constructor(limit: number, pendingCount: number, sessionId: string) {
+    super(
+      `Prompt queue full for session "${sessionId}" ` +
+        `(${pendingCount}/${limit} pending)`,
+    );
+    this.name = 'PromptQueueFullError';
+    this.limit = limit;
+    this.pendingCount = pendingCount;
+    this.sessionId = sessionId;
+  }
+}
+
+/**
  * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
  * canonicalize to the daemon's bound workspace. Every
  * bridge instance is bound to exactly one workspace; cross-workspace
@@ -449,9 +471,7 @@ export class InvalidRewindTargetError extends Error {
 export class BranchWhilePromptActiveError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string) {
-    super(
-      `Cannot branch session ${sessionId}: a prompt is currently active`,
-    );
+    super(`Cannot branch session ${sessionId}: a prompt is currently active`);
     this.name = 'BranchWhilePromptActiveError';
     this.sessionId = sessionId;
   }

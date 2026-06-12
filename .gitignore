@@ -30,6 +30,10 @@ CLAUDE.md
 
 # Qwen Code Configs
 .qwen/*
+!.qwen/design/
+!.qwen/design/**
+!.qwen/e2e-tests/
+!.qwen/e2e-tests/**
 !.qwen/commands/
 !.qwen/commands/**
 !.qwen/skills/

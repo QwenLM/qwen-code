@@ -7,6 +7,7 @@
 export {
   DaemonClient,
   DaemonHttpError,
+  DaemonPendingPromptLimitError,
   isDaemonTurnError,
   isNonBlockingAccepted,
   matchTurnEvent,

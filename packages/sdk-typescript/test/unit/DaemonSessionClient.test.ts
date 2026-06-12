@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import {
+  DaemonClient,
+  DaemonPendingPromptLimitError,
+} from '../../src/daemon/DaemonClient.js';
 import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -535,6 +538,144 @@ describe('DaemonSessionClient', () => {
       'client-1',
       'client-1',
     ]);
+  });
+
+  it('rejects locally in subscription mode when pending prompts reach the cap', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/events')) {
+        return pendingSseResponse(() => {});
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      if (req.url.endsWith('/session/s-1/cancel')) {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+      maxPendingPromptsPerSession: 1,
+    });
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+    });
+    const first = session
+      .prompt({ prompt: [{ type: 'text', text: 'first' }] })
+      .catch((err: unknown) => err);
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+    });
+
+    const secondCtrl = new AbortController();
+    const second = session
+      .prompt({ prompt: [{ type: 'text', text: 'second' }] }, secondCtrl.signal)
+      .catch((err: unknown) => err);
+    try {
+      const secondResult = await Promise.race<unknown>([
+        second,
+        new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+      ]);
+      expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+    } finally {
+      secondCtrl.abort();
+      eventsAbort.abort();
+      await first;
+      await second;
+      await eventPump;
+    }
+  });
+
+  it('does not reserve a subscription prompt slot for a pre-aborted signal', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const encoder = new TextEncoder();
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/events')) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              eventsController = controller;
+              controller.enqueue(encoder.encode(': keepalive\n\n'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      if (req.url.endsWith('/session/s-1/cancel')) {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+      maxPendingPromptsPerSession: 1,
+    });
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
+
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+    });
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(
+      session.prompt(
+        { prompt: [{ type: 'text', text: 'pre-aborted' }] },
+        aborted.signal,
+      ),
+    ).rejects.toThrow();
+    expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(0);
+
+    const active = session
+      .prompt({ prompt: [{ type: 'text', text: 'active' }] })
+      .catch((err: unknown) => err);
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    eventsController!.enqueue(
+      encoder.encode(
+        'id: 1\nevent: turn_complete\ndata: {"id":1,"v":1,"type":"turn_complete","data":{"promptId":"p-1","stopReason":"end_turn"}}\n\n',
+      ),
+    );
+    eventsController!.close();
+
+    await expect(active).resolves.toEqual({ stopReason: 'end_turn' });
+    await eventPump;
   });
 
   it('surfaces permission races and session operation failures', async () => {

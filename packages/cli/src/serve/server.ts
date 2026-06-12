@@ -68,6 +68,7 @@ import {
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  PromptQueueFullError,
   RestoreInProgressError,
   SessionBusyError,
   InvalidRewindTargetError,
@@ -276,9 +277,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -857,6 +856,16 @@ export function resolvePromptDeadlineMs(
   return Math.min(serverMs, requestMs);
 }
 
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+
+function advertisedMaxPendingPromptsPerSession(
+  value: number | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
+  return value;
+}
+
 /**
  * Build the Express app for `qwen serve`. Pure function — no side effects on
  * the network or process; `runQwenServe` does the listen/signal handling.
@@ -947,6 +956,7 @@ export function createServeApp(
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       boundWorkspace,
       // Wire the production status provider so direct embeds / tests
@@ -1376,6 +1386,11 @@ export function createServeApp(
       workspaceCwd: boundWorkspace,
       // Active mediation policy under the `policy` namespace.
       policy: { permission: bridge.permissionPolicy },
+      limits: {
+        maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
+          opts.maxPendingPromptsPerSession,
+        ),
+      },
       supportedLanguages: LANGUAGE_CODES,
     };
     res.status(200).json(envelope);
@@ -2206,8 +2221,9 @@ export function createServeApp(
       deadlineTimer.unref();
     }
 
-    bridge
-      .sendPrompt(
+    let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
+    try {
+      promptPromise = bridge.sendPrompt(
         sessionId,
         {
           ...forwardedBody,
@@ -2219,7 +2235,17 @@ export function createServeApp(
           ...(clientId !== undefined ? { clientId } : {}),
           promptId,
         },
-      )
+      );
+    } catch (err) {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/prompt',
+        sessionId,
+      });
+      return;
+    }
+
+    promptPromise
       .then(
         () => {
           if (daemonLog) {
@@ -4407,6 +4433,17 @@ function sendBridgeErrorImpl(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof PromptQueueFullError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'prompt_queue_full',
+      sessionId: err.sessionId,
+      limit: err.limit,
+      pendingCount: err.pendingCount,
     });
     return;
   }

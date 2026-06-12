@@ -8,7 +8,9 @@ import type { DaemonClient } from './DaemonClient.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
+  normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
@@ -55,6 +57,12 @@ export interface DaemonSessionClientOptions {
   lastEventId?: number;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /**
+   * Session-local cap for prompts accepted through the long-lived
+   * subscription path. Defaults to the bound DaemonClient's limit.
+   * `null`, `0`, and `Infinity` disable the local cap.
+   */
+  maxPendingPromptsPerSession?: number | null;
 }
 
 export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
@@ -84,6 +92,7 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -101,6 +110,10 @@ export class DaemonSessionClient {
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.promptLimit =
+      opts.maxPendingPromptsPerSession === undefined
+        ? opts.client.maxPendingPromptsPerSession
+        : normalizePendingPromptLimit(opts.maxPendingPromptsPerSession);
   }
 
   /**
@@ -226,6 +239,7 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
+    signal?.throwIfAborted();
     if (!this.subscriptionActive) {
       return await this.client.prompt(
         this.sessionId,
@@ -235,35 +249,55 @@ export class DaemonSessionClient {
       );
     }
 
-    const accepted = await this.client.promptNonBlocking(
+    const releaseAdmission = this.client.reservePromptSlot(
       this.sessionId,
-      req,
-      signal,
-      this.clientId,
+      this.promptLimit,
     );
-    if (!isNonBlockingAccepted(accepted)) {
-      return accepted;
+    let transferredToPending = false;
+    let accepted: NonBlockingPromptAccepted | PromptResult;
+    try {
+      accepted = await this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+      if (!isNonBlockingAccepted(accepted)) {
+        return accepted;
+      }
+      transferredToPending = true;
+    } finally {
+      if (!transferredToPending) releaseAdmission();
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
       const onAbort = () => {
-        if (this._pendingPrompts.delete(accepted.promptId)) {
+        const pending = this._pendingPrompts.get(accepted.promptId);
+        if (pending && this._pendingPrompts.delete(accepted.promptId)) {
           this.client.cancel(this.sessionId, this.clientId).catch(() => {});
-          reject(signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+          pending.reject(
+            signal!.reason ?? new DOMException('Aborted', 'AbortError'),
+          );
         }
       };
       const cleanup = () => signal?.removeEventListener('abort', onAbort);
       this._pendingPrompts.set(accepted.promptId, {
         resolve: (r) => {
           cleanup();
+          releaseAdmission();
           resolve(r);
         },
         reject: (e) => {
           cleanup();
+          releaseAdmission();
           reject(e);
         },
       });
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      } else {
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }
     });
   }
 

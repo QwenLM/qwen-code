@@ -121,13 +121,37 @@ export interface DaemonClientOptions {
    * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
+  /**
+   * Per-session cap on local `prompt()` calls that have been admitted but
+   * not completed. For 202 daemons the slot is held until the temporary
+   * SSE wait finishes. Defaults to 5. Set to `0` or `Infinity` to
+   * disable; `null` is accepted for direct
+   * `/capabilities.limits` passthrough.
+   */
+  maxPendingPromptsPerSession?: number | null;
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
+
+export function normalizePendingPromptLimit(
+  value: number | null | undefined,
+): number {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === null || value === 0 || value === Number.POSITIVE_INFINITY) {
+    return Infinity;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError(
+      'maxPendingPromptsPerSession must be a non-negative integer',
+    );
+  }
+  return value;
+}
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -195,6 +219,20 @@ export class DaemonHttpError extends Error {
     this.name = 'DaemonHttpError';
     this.status = status;
     this.body = body;
+  }
+}
+
+export class DaemonPendingPromptLimitError extends Error {
+  declare readonly sessionId: string;
+  declare readonly limit: number;
+  declare readonly pendingCount: number;
+
+  constructor(sessionId: string, limit: number, pendingCount: number) {
+    super(`Pending prompt limit reached (${pendingCount}/${limit})`);
+    this.name = 'DaemonPendingPromptLimitError';
+    this.sessionId = sessionId;
+    this.limit = limit;
+    this.pendingCount = pendingCount;
   }
 }
 
@@ -302,6 +340,8 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  private readonly promptLimit: number;
+  private readonly promptCounts: Record<string, number> = Object.create(null);
   // Lazy singleton so clients that never touch auth pay no allocation cost.
   // Exposed via the readonly `auth` accessor below.
   private _authFlow?: DaemonAuthFlow;
@@ -337,6 +377,33 @@ export class DaemonClient {
     // it instead of defending the math at every call site.
     const raw = opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.fetchTimeoutMs = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    this.promptLimit = normalizePendingPromptLimit(
+      opts.maxPendingPromptsPerSession,
+    );
+  }
+
+  get maxPendingPromptsPerSession(): number {
+    return this.promptLimit;
+  }
+
+  /** @internal */
+  reservePromptSlot(sessionId: string, limit = this.promptLimit): () => void {
+    if (limit === Infinity) return () => {};
+    const pendingCount = this.promptCounts[sessionId] ?? 0;
+    if (pendingCount >= limit) {
+      throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
+    }
+    this.promptCounts[sessionId] = pendingCount + 1;
+    let releaseCount = 1;
+    return () => {
+      if (releaseCount-- <= 0) return;
+      const current = this.promptCounts[sessionId] ?? 0;
+      if (current <= 1) {
+        delete this.promptCounts[sessionId];
+      } else {
+        this.promptCounts[sessionId] = current - 1;
+      }
+    };
   }
 
   /**
@@ -1745,29 +1812,46 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    const res = await this._fetch(
-      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-
-    if (res.status === 202) {
-      const accept = (await res.json()) as NonBlockingPromptAccepted;
-      return this._awaitTurnComplete(
-        sessionId,
-        accept.promptId,
-        accept.lastEventId,
-        signal,
-        clientId,
+    signal?.throwIfAborted();
+    const releasePromptSlot = this.reservePromptSlot(sessionId);
+    let releaseOnExit = true;
+    try {
+      const res = await this._fetch(
+        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+        {
+          method: 'POST',
+          headers: this.headers(
+            { 'Content-Type': 'application/json' },
+            clientId,
+          ),
+          body: JSON.stringify(req),
+          signal,
+        },
       );
-    }
 
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
-    return (await res.json()) as PromptResult;
+      if (res.status === 202) {
+        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        releaseOnExit = false;
+        try {
+          return await this._awaitTurnComplete(
+            sessionId,
+            accept.promptId,
+            accept.lastEventId,
+            signal,
+            clientId,
+          );
+        } finally {
+          releasePromptSlot();
+        }
+      }
+
+      if (!res.ok) {
+        throw await this.failOnError(res, 'POST /session/:id/prompt');
+      }
+      return (await res.json()) as PromptResult;
+    } finally {
+      if (releaseOnExit) releasePromptSlot();
+    }
   }
 
   /**

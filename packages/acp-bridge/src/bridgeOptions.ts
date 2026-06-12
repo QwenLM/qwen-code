@@ -180,6 +180,12 @@ export interface BridgeOptions {
    */
   maxPendingPermissionsPerSession?: number;
   /**
+   * Per-session cap on accepted prompts that have not settled yet,
+   * including the currently running prompt and queued prompts behind it.
+   * Defaults to 5. `0` / `Infinity` disable the cap.
+   */
+  maxPendingPromptsPerSession?: number;
+  /**
    * Absolute, **already-canonical** path this daemon is bound to (per
    * 1 daemon = 1 workspace). `spawnOrAttach` calls whose
    * `workspaceCwd` doesn't canonicalize to this same value throw
