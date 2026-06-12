@@ -240,6 +240,7 @@
         <button id="snooze-status-btn">Status</button>
       </div>
       <div id="snooze-status">(unknown)</div>
+      <div id="snooze-list"></div>
     </section>
     <section id="digest">
       <strong>Missed while quiet (digest)</strong> (requires owner scope)
@@ -1516,8 +1517,54 @@
               ') until ' +
               new Date(s.until).toISOString()
             : 'no snooze active';
+          // Per-scope list with per-kind Unsnooze (cycle 84; consumes the
+          // cycle-77 snoozes[] from GET). textContent-only; one Unsnooze per
+          // scope → DELETE ?scope, leaving the others active.
+          const list = $('snooze-list');
+          list.textContent = '';
+          const arr = Array.isArray(s.snoozes) ? s.snoozes : [];
+          for (const entry of arr) {
+            const row = document.createElement('div');
+            row.className = 'token-row';
+            const label = document.createElement('span');
+            label.textContent =
+              entry.scope +
+              ' until ' +
+              new Date(entry.until).toISOString() +
+              '  ';
+            const btn = document.createElement('button');
+            btn.textContent = 'Unsnooze';
+            btn.onclick = () => unsnoozeScope(entry.scope);
+            row.appendChild(label);
+            row.appendChild(btn);
+            list.appendChild(row);
+          }
         } catch (e) {
           el.textContent = 'status error: ' + e;
+        }
+      }
+
+      // Clear ONE snooze scope (cycle 84): DELETE /rc/routing/snooze?scope=<s>
+      // leaves the other scopes' windows active. Distinct from the global
+      // Unsnooze button (no ?scope → clears all).
+      async function unsnoozeScope(scope) {
+        if (!token()) return;
+        try {
+          const res = await fetch(
+            '/rc/routing/snooze?scope=' + encodeURIComponent(scope),
+            {
+              method: 'DELETE',
+              headers: { Authorization: 'Bearer ' + token() },
+            },
+          );
+          if (!res.ok && res.status !== 204) {
+            $('snooze-status').textContent =
+              'unsnooze failed (' + res.status + ')';
+            return;
+          }
+          await refreshSnooze();
+        } catch (e) {
+          $('snooze-status').textContent = 'unsnooze error: ' + e;
         }
       }
       $('snooze-status-btn').onclick = () => {
