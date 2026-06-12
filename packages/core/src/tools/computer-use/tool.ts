@@ -22,15 +22,15 @@ import type { ComputerUseToolName, ComputerUseToolSchema } from './schemas.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
-import { resolveComputerUsePackageSpec } from './constants.js';
+import { approvalKey } from './constants.js';
 import { ApprovalMode, type Config } from '../../config/config.js';
 import { homedir } from 'node:os';
 
 type ComputerUseParams = Record<string, unknown>;
 
 const INSTALL_REASON =
-  'This will install the open-computer-use binary (~50MB) via npx the first time. ' +
-  'Computer Use can click, type, and read your desktop apps. ' +
+  'This downloads the Computer Use driver (~20MB, signed + notarized) into ~/.qwen/computer-use/ the first time. ' +
+  'Computer Use can click, type, and read your desktop apps in the background. ' +
   "On macOS you'll be guided through Accessibility / Screen Recording permissions next.";
 
 class ComputerUseInvocation extends BaseToolInvocation<
@@ -95,7 +95,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
     const permissionRules = [`computer_use__${this.upstreamName}`];
     const installApproved = await isPackageSpecApproved(
       homedir(),
-      resolveComputerUsePackageSpec(),
+      approvalKey(),
     );
 
     const prompt = installApproved
@@ -119,7 +119,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
         // is no longer a blanket permission grant.
         if (outcome !== ToolConfirmationOutcome.Cancel) {
           await saveInstallState(homedir(), {
-            approvedPackageSpec: resolveComputerUsePackageSpec(),
+            approvedPackageSpec: approvalKey(),
             approvedAtIso: new Date().toISOString(),
           });
         }
@@ -165,11 +165,21 @@ class ComputerUseInvocation extends BaseToolInvocation<
     }
 
     // Transform MCP content blocks into GenAI Parts, preserving image/audio
-    // parts so the model can actually "see" screenshots from get_app_state.
+    // parts so the model can actually "see" screenshots from get_window_state.
+    // We also forward cua-driver's `structuredContent`: several tools put the
+    // load-bearing data ONLY there, not in the human-readable `content` text —
+    // e.g. list_windows' content is just "Found N window(s)" while the real
+    // window_id / bounds / is_on_screen live in structuredContent.windows.
+    // Dropping it left the model guessing window_ids and failing every
+    // screenshot/click on the wrong window.
     // NOTE: mcp-tool.ts has an analogous private transformation (transformMcpContentToParts /
     // transformImageAudioBlock); those helpers are not exported so we replicate
     // the pattern here. A future PR should extract a shared utility.
-    const llmContent = buildLlmContent(mcpResult.content, this.upstreamName);
+    const llmContent = buildLlmContent(
+      mcpResult.content,
+      this.upstreamName,
+      mcpResult.structuredContent,
+    );
     const returnDisplay = buildDisplayText(mcpResult.content);
 
     if (mcpResult.isError) {
@@ -309,6 +319,7 @@ type RawContentBlock = CallToolResult['content'][number];
 export function buildLlmContent(
   content: RawContentBlock[],
   toolName: string,
+  structuredContent?: unknown,
 ): PartListUnion {
   const parts: Part[] = [];
 
@@ -334,6 +345,15 @@ export function buildLlmContent(
     // for computer-use; extend here if the MCP server introduces them.
   }
 
+  // Forward structuredContent (real window_ids, bounds, on-screen flags, etc.)
+  // that the terse `content` text omits. Strip `tree_markdown` first — that
+  // field is get_window_state's AX tree, already rendered into the `content`
+  // text above, so re-emitting it here would roughly double the token cost.
+  const structuredText = stringifyStructured(structuredContent);
+  if (structuredText) {
+    parts.push({ text: `Structured result: ${structuredText}` });
+  }
+
   // If every part is a text Part, collapse to a plain string so callers that
   // do string operations on llmContent (e.g. error-path concatenation) keep
   // working without changes.
@@ -356,4 +376,21 @@ export function buildDisplayText(content: RawContentBlock[]): string {
     .map((block) => (block.type === 'text' ? (block.text ?? '') : ''))
     .filter(Boolean)
     .join('\n');
+}
+
+/**
+ * Serialize a tool result's `structuredContent` for the model, dropping the
+ * `tree_markdown` field (get_window_state's AX tree, already present in the
+ * `content` text — re-emitting it would roughly double the token cost).
+ * Returns undefined when there is nothing useful to forward.
+ */
+export function stringifyStructured(structured: unknown): string | undefined {
+  if (!structured || typeof structured !== 'object') return undefined;
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(structured as Record<string, unknown>)) {
+    if (k === 'tree_markdown') continue;
+    rest[k] = v;
+  }
+  if (Object.keys(rest).length === 0) return undefined;
+  return safeJsonStringify(rest);
 }

@@ -5,7 +5,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 describe('ComputerUseClient', () => {
   it('is constructible', () => {
     const client = new ComputerUseClient({
-      packageSpec: '@qwen-code/open-computer-use@latest',
+      binary: '/fake/cua-driver',
       onProgress: vi.fn(),
     });
     expect(client).toBeDefined();
@@ -13,7 +13,7 @@ describe('ComputerUseClient', () => {
 
   it('reports not-started before start() is called', () => {
     const client = new ComputerUseClient({
-      packageSpec: '@qwen-code/open-computer-use@latest',
+      binary: '/fake/cua-driver',
       onProgress: vi.fn(),
     });
     expect(client.isStarted()).toBe(false);
@@ -42,6 +42,25 @@ describe('isTransportClosedError', () => {
 
   it('matches "Not connected" (Client guard before transport is open)', () => {
     expect(isTransportClosedError(new Error('Not connected'))).toBe(true);
+  });
+
+  it('matches the daemon-restart error (Screen Recording grant → daemon restart)', () => {
+    // The first-use failure mode: after granting Screen Recording, macOS
+    // restarts the CuaDriver daemon; the proxy → daemon Unix socket dies.
+    expect(
+      isTransportClosedError(
+        new Error(
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a bare "Connection refused" / "os error 61"', () => {
+    expect(isTransportClosedError(new Error('Connection refused'))).toBe(true);
+    expect(
+      isTransportClosedError(new Error('connect failed: os error 61')),
+    ).toBe(true);
   });
 
   it('is case-insensitive', () => {
@@ -129,7 +148,7 @@ class ReconnectTestClient extends ComputerUseClient {
 
 function makeClient(): ReconnectTestClient {
   const c = new ReconnectTestClient({
-    packageSpec: '@qwen-code/open-computer-use@latest',
+    binary: '/fake/cua-driver',
   });
   // Pre-seed the started state so callTool guard passes.
   (c as unknown as { client: object }).client = { __fake: true };
@@ -197,6 +216,24 @@ describe('callTool reconnect path', () => {
     ];
 
     const result = await c.callTool('click_element', { element_index: 0 });
+
+    expect(result).toBe(successResult);
+    expect(c.stopCalled).toBe(1);
+    expect(c.startCalled).toBe(1);
+  });
+
+  it('reconnects on the daemon-restart "Connection refused" error', async () => {
+    const c = makeClient();
+    c.behaviors = [
+      async () => {
+        throw new Error(
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+        );
+      },
+      async () => successResult,
+    ];
+
+    const result = await c.callTool('list_windows', { pid: 717 });
 
     expect(result).toBe(successResult);
     expect(c.stopCalled).toBe(1);
