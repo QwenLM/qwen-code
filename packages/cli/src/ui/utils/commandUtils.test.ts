@@ -294,6 +294,12 @@ describe('commandUtils', () => {
           stdio: ['pipe', 'inherit', 'pipe'],
         };
 
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
         mockSpawn.mockImplementation(() => {
           const child = Object.assign(new EventEmitter(), {
             stdin: Object.assign(new EventEmitter(), {
@@ -341,6 +347,11 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
 
       it('should fall back to OSC 52 when xclip/xsel missing and stdout is TTY', async () => {
