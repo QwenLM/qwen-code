@@ -61,7 +61,7 @@ describe('dreamCommand', () => {
     expect(writeDreamManualRun).not.toHaveBeenCalled();
   });
 
-  it('calls writeDreamManualRun eagerly in ACP mode without onComplete', async () => {
+  it('defers writeDreamManualRun to onComplete in ACP mode (no eager write)', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
     const writeDreamManualRun = vi.fn();
@@ -80,17 +80,20 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
-    expect(result).not.toHaveProperty('onComplete');
+    // ACP fires onComplete via Session.ts's pendingSlashOnComplete, so the run
+    // is recorded only after the turn succeeds — never eagerly.
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'dream prompt',
+      onComplete: expect.any(Function),
+    });
+    expect(writeDreamManualRun).not.toHaveBeenCalled();
   });
 
-  it('silently catches writeDreamManualRun errors in ACP mode', async () => {
+  it('does not record a dream run in ACP mode when the turn is cancelled', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
-    const writeDreamManualRun = vi
-      .fn()
-      .mockRejectedValue(new Error('disk full'));
+    const writeDreamManualRun = vi.fn();
     const context = createMockCommandContext({
       executionMode: 'acp',
       services: {
@@ -106,7 +109,11 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
+    if (!result || result.type !== 'submit_prompt' || !result.onComplete) {
+      throw new Error('expected a submit_prompt result with onComplete');
+    }
+    await result.onComplete({ cancelled: true });
+    expect(writeDreamManualRun).not.toHaveBeenCalled();
   });
 
   function setupOnComplete() {

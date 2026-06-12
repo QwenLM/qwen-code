@@ -44,11 +44,13 @@ export const dreamCommand: SlashCommand = {
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());
 
-      if (context.executionMode === 'acp') {
-        recordDream().catch(() => {});
-        return { type: 'submit_prompt', content: prompt };
-      }
-
+      // Record the manual dream run only when the turn actually succeeds — a
+      // failed or cancelled /dream (API error / SIGINT abort / token limit)
+      // must not persist a consolidation record as if it had completed. Both
+      // execution modes honor this: interactive fires onComplete via
+      // useGeminiStream, and ACP fires it via Session.ts's pendingSlashOnComplete
+      // (captured from the submit_prompt result), so the guard applies uniformly
+      // instead of eagerly writing before the turn has run.
       return {
         type: 'submit_prompt',
         content: prompt,
@@ -56,9 +58,6 @@ export const dreamCommand: SlashCommand = {
           errored?: boolean;
           cancelled?: boolean;
         }) => {
-          // Only record the manual dream run when the turn actually succeeded —
-          // a failed or cancelled /dream (API error / SIGINT abort) must not
-          // persist a consolidation record as if it had completed.
           if (opts?.errored || opts?.cancelled) return;
           await recordDream();
         },
