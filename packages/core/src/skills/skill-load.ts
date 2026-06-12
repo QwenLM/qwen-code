@@ -3,6 +3,7 @@ import {
   type SkillValidationResult,
   parseModelField,
   parsePathsField,
+  parseUserInvocableField,
   validateSkillName,
 } from './types.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
@@ -165,6 +166,7 @@ export function parseSkillContent(
     disableModelInvocationRaw === true || disableModelInvocationRaw === 'true'
       ? true
       : undefined;
+  const userInvocable = parseUserInvocableField(frontmatter);
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
@@ -197,6 +199,7 @@ export function parseSkillContent(
     level: 'extension',
     whenToUse,
     disableModelInvocation,
+    userInvocable,
     paths,
     priority,
   };
