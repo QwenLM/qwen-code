@@ -15,6 +15,7 @@ import { VapidStore } from './vapid.js';
 import { PushSender, type PushTransport } from './sender.js';
 import { PushNotifier } from './notifier.js';
 import { PushRateLimiter } from './rateLimiter.js';
+import { PushCoalescer } from './coalescer.js';
 import type { PushPayload } from './payload.js';
 import { SESSION_READ, APPROVE, SHARE } from '../scopes.js';
 import { SnoozeStore } from '../routing/snooze.js';
@@ -987,5 +988,90 @@ describe('PushNotifier.forgetRateLimit', () => {
   it('is a safe no-op when no limiter is configured', () => {
     const notifier = new PushNotifier(tokens, store, sender);
     expect(() => notifier.forgetRateLimit('sub1')).not.toThrow();
+  });
+});
+
+describe('PushNotifier same-kind coalescing (cycle 63)', () => {
+  async function approverSub() {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+  }
+  const permEvent = {
+    type: 'permission_request',
+    data: { toolCall: { name: 'bash' }, requestId: 'r' },
+  };
+
+  it('suppresses a same-kind same-session repeat within the window and audits reason:coalesced', async () => {
+    await approverSub();
+    const coalescer = new PushCoalescer(5000);
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      coalescer,
+    );
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1000));
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(4000));
+    expect(sent).toHaveLength(1); // the 2nd (3s later) was coalesced
+    const coalesced = audit.calls.find(
+      (c) =>
+        c.action === 'push_suppressed' &&
+        (c.detail as Record<string, unknown>)?.reason === 'coalesced',
+    );
+    expect(coalesced).toBeDefined();
+  });
+
+  it('does NOT coalesce across different sessions', async () => {
+    await approverSub();
+    const coalescer = new PushCoalescer(5000);
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      coalescer,
+    );
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1000));
+    await notifier.notify(permEvent, { sessionId: 's2' }, new Date(1100));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('without a coalescer (default), both same-session pushes are delivered', async () => {
+    await approverSub();
+    const notifier = new PushNotifier(tokens, store, sender, undefined, audit);
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1000));
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1100));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('a disabled (window 0) coalescer never suppresses', async () => {
+    await approverSub();
+    const coalescer = new PushCoalescer(0);
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      coalescer,
+    );
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1000));
+    await notifier.notify(permEvent, { sessionId: 's1' }, new Date(1100));
+    expect(sent).toHaveLength(2);
   });
 });

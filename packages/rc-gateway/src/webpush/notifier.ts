@@ -16,6 +16,7 @@ import { parseTimeOfDay, isWithinTimeOfDay } from '../policy/conditions.js';
 import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
+import type { PushCoalescer } from './coalescer.js';
 
 /**
  * Per-kind required scope. A subscription only receives a kind if its owning
@@ -42,6 +43,7 @@ export class PushNotifier {
     private readonly workingDevice?: WorkingDeviceTracker,
     private readonly routing?: RoutingMatcher,
     private readonly rateLimiter?: PushRateLimiter,
+    private readonly coalescer?: PushCoalescer,
   ) {}
 
   /**
@@ -53,6 +55,7 @@ export class PushNotifier {
    */
   forgetRateLimit(subId: string): void {
     this.rateLimiter?.forget(subId);
+    this.coalescer?.forget(subId);
   }
 
   /**
@@ -193,6 +196,33 @@ export class PushNotifier {
             detail: {
               kind: payload.kind,
               reason: 'working_device',
+              subscriptionId: r.id,
+            },
+          });
+          return;
+        }
+        // Same-kind coalescing (cycle 63): collapse a same-(kind,session) burst
+        // to one push within the operator's window. Runs just BEFORE the rate
+        // limiter so coalesced duplicates never consume the maxPerHour budget.
+        // Leading-edge: the first push passes, repeats within the window are
+        // suppressed. DISABLED by default (window 0) -> tryPass always true ->
+        // no behavior change. Pure/total (never throws -> no try/catch). Audited
+        // (so "why no push" stays visible) but NOT a new action (reason VALUE).
+        if (
+          this.coalescer &&
+          !this.coalescer.tryPass(
+            r.id,
+            payload.kind,
+            ctx.sessionId,
+            now.getTime(),
+          )
+        ) {
+          void this.audit?.record({
+            action: 'push_suppressed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              reason: 'coalesced',
               subscriptionId: r.id,
             },
           });
