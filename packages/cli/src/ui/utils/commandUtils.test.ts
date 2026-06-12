@@ -575,6 +575,14 @@ describe('findSlashCommandTokens', () => {
       userInvocable: true,
       hidden: true,
     },
+    {
+      name: 'model-only',
+      description: 'Model-only command',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: false,
+      hidden: false,
+    },
   ] as Parameters<typeof findSlashCommandTokens>[1];
 
   it('returns empty array for empty text', () => {
@@ -596,6 +604,15 @@ describe('findSlashCommandTokens', () => {
     });
   });
 
+  it('marks line-start non-user-invocable command as invalid', () => {
+    const tokens = findSlashCommandTokens('/model-only', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: false,
+    });
+  });
+
   it('marks mid-input modelInvocable command as valid', () => {
     const tokens = findSlashCommandTokens(
       'please /review this code',
@@ -603,6 +620,18 @@ describe('findSlashCommandTokens', () => {
     );
     expect(tokens).toHaveLength(1);
     expect(tokens[0]).toMatchObject({ commandName: 'review', valid: true });
+  });
+
+  it('marks mid-input model-only command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /model-only this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: true,
+    });
   });
 
   it('marks mid-input non-modelInvocable command as invalid', () => {
