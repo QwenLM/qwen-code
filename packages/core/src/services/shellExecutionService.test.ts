@@ -730,6 +730,7 @@ describe('ShellExecutionService', () => {
     });
 
     it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
+      const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       // Critical: do NOT fire onExit — the child is still alive after the
       // background-promote abort. The result Promise must resolve via the
       // abort handler's own immediate resolve, not via the exit handler.
@@ -764,6 +765,34 @@ describe('ShellExecutionService', () => {
         -mockPtyProcess.pid,
         'SIGKILL',
       );
+      expect(terminalDisposeSpy).toHaveBeenCalled();
+
+      terminalDisposeSpy.mockRestore();
+    });
+
+    it('background-promote replay failure falls back to full decoded raw output', async () => {
+      mockSerializeTerminalToText.mockImplementationOnce(() => {
+        throw new Error('replay failed');
+      });
+      const output = Array.from(
+        { length: 250 },
+        (_, index) => `line-${index}`,
+      ).join('\n');
+
+      const { result } = await simulateExecution(
+        'long-running-output',
+        (pty, ac) => {
+          pty.onData.mock.calls[0][0](output);
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_replay_fallback',
+          } satisfies ShellAbortReason);
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      expect(result.output).toContain('line-0');
+      expect(result.output).toContain('line-249');
     });
 
     it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {

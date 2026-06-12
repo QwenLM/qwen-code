@@ -10,6 +10,8 @@ import type {
   FileDiff,
   McpToolProgressData,
   PlanResultDisplay,
+  TaskListResultDisplay,
+  TeamResultDisplay,
   TodoResultDisplay,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -314,6 +316,61 @@ function compactMcpToolProgressData(
   };
 }
 
+function isTeamResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is TeamResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'team_result'
+  );
+}
+
+function compactTeamResultDisplay(
+  display: TeamResultDisplay,
+): TeamResultDisplay {
+  return {
+    ...display,
+    teamName: compactStringForHistory(
+      display.teamName,
+      MAX_RETAINED_AGENT_FIELD_CHARS,
+    ),
+  };
+}
+
+function isTaskListResultDisplay(
+  resultDisplay: unknown,
+): resultDisplay is TaskListResultDisplay {
+  return (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'task_list'
+  );
+}
+
+function compactTaskListResultDisplay(
+  display: TaskListResultDisplay,
+): TaskListResultDisplay {
+  return {
+    ...display,
+    tasks: display.tasks.map((task) => ({
+      ...task,
+      subject: compactStringForHistory(
+        task.subject,
+        MAX_RETAINED_AGENT_FIELD_CHARS,
+      ),
+      ...(task.owner !== undefined && {
+        owner: compactStringForHistory(
+          task.owner,
+          MAX_RETAINED_AGENT_FIELD_CHARS,
+        ),
+      }),
+    })),
+  };
+}
+
 export function compactToolResultDisplayForHistory<
   T extends ToolResultDisplay | undefined,
 >(resultDisplay: T): T {
@@ -347,6 +404,14 @@ export function compactToolResultDisplayForHistory<
 
   if (isMcpToolProgressData(resultDisplay)) {
     return compactMcpToolProgressData(resultDisplay) as T;
+  }
+
+  if (isTeamResultDisplay(resultDisplay)) {
+    return compactTeamResultDisplay(resultDisplay) as T;
+  }
+
+  if (isTaskListResultDisplay(resultDisplay)) {
+    return compactTaskListResultDisplay(resultDisplay) as T;
   }
 
   return resultDisplay;
