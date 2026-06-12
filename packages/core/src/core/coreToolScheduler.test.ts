@@ -9096,14 +9096,16 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     callId: string,
     name: string,
     args: Record<string, unknown>,
+    wasOutputTruncated = false,
   ) {
-    return {
+    const request = {
       callId,
       name,
       args,
       isClientInitiated: false,
       prompt_id: `prompt-${callId}`,
     };
+    return wasOutputTruncated ? { ...request, wasOutputTruncated } : request;
   }
 
   function getLastErrorMessage(onToolCallsUpdate: Mock): string | undefined {
@@ -9153,6 +9155,35 @@ describe('CoreToolScheduler validation retry loop detection', () => {
       new AbortController().signal,
     );
     msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should keep retry counts stable when truncation guidance is toggled', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: 123 }, true)],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain('previous response was truncated');
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain('previous response was truncated');
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: 123 }, true)],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain('previous response was truncated');
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 

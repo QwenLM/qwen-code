@@ -1735,7 +1735,7 @@ export class CoreToolScheduler {
           reqInfo.prompt_id,
         );
         if (invocationOrError instanceof Error) {
-          const baseError = reqInfo.wasOutputTruncated
+          const displayError = reqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
@@ -1744,7 +1744,7 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${baseError.message}`;
+          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
           const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
           for (const key of this.validationRetryCounts.keys()) {
             if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
@@ -1755,8 +1755,10 @@ export class CoreToolScheduler {
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
-              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
-              : baseError;
+              ? new Error(
+                  `${invocationOrError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                )
+              : displayError;
 
           newToolCalls.push({
             status: 'error',
