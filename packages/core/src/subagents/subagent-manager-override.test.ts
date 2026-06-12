@@ -40,7 +40,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
   // The method is `private`. Cast via `unknown` to invoke it directly —
   // testing through the public `createAgentHeadless` pathway would also
   // work but pulls in a much larger graph (file IO, hooks, etc.).
-  function callBuildOverride(
+  async function callBuildOverride(
     manager: SubagentManager,
     base: Config,
     config?: Partial<SubagentConfig>,
@@ -50,7 +50,10 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
         buildSubagentContextOverride: (
           b: Config,
           c: SubagentConfig,
-        ) => Promise<Config>;
+        ) => Promise<{
+          context: Config;
+          disposeRegistry?: () => Promise<void>;
+        }>;
       }
     ).buildSubagentContextOverride.bind(manager);
     const fullConfig: SubagentConfig = {
@@ -60,7 +63,8 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
       level: 'session',
       ...config,
     };
-    return fn(base, fullConfig);
+    const result = await fn(base, fullConfig);
+    return result.context;
   }
 
   it('returns a Config whose registry is distinct from the parent and binds Edit/Read to the override', async () => {

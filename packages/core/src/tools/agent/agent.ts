@@ -2031,16 +2031,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
 
+      // Per-spawn cleanup the subagent manager returns. The caller MUST
+      // invoke this in the same `finally` block that wraps `execute()` —
+      // see SubagentManager.createAgentHeadless's JSDoc for the leak
+      // scenarios it covers (ephemeral HookRegistry entries, force-rebuilt
+      // ToolRegistry owning per-agent MCP child processes / sockets).
+      // Fork subagents share the parent's lifecycle and need no per-spawn
+      // dispose, so this stays undefined on the fork path.
+      let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
         const fork = await this.createForkSubagent(agentConfig);
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
       } else {
-        subagent = await this.subagentManager.createAgentHeadless(
+        const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
           agentConfig,
           { eventEmitter: this.eventEmitter },
         );
+        subagent = result.subagent;
+        subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
       }
 
@@ -2117,6 +2127,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         let bgTaskPrompt: string;
         let bgPromptConfig: PromptConfig | undefined;
         let bgToolConfig: ToolConfig | undefined;
+        // Per-spawn cleanup from `createAgentHeadless` (background path).
+        // The bg `finally` below invokes this alongside the existing
+        // parent-registry stop; see the foreground call site for the leak
+        // scenarios it covers.
+        let bgSubagentDispose: (() => Promise<void>) | undefined;
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
@@ -2128,11 +2143,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgPromptConfig = fork.promptConfig;
           bgToolConfig = fork.toolConfig;
         } else {
-          bgSubagent = await this.subagentManager.createAgentHeadless(
+          const bgResult = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
             { eventEmitter: bgEventEmitter },
           );
+          bgSubagent = bgResult.subagent;
+          bgSubagentDispose = bgResult.dispose;
           bgTaskPrompt = this.params.prompt;
         }
 
@@ -2486,6 +2503,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               .getToolRegistry()
               .stop()
               .catch(() => {});
+            // Per-spawn cleanup from `SubagentManager.createAgentHeadless`
+            // (background path). Mirrors the foreground finally: releases
+            // agent-scope hook entries and stops the per-agent ToolRegistry
+            // owning MCP child processes; not redundant with the parent
+            // registry stop above.
+            void bgSubagentDispose?.().catch(() => {});
             // Restore parent PermissionManager's dangerous allow rules
             // if this AUTO override stripped them. Background path:
             // restore fires when the bg agent terminates (complete /
@@ -2891,6 +2914,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           .getToolRegistry()
           .stop()
           .catch(() => {});
+        // Per-spawn cleanup from `SubagentManager.createAgentHeadless`:
+        // releases the agent-scope hook entries registered for this
+        // invocation and stops the per-agent ToolRegistry that the force
+        // rebuild created to land `mcpServers` discovery. The parent
+        // `getToolRegistry().stop()` above only reaches the parent's
+        // registry — the per-agent one is distinct.
+        void subagentDispose?.().catch(() => {});
         // Restore parent PermissionManager's dangerous allow rules if
         // this AUTO override stripped them on creation. No-op for non-
         // AUTO overrides and for AUTO overrides when parent was already

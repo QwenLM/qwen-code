@@ -286,8 +286,12 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
         }
       }
 
-      // Write converted content back
-      const newYaml = stringifyYaml(newFrontmatter);
+      // Write converted content back. Trim to drop the trailing newline
+      // `yaml.stringify` appends so the assembled file has the same single
+      // blank line between the closing `---` and the body that
+      // `subagent-manager.ts:serializeSubagent` produces — without `.trim()`
+      // the converter emits an extra blank line before the closing `---`.
+      const newYaml = stringifyYaml(newFrontmatter).trim();
       const systemPrompt = (qwenAgent['systemPrompt'] as string) || body.trim();
       const newContent = `---
 ${newYaml}

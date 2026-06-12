@@ -1955,5 +1955,124 @@ System prompt 3`);
         expect(runtimeView).toBeUndefined();
       });
     });
+
+    describe('createAgentHeadless — caller-driven dispose contract', () => {
+      // Regression for self-inflicted leaks (review #4996 round 1):
+      //   1. `wrapAgentHooksForCleanup` relied on `AgentHeadless.execute()`'s
+      //      inner finally firing `onStop`. Two execute() early-exit paths
+      //      (`createChat()` → null and `prepareTools()` throwing) bypass
+      //      that finally, so ephemeral hook entries leaked into the global
+      //      registry for the rest of the session.
+      //   2. The forced tool-registry rebuild for per-agent `mcpServers`
+      //      spawned real MCP client connections (stdio child processes,
+      //      sockets) on a registry distinct from the parent's, but nothing
+      //      stopped it — every subagent invocation declaring `mcpServers`
+      //      orphaned its server processes.
+      //
+      // The unified fix is to return `{ subagent, dispose }` from
+      // `createAgentHeadless` and have callers run `dispose()` in a
+      // `finally` that they already own around `subagent.execute()`. These
+      // tests assert that contract.
+
+      const baseConfig: SubagentConfig = {
+        name: 'cleanup-agent',
+        description: 'dispose contract test',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+      });
+
+      it('returns { subagent, dispose }; dispose unregisters per-agent hooks', async () => {
+        const unregisterSpy = vi.fn();
+        const addAgentHooksSpy = vi.fn().mockReturnValue(unregisterSpy);
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        // The whole point: callers need an explicit cleanup handle they can
+        // invoke from the outer `finally`. A return shape of just
+        // `AgentHeadless` (the pre-fix contract) gives them no way to do
+        // that, because the inner onStop wrap doesn't fire on every
+        // execute() exit path.
+        expect(result).toHaveProperty('subagent');
+        expect(result).toHaveProperty('dispose');
+        expect(typeof result.dispose).toBe('function');
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        expect(unregisterSpy).not.toHaveBeenCalled();
+
+        await result.dispose();
+
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {
+        // Caller pattern:
+        //   const { subagent, dispose } = await createAgentHeadless(...);
+        //   try { await subagent.execute(...); } finally { await dispose(); }
+        // We never call execute() in this test — that simulates the
+        // createChat-returns-null and prepareTools-throws paths where the
+        // pre-fix `onStop` wrapping never fired its cleanup.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const { dispose } = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: '*',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        await dispose();
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose is a safe no-op when neither hooks nor mcpServers are declared', async () => {
+        const result = await manager.createAgentHeadless(
+          baseConfig,
+          mockConfig,
+        );
+        expect(typeof result.dispose).toBe('function');
+        // Must not throw — the caller's `finally` always invokes dispose,
+        // even for agents that triggered no cleanup-bearing setup.
+        await expect(result.dispose()).resolves.toBeUndefined();
+      });
+    });
   });
 });

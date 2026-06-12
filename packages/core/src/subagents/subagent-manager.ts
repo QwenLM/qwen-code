@@ -655,11 +655,29 @@ export class SubagentManager {
   }
 
   /**
-   * Creates an AgentHeadless from a subagent configuration.
+   * Creates an AgentHeadless from a subagent configuration and returns a
+   * `dispose` callback that releases the per-spawn cleanup-bearing resources
+   * (ephemeral hook entries registered against the session's HookRegistry,
+   * the per-agent tool registry created when `mcpServers` triggers a force
+   * rebuild and the MCP child processes / sockets it owns).
+   *
+   * Callers MUST invoke `dispose` in a `finally` block around the
+   * `subagent.execute()` call. This is the only reliable way to clean up
+   * across every execute() exit path: the inner try/finally inside
+   * `AgentHeadless.execute()` does not fire `onStop` on the early-exit
+   * paths (`createChat()` returning null, `prepareTools()` throwing), and a
+   * leaked HookRegistry entry would fire globally for every matching event
+   * for the rest of the session; a leaked ToolRegistry would leave stdio
+   * child processes alive until process exit.
+   *
+   * `dispose` is idempotent — calling it twice is safe (the unregister
+   * callback filters by `agentScope` and is a no-op the second time; the
+   * registry's `stop()` is itself documented idempotent).
    *
    * @param config - Subagent configuration
    * @param runtimeContext - Runtime context
-   * @returns Promise resolving to AgentHeadless
+   * @returns the AgentHeadless and a `dispose` callback to run in the
+   *          caller's `finally` block.
    */
   async createAgentHeadless(
     config: SubagentConfig,
@@ -672,7 +690,38 @@ export class SubagentManager {
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
     },
-  ): Promise<AgentHeadless> {
+  ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
+    // Track per-spawn cleanup callbacks declared outside the inner
+    // `try/catch` so the catch can fire them on a constructor failure
+    // before the caller ever receives the return value. The successful
+    // path puts the same callbacks behind `dispose`.
+    let unregisterAgentHooks: (() => void) | undefined;
+    let disposeSubagentRegistry: (() => Promise<void>) | undefined;
+    const runCleanup = async (): Promise<void> => {
+      if (unregisterAgentHooks) {
+        try {
+          unregisterAgentHooks();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to unregister per-agent hooks: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          unregisterAgentHooks = undefined;
+        }
+      }
+      if (disposeSubagentRegistry) {
+        try {
+          await disposeSubagentRegistry();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to stop per-agent ToolRegistry: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          disposeSubagentRegistry = undefined;
+        }
+      }
+    };
+
     try {
       const runtimeConfig = await this.convertToRuntimeConfig(
         config,
@@ -702,46 +751,38 @@ export class SubagentManager {
         runtimeContext,
       );
 
-      const subagentContext = await this.buildSubagentContextOverride(
-        runtimeContext,
-        config,
-      );
+      const { context: subagentContext, disposeRegistry } =
+        await this.buildSubagentContextOverride(runtimeContext, config);
+      disposeSubagentRegistry = disposeRegistry;
 
-      // Register per-agent frontmatter hooks. Returns an unregister callback
-      // that the wrapped onStop hook below invokes when the agent terminates;
-      // a synchronous failure path also fires it via the catch block. v1
-      // limitation: while the entries live in the registry they fire for
-      // every event of their declared type, regardless of which agent is
-      // currently active — proper per-agent scope filtering is deferred.
+      // Register per-agent frontmatter hooks. The returned unregister callback
+      // is invoked from `dispose` (and from the catch block below on a
+      // constructor failure). v1 limitation: while the entries live in the
+      // registry they fire for every event of their declared type, regardless
+      // of which agent is currently active — proper per-agent scope filtering
+      // is deferred.
       const hookSystem = runtimeContext.getHookSystem();
       const hookRegistry = hookSystem?.getRegistry();
-      let unregisterAgentHooks: (() => void) | undefined;
-      if (
-        config.hooks &&
-        Object.keys(config.hooks).length > 0 &&
-        hookRegistry
-      ) {
-        const agentScope = `agent:${config.name}:${randomUUID()}`;
-        unregisterAgentHooks = hookRegistry.addAgentHooks(
-          config.hooks as { [K in HookEventName]?: HookDefinition[] },
-          agentScope,
-        );
-      } else if (
-        config.hooks &&
-        Object.keys(config.hooks).length > 0 &&
-        !hookRegistry
-      ) {
-        debugLogger.warn(
-          `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
-        );
+      if (config.hooks && Object.keys(config.hooks).length > 0) {
+        if (hookRegistry) {
+          const agentScope = `agent:${config.name}:${randomUUID()}`;
+          unregisterAgentHooks = hookRegistry.addAgentHooks(
+            config.hooks as { [K in HookEventName]?: HookDefinition[] },
+            agentScope,
+          );
+        } else {
+          // Single outer guard; nested branch on hookRegistry. The pre-fix
+          // structure repeated the `config.hooks && Object.keys(...).length`
+          // predicate across two `if`/`else if` arms, which made it easy to
+          // drift one side during future edits.
+          debugLogger.warn(
+            `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
+          );
+        }
       }
 
       try {
-        const wrappedHooks: AgentHooks | undefined = unregisterAgentHooks
-          ? wrapAgentHooksForCleanup(options?.hooks, unregisterAgentHooks)
-          : options?.hooks;
-
-        return await AgentHeadless.create(
+        const subagent = await AgentHeadless.create(
           config.name,
           subagentContext,
           promptConfig,
@@ -749,11 +790,16 @@ export class SubagentManager {
           runConfig,
           toolConfig,
           options?.eventEmitter,
-          wrappedHooks,
+          options?.hooks,
           runtimeView,
         );
+        return { subagent, dispose: runCleanup };
       } catch (innerError) {
-        unregisterAgentHooks?.();
+        // The caller never received the return value — `dispose` cannot
+        // possibly fire. Run the cleanup ourselves so the registered hook
+        // entries and the rebuilt ToolRegistry don't leak past this
+        // constructor failure.
+        await runCleanup();
         throw innerError;
       }
     } catch (error) {
@@ -792,7 +838,17 @@ export class SubagentManager {
   private async buildSubagentContextOverride(
     runtimeContext: Config,
     config: SubagentConfig,
-  ): Promise<Config> {
+  ): Promise<{
+    context: Config;
+    /**
+     * Set only when this call force-rebuilt the registry to land per-agent
+     * MCP server connections. The freshly built registry owns stdio child
+     * processes / sockets that the parent's `Config.shutdown` cannot reach,
+     * so the caller (`createAgentHeadless`) carries this callback through
+     * to its `dispose` closure and runs it when the subagent terminates.
+     */
+    disposeRegistry?: () => Promise<void>;
+  }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const subagentContext = Object.create(runtimeContext) as any as Config;
 
@@ -862,8 +918,12 @@ export class SubagentManager {
           );
         }
       }
+      return {
+        context: subagentContext,
+        disposeRegistry: () => subagentRegistry.stop(),
+      };
     }
-    return subagentContext;
+    return { context: subagentContext };
   }
 
   /**
@@ -1430,30 +1490,4 @@ function parseSubagentContent(
 function warnInvalidSubagentFile(filePath: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   debugLogger.debug(`Skipped invalid file ${filePath}: ${message}`);
-}
-
-/**
- * Wrap an optional {@link AgentHooks} so the supplied `cleanup` callback is
- * invoked when the agent's `onStop` fires, regardless of whether the caller
- * supplied their own `onStop`. The original handler still runs first; the
- * cleanup runs in a try/finally so a throwing user handler does not leak
- * the ephemeral hook entries the cleanup is responsible for removing.
- */
-function wrapAgentHooksForCleanup(
-  inner: AgentHooks | undefined,
-  cleanup: () => void,
-): AgentHooks {
-  const innerOnStop = inner?.onStop;
-  return {
-    ...inner,
-    onStop: async (payload) => {
-      try {
-        if (innerOnStop) {
-          await innerOnStop(payload);
-        }
-      } finally {
-        cleanup();
-      }
-    },
-  };
 }
