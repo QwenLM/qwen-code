@@ -4915,6 +4915,77 @@ describe('useGeminiStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it('should drop queued tool calls when user cancels the turn', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call_cancelled',
+              name: 'write_file',
+              args: { path: 'cancelled.txt' },
+            },
+          };
+          yield { type: ServerGeminiEventType.UserCancelled };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('cancel before tool dispatch');
+      });
+
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    it('should not dispatch queued tool calls after the request is aborted', async () => {
+      let resolveStream!: () => void;
+      let toolCallQueued!: () => void;
+
+      const streamCanFinish = new Promise<void>((resolve) => {
+        resolveStream = resolve;
+      });
+      const toolCallWasQueued = new Promise<void>((resolve) => {
+        toolCallQueued = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call_aborted',
+              name: 'write_file',
+              args: { path: 'aborted.txt' },
+            },
+          };
+          toolCallQueued();
+          await streamCanFinish;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      let submitPromise!: Promise<void>;
+      await act(async () => {
+        submitPromise = result.current.submitQuery(
+          'abort before tool dispatch',
+        );
+      });
+
+      await toolCallWasQueued;
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      resolveStream();
+      await submitPromise;
+
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
     it('should reset thought to null when there is an error', async () => {
       // Mock a stream that yields a thought then encounters an error
       mockSendMessageStream.mockReturnValue(

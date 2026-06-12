@@ -1535,6 +1535,7 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.UserCancelled:
               flushBufferedStreamEvents();
+              toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
               break;
             case ServerGeminiEventType.Error:
@@ -1663,7 +1664,7 @@ export const useGeminiStream = (
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
       dualOutput?.finalizeAssistantMessage();
-      if (toolCallRequests.length > 0) {
+      if (toolCallRequests.length > 0 && !signal.aborted) {
         scheduleToolCalls(toolCallRequests, signal);
       }
       return StreamProcessingStatus.Completed;
