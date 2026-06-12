@@ -453,7 +453,7 @@ describe('commandUtils', () => {
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          `All copy commands failed. "${xclipErrorMsg}", "${xselErrorMsg}". `,
+          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);

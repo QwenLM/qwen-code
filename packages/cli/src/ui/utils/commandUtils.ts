@@ -178,7 +178,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           if (writeOsc52(text)) return;
 
           throw new Error(
-            `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
+            `Clipboard unavailable: xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }
