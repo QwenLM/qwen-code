@@ -68,9 +68,8 @@ function summarize(config: MCPServerConfig): string {
  * the server for this session, and re-runs discovery so it connects; rejecting
  * persists a `rejected` decision and leaves it disconnected.
  *
- * Non-interactive sessions never reach here — the loader leaves the pending set
- * empty there (decision #2, lenient), so the queue is empty and the dialog stays
- * closed.
+ * Non-interactive sessions never render this hook. They still receive the
+ * loader's pending set so discovery can skip gated servers without prompting.
  */
 export const useMcpApproval = (config: Config) => {
   const [queue, setQueue] = useState<PendingMcpServer[]>([]);
