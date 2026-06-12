@@ -48,7 +48,8 @@
       }
       #log,
       #events,
-      #audit {
+      #audit,
+      #sessions {
         background: #111;
         color: #ddd;
         padding: 0.5rem;
@@ -65,6 +66,10 @@
       #audit {
         height: 30vh;
         color: #cea;
+      }
+      #sessions {
+        height: 30vh;
+        color: #ccd;
       }
       .token-row {
         display: flex;
@@ -141,6 +146,11 @@
       <strong>Tokens</strong> (active tokens; requires owner scope)
       <div><button id="list-tokens">List tokens</button></div>
       <div id="tokens">(not listed)</div>
+    </section>
+    <section id="session-tree">
+      <strong>Sessions</strong> (fork tree; requires owner scope)
+      <div><button id="list-sessions">List sessions</button></div>
+      <pre id="sessions">(not listed)</pre>
     </section>
     <div id="status"></div>
     <div id="cards"></div>
@@ -655,6 +665,64 @@
             row.appendChild(btn);
             out.appendChild(row);
           }
+        } catch (e) {
+          out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Session fork tree (cycle 57): GET /rc/sessions (cycle 50) returns a FLAT
+      // list with a forward forks[] index; render it as an indented text tree.
+      // A node not appearing in any forks[] is top-level (a true root or an
+      // orphan whose parent isn't listed). A `visited` set guards a hand-crafted
+      // cycle (the server's lineage walk is acyclic by construction, but the
+      // renderer must never loop). textContent-only (ids are server hex).
+      function buildSessionTree(sessions, truncated) {
+        const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+        const isChild = new Set();
+        for (const s of sessions)
+          for (const f of s.forks || []) isChild.add(f);
+        const lines = [];
+        const visited = new Set();
+        const walk = (s, depth) => {
+          if (!s || visited.has(s.sessionId)) return;
+          visited.add(s.sessionId);
+          const orphan =
+            s.parentSessionId && !byId.has(s.parentSessionId)
+              ? ' (forked from ' + s.parentSessionId + ', not listed)'
+              : '';
+          lines.push(
+            '  '.repeat(depth) + (depth ? '└ ' : '') + s.sessionId + orphan,
+          );
+          for (const f of s.forks || []) walk(byId.get(f), depth + 1);
+        };
+        for (const s of sessions) if (!isChild.has(s.sessionId)) walk(s, 0);
+        // Any node not reached (e.g. only reachable via a cycle) — list flat.
+        for (const s of sessions) if (!visited.has(s.sessionId)) walk(s, 0);
+        if (truncated) lines.push('… list truncated (scan cap hit)');
+        return lines.length ? lines.join('\n') : '(no sessions)';
+      }
+      $('list-sessions').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('sessions');
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/sessions', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : res.status === 502
+                  ? 'no workspace (daemon unavailable)'
+                  : 'list failed (' + res.status + ')';
+            return;
+          }
+          const body = await res.json();
+          out.textContent = buildSessionTree(
+            Array.isArray(body.sessions) ? body.sessions : [],
+            !!body.truncated,
+          );
         } catch (e) {
           out.textContent = 'list error: ' + e;
         }
