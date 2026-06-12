@@ -210,6 +210,9 @@ export async function applyProviderInstallPlan(
     currentStep = 'modelSelection';
     if (plan.modelSelection?.modelId) {
       settings.setValue('model.id', plan.modelSelection.modelId);
+      // model.name temporarily equals model.id (API identifier) because
+      // the model registry is not available during install. It will be
+      // resolved to the proper display name on the next model switch.
       settings.setValue('model.name', plan.modelSelection.modelId);
       if (plan.legacyCredentials?.baseUrl) {
         settings.setValue('model.baseUrl', plan.legacyCredentials.baseUrl);
