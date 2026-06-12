@@ -1919,8 +1919,11 @@ export class Session implements SessionContext {
     // are delivered as late fires through the start() callback below.
     try {
       await scheduler.enableDurable(this.sessionId);
-    } catch {
+    } catch (err) {
       // Durable support is best-effort; session-only jobs still run.
+      debugLogger.warn(
+        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+      );
     }
 
     // dispose() may have run while the durable load was in flight; its
