@@ -11,7 +11,6 @@ import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT');
 const GIT_STATUS_TIMEOUT_MS = 5000;
-const GIT_STATUS_SEPARATOR = '\n__QWEN_GIT_STATUS_SEPARATOR__\n';
 const DETACHED_HEAD_LABEL = '(detached HEAD)';
 
 /**
@@ -176,12 +175,13 @@ export function getRecentGitStatus(cwd: string): string | null {
   try {
     // Run each git command separately to avoid shell compatibility issues
     // (e.g., cmd.exe on Windows doesn't have 'printf')
-    const branch = execSync('git --no-optional-locks branch --show-current', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: GIT_STATUS_TIMEOUT_MS,
-    }).trim() || DETACHED_HEAD_LABEL;
+    const branch =
+      execSync('git --no-optional-locks branch --show-current', {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: GIT_STATUS_TIMEOUT_MS,
+      }).trim() || DETACHED_HEAD_LABEL;
 
     const status = execSync('git --no-optional-locks status --short', {
       cwd,
@@ -196,9 +196,6 @@ export function getRecentGitStatus(cwd: string): string | null {
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: GIT_STATUS_TIMEOUT_MS,
     }).trim();
-
-    const gitSnapshot =
-      branch + GIT_STATUS_SEPARATOR + status + GIT_STATUS_SEPARATOR + log;
 
     // Truncate status if too long (>2k chars)
     const MAX_STATUS_CHARS = 2000;
