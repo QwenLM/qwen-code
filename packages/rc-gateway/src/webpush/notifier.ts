@@ -45,6 +45,17 @@ export class PushNotifier {
   ) {}
 
   /**
+   * Forget a subscription's rolling-hour rate-limit window — called when the
+   * subscription is deleted so its in-memory counter doesn't linger for the
+   * process lifetime as subscriptions churn. A no-op when no limiter is
+   * configured. The limiter is private to the notifier, so the DELETE route
+   * reaches it through here rather than holding the limiter directly.
+   */
+  forgetRateLimit(subId: string): void {
+    this.rateLimiter?.forget(subId);
+  }
+
+  /**
    * Fan a daemon event out to all scope-eligible subscriptions. `now` is
    * injected (default the wall clock) so quiet-hours can be tested against a
    * fixed instant, mirroring the policy evaluator's `evaluate(…, now)`.

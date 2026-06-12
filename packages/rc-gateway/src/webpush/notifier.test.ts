@@ -941,3 +941,30 @@ describe('PushNotifier rate limit (cycle 46)', () => {
     expect(sent).toHaveLength(30); // the default cap
   });
 });
+
+describe('PushNotifier.forgetRateLimit', () => {
+  it('delegates to the limiter so a forgotten sub starts a fresh window', () => {
+    const limiter = new PushRateLimiter();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      limiter,
+    );
+    // maxPerHour=1: first send allowed, second dropped (window at cap).
+    expect(limiter.tryConsume('sub1', 1, 1000).allowed).toBe(true);
+    expect(limiter.tryConsume('sub1', 1, 1000).allowed).toBe(false);
+    // Forgetting the sub via the notifier clears the window -> allowed again.
+    notifier.forgetRateLimit('sub1');
+    expect(limiter.tryConsume('sub1', 1, 1000).allowed).toBe(true);
+  });
+
+  it('is a safe no-op when no limiter is configured', () => {
+    const notifier = new PushNotifier(tokens, store, sender);
+    expect(() => notifier.forgetRateLimit('sub1')).not.toThrow();
+  });
+});
