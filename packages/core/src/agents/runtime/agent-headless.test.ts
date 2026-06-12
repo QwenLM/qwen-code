@@ -1671,6 +1671,96 @@ describe('subagent.ts', () => {
           'rejected to prevent writing truncated content',
         );
       });
+
+      it('keeps automatic max token escalation warm for the next agent round', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        let callCount = 0;
+        mockSendMessageStream.mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                type: 'retry',
+                maxOutputTokensEscalated: 65_536,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call_write_complete',
+                      name: WriteFileTool.Name,
+                      args: {
+                        file_path: '/tmp/sticky-escalation.txt',
+                        content: 'hello',
+                      },
+                    },
+                  ],
+                },
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    { finishReason: 'STOP', content: { parts: [] } },
+                  ],
+                },
+              };
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'done' }] },
+                  },
+                ],
+              },
+            };
+          })();
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          mockSendMessageStream.mock.calls[0][1].config.maxOutputTokens,
+        ).toBeUndefined();
+        expect(
+          mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
+        ).toBe(65_536);
+      });
     });
   });
 });

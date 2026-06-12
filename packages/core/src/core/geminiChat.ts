@@ -208,6 +208,8 @@ export type StreamEvent =
        *  fresh restart (escalation). The UI should keep the accumulated text
        *  buffer so the continuation appends to it. */
       isContinuation?: boolean;
+      /** Set when the retry raised the automatic max output token limit. */
+      maxOutputTokensEscalated?: number;
     }
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
 
@@ -2202,19 +2204,29 @@ export class GeminiChat {
         // models.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
+        const requestedMaxOutputTokens = params.config?.maxOutputTokens;
+        const escalatedLimit = Math.max(
+          ESCALATED_MAX_TOKENS,
+          tokenLimit(model, 'output'),
+        );
+        const shouldEscalateMaxOutputTokens =
+          requestedMaxOutputTokens === undefined ||
+          requestedMaxOutputTokens < escalatedLimit;
+
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
           !maxTokensEscalated &&
-          !hasUserMaxTokensOverride
+          !hasUserMaxTokensOverride &&
+          shouldEscalateMaxOutputTokens
         ) {
           maxTokensEscalated = true;
-          const escalatedLimit = Math.max(
-            ESCALATED_MAX_TOKENS,
-            tokenLimit(model, 'output'),
-          );
+          const startingLimitLabel =
+            requestedMaxOutputTokens === undefined
+              ? 'capped default'
+              : `${requestedMaxOutputTokens} tokens`;
           debugLogger.info(
-            `Output truncated at capped default. Escalating to ${escalatedLimit} tokens.`,
+            `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
           );
           // Remove partial model response from history
           // (processStreamResponse already pushed it)
@@ -2225,7 +2237,10 @@ export class GeminiChat {
             self.history.pop();
           }
           // Signal UI to discard partial output
-          yield { type: StreamEventType.RETRY };
+          yield {
+            type: StreamEventType.RETRY,
+            maxOutputTokensEscalated: escalatedLimit,
+          };
           // Retry with escalated max_tokens
           const escalatedParams: SendMessageParameters = {
             ...params,
