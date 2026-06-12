@@ -18,7 +18,10 @@ import process from 'node:process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
-import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   activeGoalEquals,
   getActiveGoal,
@@ -1353,49 +1356,7 @@ export class GeminiClient {
 
       const m = mcResult.meta;
       this.getChat().setHistory(mcResult.history);
-      // Disarm only the blanked files' fast-path, keeping
-      // read-before-write state intact (issue #4239; rationale on
-      // FileReadEntry.readResidentInHistory). Any blanked read we
-      // can't disarm surgically forces the old blanket wipe so a
-      // later Read can't get a dangling file_unchanged placeholder.
-      const fileReadCache = this.config.getFileReadCache();
-      if (m.unresolvedEvictedReads > 0) {
-        debugLogger.debug(
-          `[FILE_READ_CACHE] clear after microcompaction ` +
-            `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-        );
-        fileReadCache.clear();
-      } else {
-        // Concurrent stats — don't serialize N FS round-trips
-        // before the next turn.
-        const statResults = await Promise.all(
-          m.evictedReadPaths.map((p) =>
-            fsPromises.stat(p).catch(() => undefined),
-          ),
-        );
-        // A path is surgically disarmed only if it stats AND its
-        // inode matches the recorded entry. A failed stat or inode
-        // miss could leave a stale entry armed, so fall back to the
-        // blanket wipe if any path is unresolvable.
-        let fullyDisarmed = true;
-        for (const stats of statResults) {
-          if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-            fullyDisarmed = false;
-          }
-        }
-        if (fullyDisarmed) {
-          debugLogger.debug(
-            `[FILE_READ_CACHE] disarmed fast-path for ` +
-              `${m.evictedReadPaths.length} file(s) after microcompaction`,
-          );
-        } else {
-          debugLogger.debug(
-            '[FILE_READ_CACHE] clear after microcompaction ' +
-              '(an evicted path was unresolvable)',
-          );
-          fileReadCache.clear();
-        }
-      }
+      await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       debugLogger.debug(
         `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
           `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
@@ -2395,6 +2356,77 @@ export class GeminiClient {
       // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;
     }
+    return info;
+  }
+
+  /**
+   * Surgically disarm FileReadCache entries for files evicted by
+   * microcompaction. Falls back to a blanket clear() when any evicted
+   * path can't be resolved.
+   *
+   * Shared by the time-based microcompaction path and /compress-fast.
+   */
+  private async disarmFileReadCacheAfterEviction(
+    meta: MicrocompactMeta,
+    logTag: string,
+  ): Promise<void> {
+    const fileReadCache = this.config.getFileReadCache();
+    if (meta.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          `(${meta.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+      return;
+    }
+    if (meta.evictedReadPaths.length === 0) {
+      return;
+    }
+    const statResults = await Promise.all(
+      meta.evictedReadPaths.map((p) =>
+        fsPromises.stat(p).catch(() => undefined),
+      ),
+    );
+    let fullyDisarmed = true;
+    for (const stats of statResults) {
+      if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+        fullyDisarmed = false;
+      }
+    }
+    if (fullyDisarmed) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] disarmed fast-path for ` +
+          `${meta.evictedReadPaths.length} file(s) after ${logTag}`,
+      );
+    } else {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after ${logTag} ` +
+          '(an evicted path was unresolvable)',
+      );
+      fileReadCache.clear();
+    }
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * FileReadCache disarming.
+   */
+  async tryCompressChatFast(): Promise<ChatCompressionInfo> {
+    const { info, microcompactMeta } = this.getChat().compressFast();
+
+    if (info.compressionStatus !== CompressionStatus.COMPRESSED) {
+      return info;
+    }
+
+    if (microcompactMeta) {
+      await this.disarmFileReadCacheAfterEviction(
+        microcompactMeta,
+        'compress-fast',
+      );
+    }
+    this.forceFullIdeContext = true;
+
     return info;
   }
 }
