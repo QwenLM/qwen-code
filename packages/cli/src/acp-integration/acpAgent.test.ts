@@ -1167,6 +1167,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('getAccountInfo sanitizes credentials from baseUrl', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        authType: 'openai',
+        model: 'qwen-plus',
+        baseUrl: 'https://user:sk-secret@api.example.com/v1',
+        apiKeyEnvKey: 'OPENAI_API_KEY',
+      }),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const accountInfo = await agent.extMethod('getAccountInfo', {});
+
+    expect(accountInfo).toEqual({
+      authType: 'openai',
+      model: 'qwen-plus',
+      baseUrl: 'https://api.example.com/v1',
+      apiKeyEnvKey: 'OPENAI_API_KEY',
+    });
+    expect(JSON.stringify(accountInfo)).not.toContain('sk-secret');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   function makeInnerConfig() {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -1352,7 +1389,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           description: 'General coding model',
           authType: 'qwen',
           contextWindowSize: 65_536,
-          baseUrl: 'https://secret.example.com',
+          baseUrl: 'https://user:sk-secret@api.example.com',
           envKey: 'DASHSCOPE_API_KEY',
         },
       ]),
@@ -1470,7 +1507,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               name: 'Qwen Plus',
               description: 'General coding model',
               contextLimit: 65_536,
-              baseUrl: 'https://secret.example.com',
+              baseUrl: 'https://api.example.com',
               envKey: 'DASHSCOPE_API_KEY',
               isCurrent: true,
               isRuntime: false,
@@ -1479,7 +1516,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
     });
-
+    expect(JSON.stringify(providers)).not.toContain('sk-secret');
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -3211,7 +3248,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           openai: [
             {
               id: 'deepseek-chat',
-              baseUrl: 'https://api.deepseek.com',
+              baseUrl: 'https://user:sk-provider@api.deepseek.com/v1',
               envKey: 'DEEPSEEK_API_KEY',
             },
             {
@@ -3233,19 +3270,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     }) as AgentLike;
 
-    await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual({
+    const providers = await agent.extMethod('qwen/providers/list', {});
+    expect(providers).toEqual({
       providers: [
         expect.objectContaining({
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
-            baseUrl: 'https://api.deepseek.com',
+            baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
           },
         }),
       ],
     });
+    expect(JSON.stringify(providers)).not.toContain('sk-provider');
 
     mockConnectionState.resolve();
     await agentPromise;
