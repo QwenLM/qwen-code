@@ -211,6 +211,19 @@ function generateRunId(): string {
 }
 
 /**
+ * Sanitize a user-controlled string for safe interpolation into an error
+ * message. Control characters (CR / LF / NUL / etc.) are replaced with a
+ * single space so a model-authored agentType cannot fragment a single-line
+ * error across log records / OTLP fields / display payloads. P3 R2
+ * self-review surfaced this; the corresponding throw site is in
+ * `runOverridePath` for `opts.agentType`.
+ */
+function sanitizeForErrorMessage(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f]+/g, ' ');
+}
+
+/**
  * Build the production agent-dispatch function.
  *
  * Wraps AgentHeadless.create + execute + getFinalText into the
@@ -352,8 +365,15 @@ async function runOverridePath(
       // "agent({agentType}): agent type '{name}' not found". Match for
       // user-visible parity so scripts authored against either runtime see
       // the same error text.
+      //
+      // SECURITY (P3 R2 self-review): sanitize opts.agentType before
+      // interpolation. The string is model-authored; an attacker model
+      // could embed CRLF / control characters that fragment the error
+      // message in logs / display / OTLP traces. Replace control chars
+      // with a single space so the error stays single-line.
+      const safeAgentType = sanitizeForErrorMessage(opts.agentType);
       throw new Error(
-        `agent({agentType}): agent type '${opts.agentType}' not found.`,
+        `agent({agentType}): agent type '${safeAgentType}' not found.`,
       );
     }
     baseConfig = resolved;
@@ -556,6 +576,25 @@ interface WorktreePreservedInfo {
   branch: string;
 }
 
+/**
+ * In-flight handle for one `agent({isolation:'worktree'})` provision —
+ * passed from `provisionWorkflowWorktree` to `cleanupWorkflowWorktree`
+ * (plus the outer-finally fallback) so cleanup can address the right
+ * worktree without re-discovering it from the filesystem.
+ *
+ *  - `slug` — the ephemeral `agent-<7hex>` name; used as the
+ *    `removeUserWorktree` argument AND as the input to
+ *    `hasUnmergedWorktreeCommits` (which resolves the slug to its
+ *    branch name internally).
+ *  - `path` — absolute worktree directory under
+ *    `<projectRoot>/.qwen/worktrees/`; the subagent's rebound cwd.
+ *  - `branch` — the branch created for this worktree
+ *    (`worktree-<slug>`); appears verbatim in the user-facing preserved
+ *    suffix.
+ *  - `repoRoot` — the parent project root; the cleanup helper builds a
+ *    fresh `GitWorktreeService` anchored here so the worktree-side
+ *    git invocations target the right repo.
+ */
 interface WorkflowWorktreeIsolation {
   slug: string;
   path: string;

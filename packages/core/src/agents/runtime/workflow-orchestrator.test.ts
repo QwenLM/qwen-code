@@ -41,6 +41,57 @@ const { created, nextTerminateMode } = vi.hoisted(() => ({
   nextTerminateMode: { value: 'GOAL' as string },
 }));
 
+// P3 R2 self-review (P3-T6 gap, batch): tests below for
+// agent({isolation:'worktree'}) need to drive GitWorktreeService's
+// provision/cleanup branches deterministically. Module-level mock with
+// per-test stub overrides via vi.mocked(...).mockImplementation.
+//
+// Default behaviour = "everything succeeds and the worktree is clean
+// post-spawn" so the cleanup branch removes the worktree. Tests that
+// need a specific error path override the relevant method.
+const worktreeStubs = vi.hoisted(() => {
+  const makeStub = () => ({
+    checkGitAvailable: vi.fn(async () => ({ available: true })),
+    isGitRepository: vi.fn(async () => true),
+    getRepoTopLevel: vi.fn(async () => '/fake/repo'),
+    getCurrentBranch: vi.fn(async () => 'main'),
+    hasWorktreeChanges: vi.fn(async () => false),
+    hasUnmergedWorktreeCommits: vi.fn(async () => false),
+    createUserWorktree: vi.fn(
+      async (
+        slug: string,
+        _base?: string,
+        _options?: { symlinkDirectories?: readonly string[] },
+      ) => ({
+        success: true,
+        worktree: {
+          path: `/fake/repo/.qwen/worktrees/${slug}`,
+          branch: `worktree-${slug}`,
+        },
+      }),
+    ),
+    removeUserWorktree: vi.fn(async () => ({ success: true })),
+  });
+  return { makeStub, instances: [] as Array<ReturnType<typeof makeStub>> };
+});
+
+vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/gitWorktreeService.js')
+    >();
+  return {
+    ...actual,
+    generateAgentWorktreeSlug: () => 'agent-deadbe1',
+    writeWorktreeSessionMarker: vi.fn(async () => {}),
+    GitWorktreeService: vi.fn().mockImplementation(() => {
+      const stub = worktreeStubs.makeStub();
+      worktreeStubs.instances.push(stub);
+      return stub;
+    }),
+  };
+});
+
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
@@ -732,6 +783,21 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
 // stub matching just enough surface (findSubagentByName +
 // createAgentHeadless) for the path under test.
 describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', () => {
+  // Reset GitWorktreeService stub state between tests so an override set
+  // by one test does not bleed into the next (mockImplementation is
+  // persistent; the per-test overrides below rely on a clean baseline).
+  beforeEach(async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    worktreeStubs.instances.length = 0;
+    vi.mocked(GitWorktreeService).mockImplementation(() => {
+      const stub = worktreeStubs.makeStub();
+      worktreeStubs.instances.push(stub);
+      return stub as unknown as InstanceType<typeof GitWorktreeService>;
+    });
+  });
+
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
@@ -785,6 +851,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // P3 R2 self-review: isolation:'worktree' provisioning reads
+      // these methods. Provide deterministic returns so the tests can
+      // drive GitWorktreeService stubs without re-deriving cwd.
+      getTargetDir: () => '/fake/repo',
+      getSessionId: () => 'sess_fake_test_id',
+      getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
         createAgentHeadless: async (
@@ -1304,5 +1376,307 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       /terminate mode: ERROR/,
     );
     expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // R2 self-review (sec-2): sanitize control characters in user-controlled
+  // strings before interpolating into error messages so a model-authored
+  // agentType cannot fragment a single-line error across log records.
+  it('agentType not found: control chars in name are scrubbed from the error message', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => null,
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    // newline + nul + del — all control codes < 0x20 or == 0x7f.
+    const evil = 'Explore\n\rEvil\x00\x7f';
+    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
+    // The thrown message must NOT contain raw newlines / NULs.
+    try {
+      await dispatch('hi', { agentType: evil });
+    } catch (err) {
+      const msg = (err as Error).message;
+      // eslint-disable-next-line no-control-regex
+      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+      expect(msg).toContain('not found');
+    }
+  });
+
+  // R2 self-review (test-5): dispose() MUST still run even when
+  // subagent.execute throws synchronously from inside the in-flight
+  // event-emitter callback (schema-mode failure path). The R1 dispose
+  // tests covered terminate-mode-non-GOAL; this covers the thrown-from-
+  // execute branch.
+  it('override path: dispose() still runs in finally when execute throws', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'GOAL', // not reached
+        runWithEmitter: (_emitter) => {
+          throw new Error('simulated subagent failure');
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(/simulated subagent failure/);
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── isolation:'worktree' provision error branches ──────────────
+  // R2 self-review (test-1, [critical]): each provisionWorkflowWorktree
+  // error branch had no unit test. Coverage came only from the real-
+  // LLM E2E S7 happy path. Adversarial review noted the parent-dirty
+  // refuse, nested-worktree refuse, and git-not-available paths can
+  // change behavior with no regression signal. Each test below stubs
+  // the GitWorktreeService method that controls the branch.
+
+  it("isolation:'worktree' refuses when parent cwd is already inside a worktree", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    // Override getTargetDir to look nested-worktree-ish.
+    (config as unknown as { getTargetDir: () => string }).getTargetDir = () =>
+      '/some/repo/.qwen/worktrees/agent-existing/inner';
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /already inside a worktree/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when git is not available", async () => {
+    worktreeStubs.instances.length = 0; // reset
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          checkGitAvailable: vi.fn(async () => ({
+            available: false,
+            error: 'git binary missing',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /git binary missing/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          isGitRepository: vi.fn(async () => false),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /not a git repository/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when parent working tree is dirty", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          hasWorktreeChanges: vi.fn(async () => true),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /uncommitted changes/,
+    );
+  });
+
+  it("isolation:'worktree' surfaces createUserWorktree failure", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          createUserWorktree: vi.fn(async () => ({
+            success: false,
+            error: 'simulated worktree create failure',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /simulated worktree create failure/,
+    );
+  });
+
+  // ─── isolation:'worktree' cleanup error branches ────────────────
+  // R2 self-review (test-2, [major]): cleanupWorkflowWorktree has 3
+  // notable error/branch transitions: removeUserWorktree returns
+  // {success:false}, returns {success:true, branchPreserved:true}, or
+  // throws synchronously. Each path produces a different preserved
+  // suffix and was previously untested.
+
+  it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          // Subagent left the worktree clean.
+          hasWorktreeChanges: vi
+            .fn(async () => false)
+            // ... but the subsequent cleanup-side hasWorktreeChanges
+            // (called from inside cleanupWorkflowWorktree) also reports
+            // clean. Cleanup proceeds to removeUserWorktree which fails.
+            .mockImplementation(async () => false),
+          removeUserWorktree: vi.fn(async () => ({
+            success: false,
+            error: 'simulated remove failure',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    // Suffix should appear because removeUserWorktree failed → preserve.
+    expect(String(result)).toMatch(
+      /\[worktree preserved:.*\(branch worktree-agent-deadbe1\)\]/,
+    );
+  });
+
+  it("isolation:'worktree' cleanup: branchPreserved race yields branch-only suffix", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          removeUserWorktree: vi.fn(async () => ({
+            success: true,
+            branchPreserved: true, // race: commits landed between checks and delete
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    // Directory-removed-but-branch-preserved suffix matches AgentTool
+    // verbatim and includes the recover hint.
+    expect(String(result)).toMatch(/worktree directory removed/);
+    expect(String(result)).toMatch(/git worktree add/);
+  });
+
+  it("isolation:'worktree' cleanup: thrown removeUserWorktree preserves path+branch", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          removeUserWorktree: vi.fn(async () => {
+            throw new Error('simulated git crash during remove');
+          }),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    expect(String(result)).toMatch(
+      /\[worktree preserved:.*\(branch worktree-agent-deadbe1\)\]/,
+    );
+  });
+
+  // ─── isolation:'worktree' option combinations ───────────────────
+  // R2 self-review (test-3/4): single-option tests don't catch
+  // interactions. These verify model+worktree and schema+worktree
+  // each compose correctly.
+
+  it("model + isolation:'worktree': model threaded through AND worktree provisioned", async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', {
+      model: 'qwen3-max',
+      isolation: 'worktree',
+    });
+    expect(calls[0].config.model).toBe('qwen3-max');
+    // Default-clean stub auto-removes; no suffix expected.
+    expect(String(result)).not.toMatch(/worktree preserved/);
+  });
+
+  it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, in_worktree: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract from worktree', {
+      schema: { type: 'object' },
+      isolation: 'worktree',
+    });
+    // Schema-mode returns the structured object verbatim, not the
+    // string-with-suffix shape. The preserved-suffix mechanism intentionally
+    // does NOT mutate the structured payload — operator-visible info goes
+    // to debugLogger instead. See runOverridePath's "schema-mode... payload
+    // is returned verbatim" comment.
+    expect(result).toEqual({ ok: true, in_worktree: true });
   });
 });

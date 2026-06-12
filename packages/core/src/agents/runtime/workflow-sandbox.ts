@@ -532,6 +532,24 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             __b.pushPhase(agentOpts.phase);
           }
         }
+        // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
+        // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
+        // A Proxy / inherited-getter / non-plain object in agentOpts.schema
+        // would let host-side code (SyntheticOutputTool constructor + AJV
+        // compile) trigger user-controlled trap handlers that execute with
+        // the host realm's full surface. Revive agentOpts through JSON
+        // round-trip BEFORE crossing so the host only ever sees vm-realm
+        // plain objects with vm-realm prototypes. Same mechanism that
+        // makes args + parallel/pipeline results safe.
+        var safeOpts;
+        try {
+          safeOpts = JSON.parse(JSON.stringify(agentOpts));
+        } catch (e) {
+          throw new Error(
+            "agent() opts contain a non-JSON-serializable value: " +
+            String(e && e.message != null ? e.message : e)
+          );
+        }
         // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
         // path is verbatim (no re-wrap of resolved values). Host-realm
         // strings cross the boundary harmlessly because primitives have no
@@ -546,7 +564,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // global revival). The fallback to null on a non-serializable
         // resolve mirrors the errors-as-data convention parallel/pipeline
         // already use for individual slot failures.
-        return __b.hostAgent(prompt, agentOpts).then(function (value) {
+        return __b.hostAgent(prompt, safeOpts).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
           }
