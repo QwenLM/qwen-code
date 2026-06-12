@@ -15,6 +15,7 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { getPendingGatedMcpServers } from '../../config/mcpApprovals.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
@@ -31,7 +32,10 @@ async function getMcpServersFromConfig(
     await extManager.refreshCache();
   }
   const extensions = extManager.getLoadedExtensions();
-  const mcpServers = { ...(settings.merged.mcpServers || {}) };
+  const mcpServers: Record<string, MCPServerConfig> = assembleMcpServers(
+    settings.merged.mcpServers,
+    process.cwd(),
+  );
   for (const extension of extensions) {
     if (extension.isActive) {
       Object.entries(extension.config.mcpServers || {}).forEach(
