@@ -1376,6 +1376,26 @@ export default {
   'Found {{count}} TOML command files:':
     'Найдено {{count}} файлов команд TOML:',
   'Current tasks': 'Текущие задачи',
+  'Background tasks': 'Фоновые задачи',
+  'No tasks currently running': 'Нет запущенных задач',
+  'No entry to show.': 'Нет записи для отображения.',
+  'needs approval': 'требует подтверждения',
+  'Background agent needs approval': 'Фоновый агент требует подтверждения',
+  'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  Running: 'Выполняется',
+  Paused: 'Приостановлено',
+  Completed: 'Завершено',
+  Failed: 'Ошибка',
+  Stopped: 'Остановлено',
+  Shell: 'Оболочка',
+  Monitor: 'Монитор',
+  Command: 'Команда',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] консолидация памяти',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] консолидация памяти (проверка {{count}} сессии)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] консолидация памяти (проверка {{count}} сессий)',
   '... and {{count}} more': '... и ещё {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Формат TOML устарел. Хотите перенести их в формат Markdown?',
