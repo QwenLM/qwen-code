@@ -60,6 +60,7 @@ import {
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
+  HistoryItemGoalStatus,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
   SlashCommandProcessorResult,
@@ -95,6 +96,7 @@ import {
   isValidAutoImproveLoopId,
   markActiveAutoImproveRunCancelled,
 } from '../commands/autoImproveState.js';
+import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
@@ -1467,17 +1469,16 @@ export const useGeminiStream = (
       // continuation, not a hook failure.
       const activeGoal = getActiveGoal(config.getSessionId());
       if (activeGoal && activeGoal.condition) {
-        addItem(
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'checking',
-            condition: activeGoal.condition,
-            iterations: value.iterationCount,
-            lastReason:
-              activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
-          } as HistoryItemWithoutId,
-          userMessageTimestamp,
-        );
+        const item: HistoryItemGoalStatus = {
+          type: MessageType.GOAL_STATUS,
+          kind: 'checking',
+          condition: activeGoal.condition,
+          iterations: activeGoal.iterations,
+          lastReason:
+            activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
+        };
+        addItem(item, userMessageTimestamp);
+        recordGoalStatusItem(config, item);
         return;
       }
       addItem(

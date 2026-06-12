@@ -100,6 +100,7 @@ export default {
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
+  'Move this session to a new working directory': '將此會話移動到新的工作目錄',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
@@ -310,6 +311,8 @@ export default {
   'Clear conversation history and free up context': '清除對話歷史並釋放上下文',
   'Compresses the context by replacing it with a summary.':
     '通過摘要替換來壓縮上下文',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    '無需 AI 的快速上下文壓縮。清理舊工具輸出並剝離思考過程。',
   'open full Qwen Code documentation in your browser':
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
@@ -1835,4 +1838,5 @@ export default {
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
+  'No compression needed.': '無需壓縮。',
 };
