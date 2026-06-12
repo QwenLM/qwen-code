@@ -245,7 +245,11 @@ function resolveToolMetadata(
  * Maps tool kind to allowed export kinds.
  */
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
-  if (toolName && toolName === ToolNames.EXIT_PLAN_MODE) {
+  if (
+    toolName &&
+    (toolName === ToolNames.EXIT_PLAN_MODE ||
+      toolName === ToolNames.ENTER_PLAN_MODE)
+  ) {
     return 'switch_mode';
   }
 
