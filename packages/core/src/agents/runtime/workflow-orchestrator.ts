@@ -764,11 +764,21 @@ function appendWorktreePreservedSuffix(
   finalText: string,
   preserved: WorktreePreservedInfo,
 ): string {
+  // Wording mirrors AgentTool's formatWorktreeSuffix (agent.ts:1700-1719)
+  // verbatim so a user who has seen both tools' worktree-preserved messages
+  // sees one consistent shape. AgentTool's version includes the
+  // `git worktree add <path> <branch>` recovery hint for the
+  // directory-removed-but-branch-preserved race; the Workflow path hits the
+  // same race (cleanupWorkflowWorktree's result.branchPreserved branch) so
+  // it gets the same hint.
   const sep = finalText.endsWith('\n') ? '\n' : '\n\n';
   if (preserved.path) {
-    return `${finalText}${sep}[worktree preserved at ${preserved.path} on branch ${preserved.branch}]`;
+    return `${finalText}${sep}[worktree preserved: ${preserved.path} (branch ${preserved.branch})]`;
   }
-  return `${finalText}${sep}[worktree branch preserved: ${preserved.branch} (directory already removed)]`;
+  return (
+    `${finalText}${sep}[worktree directory removed; branch ${preserved.branch} ` +
+    `preserved — recover with \`git worktree add <path> ${preserved.branch}\`]`
+  );
 }
 
 /**

@@ -1062,4 +1062,247 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await dispatch('extract', { schema: { type: 'object' } });
     expect(calls[0].eventEmitterAttached).toBe(true);
   });
+
+  // R1 self-review (P3-T6 gap): the schema-mode state machine in
+  // createSchemaEventEmitter has a `state.result === null` guard that
+  // allows the model to RECOVER from earlier failed attempts. Only the
+  // 0-failure and 3+-failure boundaries were tested; the 1-failure and
+  // 2-failure recovery transitions had no coverage. A regression
+  // inverting the guard, or one where pendingArgs cleanup discards the
+  // recovered args, would slip past the previous tests.
+  it('schema-mode: success on 2nd attempt (1 nudge then valid) captures round-2 args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          // Round 1: invalid args, validation fails.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { bad: 'shape' },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: false,
+            error: 'validation failed',
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+          // Round 2: corrected args, validation passes. Must be captured
+          // as the result, not the round-1 args.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 2,
+            callId: 'c2',
+            name: 'structured_output',
+            args: { ok: true, attempt: 2 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 2,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 2,
+            callId: 'c2',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object' },
+    });
+    expect(result).toEqual({ ok: true, attempt: 2 });
+  });
+
+  it('schema-mode: success on 3rd attempt (2 nudges then valid) captures round-3 args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          for (let r = 1; r <= 2; r++) {
+            emitter.emit('tool_call', {
+              subagentId: 'sub',
+              round: r,
+              callId: `c${r}`,
+              name: 'structured_output',
+              args: { bad: r },
+              description: '',
+              isOutputMarkdown: false,
+              timestamp: r,
+            });
+            emitter.emit('tool_result', {
+              subagentId: 'sub',
+              round: r,
+              callId: `c${r}`,
+              name: 'structured_output',
+              success: false,
+              error: 'validation failed',
+              responseParts: [],
+              resultDisplay: '',
+              durationMs: 1,
+              timestamp: r,
+            });
+          }
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 3,
+            callId: 'c3',
+            name: 'structured_output',
+            args: { ok: true, attempt: 3 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 3,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 3,
+            callId: 'c3',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 3,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object' },
+    });
+    expect(result).toEqual({ ok: true, attempt: 3 });
+  });
+
+  // R1 self-review (P3-T6 gap): the disallowed-tool floor invariant
+  // declares "ALWAYS applies regardless of agentType". The
+  // single-option tests above exercise floor+agentType and schema
+  // separately, but not their composition. A regression making the
+  // floor conditional on schema being unset (e.g. mistakenly moving
+  // the union inside an `if (opts.schema === undefined)` branch)
+  // would pass the existing tests.
+  it('schema-mode + agentType: floor disallowedTools still unioned', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Permissive',
+        description: 'allows SendMessage explicitly',
+        systemPrompt: 'permissive',
+        level: 'project',
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', {
+      agentType: 'Permissive',
+      schema: { type: 'object' },
+    });
+    const disallowed = calls[0].config.disallowedTools ?? [];
+    expect(disallowed).toEqual(
+      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+    );
+  });
+
+  // R1 self-review (P3-T6 gap): caller-abort taking priority over
+  // "completed without StructuredOutput" is a contract boundary the
+  // dispatch enforces at the explicit `if (signal?.aborted)` check.
+  // Without this test, a refactor removing the check would silently
+  // convert user-cancelled schema runs into schema-failure errors.
+  it('schema-mode: caller abort takes priority over terminal "no structured_output" error', async () => {
+    const externalAbort = new AbortController();
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (_emitter) => {
+          // Caller-side abort fires while the subagent is in flight but
+          // before any structured_output call. After execute() returns,
+          // signal.aborted is true AND state.result is still null — the
+          // dispatch must throw AbortError, not the StructuredOutput
+          // terminal error.
+          externalAbort.abort();
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config, externalAbort.signal);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(/aborted/i);
+  });
+
+  // R1 self-review (P3-T6 gap): the override path's dispose() must run
+  // in a finally so per-agent MCP processes / hooks don't leak past the
+  // dispatch — including on the exception path. The test harness has a
+  // `disposed` counter that no test asserts on; this closes that gap on
+  // both the success and the thrown-from-execute paths.
+  it('override path always calls dispose() on the success path', async () => {
+    // Use model-only override (no agentType) so we don't go through the
+    // SubagentManager resolution path. The ephemeral-default branch
+    // still routes through createAgentHeadless and therefore dispose().
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await dispatch('hi', { model: 'qwen3-max' });
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  it('override path always calls dispose() even when terminateMode is non-GOAL', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'ERROR', // non-GOAL → dispatch throws after execute
+      }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await expect(dispatch('hi', { model: 'qwen3-max' })).rejects.toThrow(
+      /terminate mode: ERROR/,
+    );
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
 });
