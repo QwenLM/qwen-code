@@ -739,15 +739,22 @@ describe('createDaemonWorkspaceService', () => {
       await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(/symlink/);
     });
 
-    it('throws when target is a FIFO (non-regular file)', async () => {
+    it('throws when target is a non-regular file', async () => {
       const target = path.join(tmpDir, 'QWEN.md');
-      const { execSync } = await import('node:child_process');
-      try {
-        execSync(`mkfifo "${target}"`, { stdio: 'ignore' });
-      } catch {
-        // mkfifo may not be available on all platforms; skip gracefully
-        return;
-      }
+      await fs.writeFile(target, '', 'utf8');
+
+      const origLstat = fs.lstat;
+      const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (p) => {
+        const stats = await origLstat(p);
+        if (path.resolve(String(p)) !== target) return stats;
+        return new Proxy(stats, {
+          get(obj, prop, receiver) {
+            if (prop === 'isFile') return () => false;
+            if (prop === 'isSymbolicLink') return () => false;
+            return Reflect.get(obj, prop, receiver);
+          },
+        });
+      });
 
       const svc = createDaemonWorkspaceService(
         makeDeps({
@@ -756,9 +763,13 @@ describe('createDaemonWorkspaceService', () => {
         }),
       );
 
-      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
-        /not a regular file/,
-      );
+      try {
+        await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+          /not a regular file/,
+        );
+      } finally {
+        lstatSpy.mockRestore();
+      }
     });
 
     it('throws WorkspaceInitConflictError when existing file has content and force is unset', async () => {

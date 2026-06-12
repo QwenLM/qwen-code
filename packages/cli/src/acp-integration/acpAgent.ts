@@ -144,6 +144,14 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
+import {
+  updateOutputLanguageFile,
+  resolveOutputLanguage,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+
+  getOutputLanguageFilePath,
+  writeOutputLanguageAndRegisterPath} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -152,14 +160,6 @@ import {
   getCurrentLanguage,
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
-import {
-  resolveOutputLanguage,
-  updateOutputLanguageFile,
-  getOutputLanguageFilePath,
-  writeOutputLanguageAndRegisterPath,
-  isAutoLanguage,
-  OUTPUT_LANGUAGE_AUTO,
-} from '../utils/languageUtils.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
@@ -6573,9 +6573,18 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
-      case SERVE_CONTROL_EXT_METHODS.workspaceReloadEnv: {
-        const fresh = loadSettings(cwd, { skipLoadEnvironment: true });
-        const envResult = reloadEnvironment(fresh.merged, cwd);
+      case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
+        const oldMerged = structuredClone(this.settings.merged);
+
+        this.settings.reloadScopeFromDisk(SettingScope.User);
+        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        const newMerged = this.settings.merged;
+
+        const envResult = reloadEnvironment(newMerged, cwd);
+
+        const changed = diffSettingsKeys(oldMerged, newMerged);
+        const envChanged =
+          envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
@@ -6589,23 +6598,97 @@ class QwenAgent implements Agent {
             }
             const config = session.getConfig();
             const authType = config.getAuthType();
-            if (!authType) {
-              skipped.push(id);
-              return;
+
+            if (changed.has('modelProviders')) {
+              try {
+                config.reloadModelProvidersConfig(newMerged.modelProviders);
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
+                );
+              }
             }
-            config.reloadModelProvidersConfig(fresh.merged.modelProviders);
-            await config.refreshAuth(authType);
+
+            const newModelName = newMerged.model?.name;
+            if (
+              changed.has('model') &&
+              newModelName &&
+              newModelName !== config.getModel() &&
+              authType
+            ) {
+              try {
+                await config.switchModel(authType, newModelName);
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: switchModel failed for session ${id}: ${err}`,
+                );
+              }
+            } else if (
+              (changed.has('modelProviders') || envChanged) &&
+              authType
+            ) {
+              try {
+                await config.refreshAuth(authType);
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: refreshAuth failed for session ${id}: ${err}`,
+                );
+              }
+            }
+
+            if (changed.has('tools')) {
+              const disabled = normalizeDisabledToolList(
+                newMerged.tools?.disabled,
+              );
+              config.setDisabledTools(new Set(disabled));
+
+              const newMode = newMerged.tools?.approvalMode;
+              if (
+                newMode &&
+                APPROVAL_MODES.includes(newMode as ApprovalMode) &&
+                newMode !== config.getApprovalMode()
+              ) {
+                try {
+                  config.setApprovalMode(newMode as ApprovalMode);
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: setApprovalMode failed for session ${id}: ${err}`,
+                  );
+                }
+              }
+            }
+
+            try {
+              await config.refreshHierarchicalMemory();
+            } catch (err) {
+              debugLogger.warn(
+                `reload: refreshHierarchicalMemory failed for session ${id}: ${err}`,
+              );
+            }
+            try {
+              await config.getGeminiClient()?.refreshSystemInstruction();
+            } catch (err) {
+              debugLogger.warn(
+                `reload: refreshSystemInstruction failed for session ${id}: ${err}`,
+              );
+            }
+
             refreshed.push(id);
           }),
         );
         for (let i = 0; i < results.length; i++) {
           if (results[i]!.status === 'rejected') {
+            const reason = (results[i] as PromiseRejectedResult).reason;
+            debugLogger.warn(
+              `Session ${sessions[i]![0]} reload failed: ${reason}`,
+            );
             skipped.push(sessions[i]![0]);
           }
         }
 
         return {
-          ...envResult,
+          env: envResult,
+          changedKeys: [...changed],
           sessionsRefreshed: refreshed,
           sessionsSkipped: skipped,
         };
@@ -6956,4 +7039,21 @@ class QwenAgent implements Agent {
     if (!baseModelId) return baseModelId;
     return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
   }
+}
+
+function diffSettingsKeys(
+  oldMerged: Record<string, unknown>,
+  newMerged: Record<string, unknown>,
+): Set<string> {
+  const changed = new Set<string>();
+  const allKeys = new Set([
+    ...Object.keys(oldMerged),
+    ...Object.keys(newMerged),
+  ]);
+  for (const key of allKeys) {
+    if (JSON.stringify(oldMerged[key]) !== JSON.stringify(newMerged[key])) {
+      changed.add(key);
+    }
+  }
+  return changed;
 }

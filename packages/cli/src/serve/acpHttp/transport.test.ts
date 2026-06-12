@@ -4,14 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
+
+const stdioMocks = vi.hoisted(() => ({
+  writeStderrLine: vi.fn(),
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: stdioMocks.writeStderrLine,
+}));
 
 /**
  * End-to-end transport test: boots a real Express server with the ACP
@@ -281,8 +290,12 @@ const fakeWorkspace = {
   async restartMcpServer() {
     return { ok: true };
   },
-  async reloadEnv() {
-    return { updatedKeys: [], removedKeys: [], childReloaded: false };
+  async reload() {
+    return {
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
+      childReloaded: false,
+    };
   },
 } as unknown as DaemonWorkspaceService;
 
@@ -330,12 +343,51 @@ async function takeFrames(
   return out;
 }
 
+function frameReader(res: Response) {
+  const ac = new AbortController();
+  const iterator = readSse(res, ac.signal)[Symbol.asyncIterator]();
+  return {
+    async next(timeoutMs = 2000): Promise<unknown> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          ac.abort();
+          reject(new Error('Timed out waiting for SSE frame'));
+        }, timeoutMs);
+      });
+      try {
+        const result = await Promise.race([iterator.next(), timeout]);
+        if (result.done) throw new Error('SSE stream ended');
+        return result.value;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    close(): void {
+      ac.abort();
+    },
+  };
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 describe('ACP Streamable HTTP transport (over the wire)', () => {
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
 
   beforeEach(async () => {
+    stdioMocks.writeStderrLine.mockClear();
     bridge = new FakeBridge();
     const app = express();
     app.use(express.json());
@@ -495,31 +547,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const sessStream = await openStream(connId, 'sess-1');
-    const got = takeFrames(sessStream, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 7,
-      method: 'session/prompt',
-      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
-    });
-    const [reqFrame] = (await got) as Array<{
-      id: number;
-      method: string;
-      params: { _meta: Record<string, { requestId: string }> };
-    }>;
-    expect(reqFrame.method).toBe('session/request_permission');
-    expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
-    // Client answers with a JSON-RPC response echoing the issued id.
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: reqFrame.id,
-      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
-    });
-    await new Promise((r) => setTimeout(r, 50));
-    expect(resolvedWith).toEqual({
-      outcome: { outcome: 'selected', optionId: 'allow' },
-    });
+    const reader = frameReader(sessStream);
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as {
+        id: number;
+        method: string;
+        params: { _meta: Record<string, { requestId: string }> };
+      };
+      expect(reqFrame.method).toBe('session/request_permission');
+      expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
+      // Client answers with a JSON-RPC response echoing the issued id.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => resolvedWith !== undefined);
+      expect(resolvedWith).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      reader.close();
+    }
   });
 
   it('standard session/set_config_option (model) routes to the bridge', async () => {
@@ -1400,38 +1459,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const sess = await openStream(connId, 'sess-1');
-    const got = takeFrames(sess, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 350,
-      method: 'session/prompt',
-      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
-    });
-    const [reqFrame] = (await got) as Array<{ id: string }>;
-    // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: reqFrame.id,
-      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    // Teardown retries the cancel — whether triggered by the session stream
-    // closing or the explicit DELETE below. Either way it only happens if the
-    // entry was RETAINED after the immediate cancel failed.
-    await fetch(`${base}/acp`, {
-      method: 'DELETE',
-      headers: { 'acp-connection-id': connId },
-    });
-    await new Promise((r) => setTimeout(r, 40));
-    const cancels = calls.filter((c) =>
-      JSON.stringify(c).includes('cancelled'),
-    );
-    // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry were
-    // dropped unconditionally after the failed immediate cancel, there would be
-    // exactly ONE cancel — so ≥2 is the retention invariant.
-    expect(cancels.length).toBeGreaterThanOrEqual(2);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const reader = frameReader(sess);
+    try {
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 350,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(
+        () =>
+          calls.filter((c) => JSON.stringify(c).includes('cancelled')).length >=
+          1,
+      );
+      // Teardown retries the cancel. This only happens if the entry was
+      // retained after the immediate cancel failed.
+      await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': connId },
+      });
+      await waitUntil(() => {
+        const cancels = calls.filter((c) =>
+          JSON.stringify(c).includes('cancelled'),
+        );
+        return cancels.length >= 2 && calls.length >= 3;
+      });
+      const cancels = calls.filter((c) =>
+        JSON.stringify(c).includes('cancelled'),
+      );
+      // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry
+      // were dropped unconditionally after the failed immediate cancel, there
+      // would be exactly ONE cancel — so ≥2 is the retention invariant.
+      expect(cancels.length).toBeGreaterThanOrEqual(2);
+      expect(calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      reader.close();
+    }
   });
 
   it('client error response to a permission request → cancellation', async () => {
@@ -1637,6 +1708,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it('_qwen/session/shell returns result', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
+      const command = 'ls\nFAKE\r\x1b[31m';
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
@@ -1649,12 +1721,19 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 54,
         method: '_qwen/session/shell',
-        params: { sessionId: 'sess-1', command: 'ls' },
+        params: { sessionId: 'sess-1', command },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
-        result: { exitCode: 0, output: '$ ls' },
+        result: { exitCode: 0, output: `$ ${command}` },
       });
+      const shellLog = stdioMocks.writeStderrLine.mock.calls
+        .map(([line]) => line)
+        .find((line) => line.includes('session/shell'));
+      expect(shellLog).toContain('cmd=ls FAKE  [31m');
+      expect(shellLog).not.toContain('\n');
+      expect(shellLog).not.toContain('\r');
+      expect(shellLog).not.toContain('\x1b');
     });
 
     it('_qwen/session/detach succeeds', async () => {
@@ -1989,5 +2068,255 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
+  });
+});
+
+// ── WebSocket transport security tests ────────────────────────────────
+describe('ACP WebSocket transport security', () => {
+  let server: Server;
+  let port: number;
+  let bridge: FakeBridge;
+
+  function startServer(
+    opts: {
+      token?: string;
+      checkRate?: (key: string, tier: string) => boolean;
+    } = {},
+  ) {
+    return new Promise<void>((resolve) => {
+      bridge = new FakeBridge();
+      const app = express();
+      app.use(express.json());
+      const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+        boundWorkspace: '/ws',
+        workspace: fakeWorkspace,
+        enabled: true,
+        token: opts.token,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        checkRate: opts.checkRate as any,
+      });
+      server = app.listen(0, '127.0.0.1', () => {
+        port = (server.address() as AddressInfo).port;
+        handle?.attachServer(server);
+        resolve();
+      });
+    });
+  }
+
+  afterEach(async () => {
+    server?.closeAllConnections?.();
+    await new Promise<void>((r) => server?.close(() => r()) ?? r());
+  });
+
+  function wsConnect(
+    opts: { headers?: Record<string, string> } = {},
+  ): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+        headers: opts.headers,
+      });
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+  }
+
+  function wsConnectRaw(
+    host: string,
+    origin?: string,
+  ): Promise<{ code: number }> {
+    return new Promise((resolve) => {
+      const headers: Record<string, string> = {};
+      if (origin) headers['Origin'] = origin;
+      const ws = new WebSocket(`ws://${host}:${port}/acp`, {
+        headers,
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) => {
+        resolve({ code: res.statusCode ?? 0 });
+      });
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+  }
+
+  function sendRpc(ws: WebSocket, msg: unknown): Promise<unknown> {
+    return new Promise((resolve) => {
+      ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+      ws.send(JSON.stringify(msg));
+    });
+  }
+
+  // ── Host allowlist ──────────────────────────────────────────────────
+  it('accepts WS upgrade with loopback Host header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', undefined);
+    // The Host header will be 127.0.0.1:PORT which is in the allowlist
+    expect(result.code).toBe(101);
+  });
+
+  // ── CSWSH origin check ─────────────────────────────────────────────
+  it('rejects WS upgrade with cross-origin Origin header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
+    expect(result.code).toBe(403);
+  });
+
+  it('allows WS upgrade with loopback Origin header', async () => {
+    await startServer();
+    const result = await wsConnectRaw('127.0.0.1', 'http://localhost:3000');
+    expect(result.code).toBe(101);
+  });
+
+  // ── Bearer token auth ──────────────────────────────────────────────
+  it('rejects WS upgrade without token when token is configured', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await wsConnectRaw('127.0.0.1');
+    expect(result.code).toBe(401);
+  });
+
+  it('rejects WS upgrade with wrong token', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const result = await new Promise<{ code: number }>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+        handshakeTimeout: 2000,
+      });
+      ws.once('open', () => {
+        ws.close();
+        resolve({ code: 101 });
+      });
+      ws.once('unexpected-response', (_req, res) =>
+        resolve({ code: res.statusCode ?? 0 }),
+      );
+      ws.once('error', () => resolve({ code: 0 }));
+    });
+    expect(result.code).toBe(401);
+  });
+
+  it('allows WS upgrade with correct token', async () => {
+    await startServer({ token: 'secret-token-123' });
+    const ws = await wsConnect({
+      headers: { Authorization: 'Bearer secret-token-123' },
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  // ── maxPayload ─────────────────────────────────────────────────────
+  it('closes WS on oversized frame (>10MB)', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    const closed = new Promise<number>((resolve) => {
+      ws.once('close', (code) => resolve(code));
+      ws.once('error', () => {});
+    });
+    try {
+      ws.send('x'.repeat(10 * 1024 * 1024 + 1));
+    } catch {
+      // ws may throw synchronously for oversized payloads
+    }
+    const code = await closed;
+    expect(code).toBe(1009); // 1009 = message too big
+  });
+
+  // ── Initialize timeout ─────────────────────────────────────────────
+  it('requires initialize as first message', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    const reply = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session/new',
+      params: {},
+    });
+    expect(reply).toMatchObject({ error: { code: -32600 } });
+    ws.close();
+  });
+
+  // ── Message serialization ──────────────────────────────────────────
+  it('serializes concurrent WS messages (no race)', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    // Initialize first
+    const initReply = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    expect(initReply).toMatchObject({ result: { protocolVersion: 1 } });
+    // Send two messages rapidly — both should succeed without race
+    const replies: unknown[] = [];
+    const done = new Promise<void>((resolve) => {
+      ws.on('message', (data) => {
+        replies.push(JSON.parse(data.toString()));
+        if (replies.length >= 2) resolve();
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: {},
+      }),
+    );
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'session/list',
+        params: {},
+      }),
+    );
+    await done;
+    const ids = replies.map((r) => (r as { id: number }).id).sort();
+    expect(ids).toEqual([2, 3]);
+    ws.close();
+  });
+
+  // ── Rate limiter ───────────────────────────────────────────────────
+  it('enforces rate limits on WS messages', async () => {
+    let callCount = 0;
+    await startServer({
+      checkRate: () => {
+        callCount++;
+        return callCount <= 2;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    // First two post-init messages should pass
+    const r1 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r1).toMatchObject({ id: 2 });
+    const r2 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r2).toMatchObject({ id: 3 });
+    // Third should be rate-limited
+    const r3 = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'session/list',
+      params: {},
+    });
+    expect(r3).toMatchObject({ error: { message: 'Rate limit exceeded' } });
+    ws.close();
   });
 });

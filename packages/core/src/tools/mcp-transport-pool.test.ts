@@ -108,6 +108,7 @@ function mockMcpSuccess(
       prompts: prompts.map((name) => ({ name, description: 'p' })),
     }),
     listTools: vi.fn().mockResolvedValue({ tools: [] }),
+    getInstructions: vi.fn(),
   };
   vi.mocked(ClientLib.Client).mockReturnValue(
     mockedClient as unknown as ClientLib.Client,

@@ -22,20 +22,23 @@ import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
+  type DeviceFlowRegistry,
 } from '../auth/deviceFlow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
-import { listWorkspaceSessionsForResponse } from '../server.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
-import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
 import { collectWorkspaceMemoryStatus } from '../workspaceMemory.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
   toDetail as agentToDetail,
 } from '../workspaceAgents.js';
+import {
+  InvalidCursorError,
+  listWorkspaceSessionsForResponse,
+} from '../server.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -199,7 +202,7 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
-  if (err instanceof AcpParamError) {
+  if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
   if (err instanceof SubagentError) {
@@ -673,10 +676,15 @@ export class AcpDispatcher {
         case 'session/list': {
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
+          const metaSize =
+            typeof meta?.['size'] === 'number'
+              ? (meta['size'] as number)
+              : undefined;
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             this.boundWorkspace,
-            { cursor },
+            { cursor, size: metaSize },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -685,7 +693,9 @@ export class AcpDispatcher {
               title: s.displayName,
               updatedAt: s.updatedAt,
             })),
-            ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+            ...(result.nextCursor != null
+              ? { nextCursor: result.nextCursor }
+              : {}),
           });
           return;
         }
@@ -1071,8 +1081,11 @@ export class AcpDispatcher {
             return;
           }
 
+          const logSessionId = logSafe(sessionId.slice(0, 8));
+          const logClientId = logSafe(String(conn.clientId?.slice(0, 8)));
+          const logCommand = logSafe(rawCmd.slice(0, 120));
           writeStderrLine(
-            `qwen serve: /acp session/shell session=${sessionId.slice(0, 8)} client=${conn.clientId?.slice(0, 8)} cmd=${rawCmd.slice(0, 120)}`,
+            `qwen serve: /acp session/shell session=${logSessionId} client=${logClientId} cmd=${logCommand}`,
           );
           const result = await this.bridge.executeShellCommand(
             sessionId,

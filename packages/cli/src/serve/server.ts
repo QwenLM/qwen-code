@@ -197,6 +197,13 @@ export interface ListWorkspaceSessionsResult {
   nextCursor?: string;
 }
 
+export class InvalidCursorError extends Error {
+  constructor(cursor: string) {
+    super(`Invalid cursor: "${cursor}" is not a valid numeric cursor`);
+    this.name = 'InvalidCursorError';
+  }
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -206,9 +213,19 @@ export async function listWorkspaceSessionsForResponse(
     Math.max(options?.size ?? DEFAULT_SESSION_PAGE_SIZE, 1),
     MAX_SESSION_PAGE_SIZE,
   );
-  const numericCursor = options?.cursor ? Number(options.cursor) : undefined;
 
-  const persisted = await new SessionService(workspaceCwd).listSessions({
+  let numericCursor: number | undefined;
+  if (options?.cursor) {
+    const parsed = Number(options.cursor);
+    if (!Number.isFinite(parsed)) {
+      throw new InvalidCursorError(options.cursor);
+    }
+    numericCursor = parsed;
+  }
+  const isFirstPage = numericCursor === undefined;
+
+  const sessionService = new SessionService(workspaceCwd);
+  const persisted = await sessionService.listSessions({
     cursor: numericCursor,
     size: pageSize,
   });
@@ -226,15 +243,26 @@ export async function listWorkspaceSessionsForResponse(
     });
   }
 
-  if (!options?.cursor) {
-    for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
-      const existing = bySessionId.get(live.sessionId);
+  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  for (const live of liveSessions) {
+    const existing = bySessionId.get(live.sessionId);
+    if (existing) {
       bySessionId.set(live.sessionId, {
         ...existing,
         ...live,
-        createdAt: existing?.createdAt ?? live.createdAt,
-        displayName: live.displayName ?? existing?.displayName,
-        updatedAt: live.updatedAt ?? existing?.updatedAt,
+        createdAt: existing.createdAt,
+        displayName: live.displayName ?? existing.displayName,
+        updatedAt: live.updatedAt ?? existing.updatedAt,
+        clientCount: live.clientCount,
+        hasActivePrompt: live.hasActivePrompt,
+      });
+    } else if (
+      isFirstPage &&
+      !(await sessionService.sessionExists(live.sessionId))
+    ) {
+      bySessionId.set(live.sessionId, {
+        ...live,
+        createdAt: live.createdAt,
         clientCount: live.clientCount,
         hasActivePrompt: live.hasActivePrompt,
       });
@@ -247,10 +275,12 @@ export async function listWorkspaceSessionsForResponse(
     return bTime - aTime;
   });
 
-  return {
-    sessions,
-    nextCursor: persisted.nextCursor ? String(persisted.nextCursor) : undefined,
-  };
+  const nextCursor =
+    persisted.nextCursor != null
+      ? String(persisted.nextCursor)
+      : undefined;
+
+  return { sessions, nextCursor };
 }
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
@@ -699,8 +729,8 @@ function resolveDaemonTelemetryRoute(
   if (req.method === 'POST' && path === '/workspace/init') {
     return { route: 'POST /workspace/init' };
   }
-  if (req.method === 'POST' && path === '/workspace/reload-env') {
-    return { route: 'POST /workspace/reload-env' };
+  if (req.method === 'POST' && path === '/workspace/reload') {
+    return { route: 'POST /workspace/reload' };
   }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {
@@ -1338,7 +1368,7 @@ export function createServeApp(
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
         rateLimit: opts.rateLimit === true,
-        reloadEnvAvailable: deps.workspace !== undefined,
+        reloadAvailable: deps.workspace !== undefined,
       }),
       modelServices: [],
       // Surface the bound workspace so clients can detect mismatch
@@ -2461,8 +2491,18 @@ export function createServeApp(
         cursor,
         size: Number.isFinite(size) ? size : undefined,
       });
-      res.status(200).json(result);
+      res.status(200).json({
+        sessions: result.sessions,
+        ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
+      });
     } catch (err) {
+      if (err instanceof InvalidCursorError) {
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_cursor',
+        });
+        return;
+      }
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
           key,
@@ -3000,21 +3040,17 @@ export function createServeApp(
   });
 
   app.post(
-    '/workspace/reload-env',
+    '/workspace/reload',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
-        const ctx = buildWorkspaceCtx(
-          req,
-          'POST /workspace/reload-env',
-          clientId,
-        );
-        const result = await workspace.reloadEnv(ctx);
+        const ctx = buildWorkspaceCtx(req, 'POST /workspace/reload', clientId);
+        const result = await workspace.reload(ctx);
         res.status(200).json(result);
       } catch (err) {
-        sendBridgeError(res, err, { route: 'POST /workspace/reload-env' });
+        sendBridgeError(res, err, { route: 'POST /workspace/reload' });
       }
     },
   );
@@ -3553,12 +3589,17 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  mountAcpHttp(app, bridge, {
+  const acpHandle = mountAcpHttp(app, bridge, {
     boundWorkspace,
     workspace,
     fsFactory,
     deviceFlowRegistry,
+    token: opts.token,
+    checkRate: rateLimiter?.checkRate,
   });
+  if (acpHandle) {
+    app.locals['acpHandle'] = acpHandle;
+  }
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware

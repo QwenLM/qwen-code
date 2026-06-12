@@ -244,7 +244,9 @@ describe('runQwenServe daemon logger wiring', () => {
       // Should contain the "daemon started" boot line
       expect(logContent).toContain('daemon started');
       expect(logContent).toContain(`pid=${process.pid}`);
-      expect(logContent).toContain(`workspace=${workspace}`);
+      expect(logContent).toContain(
+        `workspace=${fs.realpathSync.native(workspace)}`,
+      );
 
       // Close the handle (graceful shutdown)
       await handle.close();

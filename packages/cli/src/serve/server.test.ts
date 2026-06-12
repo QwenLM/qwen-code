@@ -219,7 +219,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'rate_limit' &&
-      f !== 'workspace_reload_env',
+      f !== 'workspace_reload',
   ),
   'workspace_settings',
   'workspace_init',
@@ -242,7 +242,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'rate_limit',
-  'workspace_reload_env',
+  'workspace_reload',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -511,7 +511,6 @@ interface FakeBridge extends AcpSessionBridge {
   closeCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
-    opts?: import('@qwen-code/acp-bridge').CloseSessionOpts;
   }>;
   updateMetadataCalls: Array<{
     sessionId: string;
@@ -1114,12 +1113,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       removeRuntimeMcpServerCalls.push({ name, originatorClientId });
       return removeRuntimeMcpServerImpl(name, originatorClientId);
     },
-    async closeSession(sessionId, context, opts) {
-      closeCalls.push({
-        sessionId,
-        ...(context ? { context } : {}),
-        ...(opts ? { opts } : {}),
-      });
+    async closeSession(sessionId, context) {
+      closeCalls.push({ sessionId, ...(context ? { context } : {}) });
       return closeImpl(sessionId, context);
     },
     updateSessionMetadata(sessionId, metadata, context) {
@@ -1421,13 +1416,13 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_reload_env') {
-          expect(predicate({ reloadEnvAvailable: true })).toBe(true);
-          expect(predicate({ reloadEnvAvailable: false })).toBe(false);
+        if (feature === 'workspace_reload') {
+          expect(predicate({ reloadAvailable: true })).toBe(true);
+          expect(predicate({ reloadAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, {
-              reloadEnvAvailable: true,
+              reloadAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -3393,6 +3388,115 @@ describe('createServeApp', () => {
         (s: { sessionId: string }) => s.sessionId,
       );
       expect(cursoredIds).not.toContain('live-only');
+    });
+
+    it('400 invalid_cursor when cursor is not a valid number', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?cursor=abc`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_cursor');
+    });
+
+    it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {
+      const liveId = '550e8400-e29b-41d4-a716-446655440099';
+      for (let i = 0; i < 5; i++) {
+        const id =
+          i === 2
+            ? liveId
+            : `550e8400-e29b-41d4-a716-44665544${String(i).padStart(4, '0')}`;
+        await writeStoredSession({
+          sessionId: id,
+          cwd: WS_BOUND,
+          timestamp: `2026-05-17T12:0${i}:00.000Z`,
+          prompt: `prompt ${i}`,
+          mtime: new Date(`2026-05-17T12:1${i}:00.000Z`),
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:02:00.000Z',
+            updatedAt: '2026-05-17T12:50:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const page1 = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=3`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      const page1Ids = page1.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+
+      const page2 = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=3&cursor=${page1.body.nextCursor}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      const page2Ids = page2.body.sessions.map(
+        (s: { sessionId: string }) => s.sessionId,
+      );
+
+      const allIds = [...page1Ids, ...page2Ids];
+      const uniqueIds = new Set(allIds);
+      expect(uniqueIds.size).toBe(allIds.length);
+    });
+
+    it('clamps size=0 to 1', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'prompt',
+        mtime: new Date('2026-05-17T12:10:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=0`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(1);
+    });
+
+    it('clamps size=200 to max page size', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=200`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
     });
 
     it('400 workspace_mismatch when querying a cross-workspace path (#3803 §02)', async () => {
@@ -5753,36 +5857,6 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ status: 'degraded' });
-    });
-  });
-
-  describe('session idle reaper — wire integration', () => {
-    it('deep health reflects reduced sessionCount after closeSession', async () => {
-      let count = 2;
-      const bridge = fakeBridge();
-      Object.defineProperty(bridge, 'sessionCount', { get: () => count });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-
-      const before = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(before.body.sessions).toBe(2);
-
-      count = 0;
-      const after = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(after.body.sessions).toBe(0);
-    });
-
-    it('DELETE /session/:id passes no opts (reason defaults to client_close)', async () => {
-      const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      await request(app)
-        .delete('/session/sess-1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(bridge.closeCalls).toHaveLength(1);
-      expect(bridge.closeCalls[0]?.opts).toBeUndefined();
     });
   });
 

@@ -1120,9 +1120,9 @@ export interface DaemonShellCommandResult {
  *   total has reached `clientBudget`. Caller should free a slot
  *   (disconnect another server) before retrying.
  */
-export interface DaemonEnvReloadResponse {
-  updatedKeys: string[];
-  removedKeys: string[];
+export interface DaemonReloadResponse {
+  env: { updatedKeys: string[]; removedKeys: string[] };
+  changedKeys: string[];
   childReloaded: boolean;
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
