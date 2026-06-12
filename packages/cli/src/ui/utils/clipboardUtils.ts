@@ -10,6 +10,7 @@ import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { wrapForMultiplexer } from '../../utils/osc.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
@@ -24,7 +25,7 @@ export function writeOsc52(text: string): boolean {
   try {
     const base64 = Buffer.from(text, 'utf-8').toString('base64');
     // OSC 52: \x1b]52;c;<base64>\x07 (c = clipboard)
-    const sequence = `\x1b]52;c;${base64}\x07`;
+    const sequence = wrapForMultiplexer(`\x1b]52;c;${base64}\x07`);
     // Prefer stderr if stdout is piped (not a TTY), otherwise stdout
     const stream = process.stdout.isTTY ? process.stdout : process.stderr;
     if (!stream.isTTY) {
