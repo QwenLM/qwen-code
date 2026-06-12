@@ -5,7 +5,38 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildPayload } from './payload.js';
+import { buildPayload, buildDigestPayload } from './payload.js';
+
+describe('buildDigestPayload', () => {
+  it('summarizes the total with a metadata-only payload (no session content)', () => {
+    const p = buildDigestPayload({
+      subscriptionId: 'sub-1',
+      total: 3,
+      byKind: { 'permission.required': 2, 'task.completed': 1 },
+    });
+    expect(p).toEqual({
+      v: 1,
+      kind: 'digest',
+      sessionId: '',
+      summary: '3 notifications while you were away',
+      url: '/ui/',
+    });
+    // Privacy: the serialized payload must not carry the subscription id or any
+    // per-kind/session detail beyond the count baked into the summary string.
+    const json = JSON.stringify(p);
+    expect(json).not.toContain('sub-1');
+    expect(json).not.toContain('permission.required');
+  });
+
+  it('uses the singular for a count of one', () => {
+    const p = buildDigestPayload({
+      subscriptionId: 's',
+      total: 1,
+      byKind: { 'task.completed': 1 },
+    });
+    expect(p.summary).toBe('1 notification while you were away');
+  });
+});
 
 describe('buildPayload', () => {
   it('maps permission_request to permission.required with toolName, requestId, url', () => {

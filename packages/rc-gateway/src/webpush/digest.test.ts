@@ -40,4 +40,18 @@ describe('PushDigest', () => {
       { subscriptionId: 's2', total: 1, byKind: { k: 1 } },
     ]);
   });
+
+  it('summaryFor returns one subscription, null when nothing pending', () => {
+    const d = new PushDigest();
+    d.record('s1', 'task.completed');
+    d.record('s1', 'permission.required');
+    expect(d.summaryFor('s1')).toEqual({
+      subscriptionId: 's1',
+      total: 2,
+      byKind: { 'task.completed': 1, 'permission.required': 1 },
+    });
+    expect(d.summaryFor('absent')).toBeNull();
+    d.forget('s1');
+    expect(d.summaryFor('s1')).toBeNull();
+  });
 });

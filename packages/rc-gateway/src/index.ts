@@ -52,7 +52,15 @@ export { createPromptRoute } from './routes/prompt.js';
 export { VapidStore, type VapidKeys } from './webpush/vapid.js';
 export { PushStore, type PushSubscriptionRecord } from './pushStore.js';
 export { createPushRouter } from './routes/push.js';
-export { buildPayload, type PushPayload } from './webpush/payload.js';
+export {
+  buildPayload,
+  buildDigestPayload,
+  type PushPayload,
+} from './webpush/payload.js';
+export {
+  QuietDigestWatcher,
+  type QuietDigestRecord,
+} from './webpush/quietDigestWatcher.js';
 export {
   PushSender,
   type PushTransport,

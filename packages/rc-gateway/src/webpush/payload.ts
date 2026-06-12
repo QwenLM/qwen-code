@@ -5,6 +5,7 @@
  */
 
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
+import type { DigestSummary } from './digest.js';
 
 /**
  * Metadata-only push payload. Deliberately carries NO tool args, file paths,
@@ -76,4 +77,24 @@ export function buildPayload(
     default:
       return null;
   }
+}
+
+/**
+ * Build the end-of-quiet-window "while you were away" digest payload (webpush
+ * D4) from accumulated suppressed-while-quiet counts. Metadata-only: it carries
+ * ONLY the total + per-kind counts (kind enum names), never session content, and
+ * `sessionId:''` because a digest is not tied to a single session. `sw.js`
+ * renders any `v:1` push generically (no action buttons for an unknown kind).
+ */
+export function buildDigestPayload(summary: DigestSummary): PushPayload {
+  const n = summary.total;
+  return {
+    v: 1,
+    kind: 'digest',
+    sessionId: '',
+    summary: truncate(
+      `${n} notification${n === 1 ? '' : 's'} while you were away`,
+    ),
+    url: '/ui/',
+  };
 }

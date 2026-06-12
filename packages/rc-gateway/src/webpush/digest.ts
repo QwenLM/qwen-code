@@ -52,6 +52,20 @@ export class PushDigest {
     return out;
   }
 
+  /** Pending summary for ONE subscription, or null when nothing is pending. */
+  summaryFor(subId: string): DigestSummary | null {
+    const byKindMap = this.counts.get(subId);
+    if (!byKindMap) return null;
+    const byKind: Record<string, number> = {};
+    let total = 0;
+    for (const [kind, n] of byKindMap) {
+      byKind[kind] = n;
+      total += n;
+    }
+    if (total <= 0) return null;
+    return { subscriptionId: subId, total, byKind };
+  }
+
   /** Drop a subscription's pending counts (on unsubscribe). */
   forget(subId: string): void {
     this.counts.delete(subId);
