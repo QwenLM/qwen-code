@@ -215,6 +215,7 @@
         placeholder="type a prompt to send to the watched session"
       ></textarea>
       <button id="send">Send</button>
+      <button id="dictate">Dictate</button>
     </section>
     <pre id="log"></pre>
     <script>
@@ -1311,6 +1312,61 @@
           out.textContent = 'list error: ' + e;
         }
       };
+
+      // Voice input (cycle 68): push-to-talk dictation into the composer via the
+      // browser SpeechRecognition API. Fill-only (NEVER auto-send). Recognition
+      // runs in the browser; only the final transcript reaches #prompt. Graceful
+      // degradation: when the API is absent (headless/Firefox) the button is
+      // disabled, so the composer never breaks.
+      (function () {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const dictate = $('dictate');
+        if (!SR) {
+          dictate.disabled = true;
+          dictate.title = 'voice input not supported in this browser';
+          return;
+        }
+        let rec = null;
+        dictate.onclick = () => {
+          if (rec) {
+            try {
+              rec.stop();
+            } catch (e) {
+              /* already stopping */
+            }
+            return;
+          }
+          rec = new SR();
+          rec.lang = navigator.language || 'en-US';
+          rec.interimResults = false;
+          rec.continuous = false;
+          dictate.textContent = 'Stop';
+          rec.onresult = (ev) => {
+            let text = '';
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              text += ev.results[i][0].transcript;
+            }
+            const ta = $('prompt');
+            // Append (complement typing), never auto-send.
+            ta.value = ta.value ? ta.value + ' ' + text.trim() : text.trim();
+          };
+          const reset = () => {
+            rec = null;
+            dictate.textContent = 'Dictate';
+          };
+          rec.onerror = (e) => {
+            setStatus('voice: ' + (e && e.error ? e.error : 'error'));
+            reset();
+          };
+          rec.onend = reset;
+          try {
+            rec.start();
+          } catch (e) {
+            setStatus('voice start failed: ' + e);
+            reset();
+          }
+        };
+      })();
     </script>
   </body>
 </html>
