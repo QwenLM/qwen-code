@@ -1093,7 +1093,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return clientId;
   };
 
-  //
   /**
    * Get-or-create the daemon's single `qwen --acp` channel. N sessions
    * multiplex onto it via `connection.newSession()`. Concurrent callers
@@ -3089,9 +3088,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       });
       switch (outcome.kind) {
         case 'resolved':
-          return true;
-        case 'recorded':
-          // Consensus-policy intermediate vote.
+        case 'recorded': // consensus-policy intermediate vote
           return true;
         case 'already_resolved':
           // Mediator already emitted `permission_already_resolved`.
