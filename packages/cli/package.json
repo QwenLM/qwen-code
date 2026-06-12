@@ -67,7 +67,6 @@
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",
     "lowlight": "^3.3.0",
-    "open": "^10.1.2",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",
     "react": "^19.2.4",
