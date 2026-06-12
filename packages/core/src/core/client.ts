@@ -130,6 +130,7 @@ import { type File, type IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
+const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -213,6 +214,7 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
@@ -288,12 +290,16 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(resumedSessionData.conversation, this.config.getSessionId());
+      replayUiTelemetryFromConversation(
+        resumedSessionData.conversation,
+        this.config.getSessionId(),
+      );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
@@ -644,6 +650,7 @@ export class GeminiClient {
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     this.lastHookMicrocompactionTimestamp = null;
+    this.recentCompletedToolNames = [];
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
@@ -1507,6 +1514,8 @@ export class GeminiClient {
     toolName: string,
     args?: Record<string, unknown>,
   ): void {
+    this.rememberCompletedToolName(toolName);
+
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
       if (
@@ -1517,6 +1526,45 @@ export class GeminiClient {
       }
     }
     this.toolCallCount += 1;
+  }
+
+  private rememberCompletedToolName(toolName: string): void {
+    const normalizedToolName = toolName.trim();
+    if (!normalizedToolName) {
+      return;
+    }
+    this.recentCompletedToolNames = [
+      ...this.recentCompletedToolNames.filter(
+        (name) => name !== normalizedToolName,
+      ),
+      normalizedToolName,
+    ].slice(-MAX_RECENT_TOOL_NAMES_FOR_MEMORY);
+  }
+
+  private seedRecentCompletedToolNamesFromHistory(history: Content[]): void {
+    const completedCallIds = new Set<string>();
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const responseId = part.functionResponse?.id;
+        if (responseId) {
+          completedCallIds.add(responseId);
+        }
+      }
+    }
+
+    this.recentCompletedToolNames = [];
+    for (const message of history) {
+      for (const part of message.parts ?? []) {
+        const call = part.functionCall;
+        if (!call?.name) {
+          continue;
+        }
+        if (call.id && !completedCallIds.has(call.id)) {
+          continue;
+        }
+        this.rememberCompletedToolName(call.name);
+      }
+    }
   }
 
   private async microcompactIdleHistory(
@@ -1705,6 +1753,7 @@ export class GeminiClient {
             .recall(this.config.getProjectRoot(), partToString(request), {
               config: this.config,
               excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+              recentTools: [...this.recentCompletedToolNames],
               abortSignal: controller.signal,
             })
             .catch((error: unknown) => {
