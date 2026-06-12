@@ -158,6 +158,20 @@
       <div><button id="list-subs">List subscriptions</button></div>
       <div id="subs">(not listed)</div>
     </section>
+    <section id="search">
+      <strong>Search</strong> (transcripts; requires owner scope)
+      <div>
+        <input id="search-q" placeholder="oauth refresh AND error" />
+        <select id="search-kind">
+          <option value="all">all</option>
+          <option value="user">user</option>
+          <option value="assistant">assistant</option>
+          <option value="tool">tool</option>
+        </select>
+        <button id="search-btn">Search</button>
+      </div>
+      <div id="search-results">(not searched)</div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -924,6 +938,81 @@
           out.textContent = 'list error: ' + e;
         }
       };
+
+      // Cross-session search (cycle 61): consumer of the OWNER-only GET
+      // /rc/search (an earlier cycle's backend: query operators, snippets,
+      // recency sort, timeout). THE riskiest line is rendering hit.snippet —
+      // it is arbitrary transcript text (user/model/tool), so it goes through
+      // textContent ONLY (never innerHTML), like every other server field.
+      function searchHitRow(h) {
+        const row = document.createElement('div');
+        row.className = 'token-row';
+        const head = document.createElement('div');
+        head.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
+        const snip = document.createElement('div');
+        snip.textContent = h.snippet; // transcript text -> textContent (XSS-safe)
+        row.appendChild(head);
+        row.appendChild(snip);
+        return row;
+      }
+      async function runSearch() {
+        if (!token()) return setStatus('pair first');
+        const q = $('search-q').value.trim();
+        const out = $('search-results');
+        if (!q) {
+          out.textContent = '(enter a query)';
+          return;
+        }
+        const kind = $('search-kind').value;
+        out.textContent = 'searching…';
+        try {
+          const params = new URLSearchParams({ q, kind, limit: '50' });
+          const res = await fetch('/rc/search?' + params.toString(), {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              out.textContent = 'not authorized — needs an owner token';
+            } else if (res.status === 503) {
+              out.textContent = 'search timed out (narrow the query)';
+            } else {
+              let code = res.status;
+              try {
+                const b = await res.json();
+                if (b && b.code) code = b.code;
+              } catch {
+                /* non-JSON error body */
+              }
+              out.textContent = 'search failed: ' + code;
+            }
+            return;
+          }
+          const body = await res.json();
+          const hits = Array.isArray(body.hits) ? body.hits : [];
+          out.textContent = '';
+          const footer = document.createElement('div');
+          footer.textContent =
+            hits.length +
+            ' hits in ' +
+            (body.elapsedMs || 0) +
+            'ms' +
+            (body.truncated ? ' (truncated)' : '');
+          out.appendChild(footer);
+          if (hits.length === 0) {
+            const none = document.createElement('div');
+            none.textContent = '(no hits)';
+            out.appendChild(none);
+            return;
+          }
+          for (const h of hits) out.appendChild(searchHitRow(h));
+        } catch (e) {
+          out.textContent = 'search error: ' + e;
+        }
+      }
+      $('search-btn').onclick = runSearch;
+      $('search-q').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runSearch();
+      });
     </script>
   </body>
 </html>
