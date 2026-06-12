@@ -1181,6 +1181,8 @@ export class GeminiChat {
         },
         prompt_id,
       );
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -1193,11 +1195,15 @@ export class GeminiChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
+        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
+        // predicate does not silently drop them — the default path checks these
+        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
+        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
+
         return false;
       },
-      authType: this.config.getContentGeneratorConfig()?.authType,
-      extraRetryErrorCodes:
-        this.config.getContentGeneratorConfig()?.retryErrorCodes,
+      authType: cgConfig?.authType,
+      extraRetryErrorCodes,
       persistentMode: isUnattendedMode(),
       signal: params.config?.abortSignal,
       heartbeatFn: (info) => {
