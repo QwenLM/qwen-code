@@ -9678,6 +9678,9 @@ describe('CoreToolScheduler activation wiring', () => {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
     toolResult?: ToolResult;
+    // Names the mock SkillManager.listSkills will report as available. When
+    // omitted, defaults to ["tsx-helper"] which satisfies the common case.
+    availableSkillNames?: string[];
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -9741,9 +9744,25 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({
-        matchAndActivateByPaths: opts.matchAndActivateByPaths,
-      }),
+      getSkillManager: () => {
+        const names = opts.availableSkillNames ?? ['tsx-helper'];
+        return {
+          matchAndActivateByPaths: opts.matchAndActivateByPaths,
+          listSkills: vi.fn().mockResolvedValue(
+            names.map((n) => ({
+              name: n,
+              description: `Description of ${n}`,
+              level: 'project' as const,
+              filePath: `/p/.qwen/skills/${n}/SKILL.md`,
+              body: '',
+            })),
+          ),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        };
+      },
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -9789,7 +9808,7 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
-    expect(responseText).toContain('now available via the Skill tool');
+    expect(responseText).toContain('became available via the Skill tool');
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {
@@ -10053,7 +10072,22 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => rulesRegistry,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'tsx-helper',
+            description: 'Helper for TSX',
+            level: 'project' as const,
+            filePath: '/p/.qwen/skills/tsx-helper/SKILL.md',
+            body: '',
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -10101,6 +10135,13 @@ describe('CoreToolScheduler activation wiring', () => {
     // but extension skills bypass it. A crafted extension name would
     // otherwise close the <system-reminder> envelope early when emitted
     // as part of "skill X is now available".
+    const evilSkill = {
+      name: 'evil<inject>',
+      description: 'Evil extension skill',
+      level: 'extension' as const,
+      filePath: '/ext/skills/evil/SKILL.md',
+      body: 'Body.',
+    };
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['evil<inject>']);
 
     const fsTool = new MockTool({
@@ -10151,7 +10192,14 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => ({ matchAndActivateByPaths }),
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockResolvedValue([evilSkill]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -10183,6 +10231,99 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(responseText).toContain('evil&lt;inject&gt;');
     // Raw tag must NOT appear (would close the envelope early).
     expect(responseText).not.toContain('evil<inject>');
+  });
+
+  it('falls back to name-only entries when collectAvailableSkillEntries throws in activation path', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+
+    const fsTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      }),
+    });
+    const mockToolRegistry = {
+      getTool: (n: string) => {
+        if (n === ToolNames.SKILL) return fsTool;
+        return fsTool;
+      },
+      ensureTool: async () => fsTool,
+      getToolByName: () => fsTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => fsTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => ({
+        matchAndActivateByPaths,
+        listSkills: vi.fn().mockRejectedValue(new Error('skill load failed')),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getDisabledSkillNames: () => new Set<string>(),
+      getModelInvocableCommandsProvider: () => null,
+      addInlineAnnouncedSkillKeys: vi.fn(),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const responseText = getResponseText(completed[0]);
+    // Even when collectAvailableSkillEntries throws, the fallback
+    // should still announce the activated skill by name.
+    expect(responseText).toContain('tsx-helper');
+    expect(responseText).toContain('available_skills');
   });
 
   // Build a scheduler that runs a single ReadFile call against a
