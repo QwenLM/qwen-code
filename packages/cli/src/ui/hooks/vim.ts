@@ -263,7 +263,13 @@ function writeClipboard(text: string): void {
     }
     if (linuxWriteCmd) {
       const [bin, ...args] = linuxWriteCmd;
-      const child = execFile(bin, args, { timeout: 500 }, cb);
+      const child = execFile(bin, args, { timeout: 500 }, (err) => {
+        if (err && !writeOsc52(text)) {
+          debugLogger.warn(
+            'writeClipboard: cached tool and OSC 52 both failed',
+          );
+        }
+      });
       child.stdin?.end(text);
       child.unref();
     } else {
