@@ -3823,6 +3823,9 @@ export class Config {
         this.sessionId,
         this.fileCheckpointingEnabled,
         this.cwd,
+        (snapshot) => {
+          this.getChatRecordingService()?.recordFileHistorySnapshot(snapshot);
+        },
       );
       const snapshots = this.sessionData?.fileHistorySnapshots;
       if (snapshots?.length && this.fileHistoryService.isEnabled()) {

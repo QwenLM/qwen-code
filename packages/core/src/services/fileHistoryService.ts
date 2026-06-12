@@ -49,6 +49,8 @@ export interface FileHistoryState {
   trackedFiles: Set<string>;
 }
 
+type FileHistorySnapshotRecorder = (snapshot: FileHistorySnapshot) => void;
+
 export interface DiffStats {
   filesChanged: string[];
   insertions: number;
@@ -550,11 +552,18 @@ export class FileHistoryService {
   private readonly sessionId: string;
   private readonly enabled: boolean;
   private readonly cwd: string;
+  private readonly onSnapshotUpdated?: FileHistorySnapshotRecorder;
 
-  constructor(sessionId: string, enabled: boolean, cwd: string) {
+  constructor(
+    sessionId: string,
+    enabled: boolean,
+    cwd: string,
+    onSnapshotUpdated?: FileHistorySnapshotRecorder,
+  ) {
     this.sessionId = sessionId;
     this.enabled = enabled;
     this.cwd = cwd;
+    this.onSnapshotUpdated = onSnapshotUpdated;
   }
 
   isEnabled(): boolean {
@@ -563,6 +572,14 @@ export class FileHistoryService {
 
   getSnapshots(): FileHistorySnapshot[] {
     return this.state.snapshots;
+  }
+
+  private recordSnapshotUpdate(snapshot: FileHistorySnapshot): void {
+    try {
+      this.onSnapshotUpdated?.(snapshot);
+    } catch (error) {
+      debugLogger.error(`FileHistory: recordSnapshotUpdate failed: ${error}`);
+    }
   }
 
   restoreFromSnapshots(snapshots: FileHistorySnapshot[]): void {
@@ -671,9 +688,11 @@ export class FileHistoryService {
     if (!current || current.failed) {
       mostRecent.trackedFileBackups[trackingPath] = backup;
       this.state.trackedFiles.add(trackingPath);
+      this.recordSnapshotUpdate(mostRecent);
+      debugLogger.debug(
+        `FileHistory: Tracked file modification for ${filePath}`,
+      );
     }
-
-    debugLogger.debug(`FileHistory: Tracked file modification for ${filePath}`);
   }
 
   async makeSnapshot(promptId: string): Promise<void> {

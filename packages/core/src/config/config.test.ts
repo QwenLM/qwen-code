@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -408,6 +409,46 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
     expect(config.getSystemPrompt()).toBeUndefined();
+  });
+
+  it('wires file history snapshot updates to chat recording', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+      chatRecording: true,
+    });
+    const recordFileHistorySnapshot = vi.fn();
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const fileHistoryService = config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot('p1');
+      await fileHistoryService.trackEdit(trackedFile);
+
+      const snapshot = fileHistoryService.getSnapshots()[0];
+      expect(recordFileHistorySnapshot).toHaveBeenCalledWith(snapshot);
+      expect(snapshot.trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
   });
 
   describe('FileReadCache isolation', () => {

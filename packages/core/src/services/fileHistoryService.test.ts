@@ -62,6 +62,109 @@ describe('FileHistoryService', () => {
   });
 
   describe('trackEdit', () => {
+    it('records the updated latest snapshot after tracking a file', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(file);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      const recorded = recordSnapshot.mock.calls[0][0];
+      expect(recorded.promptId).toBe('p1');
+      expect(recorded.trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
+    it('does not record duplicate tracking for the same file', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(file);
+      await recordingService.trackEdit(file);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('records again when a second file is tracked in the same snapshot', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const firstFile = join(projectDir, 'a.txt');
+      const secondFile = join(projectDir, 'b.txt');
+      await writeFile(firstFile, 'a-original');
+      await writeFile(secondFile, 'b-original');
+
+      await recordingService.makeSnapshot('p1');
+      await recordingService.trackEdit(firstFile);
+      await recordingService.trackEdit(secondFile);
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(2);
+      const recorded = recordSnapshot.mock.calls[1][0];
+      expect(recorded.trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+      expect(recorded.trackedFileBackups['b.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
+    it('swallows recorder errors after tracking a file', async () => {
+      const recordSnapshot = vi.fn(() => {
+        throw new Error('record failed');
+      });
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      await expect(recordingService.trackEdit(file)).resolves.toBeUndefined();
+
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      expect(
+        recordingService.getSnapshots()[0].trackedFileBackups['a.txt'],
+      ).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    });
+
     it('should back up file before first edit in a snapshot', async () => {
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'original');
@@ -130,6 +233,13 @@ describe('FileHistoryService', () => {
     // the failed flag stays sticky until the file content changes,
     // permanently poisoning rewind for that file.
     it('heals a failed entry on the next trackEdit attempt', async () => {
+      const recordSnapshot = vi.fn();
+      service = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'p1-content');
 
@@ -159,6 +269,15 @@ describe('FileHistoryService', () => {
       expect(p2Backup).toBeDefined();
       expect(p2Backup.failed).toBeFalsy();
       expect(p2Backup.backupFileName).not.toBeNull();
+      expect(recordSnapshot).toHaveBeenCalledTimes(2);
+      expect(recordSnapshot.mock.calls[1][0]).toEqual(
+        expect.objectContaining({
+          promptId: 'p2',
+          trackedFileBackups: expect.objectContaining({
+            'a.txt': p2Backup,
+          }),
+        }),
+      );
 
       // Verify the on-disk backup at the new name actually contains the
       // current file content. Catches a regression where the heal path
