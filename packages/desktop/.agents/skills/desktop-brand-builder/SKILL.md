@@ -65,22 +65,22 @@ Use explicit user-provided override values as-is after basic validation.
 ## Build Workflow
 
 Use an isolated build directory under the current working directory so user
-changes in the current worktree are not mutated. Default to the qwen-code desktop branch; do not clone from
-`craft-agents-oss`, OpenWork, or another local checkout unless the user
-explicitly asks for that source:
+changes in the current worktree are not mutated. Default to the qwen-code main
+branch; do not clone from `craft-agents-oss`, OpenWork, or another local
+checkout unless the user explicitly asks for that source:
 
 ```bash
 BUILD_ROOT="$PWD/brand-builds/<brandId>-<timestamp>"
 mkdir -p "$BUILD_ROOT"
-git clone --branch dragon/feat-unstable-desktop-app --single-branch \
+git clone --branch main --single-branch \
   https://github.com/QwenLM/qwen-code.git \
   "$BUILD_ROOT/qwen-code"
 cd "$BUILD_ROOT/qwen-code"
-git checkout -B dragon/brand-<brandId> origin/dragon/feat-unstable-desktop-app
+git checkout -B brand-<brandId> origin/main
 ```
 
 If the branch fetch or checkout fails, stop and report the failure. Do not
-continue as if `dragon/brand-<brandId>` was created.
+continue as if `brand-<brandId>` was created.
 
 Create a temporary `brand.json` in the build directory:
 
