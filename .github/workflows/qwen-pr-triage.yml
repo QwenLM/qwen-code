@@ -118,10 +118,7 @@ jobs:
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
         (github.event_name == 'pull_request_target' &&
-         github.event.pull_request.draft == false &&
-         (github.event.pull_request.author_association == 'OWNER' ||
-          github.event.pull_request.author_association == 'MEMBER' ||
-          github.event.pull_request.author_association == 'COLLABORATOR')) ||
+         github.event.pull_request.draft == false) ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
          github.event.issue.pull_request &&
