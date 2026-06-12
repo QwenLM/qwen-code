@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The token is in the URL path; no-referrer kills it leaking via Referer
+         even for the very first request, before any script runs. -->
+    <meta name="referrer" content="no-referrer" />
+    <title>qwen-rc shared session</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 1rem;
+        max-width: 720px;
+      }
+      #meta {
+        margin: 0.5rem 0;
+        font-size: 0.9rem;
+      }
+      #meta div {
+        font-family: ui-monospace, monospace;
+        overflow-wrap: anywhere;
+      }
+      #log {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #f6f6f6;
+        padding: 0.5rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        max-height: 60vh;
+        overflow: auto;
+      }
+      .watermark {
+        color: #888;
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Shared session</h2>
+    <div id="status">redeeming…</div>
+    <div id="meta"></div>
+    <pre id="log"></pre>
+    <div class="watermark">
+      Read-only shared view. This link expires; do not forward it.
+    </div>
+    <script>
+      (function () {
+        'use strict';
+        var $ = function (id) {
+          return document.getElementById(id);
+        };
+        var setStatus = function (m) {
+          $('status').textContent = m;
+        };
+        var STORE_KEY = 'rc-share-token';
+
+        // Resolve the share token: the path segment after /ui/share on first
+        // visit (then stash + scrub), else sessionStorage on a reload. The URL
+        // is scrubbed BEFORE any fetch so the token can't ride a Referer or sit
+        // in history; sessionStorage uses a key DISTINCT from index.html's
+        // localStorage owner token (same origin) and is per-tab/ephemeral.
+        var parts = location.pathname.split('/').filter(Boolean);
+        var fromPath = parts.length >= 3 ? decodeURIComponent(parts[2]) : null;
+        if (fromPath) {
+          try {
+            sessionStorage.setItem(STORE_KEY, fromPath);
+          } catch (e) {
+            /* storage may be blocked; the in-memory tok still works this load */
+          }
+          history.replaceState(null, '', '/ui/share');
+        }
+        var tok =
+          fromPath ||
+          (function () {
+            try {
+              return sessionStorage.getItem(STORE_KEY);
+            } catch (e) {
+              return null;
+            }
+          })();
+
+        if (!tok) {
+          setStatus('no share token — open the share link again');
+          return;
+        }
+
+        var authed = function (path) {
+          return fetch(path, { headers: { Authorization: 'Bearer ' + tok } });
+        };
+        var log = function (m) {
+          var el = $('log');
+          el.textContent += m + '\n';
+          el.scrollTop = el.scrollHeight;
+        };
+
+        // Redeem: GET /rc/share/whoami consumes one use (cookie-deduped server
+        // side, so a reload does NOT burn a second use).
+        authed('/rc/share/whoami')
+          .then(function (res) {
+            if (!res.ok) {
+              setStatus(
+                res.status === 401
+                  ? 'link expired or invalid'
+                  : 'redeem failed (' + res.status + ')',
+              );
+              return;
+            }
+            return res.json().then(function (info) {
+              setStatus('connected');
+              var m = $('meta');
+              m.textContent = '';
+              var add = function (label, val) {
+                var d = document.createElement('div');
+                d.textContent = label + ': ' + val; // server fields -> textContent
+                m.appendChild(d);
+              };
+              add('session', info.sessionId);
+              add('scope', info.scope);
+              if (info.label) add('label', info.label);
+              if (info.expiresAt)
+                add('expires', new Date(info.expiresAt).toISOString());
+              if (info.usesRemaining !== null && info.usesRemaining !== undefined)
+                add('uses remaining', String(info.usesRemaining));
+              watch(info.sessionId);
+            });
+          })
+          .catch(function (e) {
+            setStatus('redeem error: ' + e);
+          });
+
+        // Read-only watch of the locked session's event stream (fetch-SSE;
+        // EventSource can't set Authorization). Approve/prompt deferred — this
+        // is a view. Event data is rendered via textContent (XSS-safe).
+        function watch(sessionId) {
+          authed('/rc/session/' + encodeURIComponent(sessionId) + '/events')
+            .then(function (res) {
+              if (!res.ok) {
+                setStatus('watch unavailable (' + res.status + ')');
+                return;
+              }
+              setStatus('streaming');
+              var reader = res.body.getReader();
+              var decoder = new TextDecoder();
+              var buf = '';
+              function pump() {
+                return reader.read().then(function (r) {
+                  if (r.done) {
+                    setStatus('stream ended');
+                    return;
+                  }
+                  buf += decoder.decode(r.value, { stream: true });
+                  var blocks = buf.split('\n\n');
+                  buf = blocks.pop() || '';
+                  blocks.forEach(function (block) {
+                    var dataLine = block.split('\n').find(function (l) {
+                      return l.indexOf('data:') === 0;
+                    });
+                    if (dataLine) log(dataLine.slice(5).trim());
+                  });
+                  return pump();
+                });
+              }
+              return pump();
+            })
+            .catch(function (e) {
+              setStatus('watch error: ' + e);
+            });
+        }
+      })();
+    </script>
+  </body>
+</html>
