@@ -66,6 +66,19 @@
         height: 30vh;
         color: #cea;
       }
+      .token-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+        border-bottom: 1px solid #eee;
+        padding: 0.3rem 0;
+        font-size: 0.85rem;
+      }
+      .token-row span {
+        font-family: ui-monospace, monospace;
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -123,6 +136,11 @@
         <button id="audit-query">Query</button>
       </div>
       <pre id="audit">(not queried)</pre>
+    </section>
+    <section id="token-mgmt">
+      <strong>Tokens</strong> (active tokens; requires owner scope)
+      <div><button id="list-tokens">List tokens</button></div>
+      <div id="tokens">(not listed)</div>
     </section>
     <div id="status"></div>
     <div id="cards"></div>
@@ -574,6 +592,71 @@
             .join('\n');
         } catch (e) {
           out.textContent = 'query error: ' + e;
+        }
+      };
+
+      // Token management (cycle 56): GET /rc/tokens list + DELETE revoke. The
+      // first UI with a mutating action. Rows are built with createElement +
+      // textContent (a server-set `label`/`scopes` can't inject markup) —
+      // mirrors renderPermissionCard, never innerHTML. Self-contained.
+      async function revokeToken(id, row, btn) {
+        btn.disabled = true;
+        try {
+          const res = await fetch('/rc/tokens/' + encodeURIComponent(id), {
+            method: 'DELETE',
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (res.status === 204) row.textContent = 'revoked: ' + id;
+          else if (res.status === 404) row.textContent = 'already gone: ' + id;
+          else {
+            btn.disabled = false;
+            setStatus('revoke failed (' + res.status + ')');
+          }
+        } catch (e) {
+          btn.disabled = false;
+          setStatus('revoke error: ' + e);
+        }
+      }
+      $('list-tokens').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('tokens');
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/tokens', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : 'list failed (' + res.status + ')';
+            return;
+          }
+          const list = await res.json();
+          out.textContent = '';
+          if (!Array.isArray(list) || list.length === 0) {
+            out.textContent = '(no tokens)';
+            return;
+          }
+          for (const t of list) {
+            const row = document.createElement('div');
+            row.className = 'token-row';
+            const info = document.createElement('span');
+            info.textContent =
+              (t.label || 'unnamed') +
+              '  [' +
+              (t.scopes || []).join(',') +
+              ']  ' +
+              t.id;
+            const btn = document.createElement('button');
+            btn.textContent = 'Revoke';
+            btn.onclick = () => revokeToken(t.id, row, btn);
+            row.appendChild(info);
+            row.appendChild(btn);
+            out.appendChild(row);
+          }
+        } catch (e) {
+          out.textContent = 'list error: ' + e;
         }
       };
     </script>
