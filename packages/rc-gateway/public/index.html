@@ -213,6 +213,26 @@
       </div>
       <div id="fork-result"></div>
     </section>
+    <section id="snooze">
+      <strong>Snooze notifications</strong> (requires owner scope)
+      <div>
+        <input
+          id="snooze-dur"
+          type="number"
+          placeholder="seconds"
+          value="3600"
+        />
+        <select id="snooze-scope">
+          <option value="all">all</option>
+          <option value="permission.required">permission.required</option>
+          <option value="task.completed">task.completed</option>
+        </select>
+        <button id="snooze-btn">Snooze</button>
+        <button id="unsnooze-btn">Unsnooze</button>
+        <button id="snooze-status-btn">Status</button>
+      </div>
+      <div id="snooze-status">(unknown)</div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -1321,6 +1341,91 @@
           }
         } catch (e) {
           out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Snooze notifications (cycle 70): /rc/routing/snooze POST/GET/DELETE
+      // (OWNER). Snooze ALL (or one kind of) push for a window. textContent-only.
+      async function refreshSnooze() {
+        const el = $('snooze-status');
+        try {
+          const res = await fetch('/rc/routing/snooze', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            el.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs owner token'
+                : 'status failed (' + res.status + ')';
+            return;
+          }
+          const s = await res.json();
+          el.textContent = s.active
+            ? 'snoozed (' +
+              s.scope +
+              ') until ' +
+              new Date(s.until).toISOString()
+            : 'no snooze active';
+        } catch (e) {
+          el.textContent = 'status error: ' + e;
+        }
+      }
+      $('snooze-status-btn').onclick = () => {
+        if (!token()) return setStatus('pair first');
+        refreshSnooze();
+      };
+      $('snooze-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const durationSec = Number($('snooze-dur').value);
+        if (!Number.isFinite(durationSec) || durationSec <= 0) {
+          $('snooze-status').textContent = 'enter a duration in seconds (> 0)';
+          return;
+        }
+        try {
+          const res = await fetch('/rc/routing/snooze', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({
+              durationSec,
+              scope: $('snooze-scope').value,
+            }),
+          });
+          if (!res.ok) {
+            let code = res.status;
+            try {
+              const b = await res.json();
+              if (b && b.code) code = b.code;
+            } catch {
+              /* non-JSON */
+            }
+            $('snooze-status').textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs owner token'
+                : 'snooze failed: ' + code;
+            return;
+          }
+          await refreshSnooze();
+        } catch (e) {
+          $('snooze-status').textContent = 'snooze error: ' + e;
+        }
+      };
+      $('unsnooze-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        try {
+          const res = await fetch('/rc/routing/snooze', {
+            method: 'DELETE',
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok && res.status !== 204) {
+            $('snooze-status').textContent = 'unsnooze failed (' + res.status + ')';
+            return;
+          }
+          await refreshSnooze();
+        } catch (e) {
+          $('snooze-status').textContent = 'unsnooze error: ' + e;
         }
       };
 
