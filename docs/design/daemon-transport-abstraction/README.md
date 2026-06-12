@@ -89,8 +89,10 @@ interface DaemonTransport {
    * - Callable without prior setup; transport handles init internally
    *   (lazy-init / init-once deferred pattern)
    * - Throws DaemonTransportClosedError when connection is dead
-   * - When init.signal aborts, transport MUST propagate cancellation
-   *   to the wire (WS: send session/cancel RPC; HTTP: abort fetch).
+   * - When init.signal aborts: for prompt requests, transport MUST
+   *   cancel the in-flight prompt on the wire (WS: send session/cancel
+   *   RPC; HTTP: abort fetch). For ordinary requests, abort only
+   *   rejects/cancels the pending request without side effects.
    *   Pending response rejects with AbortError.
    */
   fetch(
@@ -120,6 +122,10 @@ interface DaemonTransport {
 
   /** Transport identity for exhaustive switching. */
   readonly type: 'rest' | 'acp-http' | 'acp-ws';
+
+  /** Whether this transport supports Last-Event-ID based replay on reconnect.
+   *  When false, consumer MUST use session/load for full resync. */
+  readonly supportsReplay: boolean;
 
   /** False after connection drop or dispose(). */
   readonly connected: boolean;
@@ -215,15 +221,22 @@ Wraps `globalThis.fetch` + extracts current SSE logic from
 ```typescript
 class RestSseTransport implements DaemonTransport {
   readonly type = 'rest' as const;
-  readonly connected = true;  // REST is stateless
+  readonly supportsReplay = true;  // SSE supports Last-Event-ID
+  readonly connected = true;       // REST is stateless
 
-  constructor(private readonly _fetch: typeof globalThis.fetch) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly token: string | undefined,
+    private readonly _fetch: typeof globalThis.fetch,
+  ) {}
 
   fetch(url, init, opts?) { return this._fetch(url, init); }
 
   async *subscribeEvents(sessionId, opts) {
     // Current DaemonClient.subscribeEvents logic moved here:
-    // - build URL, set headers, connect-phase timeout
+    // - build URL from this.baseUrl + sessionId
+    // - set Authorization header from this.token
+    // - connect-phase timeout from opts.connectTimeoutMs
     // - fetch → validate content-type → parseSseStream → yield
   }
 
@@ -231,20 +244,22 @@ class RestSseTransport implements DaemonTransport {
 }
 ```
 
-### 2.6 ACP transport internals (follow-up PRs)
+### 2.6 ACP transport internals
 
-**AcpWsTransport** (~400-600 lines, separate PR):
+**AcpWsTransport** (~400-600 lines):
 - Lazy-init: first `fetch` call opens WS + sends `initialize`
 - URL→JSON-RPC mapping table: `/session/:id/prompt` → `{method: "session/prompt", params: {sessionId: id, ...body}}`
 - Request multiplexer: `Map<id, {resolve, reject}>` for pending requests
 - `subscribeEvents`: filter shared notification stream by sessionId
 - `connected`: tracks WS readyState
+- `supportsReplay`: false (WS has no Last-Event-ID; consumer must `session/load`)
 - Synthesizes `Response` objects with correct `.status`/`.json()`/`.text()`
 
-**AcpHttpTransport** (~800-1000 lines, separate PR):
+**AcpHttpTransport** (~800-1000 lines):
 - Lazy-init: first `fetch` call sends `POST /acp {initialize}`
 - Manages conn-scoped + session-scoped SSE streams internally
 - Same URL→JSON-RPC mapping + request correlation
+- `supportsReplay`: true (session SSE supports Last-Event-ID)
 
 ### 2.7 Transport auto-detection
 
@@ -389,8 +404,8 @@ format mapping layer.
 Error taxonomy → Interface → AcpHttp → AcpWs as separate PRs.
 
 **Rejected**: over-engineered. Error taxonomy is unnecessary (ACP transports can
-map to HTTP-equivalent status codes). Provider changes unnecessary (transport
-injected via DaemonClient constructor, not provider props).
+map to HTTP-equivalent status codes). Separate PRs increase review context-switch
+cost for a single cohesive abstraction.
 
 ### 5.3 Dual provider with BridgeContext
 
@@ -415,7 +430,7 @@ All changes land in one PR. Estimated ~1300 lines total.
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Constructor + 6 `_fetch` sites + subscribeEvents rewrite | ~40 net |
 | `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~10 |
 | `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` | ~5 |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Add `transports` to `DaemonCapabilities` type | ~3 |
+| `packages/sdk-typescript/src/daemon/types.ts` | Add `transports` to `DaemonCapabilities` type | ~3 |
 | `packages/webui/src/daemon/workspace/DaemonWorkspaceProvider.tsx` | Add optional `transport` prop, forward to `DaemonClient` | ~5 |
 | Tests | Transport unit + integration tests | ~200 |
 
@@ -426,15 +441,24 @@ All changes land in one PR. Estimated ~1300 lines total.
 
 ## 7. Verification
 
-1. **PR 1**: `npm run test` across sdk-typescript — zero test changes needed.
-   `new DaemonClient({ baseUrl, token })` produces identical behavior.
-2. **PR 2**: Integration test connecting to real daemon via ACP WS. Verify:
+1. **Backward compat**: `npm run test` across sdk-typescript and webui — zero
+   test changes needed. `new DaemonClient({ baseUrl, token })` = identical behavior.
+2. **RestSseTransport extraction**: bit-for-bit equivalent SSE behavior confirmed
+   by existing test suite.
+3. **AcpWsTransport**: integration test connecting to real daemon via WS. Verify:
    - `subscribeEvents` yields same `DaemonEvent` shapes as REST SSE
    - prompt 202/200 branching works with synthesized Response
    - permission vote round-trips correctly
    - `connected` transitions to `false` on WS drop
-3. **End-to-end**: Third-party passes `transport={new AcpWsTransport(url, token)}`
-   to `DaemonClient`. All SDK hooks and transcript store work unchanged.
+   - abort signal on prompt → WS sends session/cancel RPC
+4. **AcpHttpTransport**: same verification as WS but over HTTP+SSE.
+5. **Auto-detect**: `negotiate()` returns best transport; fallback to REST on WS failure.
+6. **Runtime fallback**: `AutoReconnectTransport` catches `DaemonTransportClosedError`,
+   rebuilds transport, consumer calls `session/load` for resync.
+7. **Provider**: `DaemonWorkspaceProvider` with `transport` prop — ChatView +
+   TerminalView both read from single store.
+8. **End-to-end**: Third-party passes `transport={new AcpWsTransport(url, token)}`
+   to `DaemonWorkspaceProvider`. All SDK hooks and transcript store work unchanged.
 
 ---
 
