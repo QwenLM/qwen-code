@@ -532,6 +532,7 @@ export class Session implements SessionContext {
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -2152,6 +2153,31 @@ export class Session implements SessionContext {
         kind: 'shell',
       });
     });
+
+    // Session title recorded (auto-generated after a turn, or an in-process
+    // /rename) → notify attached clients. A title update is NOT an ACP
+    // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
+    // would reject an unknown kind at validation), so — like
+    // `current_model_update` above — it goes over the agent→bridge
+    // `extNotification` side-channel. The bridge demuxes it into the
+    // canonical `session_metadata_updated` bus event so HTTP clients can
+    // refresh their session list immediately instead of discovering the
+    // new title on their next poll.
+    this.config
+      .getChatRecordingService()
+      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+        void this.client
+          .extNotification('qwen/notify/session/title-update', {
+            v: 1,
+            sessionId: this.sessionId,
+            title: customTitle,
+            titleSource,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the title
+            // until the client's next session-list refresh.
+          });
+      });
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
