@@ -238,6 +238,14 @@ export interface CapabilitiesEnvelope {
    */
   workspaceCwd?: string;
   /**
+   * Transport families this daemon supports. Always includes `'rest'`;
+   * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
+   * use `negotiateTransport()` to auto-select the best available.
+   * Additive — older daemons omit this field; SDK consumers should
+   * treat absence as `['rest']`.
+   */
+  transports?: string[];
+  /**
    * Daemon-policy namespace. Active values for
    * cross-cutting daemon coordination policies that don't fit on a
    * per-feature flag. Today only `permission` is populated (active

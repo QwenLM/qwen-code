@@ -19,6 +19,28 @@ export {
   type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+// Transport abstraction layer
+export {
+  DaemonTransportClosedError,
+  negotiateTransport,
+} from './DaemonTransport.js';
+export type {
+  DaemonTransport,
+  DaemonTransportFetchOptions,
+  DaemonTransportSubscribeOptions,
+  DaemonTransportType,
+  NegotiateTransportOptions,
+} from './DaemonTransport.js';
+export { RestSseTransport } from './RestSseTransport.js';
+export { AcpWsTransport } from './AcpWsTransport.js';
+export { AcpHttpTransport } from './AcpHttpTransport.js';
+export {
+  denormalizeAcpNotification,
+  filterEventsBySession,
+} from './AcpEventDenormalizer.js';
+export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
+export { AutoReconnectTransport } from './AutoReconnectTransport.js';
+export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
   DaemonAuthFlow,
   DEVICE_FLOW_EXPIRY_GRACE_MS,

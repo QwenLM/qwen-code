@@ -38,11 +38,13 @@ export function DaemonWorkspaceProvider({
   token,
   workspaceCwd,
   autoConnect = true,
+  transport,
   children,
 }: DaemonWorkspaceProviderProps) {
   const client = useMemo(
-    () => (autoConnect ? new DaemonClient({ baseUrl, token }) : undefined),
-    [autoConnect, baseUrl, token],
+    () =>
+      autoConnect ? new DaemonClient({ baseUrl, token, transport }) : undefined,
+    [autoConnect, baseUrl, token, transport],
   );
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;
