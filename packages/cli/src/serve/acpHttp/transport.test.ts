@@ -230,18 +230,20 @@ class FakeBridge {
   shellCalls: Array<{
     sessionId: string;
     command: string;
+    signal?: AbortSignal;
     context?: unknown;
   }> = [];
   shellError: unknown;
   async executeShellCommand(
     sessionId: string,
     command: string,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
     context?: unknown,
   ) {
     this.shellCalls.push({
       sessionId,
       command,
+      ...(signal !== undefined ? { signal } : {}),
       ...(context !== undefined ? { context } : {}),
     });
     if (this.shellError !== undefined) throw this.shellError;
@@ -1776,7 +1778,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({
         error: {
-          code: -32600,
+          code: -32602,
           data: { errorKind: 'session_shell_disabled' },
         },
       });
@@ -1835,7 +1837,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         error: {
-          code: -32600,
+          code: -32602,
           data: { errorKind: 'client_id_required' },
         },
       });
@@ -1899,9 +1901,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         {
           sessionId: 'sess-1',
           command,
+          signal: expect.any(AbortSignal),
           context: { clientId: 'client-1', fromLoopback: true },
         },
       ]);
+      expect(bridge.shellCalls[0]?.signal?.aborted).toBe(false);
     });
 
     it('_qwen/session/shell maps bridge shell policy errors to RPC errorKind', async () => {
@@ -1926,7 +1930,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const disabledFrames = await takeFrames(await streamRes, 2);
       expect(disabledFrames[1]).toMatchObject({
         error: {
-          code: -32600,
+          code: -32602,
           data: { errorKind: 'session_shell_disabled' },
         },
       });
@@ -1952,7 +1956,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const clientRequiredFrames = await takeFrames(await streamRes2, 2);
       expect(clientRequiredFrames[1]).toMatchObject({
         error: {
-          code: -32600,
+          code: -32602,
           data: { errorKind: 'client_id_required' },
         },
       });

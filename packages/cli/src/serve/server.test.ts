@@ -211,7 +211,6 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
       f !== 'session_btw' &&
-      f !== 'session_shell_command' &&
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&

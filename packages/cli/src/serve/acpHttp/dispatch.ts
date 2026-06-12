@@ -268,13 +268,13 @@ function toRpcError(err: unknown): {
   switch (name) {
     case 'SessionShellDisabledError':
       return {
-        code: RPC.INVALID_REQUEST,
+        code: RPC.INVALID_PARAMS,
         message: errMsg(err),
         data: { errorKind: 'session_shell_disabled' },
       };
     case 'SessionShellClientRequiredError':
       return {
-        code: RPC.INVALID_REQUEST,
+        code: RPC.INVALID_PARAMS,
         message: errMsg(err),
         data: { errorKind: 'client_id_required' },
       };
@@ -1100,7 +1100,8 @@ export class AcpDispatcher {
             throw new SessionShellDisabledError();
           }
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const clientId = conn.sessions.get(sessionId)?.clientId;
+          const binding = conn.sessions.get(sessionId);
+          const clientId = binding?.clientId;
           if (!clientId) {
             throw new SessionShellClientRequiredError();
           }
@@ -1126,7 +1127,7 @@ export class AcpDispatcher {
           const result = await this.bridge.executeShellCommand(
             sessionId,
             rawCmd,
-            undefined,
+            binding.abort.signal,
             { clientId, fromLoopback: loopback },
           );
           this.replyConn(conn, id, result as unknown);
