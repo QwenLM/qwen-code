@@ -353,9 +353,14 @@ if (process.argv[2] === 'serve') {
   // rate-limit - are NOT considered). INSPECTOR: exit 0 on success, 2 on a
   // usage/parse error. The routing config FAIL-OPENS, so there is no exit 1.
   void (async () => {
-    // Read stdin only when piped, so a positional invocation never blocks.
-    const stdin = process.stdin.isTTY ? null : await readAllStdin();
-    const parsed = parseRoutingTest(process.argv.slice(4), stdin);
+    const argv = process.argv.slice(4);
+    // Read stdin ONLY when no positional event was given AND stdin is piped:
+    // an isTTY-only guard would block forever when a positional IS supplied but
+    // stdin is a non-TTY handle that never delivers EOF (e.g. a CI pipe).
+    const hasPositional = argv.some((a) => !a.startsWith('--'));
+    const stdin =
+      hasPositional || process.stdin.isTTY ? null : await readAllStdin();
+    const parsed = parseRoutingTest(argv, stdin);
     if (!parsed.ok) {
       // eslint-disable-next-line no-console
       console.error(parsed.error);
@@ -374,5 +379,12 @@ if (process.argv[2] === 'serve') {
       formatRoutingTest(evaluateRoutingTest(matcher, request, ruleCount)),
     );
     process.exit(0);
-  })();
+  })().catch((err: unknown) => {
+    // The only throw source is readAllStdin (the matcher load never throws, the
+    // trio is pure). Keep the inspector's exit-code contract (0/2, never a raw
+    // exit 1 from an unhandled rejection).
+    // eslint-disable-next-line no-console
+    console.error(`routing test: ${(err as Error).message}`);
+    process.exit(2);
+  });
 }

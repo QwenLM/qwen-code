@@ -52,8 +52,10 @@ Pure trio (unit-tested), mirroring `policy explain`'s parse/format split:
 - `parseRoutingTest(argv, stdin)` → `{ok, request}` | `{ok:false, error}`.
   Separates the positional event JSON from `--sub`/`--resolved`; uses
   `stdin` when no positional. Errors (→ exit 2): no event, unparseable
-  JSON, missing/`non-string `kind`, a `--sub` without a value, an unknown
-  flag.
+  JSON, missing/non-string `kind`. LENIENT on flags (matching
+  `parseExplainArgs`): an unknown flag is ignored and a `--sub=` with no
+  scopes yields an empty-scope sub (which simply matches no `scopeIn`
+  rule) — neither is an error.
 - `evaluateRoutingTest(matcher, request, ruleCount)` → `RoutingTestResult`.
   `firstDrop` decides event-global suppression (suppresses ALL subs);
   else per-sub `firstDropForSubscription`. No `--sub` → a single
