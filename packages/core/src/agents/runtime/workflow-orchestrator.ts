@@ -7,7 +7,7 @@
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
-import { createWorkflowSandbox } from './workflow-sandbox.js';
+import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
@@ -16,9 +16,6 @@ import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
-import { createDebugLogger } from '../../utils/debugLogger.js';
-
-const debugLogger = createDebugLogger('WORKFLOW');
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream

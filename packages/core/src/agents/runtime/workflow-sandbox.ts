@@ -122,7 +122,11 @@ function isRegexContext(source: string, i: number): boolean {
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
-const debugLogger = createDebugLogger('WORKFLOW');
+// Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
+// instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
+// imports the same instance — orchestrator already imports from this module,
+// so this is the natural direction (the reverse would be a circular dep).
+export const debugLogger = createDebugLogger('WORKFLOW');
 
 // Cap log + phase lines to prevent unbounded memory growth from runaway
 // model-authored loops.
@@ -564,10 +568,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             // Cross to host realm for debug logging. The bridge function
             // accepts only primitive strings/numbers; the error message is
             // coerced to a String here so no vm-realm Error object crosses.
-            __b.logRevivalFailure(
-              i,
-              String((e && e.message != null) ? e.message : e),
-            );
+            __b.logRevivalFailure(i, String(e?.message ?? e));
             out[i] = null;
           }
         }
