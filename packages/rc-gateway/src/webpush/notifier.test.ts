@@ -1124,4 +1124,34 @@ describe('PushNotifier quiet-hours digest tracking (cycle 71)', () => {
     const notifier = new PushNotifier(tokens, store, sender);
     expect(notifier.digestSummary()).toEqual([]);
   });
+
+  it('does NOT record a delivered (non-quiet) push in the digest', async () => {
+    const { PushDigest } = await import('./digest.js');
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    // No quiet hours set -> the push is delivered, not suppressed.
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/a',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const digest = new PushDigest();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      digest,
+    );
+    await notifier.notify(
+      { type: 'permission_request', data: { requestId: 'r1' } },
+      { sessionId: 's1' },
+      new Date('2026-06-12T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(1); // delivered
+    expect(notifier.digestSummary()).toEqual([]); // nothing recorded
+  });
 });
