@@ -16,9 +16,11 @@ import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
+import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
+import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
@@ -27,6 +29,7 @@ import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
+import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
@@ -40,7 +43,6 @@ import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
-import { manageModelsCommand } from '../ui/commands/manageModelsCommand.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
@@ -103,9 +105,12 @@ export class BuiltinCommandLoader implements ICommandLoader {
       authCommand,
       branchCommand,
       btwCommand,
+      forkCommand,
       bugCommand,
+      cdCommand,
       clearCommand,
       compressCommand,
+      compressFastCommand,
       contextCommand,
       copyCommand,
       diffCommand,
@@ -128,7 +133,6 @@ export class BuiltinCommandLoader implements ICommandLoader {
       goalCommand,
       memoryCommand,
       modelCommand,
-      manageModelsCommand,
       rememberCommand,
       planCommand,
       permissionsCommand,

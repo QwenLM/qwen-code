@@ -23,6 +23,18 @@ import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import type { SlashCommand } from '../ui/commands/types.js';
 
+const FORK_COMMAND_REQUIRED_KEYS = [
+  'Spawn a background agent that inherits the full conversation',
+  'Please provide a directive. Usage: /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork before the first conversation turn.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
+  'The agent tool is unavailable; cannot fork.',
+  'Failed to launch fork: {{error}}',
+  'User launched a background fork via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
+] as const;
+
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
@@ -81,6 +93,12 @@ describe('must-translate locale coverage', () => {
     );
 
     expect(missingKeys).toEqual([]);
+  });
+
+  it('requires translation coverage for /fork user-facing strings', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining([...FORK_COMMAND_REQUIRED_KEYS]),
+    );
   });
 
   it.each(NON_ENGLISH_LANGUAGES)(

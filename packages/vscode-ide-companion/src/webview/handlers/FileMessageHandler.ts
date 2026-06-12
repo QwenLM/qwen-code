@@ -13,12 +13,12 @@ import {
   findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
-import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
 import {
+  crawlCache,
+  FileDiscoveryService,
   FileSearchFactory,
   type FileSearch,
-} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
-import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
@@ -104,8 +104,17 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   private clearFileSearchCache(rootPath: string): void {
+    // Drop the instance from the Map first so any concurrent reader sees a
+    // miss, then dispose() the prior holder so its worker_threads worker
+    // (if RecursiveFileSearch promoted past the in-thread threshold)
+    // doesn't accumulate inside the long-running extension host. Fire-and-
+    // forget — dispose is best-effort.
+    const previous = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    void previous?.dispose?.().catch(() => {
+      // Already gone or never had a worker; nothing actionable here.
+    });
     crawlCache.clear();
     console.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
@@ -171,6 +180,11 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
         this.fileWatchers.clear();
         foldersChangeListener.dispose();
+        for (const instance of this.fileSearchInstances.values()) {
+          void instance.dispose?.().catch(() => {});
+        }
+        this.fileSearchInstances.clear();
+        this.fileSearchInitializing.clear();
       },
     };
   }

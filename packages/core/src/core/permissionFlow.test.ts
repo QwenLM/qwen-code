@@ -13,6 +13,7 @@ import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 // Import the functions we're testing
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -157,6 +158,21 @@ describe('needsConfirmation', () => {
     expect(needsConfirmation('deny', ApprovalMode.DEFAULT, 'shell')).toBe(
       false,
     );
+  });
+});
+
+describe('getEffectivePermissionForConfirmation', () => {
+  it('forces protected allow-rule fallback through manual confirmation', () => {
+    expect(getEffectivePermissionForConfirmation('allow', true)).toBe('ask');
+  });
+
+  it('preserves ordinary permission decisions', () => {
+    expect(getEffectivePermissionForConfirmation('allow', false)).toBe('allow');
+    expect(getEffectivePermissionForConfirmation('ask', true)).toBe('ask');
+    expect(getEffectivePermissionForConfirmation('default', true)).toBe(
+      'default',
+    );
+    expect(getEffectivePermissionForConfirmation('deny', true)).toBe('deny');
   });
 });
 

@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -89,7 +89,7 @@ jobs:
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -153,13 +153,13 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -206,13 +206,13 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -247,13 +247,13 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -317,13 +317,13 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
       - name: 'Setup Node.js'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
@@ -400,11 +400,16 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
+      - name: 'Verify Standalone Archives'
+        run: |-
+          npm run verify:installation-release -- --dir dist/standalone
+
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # CI_BOT_PAT required: GITHUB_TOKEN events cannot trigger downstream workflows (sync-release-to-oss.yml).
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
@@ -426,6 +431,36 @@ jobs:
             --generate-notes \
             ${PRERELEASE_FLAG}
 
+      - name: 'Regenerate CHANGELOG.md'
+        # Stable releases only: nightly/preview ship daily and would drown out
+        # the changelog. The just-created GitHub Release is already queryable,
+        # so the generator picks it up. The release branch was already pushed
+        # above, so push this follow-up commit too — otherwise the PR opened
+        # below (whose head is the remote branch) would not include it.
+        #
+        # Non-blocking by design: the only realistic failures are transient
+        # (the gh API read or the git push). The changelog is rebuilt from the
+        # full release history on every run, so a skipped update self-heals on
+        # the next stable release — never worth blocking the version-bump PR to
+        # main that follows.
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+        run: |-
+          set -euo pipefail
+          node scripts/generate-changelog.js
+          git add CHANGELOG.md
+          if git diff --cached --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already up to date."
+          else
+            git commit -m "docs(changelog): sync for ${RELEASE_TAG}"
+            git push origin "${BRANCH_NAME}"
+          fi
+
       - name: 'Create PR to merge release branch into main'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
@@ -443,7 +478,7 @@ jobs:
               --base main \
               --head "${RELEASE_BRANCH}" \
               --title "chore(release): ${RELEASE_TAG}" \
-              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
+              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions and CHANGELOG.md on main.")"
           fi
 
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"

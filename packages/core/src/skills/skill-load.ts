@@ -1,6 +1,7 @@
 import {
   type SkillConfig,
   type SkillValidationResult,
+  parseAllowedToolsField,
   parseModelField,
   parsePathsField,
   validateSkillName,
@@ -132,16 +133,7 @@ export function parseSkillContent(
   const description = String(descriptionRaw);
 
   // Extract optional fields
-  const allowedToolsRaw = frontmatter['allowedTools'] as unknown[] | undefined;
-  let allowedTools: string[] | undefined;
-
-  if (allowedToolsRaw !== undefined) {
-    if (Array.isArray(allowedToolsRaw)) {
-      allowedTools = allowedToolsRaw.map(String);
-    } else {
-      throw new Error('"allowedTools" must be an array');
-    }
-  }
+  const allowedTools = parseAllowedToolsField(frontmatter);
 
   // Extract optional model field
   const model = parseModelField(frontmatter);
@@ -169,6 +161,7 @@ export function parseSkillContent(
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
   const paths = parsePathsField(frontmatter);
+  const priority = parsePriorityField(frontmatter, filePath);
 
   const config: SkillConfig = {
     name,
@@ -197,6 +190,7 @@ export function parseSkillContent(
     whenToUse,
     disableModelInvocation,
     paths,
+    priority,
   };
 
   // Validate the parsed configuration
@@ -242,6 +236,13 @@ export function validateConfig(
     }
   }
 
+  if (
+    config.priority !== undefined &&
+    (typeof config.priority !== 'number' || !Number.isFinite(config.priority))
+  ) {
+    errors.push('"priority" must be a finite number');
+  }
+
   // Warn if body is empty
   if (!config.body || config.body.trim() === '') {
     warnings.push('Skill body is empty');
@@ -252,4 +253,67 @@ export function validateConfig(
     errors,
     warnings,
   };
+}
+
+/**
+ * Parse the optional `priority` frontmatter field for a skill.
+ *
+ * NOTE for adding new optional frontmatter fields: the SKILL.md parsing
+ * logic exists in **two** places — `parseSkillContent` here (used for
+ * extension skills) and `SkillManager.parseSkillContent` in
+ * `skill-manager.ts` (used for project / user / bundled skills). Any new
+ * field must be wired into both, or extension SKILL.md authors will see
+ * the field silently dropped — the same regression that previously hit
+ * `whenToUse`, `disable-model-invocation`, `paths`, and `priority`. Prefer
+ * extracting the field's parsing into a shared helper (like this one)
+ * rather than inlining `frontmatter['key']` twice.
+ *
+ * Strict typecheck: `priority` must be a finite JS number. The custom
+ * YAML parser returns `true`/`false` as JS booleans and `null` as `null`,
+ * all of which `Number()` would silently coerce to 1/0/0. Anything that
+ * isn't already `typeof === 'number'` is rejected before checking
+ * finiteness. Empty string is treated as omission for ergonomics
+ * (matches `paths:` lenient handling).
+ *
+ * Returns `undefined` (and warns) for invalid values rather than
+ * throwing — `priority` is a cosmetic ordering hint, not a load-blocking
+ * field, so a typo in this single key shouldn't make a previously-working
+ * skill silently disappear from the listing.
+ */
+export function parsePriorityField(
+  frontmatter: Record<string, unknown>,
+  filePath: string,
+  // Optional logger so the caller's namespace tags the warning. Without
+  // this, a warning for a project/user/bundled SKILL.md emitted from
+  // SkillManager.parseSkillContent would be tagged `[SKILL_LOAD]` —
+  // misleading for log filtering. Defaults to skill-load's own logger
+  // for the original (extension) call site.
+  warn: (message: string) => void = (message) => debugLogger.warn(message),
+): number | undefined {
+  const raw = frontmatter['priority'];
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined;
+  }
+
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    warn(
+      `Ignoring invalid priority value in ${filePath}: expected a finite number.`,
+    );
+    return undefined;
+  }
+
+  return raw;
+}
+
+/**
+ * Normalize a skill priority to a finite number for sort comparisons.
+ * Used in the `listSkills()` sort comparator so extension-provided skills
+ * (which bypass the frontmatter parser and validateConfig) can't poison
+ * ordering with `NaN` or non-number values that `(a ?? 0) - (b ?? 0)`
+ * would otherwise propagate as `NaN`.
+ */
+export function normalizeSkillPriority(priority: unknown): number {
+  return typeof priority === 'number' && Number.isFinite(priority)
+    ? priority
+    : 0;
 }

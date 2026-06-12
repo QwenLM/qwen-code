@@ -31,6 +31,12 @@ type ToolParams = Record<string, unknown>;
 /** Factory function for lazy tool instantiation via dynamic import. */
 export type ToolFactory = () => Promise<AnyDeclarativeTool>;
 
+export interface DeferredToolSummary {
+  name: string;
+  description: string;
+  serverName?: string;
+}
+
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
@@ -196,12 +202,31 @@ export class ToolRegistry {
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
     this.config = config;
-    this.mcpClientManager = new McpClientManager(
-      this.config,
-      this,
+    // options-bag
+    // ctor; previously 7 positional args with `undefined, undefined`
+    // sentinels for `healthConfig` / `budgetConfig`. `pool` is
+    // forwarded from Config (set by daemon-mode QwenAgent in
+    // `newSessionConfig`); when undefined the manager keeps its previous
+    // per-session spawn behavior, when defined non-SDK MCP discovery
+    // goes through `pool.acquire` so N sessions in the same workspace
+    // share one transport per unique server config.
+    this.mcpClientManager = new McpClientManager(this.config, this, {
       eventEmitter,
       sendSdkMcpMessage,
-    );
+      pool: this.config.getMcpTransportPool(),
+    });
+  }
+
+  /**
+   * Returns true when `name` is in the Config's `disabledTools` set, in
+   * which case `registerTool` / `registerFactory` will skip it. This is
+   * the chokepoint for the daemon mutation route at `POST /workspace/
+   * tools/:name/enable {enabled:false}`; both
+   * built-ins and MCP-discovered tools flow through `registerTool`, so
+   * gating here covers every registration path.
+   */
+  private isToolDisabled(name: string): boolean {
+    return this.config.getDisabledTools().has(name);
   }
 
   /**
@@ -209,6 +234,12 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.isToolDisabled(tool.name)) {
+      debugLogger.info(
+        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
     // A name collision can happen against either the eager `tools` map
     // (already-instantiated tools) or the lazy `factories` map (registered
     // but not yet constructed — `structured_output` lives here when
@@ -232,6 +263,20 @@ export class ToolRegistry {
         );
       }
     }
+    // Re-check the disabled set against
+    // the FINAL registration name. Without this, an MCP tool that
+    // collides with a lazy factory and gets renamed via
+    // `asFullyQualifiedTool()` (e.g. `structured_output` →
+    // `mcp__server__structured_output`) would slip past the up-front
+    // `isToolDisabled(tool.name)` gate above when the operator
+    // disabled the renamed-and-exposed name. Re-evaluating after the
+    // rename closes that hole.
+    if (this.isToolDisabled(tool.name)) {
+      debugLogger.info(
+        `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
+      );
+      return;
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -240,6 +285,12 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
     this.factories.set(name, factory);
   }
 
@@ -399,7 +450,7 @@ export class ToolRegistry {
         // Always drop the server from the global status registry — even
         // if disconnect or the exclusion-list update throws — so the
         // Footer's MCP health pill stops counting it as "offline". A
-        // leftover entry would resurrect the bug from #3895.
+        // leftover entry would resurrect the bug.
         removeMCPServerStatus(serverName);
       }
     }
@@ -671,21 +722,31 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns a lightweight summary ({name, description}) of tools that are
+   * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the system prompt so the model knows what is
+   * set of on-demand tools in the startup reminder so the model knows what is
    * reachable via ToolSearch. `alwaysLoad` tools are excluded.
    */
-  getDeferredToolSummary(): Array<{ name: string; description: string }> {
-    const summary: Array<{ name: string; description: string }> = [];
+  getDeferredToolSummary(): DeferredToolSummary[] {
+    const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (tool.shouldDefer && !tool.alwaysLoad) {
-        summary.push({ name: tool.name, description: tool.description });
+        summary.push({
+          name: tool.name,
+          description: tool.description,
+          ...(tool instanceof DiscoveredMCPTool
+            ? { serverName: tool.serverName }
+            : {}),
+        });
       }
     });
-    // Stable order so the system prompt text is deterministic across runs.
+    // Stable order so the startup reminder text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
+  }
+
+  getMcpServerInstructions(): Map<string, string> {
+    return this.mcpClientManager.getServerInstructions();
   }
 
   /**

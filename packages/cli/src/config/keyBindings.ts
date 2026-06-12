@@ -75,6 +75,14 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Scroll commands
+  SCROLL_UP = 'scrollUp',
+  SCROLL_DOWN = 'scrollDown',
+  PAGE_UP = 'pageUp',
+  PAGE_DOWN = 'pageDown',
+  SCROLL_HOME = 'scrollHome',
+  SCROLL_END = 'scrollEnd',
 }
 
 /**
@@ -140,18 +148,18 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // History navigation
   [Command.HISTORY_UP]: [{ key: 'p', ctrl: true }],
   [Command.HISTORY_DOWN]: [{ key: 'n', ctrl: true }],
-  [Command.NAVIGATION_UP]: [{ key: 'up' }],
-  [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
+  [Command.NAVIGATION_UP]: [{ key: 'up', shift: false }],
+  [Command.NAVIGATION_DOWN]: [{ key: 'down', shift: false }],
 
   // Selection-list nav: arrows + k/j + Ctrl+P/Ctrl+N
   // ctrl: false on bare k/j skips Ctrl+K and Ctrl+J
   [Command.SELECTION_UP]: [
-    { key: 'up' },
+    { key: 'up', shift: false },
     { key: 'k', ctrl: false },
     { key: 'p', ctrl: true },
   ],
   [Command.SELECTION_DOWN]: [
-    { key: 'down' },
+    { key: 'down', shift: false },
     { key: 'j', ctrl: false },
     { key: 'n', ctrl: true },
   ],
@@ -159,8 +167,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
   // Completion navigation uses only arrow keys
-  [Command.COMPLETION_UP]: [{ key: 'up' }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down' }],
+  [Command.COMPLETION_UP]: [{ key: 'up', shift: false }],
+  [Command.COMPLETION_DOWN]: [{ key: 'down', shift: false }],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
@@ -220,4 +228,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Scroll commands
+  [Command.SCROLL_UP]: [{ key: 'up', shift: true }],
+  [Command.SCROLL_DOWN]: [{ key: 'down', shift: true }],
+  [Command.PAGE_UP]: [{ key: 'pageup' }],
+  [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
+  [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
+  [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
 };

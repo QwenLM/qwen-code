@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -16,8 +17,10 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
-} from '../../auth/providerConfig.js';
+  ModelSpec,
+} from '@qwen-code/qwen-code-core';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
+import { normalizeModelIds } from './useAuth.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,7 +112,9 @@ function BaseUrlInputStep({
           value={flow.state.baseUrl}
           onChange={flow.changeBaseUrl}
           onSubmit={flow.submitBaseUrl}
-          placeholder="https://api.openai.com/v1"
+          placeholder={
+            flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
+          }
         />
       </Box>
       {flow.state.baseUrlError && (
@@ -176,6 +181,80 @@ function ApiKeyStep({
 // Step: Model IDs input
 // ---------------------------------------------------------------------------
 
+const MODEL_DESCRIPTION_COLUMN = 28;
+const MODALITY_DISPLAY_ORDER = ['image', 'video', 'audio', 'pdf'] as const;
+const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
+const MODEL_SEARCH_INPUT_FOCUS_INDEX = -1;
+const MAX_RECOMMENDED_MODELS_TO_SHOW = 8;
+
+interface ModelOption {
+  key: string;
+  value: string;
+  label: string;
+}
+
+function formatModelOptionLabel(model: ModelSpec): string {
+  const details: string[] = [];
+  if (model.contextWindowSize) {
+    details.push(`${model.contextWindowSize.toLocaleString('en-US')} tokens`);
+  }
+  if (model.enableThinking) {
+    details.push('thinking');
+  }
+  const modalities = MODALITY_DISPLAY_ORDER.filter(
+    (name) => model.modalities?.[name],
+  );
+  details.push(['text', ...modalities].join('/'));
+  const suffix = details.length > 0 ? ` ${details.join(', ')}` : '';
+  return `${model.id.padEnd(MODEL_DESCRIPTION_COLUMN)}${suffix}`;
+}
+
+function modelOptionSearchText(item: ModelOption): string {
+  return `${item.key} ${item.label} ${item.value}`.toLowerCase();
+}
+
+function uniqueModelIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    unique.push(id);
+  }
+  return unique;
+}
+
+function mergeModelIds(
+  customModelIdsText: string,
+  selectedRecommendationKeys: string[],
+): string[] {
+  return uniqueModelIds([
+    ...normalizeModelIds(customModelIdsText),
+    ...selectedRecommendationKeys,
+  ]);
+}
+
+function getRecommendedSelections(
+  selectedModelIds: string[],
+  modelOptions: ModelOption[],
+): string[] {
+  const selectedSet = new Set(selectedModelIds);
+  return modelOptions
+    .filter((item) => selectedSet.has(item.key))
+    .map((item) => item.key);
+}
+
+function getCustomModelIdsText(
+  selectedModelIds: string[],
+  recommendedModelIds: Set<string>,
+): string {
+  return selectedModelIds
+    .filter((id) => !recommendedModelIds.has(id))
+    .join(', ');
+}
+
 function ModelIdsStep({
   config,
   flow,
@@ -184,18 +263,261 @@ function ModelIdsStep({
   flow: ProviderSetupFlow;
 }): React.JSX.Element {
   const defaultIds = config.models?.map((m) => m.id).join(', ') ?? '';
+  const hasSelectableModels = (config.models?.length ?? 0) > 0;
+  const selectedModelIds = useMemo(
+    () => normalizeModelIds(flow.state.modelIds),
+    [flow.state.modelIds],
+  );
+  const modelOptions = useMemo<ModelOption[]>(
+    () =>
+      config.models?.map((model) => ({
+        key: model.id,
+        value: model.id,
+        label: formatModelOptionLabel(model),
+      })) ?? [],
+    [config.models],
+  );
+  const recommendedModelIds = useMemo(
+    () => new Set(modelOptions.map((item) => item.key)),
+    [modelOptions],
+  );
+  const [focusedModelIndex, setFocusedModelIndex] = useState(
+    MODEL_CUSTOM_INPUT_FOCUS_INDEX,
+  );
+  const [customModelIdsText, setCustomModelIdsText] = useState(() =>
+    getCustomModelIdsText(selectedModelIds, recommendedModelIds),
+  );
+  const [selectedRecommendationKeys, setSelectedRecommendationKeys] = useState(
+    () => getRecommendedSelections(selectedModelIds, modelOptions),
+  );
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const filteredModelOptions = useMemo(() => {
+    const normalizedQuery = modelSearchQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return modelOptions;
+    }
+    return modelOptions.filter((item) =>
+      modelOptionSearchText(item).includes(normalizedQuery),
+    );
+  }, [modelOptions, modelSearchQuery]);
+  const recommendedScrollOffset =
+    focusedModelIndex < 0
+      ? 0
+      : Math.max(
+          0,
+          Math.min(
+            focusedModelIndex - MAX_RECOMMENDED_MODELS_TO_SHOW + 1,
+            filteredModelOptions.length - MAX_RECOMMENDED_MODELS_TO_SHOW,
+          ),
+        );
+  const visibleModelOptions = filteredModelOptions.slice(
+    recommendedScrollOffset,
+    recommendedScrollOffset + MAX_RECOMMENDED_MODELS_TO_SHOW,
+  );
+
+  const syncModelIds = useCallback(
+    (customText: string, recommendationKeys: string[]) => {
+      flow.changeModelIds(
+        mergeModelIds(customText, recommendationKeys).join(', '),
+      );
+    },
+    [flow],
+  );
+
+  const handleSubmitModelIds = useCallback(() => {
+    flow.submitModelIds({
+      modelIds: mergeModelIds(customModelIdsText, selectedRecommendationKeys),
+    });
+  }, [customModelIdsText, flow, selectedRecommendationKeys]);
+
+  const handleCustomModelIdsChange = useCallback(
+    (value: string) => {
+      setCustomModelIdsText(value);
+      syncModelIds(value, selectedRecommendationKeys);
+    },
+    [selectedRecommendationKeys, syncModelIds],
+  );
+
+  const toggleRecommendationAtIndex = useCallback(
+    (index: number) => {
+      const item = filteredModelOptions[index];
+      if (!item) {
+        return;
+      }
+
+      const nextSet = new Set(selectedRecommendationKeys);
+      if (nextSet.has(item.key)) {
+        nextSet.delete(item.key);
+      } else {
+        nextSet.add(item.key);
+      }
+      const nextKeys = modelOptions
+        .filter((option) => nextSet.has(option.key))
+        .map((option) => option.key);
+      setSelectedRecommendationKeys(nextKeys);
+      syncModelIds(customModelIdsText, nextKeys);
+    },
+    [
+      customModelIdsText,
+      filteredModelOptions,
+      modelOptions,
+      selectedRecommendationKeys,
+      syncModelIds,
+    ],
+  );
+
+  useKeypress(
+    (key) => {
+      if (focusedModelIndex < 0) {
+        return;
+      }
+
+      if (key.name === 'tab') {
+        setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+        return;
+      }
+
+      if (key.name === 'up') {
+        setFocusedModelIndex((index) =>
+          index <= 0 ? MODEL_SEARCH_INPUT_FOCUS_INDEX : index - 1,
+        );
+        return;
+      }
+
+      if (key.name === 'down') {
+        setFocusedModelIndex((index) =>
+          Math.max(0, Math.min(index + 1, filteredModelOptions.length - 1)),
+        );
+        return;
+      }
+
+      if (key.name === 'space' || key.sequence === ' ') {
+        toggleRecommendationAtIndex(focusedModelIndex);
+        return;
+      }
+
+      if (key.name === 'return') {
+        handleSubmitModelIds();
+        return;
+      }
+    },
+    { isActive: hasSelectableModels && focusedModelIndex >= 0 },
+  );
+
+  if (hasSelectableModels) {
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Enter model IDs directly. Use commas to configure multiple models.',
+            )}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <TextInput
+            key="model-ids-input"
+            value={customModelIdsText}
+            onChange={handleCustomModelIdsChange}
+            onSubmit={handleSubmitModelIds}
+            onDown={() => {
+              setFocusedModelIndex(MODEL_SEARCH_INPUT_FOCUS_INDEX);
+            }}
+            onTab={() => {
+              setFocusedModelIndex(MODEL_SEARCH_INPUT_FOCUS_INDEX);
+            }}
+            placeholder="model-id"
+            height={3}
+            isActive={focusedModelIndex === MODEL_CUSTOM_INPUT_FOCUS_INDEX}
+          />
+        </Box>
+        <Box marginTop={0}>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Checked recommended models are applied on submit but not copied into the input.',
+            )}
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>{t('Recommended models')}</Text>
+        </Box>
+        <Box marginTop={0} flexDirection="column">
+          <Text color={theme.text.secondary}>{t('Search')}</Text>
+          <TextInput
+            key="model-search-input"
+            value={modelSearchQuery}
+            onChange={setModelSearchQuery}
+            onSubmit={handleSubmitModelIds}
+            onUp={() => setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX)}
+            onDown={() => {
+              if (filteredModelOptions.length > 0) {
+                setFocusedModelIndex(0);
+              }
+            }}
+            onTab={() => {
+              if (filteredModelOptions.length > 0) {
+                setFocusedModelIndex(0);
+              }
+            }}
+            placeholder="search"
+            isActive={focusedModelIndex === MODEL_SEARCH_INPUT_FOCUS_INDEX}
+          />
+        </Box>
+        <Box marginTop={1} flexDirection="column">
+          {visibleModelOptions.length > 0 ? (
+            visibleModelOptions.map((item, visibleIndex) => {
+              const modelIndex = recommendedScrollOffset + visibleIndex;
+              const isFocused = focusedModelIndex === modelIndex;
+              const isSelected = selectedRecommendationKeys.includes(item.key);
+              const textColor = isFocused
+                ? theme.status.success
+                : isSelected
+                  ? theme.text.accent
+                  : theme.text.primary;
+              return (
+                <Box key={item.key} alignItems="flex-start">
+                  <Box minWidth={4} flexShrink={0}>
+                    <Text color={textColor}>{isSelected ? '◉' : '○'}</Text>
+                  </Box>
+                  <Box flexGrow={1}>
+                    <Text color={textColor}>{item.label}</Text>
+                  </Box>
+                </Box>
+              );
+            })
+          ) : (
+            <Text color={theme.text.secondary}>
+              {t('No recommended models match.')}
+            </Text>
+          )}
+        </Box>
+        {flow.state.modelIdsError && (
+          <Box marginTop={1}>
+            <Text color={theme.status.error}>{flow.state.modelIdsError}</Text>
+          </Box>
+        )}
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
+            )}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box marginTop={1} flexDirection="column">
-      {defaultIds && (
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t('Enter model IDs separated by commas. Examples: {{modelIds}}', {
-              modelIds: defaultIds,
-            })}
-          </Text>
-        </Box>
-      )}
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary}>
+          {defaultIds
+            ? t('Enter model IDs separated by commas. Examples: {{modelIds}}', {
+                modelIds: defaultIds,
+              })
+            : t('Enter model IDs separated by commas.')}
+        </Text>
+      </Box>
       <Box marginTop={1}>
         <TextInput
           key="model-ids-input"

@@ -7,10 +7,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -44,6 +45,18 @@ export interface StatusLineCommandInput {
   };
   git?: {
     branch: string;
+  };
+  /**
+   * Present when the session is inside an active worktree (created by
+   * `enter_worktree`). Field names mirror claude-code's StatusLine payload
+   * so users can share statusline scripts across both CLIs.
+   */
+  worktree?: {
+    name: string;
+    path: string;
+    branch: string;
+    original_cwd: string;
+    original_branch: string;
   };
   metrics: {
     models: Record<
@@ -80,6 +93,12 @@ interface StatusLineCommandConfig {
   // clock) stays fresh even when no Agent state changes. Values < 1 are
   // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
   refreshInterval?: number;
+  // When true, ANSI color codes in the command output are preserved as-is.
+  // The renderer will not apply dimColor or theme color overrides.
+  respectUserColors?: boolean;
+  // When true, the built-in context usage indicator in the footer right
+  // section is hidden. Useful when the statusline already shows context info.
+  hideContextIndicator?: boolean;
 }
 
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
@@ -118,6 +137,12 @@ function getStatusLineConfig(
       raw.refreshInterval >= 1
     ) {
       config.refreshInterval = raw.refreshInterval;
+    }
+    if (typeof raw.respectUserColors === 'boolean') {
+      config.respectUserColors = raw.respectUserColors;
+    }
+    if (typeof raw.hideContextIndicator === 'boolean') {
+      config.hideContextIndicator = raw.hideContextIndicator;
     }
     return config;
   }
@@ -167,11 +192,13 @@ function buildMetricsPayload(
 export function useStatusLine(): {
   lines: string[];
   useThemeColors: boolean;
+  respectUserColors: boolean;
+  hideContextIndicator: boolean;
 } {
   const settings = useSettings();
   const uiState = useUIState();
   const config = useConfig();
-  const { vimEnabled, vimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -225,7 +252,11 @@ export function useStatusLine(): {
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel, branchName, streamingState } = uiState;
+  const { currentModel, branchName, activeWorktree, streamingState } = uiState;
+  // Track only the slug — equality on the whole object would re-fire on
+  // every render because `activeWorktree` is rebuilt by AppContainer's
+  // useMemo each time the sidecar reloads.
+  const worktreeSlug = activeWorktree?.slug;
   const totalToolCalls = uiState.sessionStats.metrics.tools.totalCalls;
   const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
   const totalLinesRemoved =
@@ -236,6 +267,7 @@ export function useStatusLine(): {
     currentModel: string;
     effectiveVim: string | undefined;
     branchName: string | undefined;
+    worktreeSlug: string | undefined;
     totalToolCalls: number;
     totalLinesAdded: number;
     totalLinesRemoved: number;
@@ -245,6 +277,7 @@ export function useStatusLine(): {
     currentModel,
     effectiveVim,
     branchName,
+    worktreeSlug,
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,
@@ -355,12 +388,13 @@ export function useStatusLine(): {
 
       const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
-      const contextWindowSize =
-        cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+      const contentGeneratorConfig = cfg.getContentGeneratorConfig();
+      const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: ui.currentModel || cfg.getModel(),
+        modelDisplayName: cfg.getModelDisplayName(),
+        reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,
@@ -410,7 +444,7 @@ export function useStatusLine(): {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: cfg.getModelDisplayName(),
       },
       context_window: {
         context_window_size: contextWindowSize,
@@ -426,6 +460,15 @@ export function useStatusLine(): {
       ...(ui.branchName && {
         git: {
           branch: ui.branchName,
+        },
+      }),
+      ...(ui.activeWorktree && {
+        worktree: {
+          name: ui.activeWorktree.slug,
+          path: ui.activeWorktree.path,
+          branch: ui.activeWorktree.branch,
+          original_cwd: ui.activeWorktree.originalCwd,
+          original_branch: ui.activeWorktree.originalBranch,
         },
       }),
       metrics: buildMetricsPayload(m),
@@ -536,6 +579,7 @@ export function useStatusLine(): {
       currentModel !== prev.currentModel ||
       effectiveVim !== prev.effectiveVim ||
       branchName !== prev.branchName ||
+      worktreeSlug !== prev.worktreeSlug ||
       totalToolCalls !== prev.totalToolCalls ||
       totalLinesAdded !== prev.totalLinesAdded ||
       totalLinesRemoved !== prev.totalLinesRemoved ||
@@ -545,6 +589,7 @@ export function useStatusLine(): {
       prev.currentModel = currentModel;
       prev.effectiveVim = effectiveVim;
       prev.branchName = branchName;
+      prev.worktreeSlug = worktreeSlug;
       prev.totalToolCalls = totalToolCalls;
       prev.totalLinesAdded = totalLinesAdded;
       prev.totalLinesRemoved = totalLinesRemoved;
@@ -561,6 +606,7 @@ export function useStatusLine(): {
     currentModel,
     effectiveVim,
     branchName,
+    worktreeSlug,
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,
@@ -568,6 +614,23 @@ export function useStatusLine(): {
     scheduleUpdate,
     updatePullRequestNumber,
   ]);
+
+  // File edits made during a turn bypass in-memory settings; reload the user
+  // scope on idle, then re-render only if ui.statusLine changed.
+  const [settingsReloadKey, setSettingsReloadKey] = useState(0);
+  const prevStreamingForReloadRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevStreamingForReloadRef.current;
+    prevStreamingForReloadRef.current = streamingState;
+    if (prev !== streamingState && streamingState === 'idle') {
+      const before = JSON.stringify(settings.merged.ui?.statusLine);
+      settings.reloadScopeFromDisk(SettingScope.User);
+      const after = JSON.stringify(settings.merged.ui?.statusLine);
+      if (before !== after) {
+        setSettingsReloadKey((k) => k + 1);
+      }
+    }
+  }, [streamingState, settings]);
 
   // Re-execute immediately when the command itself changes (hot reload).
   // Skip the first run — the mount effect below already handles it.
@@ -589,6 +652,7 @@ export function useStatusLine(): {
     statusLinePresetUseThemeColors,
     statusLinePresetItemsKey,
     statusLineSettingsVersion,
+    settingsReloadKey,
   ]);
 
   // Re-render preset output once the async GitHub PR lookup returns.
@@ -650,5 +714,9 @@ export function useStatusLine(): {
   return {
     lines: output,
     useThemeColors: statusLinePreset?.useThemeColors === true,
+    respectUserColors:
+      statusLineConfig?.type === 'command' &&
+      statusLineConfig.respectUserColors === true,
+    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
   };
 }

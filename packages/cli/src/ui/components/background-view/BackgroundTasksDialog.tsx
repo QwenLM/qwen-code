@@ -31,6 +31,7 @@ import {
   type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
+import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
 import {
   type AgentDialogEntry,
   type DialogEntry,
@@ -301,7 +302,9 @@ const ListBody: React.FC<{
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
-              <Text color={labelColor}>{rowLabel(entry)}</Text>
+              <Text color={labelColor}>
+                {escapeAnsiCtrlCodes(rowLabel(entry))}
+              </Text>
             </Box>
           );
         })}
@@ -556,7 +559,9 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`;
+  const title = escapeAnsiCtrlCodes(
+    `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
+  );
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
@@ -628,7 +633,7 @@ const AgentDetailBody: React.FC<{
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
             const label = truncateToWidth(
-              formatActivityLabel(a.name, a.description),
+              escapeAnsiCtrlCodes(formatActivityLabel(a.name, a.description)),
               Math.max(0, maxWidth - stringWidth(prefix)),
             );
             return (
@@ -655,7 +660,9 @@ const AgentDetailBody: React.FC<{
           </Box>
           {visiblePromptLines.map((line, i) => (
             <Box key={`prompt-${i}`}>
-              <Text wrap="truncate-end">{line || ' '}</Text>
+              <Text wrap="truncate-end">
+                {escapeAnsiCtrlCodes(line) || ' '}
+              </Text>
             </Box>
           ))}
         </Fragment>
@@ -870,6 +877,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 }) => {
   const { entries, selectedIndex, dialogOpen, dialogMode } =
     useBackgroundTaskViewState();
+  const isDetailMode =
+    dialogMode === 'detail' || dialogMode === 'detail-from-panel';
   const {
     moveSelectionUp,
     moveSelectionDown,
@@ -949,8 +958,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
-      return;
+    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
@@ -958,7 +966,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, config, selectedAgentIdForActivity]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    config,
+    selectedAgentIdForActivity,
+  ]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -967,14 +981,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (
       !dialogOpen ||
-      dialogMode !== 'detail' ||
+      !isDetailMode ||
       !selectedEntryId ||
       selectedStatus !== 'running'
     )
       return;
     const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus]);
+  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus]);
 
   // Auto-fallback to the list view when the selected agent reaches a
   // terminal state while the user is watching it live. We only exit on
@@ -987,7 +1001,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     status: EntryStatus;
   } | null>(null);
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail') {
+    if (!dialogOpen || !isDetailMode) {
       initialDetailStatusRef.current = null;
       return;
     }
@@ -1019,7 +1033,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    selectedEntryId,
+    selectedStatus,
+    exitDetail,
+  ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
   // Foreground entries: first `x` arms; second `x` confirms. Background
@@ -1154,7 +1175,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     hints.push('\u2190/Esc close');
   } else {
-    hints.push('\u2190 go back', 'Esc/Enter/Space close');
+    hints.push('\u2190 back', 'Esc close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {

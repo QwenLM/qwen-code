@@ -52,6 +52,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Edit: 'edit',
   EditTool: 'edit',
 
+  // Notebook Edit tool — also matched by "Edit" meta-category rules
+  notebook_edit: 'notebook_edit',
+  NotebookEdit: 'notebook_edit',
+  NotebookEditTool: 'notebook_edit',
+
   // Write File tool — also matched by "Edit" meta-category rules
   write_file: 'write_file',
   WriteFile: 'write_file',
@@ -153,7 +158,7 @@ const READ_TOOLS = new Set([
  *
  * Per Claude Code docs: "Edit rules apply to all built-in tools that edit files."
  */
-const EDIT_TOOLS = new Set(['edit', 'write_file']);
+const EDIT_TOOLS = new Set(['edit', 'write_file', 'notebook_edit']);
 
 /**
  * WebFetch tools.
@@ -319,6 +324,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Edit meta-category
   edit: 'Edit',
   write_file: 'Edit',
+  notebook_edit: 'Edit',
   // Shell
   run_shell_command: 'Bash',
   // Monitor
@@ -355,7 +361,12 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
-const FILE_TARGETED_TOOLS = new Set(['read_file', 'edit', 'write_file']);
+const FILE_TARGETED_TOOLS = new Set([
+  'read_file',
+  'edit',
+  'write_file',
+  'notebook_edit',
+]);
 
 /**
  * Build minimum-scope permission rule strings from a permission check context.
@@ -541,7 +552,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands

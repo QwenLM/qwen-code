@@ -21,6 +21,7 @@ import {
 } from 'react';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
+import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
   CHAR_CODE_ESC,
@@ -164,10 +165,7 @@ export function KeypressProvider({
   );
 
   useEffect(() => {
-    const wasRaw = stdin.isRaw;
-    if (wasRaw === false) {
-      setRawMode(true);
-    }
+    setRawMode(true);
 
     // Use pre-drained captured input passed from outside React.
     // Draining happens before render() so StrictMode's mount/cleanup/remount
@@ -195,6 +193,8 @@ export function KeypressProvider({
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+    let swallowingSgrMouse = false;
+    let sgrMouseTimeout: NodeJS.Timeout | null = null;
 
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
@@ -653,6 +653,11 @@ export function KeypressProvider({
     };
 
     const broadcast = (key: Key) => {
+      // Mark interaction so background housekeeping can defer work when the
+      // user is actively typing. Pre-filters above (DA1/DA2/Kitty queries,
+      // FOCUS_IN/OUT) early-return before reaching broadcast, so terminal
+      // protocol noise does not count as user activity.
+      noteInteraction();
       for (const handler of subscribers) {
         handler(key);
       }
@@ -669,6 +674,42 @@ export function KeypressProvider({
         return;
       }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
+        return;
+      }
+
+      // SGR mouse sequences (\x1b[<...M or \x1b[<...m) are handled by
+      // useMouseEvents via ink's useInput pipeline. readline's CSI parser
+      // treats the `<` parameter byte as a final byte, splitting the
+      // sequence into a CSI event (\x1b[<) followed by individual character
+      // events (digits, semicolons, M/m). Without this filter, those
+      // trailing characters would appear as typed text in the input box.
+      if (swallowingSgrMouse) {
+        if (key.ctrl && key.name === 'c') {
+          swallowingSgrMouse = false;
+          if (sgrMouseTimeout) {
+            clearTimeout(sgrMouseTimeout);
+            sgrMouseTimeout = null;
+          }
+        } else {
+          if (key.name === 'm' || key.sequence === 'M') {
+            swallowingSgrMouse = false;
+            if (sgrMouseTimeout) {
+              clearTimeout(sgrMouseTimeout);
+              sgrMouseTimeout = null;
+            }
+          }
+          return;
+        }
+      }
+      if (key.sequence === `${ESC}[<`) {
+        swallowingSgrMouse = true;
+        if (sgrMouseTimeout) {
+          clearTimeout(sgrMouseTimeout);
+        }
+        sgrMouseTimeout = setTimeout(() => {
+          swallowingSgrMouse = false;
+          sgrMouseTimeout = null;
+        }, KITTY_SEQUENCE_TIMEOUT_MS);
         return;
       }
 
@@ -1142,10 +1183,7 @@ export function KeypressProvider({
 
       rl.close();
 
-      // Restore the terminal to its original state.
-      if (wasRaw === false) {
-        setRawMode(false);
-      }
+      setRawMode(false);
 
       if (backslashTimeout) {
         clearTimeout(backslashTimeout);
@@ -1154,6 +1192,12 @@ export function KeypressProvider({
 
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
+
+      if (sgrMouseTimeout) {
+        clearTimeout(sgrMouseTimeout);
+        sgrMouseTimeout = null;
+      }
+      swallowingSgrMouse = false;
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);

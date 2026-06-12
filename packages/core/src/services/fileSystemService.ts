@@ -167,6 +167,11 @@ export function detectLineEnding(content: string): LineEnding {
   return content.includes('\r\n') ? 'crlf' : 'lf';
 }
 
+interface PreparedTextFileContent {
+  data: string | Buffer;
+  encoding?: BufferEncoding;
+}
+
 /**
  * Return the BOM byte sequence for a given encoding name, or null if the
  * encoding does not use a standard BOM. Used when writing back a file that
@@ -192,6 +197,65 @@ function getBOMBytesForEncoding(encoding: string): Buffer | null {
   }
 }
 
+function prepareTextFileContent(
+  filePath: string,
+  content: string,
+  meta?: ReadTextFileResponse['_meta'] | null,
+): PreparedTextFileContent {
+  const lineEnding = meta?.['lineEnding'] as string | undefined;
+  const shouldUseCrlf = needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
+  const normalizedContent = shouldUseCrlf
+    ? ensureCrlfLineEndings(content)
+    : content;
+  const bom = meta?.['bom'] ?? (false as boolean);
+  const encoding = meta?.['encoding'] as string | undefined;
+
+  // Check if a non-UTF-8 encoding is specified and supported by iconv-lite
+  const isNonUtf8Encoding =
+    encoding &&
+    !isUtf8CompatibleEncoding(encoding) &&
+    iconvEncodingExists(encoding);
+
+  if (isNonUtf8Encoding) {
+    // Non-UTF-8 encoding (e.g. GBK, Big5, Shift_JIS, UTF-16LE, UTF-32BE…)
+    // Use iconv-lite to encode the content. When the file originally had a BOM
+    // (bom: true), prepend the correct BOM bytes for this encoding so the
+    // byte-order mark is preserved on write-back.
+    const encoded = iconvEncode(normalizedContent, encoding);
+    if (bom) {
+      const bomBytes = getBOMBytesForEncoding(encoding);
+      return {
+        data: bomBytes ? Buffer.concat([bomBytes, encoded]) : encoded,
+      };
+    }
+    return { data: encoded };
+  }
+
+  if (bom) {
+    // UTF-8 BOM: prepend EF BB BF
+    // If content already starts with the BOM character, strip it first to avoid double BOM.
+    const contentWithoutBom =
+      normalizedContent.charCodeAt(0) === 0xfeff
+        ? normalizedContent.slice(1)
+        : normalizedContent;
+    const bomBuffer = Buffer.from([0xef, 0xbb, 0xbf]);
+    const contentBuffer = Buffer.from(contentWithoutBom, 'utf-8');
+    return { data: Buffer.concat([bomBuffer, contentBuffer]) };
+  }
+
+  return { data: normalizedContent, encoding: 'utf-8' };
+}
+
+export function encodeTextFileContent(
+  filePath: string,
+  content: string,
+  meta?: ReadTextFileResponse['_meta'] | null,
+): Buffer {
+  const prepared = prepareTextFileContent(filePath, content, meta);
+  if (Buffer.isBuffer(prepared.data)) return prepared.data;
+  return Buffer.from(prepared.data, prepared.encoding ?? 'utf-8');
+}
+
 /**
  * Standard file system implementation
  */
@@ -215,52 +279,13 @@ export class StandardFileSystemService implements FileSystemService {
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
-    const lineEnding = _meta?.['lineEnding'] as string | undefined;
-    // Convert LF to CRLF when:
-    // 1. The file type requires it (e.g. .bat, .cmd on Windows), OR
-    // 2. The original file used CRLF line endings (preserve original style)
-    const shouldUseCrlf =
-      needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
-    const content = shouldUseCrlf
-      ? ensureCrlfLineEndings(params.content)
-      : params.content;
-    const bom = _meta?.['bom'] ?? (false as boolean);
-    const encoding = _meta?.['encoding'] as string | undefined;
-
-    // Check if a non-UTF-8 encoding is specified and supported by iconv-lite
-    const isNonUtf8Encoding =
-      encoding &&
-      !isUtf8CompatibleEncoding(encoding) &&
-      iconvEncodingExists(encoding);
-
-    if (isNonUtf8Encoding) {
-      // Non-UTF-8 encoding (e.g. GBK, Big5, Shift_JIS, UTF-16LE, UTF-32BE…)
-      // Use iconv-lite to encode the content. When the file originally had a BOM
-      // (bom: true), prepend the correct BOM bytes for this encoding so the
-      // byte-order mark is preserved on write-back.
-      const encoded = iconvEncode(content, encoding);
-      if (bom) {
-        const bomBytes = getBOMBytesForEncoding(encoding);
-        await atomicWriteFile(
-          filePath,
-          bomBytes ? Buffer.concat([bomBytes, encoded]) : encoded,
-        );
-      } else {
-        await atomicWriteFile(filePath, encoded);
-      }
-    } else if (bom) {
-      // UTF-8 BOM: prepend EF BB BF
-      // If content already starts with the BOM character, strip it first to avoid double BOM.
-      const normalizedContent =
-        content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
-      const bomBuffer = Buffer.from([0xef, 0xbb, 0xbf]);
-      const contentBuffer = Buffer.from(normalizedContent, 'utf-8');
-      await atomicWriteFile(
-        filePath,
-        Buffer.concat([bomBuffer, contentBuffer]),
-      );
+    const prepared = prepareTextFileContent(filePath, params.content, _meta);
+    if (Buffer.isBuffer(prepared.data)) {
+      await atomicWriteFile(filePath, prepared.data);
     } else {
-      await atomicWriteFile(filePath, content, { encoding: 'utf-8' });
+      await atomicWriteFile(filePath, prepared.data, {
+        encoding: prepared.encoding ?? 'utf-8',
+      });
     }
     return { _meta };
   }

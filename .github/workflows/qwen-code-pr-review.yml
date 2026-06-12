@@ -2,7 +2,14 @@ name: '🧐 Qwen Pull Request Review'
 
 on:
   pull_request_target:
-    types: ['opened']
+    types:
+      - 'opened'
+      - 'synchronize'
+      - 'reopened'
+      - 'ready_for_review'
+      - 'review_requested'
+  issue_comment:
+    types: ['created']
   pull_request_review_comment:
     types: ['created']
   pull_request_review:
@@ -13,178 +20,410 @@ on:
         description: 'PR number to review'
         required: true
         type: 'number'
+      review_mode:
+        description: 'dry-run (no comments) or comment (post inline comments)'
+        required: true
+        default: 'comment'
+        type: 'choice'
+        options:
+          - 'dry-run'
+          - 'comment'
+      timeout_minutes:
+        description: 'Review timeout in minutes'
+        required: false
+        default: '90'
+        type: 'number'
+
+concurrency:
+  # PR lifecycle events share a PR-scoped group so new pushes restart the delay.
+  # Comment/review events use per-run groups to avoid cancelling active reviews.
+  group: >-
+    ${{ github.event_name == 'pull_request_target' &&
+    format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
+    format('qwen-pr-review-run-{0}', github.run_id) }}
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
-  review-pr:
+  ack-review-request:
+    # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     if: |-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_target' &&
-       github.event.action == 'opened' &&
-       (github.event.pull_request.author_association == 'OWNER' ||
-        github.event.pull_request.author_association == 'MEMBER' ||
-        github.event.pull_request.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        github.event.issue.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review' &&
-        contains(github.event.review.body, '@qwen /review') &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.review.body == '@qwen-code /review' ||
+         startsWith(github.event.review.body, '@qwen-code /review ') ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
-    timeout-minutes: 15
+    concurrency:
+      group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
+      cancel-in-progress: false
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
     permissions:
-      contents: 'read'
-      id-token: 'write'
       pull-requests: 'write'
       issues: 'write'
     steps:
-      - name: 'Checkout PR code'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+      - name: 'Post queued acknowledgement'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          EXISTING_ACK_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )" || EXISTING_ACK_ID=""
+          if [ -n "$EXISTING_ACK_ID" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
+              -f body="$ACK_BODY" > /dev/null
+            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$ACK_BODY"
+            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  review-config:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'review_requested'
+    runs-on: 'ubuntu-latest'
+    permissions: {}
+    outputs:
+      bot_login: '${{ steps.values.outputs.bot_login }}'
+    steps:
+      - name: 'Set review constants'
+        id: 'values'
+        run: |-
+          echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
+
+  delay-automatic-review:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'synchronize') &&
+      github.event.pull_request.state == 'open' &&
+      !github.event.pull_request.draft &&
+      (github.event.pull_request.author_association == 'OWNER' ||
+       github.event.pull_request.author_association == 'MEMBER' ||
+       github.event.pull_request.author_association == 'COLLABORATOR')
+    runs-on: 'ubuntu-latest'
+    # Configured in repo settings with a 30-minute wait timer.
+    environment:
+      name: 'qwen-pr-review-delay'
+      deployment: false
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+    outputs:
+      should_review: '${{ steps.pr_state.outputs.should_review }}'
+    steps:
+      - name: 'Re-check PR state'
+        id: 'pr_state'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+
+          if [ "$state" != "OPEN" ]; then
+            echo "Skipping delayed review: PR #${PR_NUMBER} is ${state}." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$is_draft" = "true" ]; then
+            echo "Skipping delayed review: PR #${PR_NUMBER} is draft." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_review=true" >> "$GITHUB_OUTPUT"
+
+  authorize-review-request:
+    needs: ['review-config']
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'review_requested' &&
+      github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
+      github.event.pull_request.state == 'open' &&
+      !github.event.pull_request.draft
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    outputs:
+      should_review: '${{ steps.sender_permission.outputs.should_review }}'
+    steps:
+      - name: 'Check requester permission'
+        id: 'sender_permission'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REQUESTER: '${{ github.event.sender.login }}'
+        run: |-
+          set -euo pipefail
+          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${REQUESTER}/permission" --jq '.permission')"; then
+            echo "Failed to check permission for ${REQUESTER}." >&2
+            echo "Failed to check permission for ${REQUESTER}." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$permission" in
+            admin|maintain|write)
+              echo "should_review=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Skipping requested review: ${REQUESTER} lacks write permission or permission check failed." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_review=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+  review-pr:
+    needs:
+      ['review-config', 'delay-automatic-review', 'authorize-review-request']
+    # pull_request_target routing:
+    # - review_requested uses authorize-review-request and skips delay
+    # - opened/synchronize uses delay-automatic-review
+    # - reopened/ready_for_review runs immediately for trusted PR authors
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
+    if: |-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.state == 'open' &&
+       !github.event.pull_request.draft &&
+       ((github.event.action == 'review_requested' &&
+         github.event.requested_reviewer.login == needs.review-config.outputs.bot_login &&
+         needs.authorize-review-request.outputs.should_review == 'true') ||
+        (github.event.action != 'review_requested' &&
+         ((github.event.action != 'opened' &&
+           github.event.action != 'synchronize') ||
+          needs.delay-automatic-review.outputs.should_review == 'true') &&
+         (github.event.pull_request.author_association == 'OWNER' ||
+          github.event.pull_request.author_association == 'MEMBER' ||
+          github.event.pull_request.author_association == 'COLLABORATOR')))) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.issue.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.comment.body == '@qwen-code /review' ||
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request_review' &&
+        github.event.pull_request.state == 'open' &&
+        (github.event.review.body == '@qwen-code /review' ||
+         startsWith(github.event.review.body, '@qwen-code /review ') ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+        (github.event.review.author_association == 'OWNER' ||
+         github.event.review.author_association == 'MEMBER' ||
+         github.event.review.author_association == 'COLLABORATOR')))
+    timeout-minutes: 90
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      # SECURITY: checkout trusted base code; /review fetches PR diff context.
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          token: '${{ secrets.GITHUB_TOKEN }}'
+          ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
 
-      - name: 'Get PR details (pull_request_target & workflow_dispatch)'
-        id: 'get_pr'
-        if: |-
-          ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
+      - name: 'Resolve PR context'
+        id: 'context'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          TRIGGER_BODY: "${{ github.event.comment.body || github.event.review.body || '' }}"
         run: |-
+          set -euo pipefail
+          TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER=${{ github.event.inputs.pr_number }}
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            REVIEW_MODE="${{ github.event.inputs.review_mode }}"
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            PR_NUMBER="${{ github.event.issue.number }}"
+            REVIEW_MODE="comment"
+          elif [ "${{ github.event_name }}" = "pull_request_target" ] ||
+               [ "${{ github.event_name }}" = "pull_request_review_comment" ] ||
+               [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            if [ "${{ github.event_name }}" != "pull_request_target" ] &&
+               ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            REVIEW_MODE="comment"
           else
-            PR_NUMBER=${{ github.event.pull_request.number }}
+            echo "Unsupported event: ${{ github.event_name }}" >&2
+            exit 1
           fi
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          # Get PR details
-          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,additions,deletions,changedFiles,baseRefName,headRefName)
-          echo "pr_data=$PR_DATA" >> "$GITHUB_OUTPUT"
-          # Get file changes
-          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only)
-          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: 'Get PR details (issue_comment)'
-        id: 'get_pr_comment'
-        if: |-
-          ${{ github.event_name == 'issue_comment' }}
+          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
+
+          {
+            echo "should_run=true"
+            echo "pr_number=$PR_NUMBER"
+            echo "review_mode=$REVIEW_MODE"
+            echo "timeout_minutes=$TIMEOUT_MINUTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Run review'
+        id: 'review'
+        if: "steps.context.outputs.should_run == 'true'"
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          COMMENT_BODY: '${{ github.event.comment.body }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
+          TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
         run: |-
-          PR_NUMBER=${{ github.event.issue.number }}
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          # Extract additional instructions from comment
-          ADDITIONAL_INSTRUCTIONS=$(echo "$COMMENT_BODY" | sed 's/.*@qwen \/review//' | xargs)
-          echo "additional_instructions=$ADDITIONAL_INSTRUCTIONS" >> "$GITHUB_OUTPUT"
-          # Get PR details
-          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,additions,deletions,changedFiles,baseRefName,headRefName)
-          echo "pr_data=$PR_DATA" >> "$GITHUB_OUTPUT"
-          # Get file changes
-          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only)
-          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          fail() {
+            local message="$1"
+            local code="${2:-1}"
+            echo "$message" >&2
+            echo "failure_reason=$message" >> "$GITHUB_OUTPUT"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit "$code"
+          }
 
-      - name: 'Run Qwen PR Review'
-        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+          REPO="${GITHUB_REPOSITORY}"
+          REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+          LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
+          trap 'rm -f "$LOG_PATH"' EXIT
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            fail "CI_BOT_PAT secret is required for Qwen PR review."
+          fi
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            fail "REVIEW_OPENAI_API_KEY secret is required for Qwen PR review."
+          fi
+          if [ -z "${OPENAI_BASE_URL:-}" ]; then
+            fail "REVIEW_OPENAI_BASE_URL secret is required for Qwen PR review."
+          fi
+          if ! command -v qwen >/dev/null 2>&1; then
+            fail "qwen CLI is required on the review runner."
+          fi
+          qwen --version
+
+          case "$TIMEOUT_MINUTES" in
+            ''|*[!0-9]*)
+              fail "Invalid timeout_minutes: ${TIMEOUT_MINUTES}"
+              ;;
+          esac
+          if [ "$TIMEOUT_MINUTES" -le 5 ]; then
+            fail "timeout_minutes must be greater than 5"
+          fi
+          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
+            fail "timeout_minutes must not exceed the 90 minute job timeout"
+          fi
+
+          if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then
+            fail "Failed to determine state for PR #${PR_NUMBER}."
+          fi
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          PROMPT="/review ${REVIEW_URL}"
+          if [ "$REVIEW_MODE" = "comment" ]; then
+            PROMPT="${PROMPT} --comment"
+          fi
+
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+
+          QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))
+          set +e
+          # GNU timeout times out command children unless --foreground is used.
+          timeout --kill-after=10s "${QWEN_TIMEOUT}m" qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "$PROMPT" \
+            --output-format stream-json \
+            | tee "$LOG_PATH"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          qwen_status="${pipeline_status[0]}"
+          tee_status="${pipeline_status[1]}"
+
+          if [ "$tee_status" -ne 0 ]; then
+            fail "Failed to write qwen review log."
+          fi
+          if [ "$qwen_status" -eq 124 ]; then
+            fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes."
+          fi
+          if [ "$qwen_status" -ne 0 ]; then
+            fail "Qwen review exited with status ${qwen_status}."
+          fi
+
+          if [ ! -s "$LOG_PATH" ]; then
+            fail "Qwen review completed but produced no output."
+          fi
+
+      - name: 'Post fallback comment on failure'
+        if: |-
+          failure() &&
+          steps.context.outputs.should_run == 'true' &&
+          steps.context.outputs.review_mode == 'comment' &&
+          steps.context.outputs.pr_number != ''
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_NUMBER: '${{ steps.get_pr.outputs.pr_number || steps.get_pr_comment.outputs.pr_number }}'
-          PR_DATA: '${{ steps.get_pr.outputs.pr_data || steps.get_pr_comment.outputs.pr_data }}'
-          CHANGED_FILES: '${{ steps.get_pr.outputs.changed_files || steps.get_pr_comment.outputs.changed_files }}'
-          ADDITIONAL_INSTRUCTIONS: '${{ steps.get_pr.outputs.additional_instructions || steps.get_pr_comment.outputs.additional_instructions }}'
-          REPOSITORY: '${{ github.repository }}'
-        with:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-          settings_json: |-
-            {
-              "coreTools": [
-                "run_shell_command",
-                "write_file"
-              ],
-              "sandbox": false
-            }
-          prompt: |-
-            You are an expert code reviewer. You have access to shell commands to gather PR information and perform the review.
-
-            IMPORTANT: Use the available shell commands to gather information. Do not ask for information to be provided.
-
-            Start by running these commands to gather the required data:
-            1. Run: echo "$PR_DATA" to get PR details (JSON format)
-            2. Run: echo "$CHANGED_FILES" to get the list of changed files
-            3. Run: echo "$PR_NUMBER" to get the PR number
-            4. Run: echo "$ADDITIONAL_INSTRUCTIONS" to see any specific review instructions from the user
-            5. Run: gh pr diff $PR_NUMBER to see the full diff
-            6. For any specific files, use: cat filename, head -50 filename, or tail -50 filename
-
-            Additional Review Instructions:
-            If ADDITIONAL_INSTRUCTIONS contains text, prioritize those specific areas or focus points in your review.
-            Common instruction examples: "focus on security", "check performance", "review error handling", "check for breaking changes"
-
-            Once you have the information, provide a comprehensive code review by:
-            1. Writing your review to a file: write_file("review.md", "<your detailed review feedback here>")
-            2. Posting the review: gh pr comment $PR_NUMBER --body-file review.md --repo $REPOSITORY
-
-            Review Areas:
-            - **Security**: Authentication, authorization, input validation, data sanitization
-            - **Performance**: Algorithms, database queries, caching, resource usage
-            - **Reliability**: Error handling, logging, testing coverage, edge cases
-            - **Maintainability**: Code structure, documentation, naming conventions
-            - **Functionality**: Logic correctness, requirements fulfillment
-
-            Output Format:
-            Structure your review using this exact format with markdown:
-
-            ## 📋 Review Summary
-            Provide a brief 2-3 sentence overview of the PR and overall assessment.
-
-            ## 🔍 General Feedback
-            - List general observations about code quality
-            - Mention overall patterns or architectural decisions
-            - Highlight positive aspects of the implementation
-            - Note any recurring themes across files
-
-            ## 🎯 Specific Feedback
-            Only include sections below that have actual issues. If there are no issues in a priority category, omit that entire section.
-
-            ### 🔴 Critical
-            (Only include this section if there are critical issues)
-            Issues that must be addressed before merging (security vulnerabilities, breaking changes, major bugs):
-            - **File: `filename:line`** - Description of critical issue with specific recommendation
-
-            ### 🟡 High
-            (Only include this section if there are high priority issues)
-            Important issues that should be addressed (performance problems, design flaws, significant bugs):
-            - **File: `filename:line`** - Description of high priority issue with suggested fix
-
-            ### 🟢 Medium
-            (Only include this section if there are medium priority issues)
-            Improvements that would enhance code quality (style issues, minor optimizations, better practices):
-            - **File: `filename:line`** - Description of medium priority improvement
-
-            ### 🔵 Low
-            (Only include this section if there are suggestions)
-            Nice-to-have improvements and suggestions (documentation, naming, minor refactoring):
-            - **File: `filename:line`** - Description of suggestion or enhancement
-
-            **Note**: If no specific issues are found in any category, simply state "No specific issues identified in this review."
-
-            ## ✅ Highlights
-            (Only include this section if there are positive aspects to highlight)
-            - Mention specific good practices or implementations
-            - Acknowledge well-written code sections
-            - Note improvements from previous versions
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          FAILURE_REASON: "${{ steps.review.outputs.failure_reason || 'Run review failed. See workflow logs for details.' }}"
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "_Qwen Code review did not complete successfully: ${FAILURE_REASON} See [workflow logs](${RUN_URL})._"

@@ -61,14 +61,14 @@ describe('findGoalToRestore', () => {
     ).toBeNull();
   });
 
-  it('returns the condition when last goal_status is set', () => {
+  it('returns the condition (iterations 0) when last goal_status is set', () => {
     expect(
       findGoalToRestore([
         goalItem({ kind: 'achieved', condition: 'old goal' }),
         goalItem({ kind: 'set', condition: 'fresh goal' }),
         userItem(),
       ]),
-    ).toBe('fresh goal');
+    ).toEqual({ condition: 'fresh goal', iterations: 0 });
   });
 
   it('returns the condition when last goal_status is checking', () => {
@@ -78,7 +78,17 @@ describe('findGoalToRestore', () => {
         userItem(),
         goalItem({ kind: 'checking', condition: 'fresh goal' }),
       ]),
-    ).toBe('fresh goal');
+    ).toEqual({ condition: 'fresh goal', iterations: 0 });
+  });
+
+  it('carries the running iteration count from a checking item', () => {
+    expect(
+      findGoalToRestore([
+        goalItem({ kind: 'set', condition: 'fresh goal' }),
+        userItem(),
+        goalItem({ kind: 'checking', condition: 'fresh goal', iterations: 7 }),
+      ]),
+    ).toEqual({ condition: 'fresh goal', iterations: 7 });
   });
 
   it('returns null when last goal_status is cleared', () => {
@@ -98,6 +108,15 @@ describe('findGoalToRestore', () => {
       ]),
     ).toBeNull();
   });
+
+  it('returns null when last goal_status is failed', () => {
+    expect(
+      findGoalToRestore([
+        goalItem({ kind: 'set', condition: 'do x' }),
+        goalItem({ kind: 'failed', condition: 'do x' }),
+      ]),
+    ).toBeNull();
+  });
 });
 
 describe('restoreGoalFromHistory', () => {
@@ -112,6 +131,23 @@ describe('restoreGoalFromHistory', () => {
     );
     expect(result).toEqual({ restored: true, condition: 'write hello' });
     expect(getActiveGoal('sess-1')).toMatchObject({ condition: 'write hello' });
+  });
+
+  it('resumes the iteration count so the MAX cap is not reset on resume', () => {
+    const cfg = makeConfig();
+    const result = restoreGoalFromHistory(
+      [
+        goalItem({ kind: 'set', condition: 'write hello' }),
+        userItem(),
+        goalItem({ kind: 'checking', condition: 'write hello', iterations: 7 }),
+      ],
+      cfg,
+    );
+    expect(result).toEqual({ restored: true, condition: 'write hello' });
+    expect(getActiveGoal('sess-1')).toMatchObject({
+      condition: 'write hello',
+      iterations: 7,
+    });
   });
 
   it('does nothing when no goal_status item exists', () => {
@@ -269,5 +305,22 @@ describe('findLastTerminalGoal', () => {
     ]);
     expect(result?.kind).toBe('aborted');
     expect(result?.condition).toBe('goal B');
+  });
+
+  it('returns failed when it is the most recent terminal', () => {
+    const result = findLastTerminalGoal([
+      goalItem({ kind: 'achieved', condition: 'goal A' }),
+      goalItem({ kind: 'set', condition: 'goal B' }),
+      goalItem({
+        kind: 'failed',
+        condition: 'goal B',
+        lastReason: 'external service unavailable',
+      }),
+    ]);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      condition: 'goal B',
+      lastReason: 'external service unavailable',
+    });
   });
 });

@@ -1,0 +1,59 @@
+.message {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.prefix {
+  width: 2ch;
+  flex-shrink: 0;
+}
+
+.body {
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--text-secondary);
+}
+
+.accent {
+  color: var(--accent-color);
+}
+
+.success {
+  color: var(--success-color);
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.row {
+  display: flex;
+  gap: 1ch;
+  min-width: 0;
+}
+
+.label {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

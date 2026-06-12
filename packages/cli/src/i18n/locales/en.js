@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
+  'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -84,6 +85,8 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'for help on Qwen Code',
   'show version info': 'show version info',
+  'show paths for current session files and logs':
+    'show paths for current session files and logs',
   'submit a bug report': 'submit a bug report',
   Status: 'Status',
 
@@ -110,7 +113,43 @@ export default {
     'Analyzes the project and creates a tailored QWEN.md file.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'List available Qwen Code tools. Usage: /tools [desc]',
-  'List available skills.': 'List available skills.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Open the skills panel (browse, search, toggle, pick).',
+  'Move this session to a new working directory':
+    'Move this session to a new working directory',
+  // SkillsManagerDialog (the panel `/skills` opens)
+  'Manage Skills': 'Manage Skills',
+  'Skills configuration saved.': 'Skills configuration saved.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.',
+  'SkillManager not available.': 'SkillManager not available.',
+  'Loading skills…': 'Loading skills…',
+  'Failed to load skills: {{error}}': 'Failed to load skills: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'Failed to save skills configuration: {{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
+  'Press esc to close.': 'Press esc to close.',
+  '{{count}} skills · ': '{{count}} skills · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} skills · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
+  'Search:': 'Search:',
+  'type to filter…': 'type to filter…',
+  'No skills are currently available.': 'No skills are currently available.',
+  'All available skills are locked at a higher scope (see below).':
+    'All available skills are locked at a higher scope (see below).',
+  'No skills match the search.': 'No skills match the search.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Locked by higher-scope settings (cannot toggle here):',
+  'higher scope': 'higher scope',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [locked: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navigate · backspace edits search',
+  Bundled: 'Bundled',
   'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
@@ -187,13 +226,14 @@ export default {
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    'Fast context compression without AI. Strips old tool outputs and thinking parts.',
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
-  'Configure authentication information for login':
-    'Configure authentication information for login',
-  'Copy the last result or code snippet to clipboard':
-    'Copy the last result or code snippet to clipboard',
+  'Connect an LLM provider': 'Connect an LLM provider',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copy the last AI response to clipboard (/copy N for Nth-latest)',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
@@ -472,12 +512,11 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Default',
+  'Ask permissions': 'Ask permissions',
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
-  'check session stats. Usage: /stats [model|tools]':
-    'check session stats. Usage: /stats [model|tools]',
+  'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
@@ -585,6 +624,7 @@ export default {
     'The name of the extension to update.',
   'Either an extension name or --all must be provided':
     'Either an extension name or --all must be provided',
+  'List installed extensions': 'List installed extensions',
   'Lists installed extensions.': 'Lists installed extensions.',
   'Path:': 'Path:',
   'Source:': 'Source:',
@@ -741,6 +781,8 @@ export default {
   'After tool execution fails': 'After tool execution fails',
   'When notifications are sent': 'When notifications are sent',
   'When the user submits a prompt': 'When the user submits a prompt',
+  'When a slash command expands into a prompt':
+    'When a slash command expands into a prompt',
   'When a new session is started': 'When a new session is started',
   'Right before Qwen Code concludes its response':
     'Right before Qwen Code concludes its response',
@@ -766,6 +808,8 @@ export default {
     'Input to command is JSON with notification message and type.',
   'Input to command is JSON with original user prompt text.':
     'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
     'Input to command is JSON with session start source.',
   'Input to command is JSON with session end reason.':
@@ -794,6 +838,8 @@ export default {
     'show stderr to user only but continue with tool call',
   'block processing, erase original prompt, and show stderr to user only':
     'block processing, erase original prompt, and show stderr to user only',
+  'block expanded prompt submission and show stderr to user only':
+    'block expanded prompt submission and show stderr to user only',
   'stdout shown to Qwen': 'stdout shown to Qwen',
   'show stderr to user only (blocking errors ignored)':
     'show stderr to user only (blocking errors ignored)',
@@ -840,6 +886,25 @@ export default {
   'Resume a previous session': 'Resume a previous session',
   'Fork the current conversation into a new session':
     'Fork the current conversation into a new session',
+  'Spawn a background agent that inherits the full conversation':
+    'Spawn a background agent that inherits the full conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Please provide a directive. Usage: /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork before the first conversation turn.':
+    'Cannot fork before the first conversation turn.',
+  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
+    'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
+  'The agent tool is unavailable; cannot fork.':
+    'The agent tool is unavailable; cannot fork.',
+  'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
+  'the background agent could not be started.':
+    'the background agent could not be started.',
+  'User launched a background fork via /fork: {{directive}}':
+    'User launched a background fork via /fork: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'No conversation to branch.': 'No conversation to branch.',
@@ -885,12 +950,13 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Tool Approval Mode',
-  '{{mode}} mode': '{{mode}} mode',
   'Analyze only, do not modify files or execute commands':
     'Analyze only, do not modify files or execute commands',
   'Require approval for file edits or shell commands':
     'Require approval for file edits or shell commands',
   'Automatically approve file edits': 'Automatically approve file edits',
+  'Use classifier to automatically approve safe tool calls':
+    'Use classifier to automatically approve safe tool calls',
   'Automatically approve all tools': 'Automatically approve all tools',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
@@ -900,6 +966,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  'Auto-skill: {{status}}': 'Auto-skill: {{status}}',
   never: 'never',
   on: 'on',
   off: 'off',
@@ -1155,9 +1222,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Welcome back! (Last updated: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Overall Goal:',
-  'Select Authentication Method': 'Select Authentication Method',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+  'Connect a Provider': 'Connect a Provider',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'You must connect a provider to proceed. Press Ctrl+C again to exit.',
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1894,6 +1961,21 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Show current process memory diagnostics':
+    'Show current process memory diagnostics',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Record a CPU profile for Chrome DevTools analysis',
+  'Roll back a standalone update to the previous version':
+    'Roll back a standalone update to the previous version',
+  'Rollback is not available in ACP mode.':
+    'Rollback is not available in ACP mode.',
+  'Rollback is only available for standalone installations.':
+    'Rollback is only available for standalone installations.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Rollback successful. Restart your terminal to use the previous version.',
+  'Rollback failed:': 'Rollback failed:',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
@@ -1948,4 +2030,87 @@ export default {
   'Loading suggestions...': 'Loading suggestions...',
   'Show per-item context usage breakdown.':
     'Show per-item context usage breakdown.',
+  'No compression needed.': 'No compression needed.',
+
+  // ============================================================================
+  // Stats
+  // ============================================================================
+
+  // statsCommand non-interactive output
+  'Session duration: {{duration}}': 'Session duration: {{duration}}',
+  'Prompts: {{count}}': 'Prompts: {{count}}',
+  'API requests: {{count}}': 'API requests: {{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Tokens — prompt: {{prompt}}, output: {{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)',
+  'Files: +{{added}} / -{{removed}} lines':
+    'Files: +{{added}} / -{{removed}} lines',
+  prompt: 'prompt',
+  output: 'output',
+  cached: 'cached',
+  'Estimated cost: ${{cost}}': 'Estimated cost: ${{cost}}',
+  'No model usage data yet.': 'No model usage data yet.',
+  'No tool usage data yet.': 'No tool usage data yet.',
+
+  // StatsDialog
+  Models: 'Models',
+  'All time': 'All time',
+  'Last 7 days': 'Last 7 days',
+  'Last 30 days': 'Last 30 days',
+  'N/A': 'N/A',
+  Sessions: 'Sessions',
+  days: 'days',
+  Input: 'Input',
+  'Tool calls': 'Tool calls',
+  'Code changes': 'Code changes',
+  Projects: 'Projects',
+  Name: 'Name',
+  Duration: 'Duration',
+  'Activity Heatmap': 'Activity Heatmap',
+  'Loading stats...': 'Loading stats...',
+  '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
+    '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close',
+  Cost: 'Cost',
+  Less: 'Less',
+  More: 'More',
+  '(no data)': '(no data)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — labels
+  Session: 'Session',
+  Activity: 'Activity',
+  Efficiency: 'Efficiency',
+  Success: 'Success',
+  Today: 'Today',
+  'Cache Hit Rate': 'Cache Hit Rate',
+  'Tool Success': 'Tool Success',
+  'Tool Leaderboard': 'Tool Leaderboard',
+  Time: 'Time',
+  Cache: 'Cache',
+  Latency: 'Latency',
+  'Code Impact': 'Code Impact',
+  'Failed to load stats. Press r to retry.':
+    'Failed to load stats. Press r to retry.',
+  net: 'net',
+  streak: 'streak',
+  best: 'best',
+  'Token Trend': 'Token Trend',
+  'In/Out': 'In/Out',
+  'API Requests': 'API Requests',
+  'Tool Calls': 'Tool Calls',
+  'Success rate': 'Success rate',
+  'Code Changes': 'Code Changes',
+  Tool: 'Tool',
+  reqs: 'reqs',
+  in: 'in',
+  out: 'out',
 };

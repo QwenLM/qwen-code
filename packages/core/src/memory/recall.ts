@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
@@ -163,8 +164,26 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<RelevantAutoMemoryPromptResult> {
   const t0 = Date.now();
+  // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
+  // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
+  // recall returns nothing at all for the rest of the session. Project-
+  // level scan failures still bubble — they're the only mandatory side.
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.warn(
+        `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }),
+  ]);
+  // Project-level docs come first as a soft hint to the model-based
+  // selector and, in the heuristic fallback (`selectRelevantAutoMemoryDocuments`),
+  // as the stable-sort tie-breaker — matching the PR's "project shadows
+  // user" precedence. The model selector ranks by its own judgement so
+  // this ordering is advisory there, not enforced.
   const docs = filterExcludedAutoMemoryDocuments(
-    await scanAutoMemoryTopicDocuments(projectRoot),
+    [...projectDocs, ...userDocs],
     options.excludedFilePaths,
   );
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
@@ -219,12 +238,25 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         strategy,
       };
     } catch (error) {
-      // Distinguish deadline-triggered cancellation from real model errors
-      // so oncall debugging is not misled by the fallback log.
+      // Distinguish three cases so oncall debugging isn't misled:
+      //   - caller-driven abort (user signal / new UserQuery / session
+      //     cleanup): caller signal is aborted → heuristic fallback is
+      //     skipped below at `options.abortSignal?.aborted`, so the
+      //     result really is discarded.
+      //   - 30 s safety-net timeout in relevanceSelector: only the inner
+      //     combined signal aborts; the caller's signal is NOT aborted,
+      //     so the heuristic fallback below DOES run.
+      //   - real model error: warn at the higher level.
       if (error instanceof DOMException && error.name === 'AbortError') {
-        debugLogger.debug(
-          'Model-driven auto-memory recall cancelled by deadline; heuristic result discarded.',
-        );
+        if (options.abortSignal?.aborted) {
+          debugLogger.debug(
+            'Model-driven auto-memory recall aborted by caller; heuristic result discarded.',
+          );
+        } else {
+          debugLogger.debug(
+            'Model-driven auto-memory recall timed out (30 s safety net); heuristic fallback will run.',
+          );
+        }
       } else {
         debugLogger.warn(
           'Model-driven auto-memory recall failed; falling back to heuristic selection.',
@@ -234,8 +266,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     }
   }
 
-  // If the caller's abort signal is already set (e.g. deadline fired), skip the
-  // heuristic fallback — the result would be discarded anyway.
+  // If the caller's abort signal is already set, skip the heuristic
+  // fallback — the result would be discarded anyway.
   if (options.abortSignal?.aborted) {
     return {
       prompt: '',

@@ -11,6 +11,10 @@
  * state (messages, pending approvals, live outputs) that the UI reads.
  */
 
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -57,7 +61,7 @@ export class AgentInteractive {
   private error: string | undefined;
   private lastRoundError: string | undefined;
   private executionPromise: Promise<void> | undefined;
-  private masterAbortController = new AbortController();
+  private masterAbortController = createAbortController();
   private roundAbortController: AbortController | undefined;
   private chat: GeminiChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
@@ -137,6 +141,22 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive processing failed:', err);
     } finally {
       this.processing = false;
+      // A message enqueued during the synchronous IDLE STATUS_CHANGE
+      // emit (e.g. TeamManager flushing a held message the moment the
+      // agent settles) arrives after the dequeue loop's final empty
+      // check but while `processing` is still true — enqueueMessage
+      // sees the loop as live and won't restart it, stranding the
+      // message in the queue. Re-check here, after the flag flips.
+      // The sync prefix of the restarted loop re-arms `processing`
+      // before any interleaved enqueueMessage can observe it false,
+      // so the two restart paths can't double-run.
+      if (
+        this.queue.size > 0 &&
+        !this.masterAbortController.signal.aborted &&
+        !isTerminalStatus(this.status)
+      ) {
+        this.executionPromise = this.runLoop();
+      }
     }
   }
 
@@ -150,14 +170,9 @@ export class AgentInteractive {
     this.setStatus(AgentStatus.RUNNING);
     this.lastRoundError = undefined;
     this.roundCancelledByUser = false;
-    this.roundAbortController = new AbortController();
-
-    // Propagate master abort to round
-    const onMasterAbort = () => this.roundAbortController?.abort();
-    this.masterAbortController.signal.addEventListener('abort', onMasterAbort);
-    if (this.masterAbortController.signal.aborted) {
-      this.roundAbortController.abort();
-    }
+    this.roundAbortController = createChildAbortController(
+      this.masterAbortController,
+    );
 
     try {
       const initialMessages = [
@@ -196,10 +211,10 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive round error:', err);
       this.addMessage('info', errorMessage, { metadata: { level: 'error' } });
     } finally {
-      this.masterAbortController.signal.removeEventListener(
-        'abort',
-        onMasterAbort,
-      );
+      // Helper's reverse-cleanup detaches the parent listener automatically
+      // when the round controller aborts; abort here so cleanup fires whether
+      // or not the round was already cancelled.
+      this.roundAbortController?.abort();
       this.roundAbortController = undefined;
     }
   }
@@ -242,6 +257,14 @@ export class AgentInteractive {
     this.masterAbortController.abort();
     this.queue.drain();
     this.core.clearPendingApprovals();
+    // When no run loop is in flight (idle/initializing agent), nothing
+    // will ever observe the aborted signal and settle status — the
+    // agent would sit non-terminal forever and lifecycle gates like
+    // TeamManager's allTeammatesTerminated() would never fire. Settle
+    // it here; a live loop exits via its own aborted check instead.
+    if (!this.processing && !isTerminalStatus(this.status)) {
+      this.setStatus(AgentStatus.CANCELLED);
+    }
   }
 
   // ─── Message Queue ─────────────────────────────────────────
@@ -349,6 +372,8 @@ export class AgentInteractive {
   private settleRoundStatus(): void {
     if (this.lastRoundError && !this.roundCancelledByUser) {
       this.setStatus(AgentStatus.FAILED);
+    } else if (this.config.completeOnIdle) {
+      this.setStatus(AgentStatus.COMPLETED);
     } else {
       this.setStatus(AgentStatus.IDLE);
     }

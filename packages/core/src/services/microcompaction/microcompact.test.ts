@@ -662,3 +662,243 @@ describe('microcompactHistory', () => {
     expect(cleared.parts).toBeUndefined();
   });
 });
+
+describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
+  const TWO_HOURS_AGO = Date.now() - 2 * 60 * 60 * 1000;
+
+  function fileCall(id: string, name: string, filePath: string): Content {
+    return {
+      role: 'model',
+      parts: [{ functionCall: { id, name, args: { file_path: filePath } } }],
+    };
+  }
+
+  function fileResult(id: string, name: string, output: string): Content {
+    return {
+      role: 'user',
+      parts: [{ functionResponse: { id, name, response: { output } } }],
+    };
+  }
+
+  it('reports the file path of a blanked read_file result', () => {
+    const history: Content[] = [
+      fileCall('c0', 'read_file', '/proj/old.ts'),
+      fileResult('c0', 'read_file', 'old long content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBe(1);
+    // Only the blanked (oldest) file is reported; the kept one is not.
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/old.ts']);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('disarms ALL paths sharing a reused functionCall.id (mimo F1)', () => {
+    // Pathological/resumed history reuses one id across two files.
+    // The blanked result must disarm BOTH candidate paths — keeping
+    // the wrong one armed would resurrect the dangling-placeholder
+    // hazard. Over-disarming only costs a redundant re-read.
+    const history: Content[] = [
+      fileCall('dup', 'read_file', '/proj/first.ts'),
+      fileResult('dup', 'read_file', 'first old content '.repeat(50)),
+      fileCall('dup', 'read_file', '/proj/second.ts'),
+      fileResult('dup', 'read_file', 'second old content '.repeat(50)),
+      fileCall('c2', 'read_file', '/proj/keep.ts'),
+      fileResult('c2', 'read_file', 'kept'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect([...result.meta!.evictedReadPaths].sort()).toEqual([
+      '/proj/first.ts',
+      '/proj/second.ts',
+    ]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('reports edit and write_file paths too, deduplicated', () => {
+    const history: Content[] = [
+      fileCall('c0', 'edit', '/proj/a.ts'),
+      fileResult('c0', 'edit', 'edit output '.repeat(50)),
+      fileCall('c1', 'write_file', '/proj/a.ts'),
+      fileResult('c1', 'write_file', 'write output '.repeat(50)),
+      fileCall('c2', 'read_file', '/proj/keep.ts'),
+      fileResult('c2', 'read_file', 'kept'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(2);
+    // /proj/a.ts blanked via both edit and write_file → reported once.
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/a.ts']);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('counts a blanked read it cannot link back as unresolved (forces safe fallback)', () => {
+    const history: Content[] = [
+      // functionResponse without an id: cannot be linked to a call.
+      // This is the id-less-provider case — must NOT be silently
+      // skipped, or its fast-path stays armed and serves a dangling
+      // placeholder. It is counted so the caller falls back to the
+      // blanket wipe.
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'orphan content '.repeat(50) },
+            },
+          },
+        ],
+      },
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(1);
+  });
+
+  it('counts a blanked file call whose id has no mapped file_path as unresolved', () => {
+    const history: Content[] = [
+      // functionResponse has an id, but no functionCall carries that
+      // id with a file_path (synthetic-id / mismatch case).
+      fileResult('orphan-id', 'read_file', 'orphan content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(1);
+  });
+
+  it('does not report non-file tools (shell/grep) as evicted reads', () => {
+    const history: Content[] = [
+      fileCall('c0', 'run_shell_command', 'unused'),
+      fileResult('c0', 'run_shell_command', 'shell output '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    // Shell is not a file tool — not counted as an unresolved read.
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('returns no evictedReadPaths when nothing fires (no idle trigger)', () => {
+    const history: Content[] = [
+      fileCall('c0', 'read_file', '/proj/a.ts'),
+      fileResult('c0', 'read_file', 'content'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    // No trigger → no meta at all (and therefore no eviction data).
+    expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory — force option', () => {
+  afterEach(clearEnv);
+
+  it('force: true skips time-based trigger (fires even with recent timestamp)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    // Date.now() would normally prevent the trigger from firing,
+    // but force: true bypasses the check entirely.
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: false behaves the same as not passing opts', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'content'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS, {
+      force: false,
+    });
+
+    expect(result.meta).toBeUndefined();
+  });
+
+  it('force: true works even when threshold is disabled (-1)', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old content that is very long'),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      null,
+      { toolResultsThresholdMinutes: -1, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBeGreaterThanOrEqual(1);
+  });
+
+  it('force: true returns history unchanged when nothing to clear', () => {
+    const history: Content[] = [
+      makeUserMessage('hello'),
+      makeModelMessage('hi'),
+    ];
+
+    const result = microcompactHistory(history, null, DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    // No compactable tools → no meta
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toEqual(history);
+  });
+});

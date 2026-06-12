@@ -16,6 +16,8 @@
  * and how to interpret the results.
  */
 
+import { randomUUID } from 'node:crypto';
+import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
@@ -74,18 +76,30 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import {
+  isTeammate,
+  getTeammateContext,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
 
 /**
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to subagents (including forked agents).
+ * Tools that must never be available to non-team subagents (including
+ * forked agents spawned via the Agent tool).
  * - AgentTool prevents recursive subagent spawning.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
  *   exposing them only widens the surface for cross-agent interference if an
  *   ID leaks via prompt or transcript.
+ * - Team management (team_create/team_delete) and task coordination
+ *   (task_create/task_update/task_list) are leader/teammate tools. A
+ *   non-team Agent subagent has no teammate identity, so isTeammate()
+ *   returns false and these tools would treat it as the leader — letting
+ *   it delete or rewrite the active team.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -94,10 +108,43 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TASK_CREATE,
+  ToolNames.TASK_UPDATE,
+  ToolNames.TASK_LIST,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
+]);
+
+/**
+ * Tools excluded from teammates. Teammates need send_message and the
+ * task_* coordination tools to do their job, but they must not be able
+ * to create or destroy the team itself — only the leader can do that.
+ */
+const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  // Worktree management belongs to the parent session.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
+  // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
+  // identity propagates through AsyncLocalStorage into anything it
+  // spawns, so prepareTools() would keep choosing THIS exclusion set
+  // for nested agents — without WORKFLOW here, a teammate-launched
+  // workflow re-arms the O(k^n) fan-out the subagent set prevents.
+  ToolNames.WORKFLOW,
 ]);
 
 /**
@@ -271,7 +318,7 @@ export class AgentCore {
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
   ) {
-    const randomPart = Math.random().toString(36).slice(2, 8);
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
     this.subagentId = `${name}-${randomPart}`;
     this.name = name;
     this.runtimeContext = runtimeContext;
@@ -323,9 +370,13 @@ export class AgentCore {
     const hasInitialMessages =
       !!this.promptConfig.initialMessages &&
       this.promptConfig.initialMessages.length > 0;
-    const envHistory = hasInitialMessages
-      ? []
-      : await getInitialChatHistory(this.runtimeContext);
+    const hasSkillTool = this.willHaveSkillTool();
+    const [envHistory] = hasInitialMessages
+      ? [[]]
+      : await getInitialChatHistory(this.runtimeContext, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: hasSkillTool,
+        });
 
     const startHistory = [
       ...envHistory,
@@ -377,6 +428,25 @@ export class AgentCore {
   // ─── Tool Preparation ─────────────────────────────────────
 
   /**
+   * Returns true if this agent's effective tool surface will include the Skill
+   * tool. Used before `prepareTools()` to decide whether to inject the
+   * `<available_skills>` snapshot.
+   */
+  private willHaveSkillTool(): boolean {
+    if (!this.toolConfig) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    const asStrings = this.toolConfig.tools.filter(
+      (t): t is string => typeof t === 'string',
+    );
+    const hasWildcard = asStrings.includes('*');
+    if (hasWildcard || asStrings.length === 0) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    return asStrings.includes(ToolNames.SKILL);
+  }
+
+  /**
    * Prepares the list of tools available to this agent.
    *
    * If no explicit toolConfig or it contains "*" or is empty,
@@ -387,7 +457,9 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    const excludedFromSubagents = isTeammate()
+      ? EXCLUDED_TOOLS_FOR_TEAMMATES
+      : EXCLUDED_TOOLS_FOR_SUBAGENTS;
     // When a subagent has an explicit tools list (not wildcard), only the
     // recursive-spawn guard (AgentTool) is enforced.
     const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
@@ -407,9 +479,8 @@ export class AgentCore {
       ) {
         // Subagents inherit the full tool surface — including deferred tools
         // (MCP, low-frequency built-ins). Subagents are one-shot and don't
-        // have the same "save tokens" lifecycle as the main chat, and they
-        // don't see the "Deferred Tools" section of the system prompt, so
-        // hiding schemas would silently break existing `tools: ['*']` configs.
+        // have the same "save tokens" lifecycle as the main chat, so hiding
+        // schemas would silently break existing `tools: ['*']` configs.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
@@ -527,6 +598,15 @@ export class AgentCore {
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
    * has unwound.
    *
+   * `inheritedTeammateIdentity` restores the in-process teammate identity
+   * frame (`teammateIdentityStore`). Deferred approval needs it for the
+   * same reason as the others: when a teammate's `send_message` /
+   * `task_update` resumes from the UI chain, `getAgentName()` would
+   * otherwise be undefined and the tool would mis-attribute the message
+   * to the leader (forged `from="leader"` envelope) and slip past the
+   * leader-only `isTeammate()` guard. No-op on the reasoning-loop path,
+   * where TeamManager already establishes this frame.
+   *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
    */
@@ -534,13 +614,18 @@ export class AgentCore {
     fn: () => Promise<T>,
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
+    inheritedTeammateIdentity?: TeammateIdentity,
   ): Promise<T> {
-    return subagentNameContext.run(this.name, () => {
-      const runWithView = () => this.withRuntimeView(fn, inheritedView);
-      return inheritedAgentId
-        ? runWithAgentContext(inheritedAgentId, runWithView)
-        : runWithView();
-    });
+    const runInner = () =>
+      subagentNameContext.run(this.name, () => {
+        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        return inheritedAgentId
+          ? runWithAgentContext(inheritedAgentId, runWithView)
+          : runWithView();
+      });
+    return inheritedTeammateIdentity
+      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+      : runInner();
   }
 
   /**
@@ -590,252 +675,253 @@ export class AgentCore {
         break;
       }
 
-      // Create a new AbortController per round to avoid listener accumulation
-      // in the model SDK. The parent abortController propagates abort to it.
-      const roundAbortController = new AbortController();
-      const onParentAbort = () => roundAbortController.abort();
-      abortController.signal.addEventListener('abort', onParentAbort);
-      if (abortController.signal.aborted) {
-        roundAbortController.abort();
-      }
+      // Per-round child controller so model-SDK retry layers don't accumulate
+      // listeners on the long-lived parent. createChildAbortController handles
+      // parent propagation; the try/finally below guarantees reverse-cleanup
+      // fires for every exit (success, break, return, throw).
+      const roundAbortController = createChildAbortController(abortController);
 
-      const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+      try {
+        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
 
-      const messageParams = {
-        message: currentMessages[0]?.parts || [],
-        config: {
-          abortSignal: roundAbortController.signal,
-          tools: [{ functionDeclarations: toolsList }],
-        },
-      };
+        const messageParams = {
+          message: currentMessages[0]?.parts || [],
+          config: {
+            abortSignal: roundAbortController.signal,
+            tools: [{ functionDeclarations: toolsList }],
+          },
+        };
 
-      const roundStreamStart = Date.now();
-      const responseStream = await chat.sendMessageStream(
-        this.modelConfig.model ||
-          this.runtimeContext.getModel() ||
-          DEFAULT_QWEN_MODEL,
-        messageParams,
-        promptId,
-      );
-      this.eventEmitter?.emit(AgentEventType.ROUND_START, {
-        subagentId: this.subagentId,
-        round: turnCounter,
-        promptId,
-        timestamp: Date.now(),
-      } as AgentRoundEvent);
-
-      const functionCalls: FunctionCall[] = [];
-      let roundText = '';
-      let roundThoughtText = '';
-      let lastUsage: GenerateContentResponseUsageMetadata | undefined =
-        undefined;
-      let currentResponseId: string | undefined = undefined;
-      let wasOutputTruncated = false;
-
-      for await (const streamEvent of responseStream) {
-        if (roundAbortController.signal.aborted) {
-          abortController.signal.removeEventListener('abort', onParentAbort);
-          return {
-            text: finalText,
-            terminateMode: AgentTerminateMode.CANCELLED,
-            turnsUsed: turnCounter,
-          };
-        }
-
-        // Handle retry events — reset all per-attempt state so a successful
-        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
-        // previous attempt that may have hit MAX_TOKENS.
-        if (streamEvent.type === 'retry') {
-          functionCalls.length = 0;
-          roundText = '';
-          roundThoughtText = '';
-          lastUsage = undefined;
-          currentResponseId = undefined;
-          wasOutputTruncated = false;
-          continue;
-        }
-
-        // GeminiChat already mutated its own history; surface to the debug
-        // log so subagent compactions show up alongside the main session's.
-        if (streamEvent.type === 'compressed') {
-          this.runtimeContext
-            .getDebugLogger()
-            .debug(
-              `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
-                `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
-            );
-          continue;
-        }
-
-        // Handle chunk events
-        if (streamEvent.type === 'chunk') {
-          const resp = streamEvent.value;
-          // Track the response ID for tool call correlation
-          if (resp.responseId) {
-            currentResponseId = resp.responseId;
-          }
-          if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
-          if (resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
-            wasOutputTruncated = true;
-          }
-          const content = resp.candidates?.[0]?.content;
-          const parts = content?.parts || [];
-          for (const p of parts) {
-            const txt = p.text;
-            const isThought = p.thought ?? false;
-            if (txt && isThought) roundThoughtText += txt;
-            if (txt && !isThought) roundText += txt;
-            if (txt)
-              this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
-                subagentId: this.subagentId,
-                round: turnCounter,
-                text: txt,
-                thought: isThought,
-                timestamp: Date.now(),
-              });
-          }
-          if (resp.usageMetadata) lastUsage = resp.usageMetadata;
-        }
-      }
-
-      if (roundText || roundThoughtText) {
-        this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
+        const roundStreamStart = Date.now();
+        const responseStream = await chat.sendMessageStream(
+          this.modelConfig.model ||
+            this.runtimeContext.getModel() ||
+            DEFAULT_QWEN_MODEL,
+          messageParams,
+          promptId,
+        );
+        this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
           round: turnCounter,
-          text: roundText,
-          thoughtText: roundThoughtText,
-          timestamp: Date.now(),
-        } as AgentRoundTextEvent);
-      }
-
-      this.executionStats.rounds = turnCounter;
-      this.stats.setRounds(turnCounter);
-
-      durationMin = (Date.now() - startTime) / (1000 * 60);
-      if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
-        abortController.signal.removeEventListener('abort', onParentAbort);
-        terminateMode = AgentTerminateMode.TIMEOUT;
-        break;
-      }
-
-      // Update token usage if available
-      if (lastUsage) {
-        this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
-      }
-
-      if (functionCalls.length > 0) {
-        currentMessages = await this.processFunctionCalls(
-          functionCalls,
-          roundAbortController,
           promptId,
-          turnCounter,
-          toolsList,
-          currentResponseId,
-          wasOutputTruncated,
-        );
+          timestamp: Date.now(),
+        } as AgentRoundEvent);
 
-        const externalInputs = this.drainExternalInputs(options);
-        if (externalInputs.length > 0) {
-          // Append to the tool-response user message so external input rides
-          // alongside the tool results the model is about to see.
-          // processFunctionCalls always returns exactly one user-role entry.
-          const last = currentMessages[currentMessages.length - 1];
-          last.parts!.push(...this.externalInputsToParts(externalInputs, true));
-          // Emit one event per injection so observers (e.g. the JSONL
-          // transcript writer) can persist each external message as a
-          // user-role record. The framing prefix is stripped — the prefix
-          // is a model-facing detail, not part of the original message.
-          this.emitExternalInputEvents(externalInputs);
-        }
-      } else {
-        const immediateExternalInputs = this.drainExternalInputs(options);
-        if (immediateExternalInputs.length > 0) {
-          currentMessages = this.externalInputsToContent(
-            immediateExternalInputs,
-          );
-          this.emitExternalInputEvents(immediateExternalInputs);
-        } else if (options?.shouldWaitForExternalMessages?.()) {
-          this.eventEmitter?.emit(AgentEventType.ROUND_END, {
-            subagentId: this.subagentId,
-            round: turnCounter,
-            promptId,
-            timestamp: Date.now(),
-          } as AgentRoundEvent);
-          abortController.signal.removeEventListener('abort', onParentAbort);
+        const functionCalls: FunctionCall[] = [];
+        let roundText = '';
+        let roundThoughtText = '';
+        let lastUsage: GenerateContentResponseUsageMetadata | undefined =
+          undefined;
+        let currentResponseId: string | undefined = undefined;
+        let wasOutputTruncated = false;
 
-          const waitResult = await this.waitForExternalInputs(
-            options,
-            abortController,
-            startTime,
-            turnCounter,
-          );
-          if (waitResult.terminateMode) {
-            finalText = roundText.trim();
-            terminateMode = waitResult.terminateMode;
-            break;
+        for await (const streamEvent of responseStream) {
+          if (roundAbortController.signal.aborted) {
+            return {
+              text: finalText,
+              terminateMode: AgentTerminateMode.CANCELLED,
+              turnsUsed: turnCounter,
+            };
           }
-          if (waitResult.inputs.length > 0) {
-            currentMessages = this.externalInputsToContent(waitResult.inputs);
-            this.emitExternalInputEvents(waitResult.inputs);
+
+          // Handle retry events — reset all per-attempt state so a successful
+          // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+          // previous attempt that may have hit MAX_TOKENS.
+          if (streamEvent.type === 'retry') {
+            functionCalls.length = 0;
+            roundText = '';
+            roundThoughtText = '';
+            lastUsage = undefined;
+            currentResponseId = undefined;
+            wasOutputTruncated = false;
             continue;
           }
 
-          if (roundText && roundText.trim().length > 0) {
-            finalText = roundText.trim();
-            break;
+          // GeminiChat already mutated its own history; surface to the debug
+          // log so subagent compactions show up alongside the main session's.
+          if (streamEvent.type === 'compressed') {
+            this.runtimeContext
+              .getDebugLogger()
+              .debug(
+                `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
+                  `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+              );
+            continue;
           }
-          currentMessages = [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: 'Please provide the final result now and stop calling tools.',
-                },
-              ],
-            },
-          ];
-          continue;
+
+          // Handle chunk events
+          if (streamEvent.type === 'chunk') {
+            const resp = streamEvent.value;
+            // Track the response ID for tool call correlation
+            if (resp.responseId) {
+              currentResponseId = resp.responseId;
+            }
+            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            if (
+              resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
+            ) {
+              wasOutputTruncated = true;
+            }
+            const content = resp.candidates?.[0]?.content;
+            const parts = content?.parts || [];
+            for (const p of parts) {
+              const txt = p.text;
+              const isThought = p.thought ?? false;
+              if (txt && isThought) roundThoughtText += txt;
+              if (txt && !isThought) roundText += txt;
+              if (txt)
+                this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+                  subagentId: this.subagentId,
+                  round: turnCounter,
+                  text: txt,
+                  thought: isThought,
+                  timestamp: Date.now(),
+                });
+            }
+            if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+          }
+        }
+
+        if (roundText || roundThoughtText) {
+          this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
+            subagentId: this.subagentId,
+            round: turnCounter,
+            text: roundText,
+            thoughtText: roundThoughtText,
+            timestamp: Date.now(),
+          } as AgentRoundTextEvent);
+        }
+
+        this.executionStats.rounds = turnCounter;
+        this.stats.setRounds(turnCounter);
+
+        durationMin = (Date.now() - startTime) / (1000 * 60);
+        if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
+          terminateMode = AgentTerminateMode.TIMEOUT;
+          break;
+        }
+
+        // Update token usage if available
+        if (lastUsage) {
+          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+        }
+
+        if (functionCalls.length > 0) {
+          currentMessages = await this.processFunctionCalls(
+            functionCalls,
+            roundAbortController,
+            promptId,
+            turnCounter,
+            toolsList,
+            currentResponseId,
+            wasOutputTruncated,
+          );
+
+          const externalInputs = this.drainExternalInputs(options);
+          if (externalInputs.length > 0) {
+            // Append to the tool-response user message so external input rides
+            // alongside the tool results the model is about to see.
+            // processFunctionCalls always returns exactly one user-role entry.
+            const last = currentMessages[currentMessages.length - 1];
+            last.parts!.push(
+              ...this.externalInputsToParts(externalInputs, true),
+            );
+            // Emit one event per injection so observers (e.g. the JSONL
+            // transcript writer) can persist each external message as a
+            // user-role record. The framing prefix is stripped — the prefix
+            // is a model-facing detail, not part of the original message.
+            this.emitExternalInputEvents(externalInputs);
+          }
         } else {
-          // No tool calls — treat this as the model's final answer.
-          if (roundText && roundText.trim().length > 0) {
-            finalText = roundText.trim();
-            // Emit ROUND_END for the final round so all consumers see it.
-            // Previously this was skipped, requiring AgentInteractive to
-            // compensate with an explicit flushStreamBuffers() call.
+          const immediateExternalInputs = this.drainExternalInputs(options);
+          if (immediateExternalInputs.length > 0) {
+            currentMessages = this.externalInputsToContent(
+              immediateExternalInputs,
+            );
+            this.emitExternalInputEvents(immediateExternalInputs);
+          } else if (options?.shouldWaitForExternalMessages?.()) {
             this.eventEmitter?.emit(AgentEventType.ROUND_END, {
               subagentId: this.subagentId,
               round: turnCounter,
               promptId,
               timestamp: Date.now(),
             } as AgentRoundEvent);
-            // Clean up before breaking
-            abortController.signal.removeEventListener('abort', onParentAbort);
-            // null terminateMode = normal text completion
-            break;
+
+            const waitResult = await this.waitForExternalInputs(
+              options,
+              abortController,
+              startTime,
+              turnCounter,
+            );
+            if (waitResult.terminateMode) {
+              finalText = roundText.trim();
+              terminateMode = waitResult.terminateMode;
+              break;
+            }
+            if (waitResult.inputs.length > 0) {
+              currentMessages = this.externalInputsToContent(waitResult.inputs);
+              this.emitExternalInputEvents(waitResult.inputs);
+              continue;
+            }
+
+            if (roundText && roundText.trim().length > 0) {
+              finalText = roundText.trim();
+              break;
+            }
+            currentMessages = [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: 'Please provide the final result now and stop calling tools.',
+                  },
+                ],
+              },
+            ];
+            continue;
+          } else {
+            // No tool calls — treat this as the model's final answer.
+            if (roundText && roundText.trim().length > 0) {
+              finalText = roundText.trim();
+              // Emit ROUND_END for the final round so all consumers see it.
+              // Previously this was skipped, requiring AgentInteractive to
+              // compensate with an explicit flushStreamBuffers() call.
+              this.eventEmitter?.emit(AgentEventType.ROUND_END, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                promptId,
+                timestamp: Date.now(),
+              } as AgentRoundEvent);
+              // null terminateMode = normal text completion
+              break;
+            }
+            // Otherwise, nudge the model to finalize a result.
+            currentMessages = [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: 'Please provide the final result now and stop calling tools.',
+                  },
+                ],
+              },
+            ];
           }
-          // Otherwise, nudge the model to finalize a result.
-          currentMessages = [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: 'Please provide the final result now and stop calling tools.',
-                },
-              ],
-            },
-          ];
         }
+
+        this.eventEmitter?.emit(AgentEventType.ROUND_END, {
+          subagentId: this.subagentId,
+          round: turnCounter,
+          promptId,
+          timestamp: Date.now(),
+        } as AgentRoundEvent);
+      } finally {
+        // Reverse-cleanup fires whether the iteration ended normally, broke,
+        // returned, or threw — preventing parent-listener accumulation on
+        // long-running parents like the per-message roundAbortController in
+        // AgentInteractive or the session-lived externalSignal in headless.
+        roundAbortController.abort();
       }
-
-      this.eventEmitter?.emit(AgentEventType.ROUND_END, {
-        subagentId: this.subagentId,
-        round: turnCounter,
-        promptId,
-        timestamp: Date.now(),
-      } as AgentRoundEvent);
-
-      // Clean up the per-round listener before the next iteration
-      abortController.signal.removeEventListener('abort', onParentAbort);
     }
 
     return {
@@ -942,12 +1028,7 @@ export class AgentCore {
         return { inputs: [] };
       }
 
-      const waitAbortController = new AbortController();
-      const onAbort = () => waitAbortController.abort();
-      abortController.signal.addEventListener('abort', onAbort, { once: true });
-      if (abortController.signal.aborted) {
-        waitAbortController.abort();
-      }
+      const waitAbortController = createChildAbortController(abortController);
       let timedOut = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       if (remainingTimeMs !== undefined) {
@@ -984,7 +1065,9 @@ export class AgentCore {
         throw error;
       } finally {
         if (timeout) clearTimeout(timeout);
-        abortController.signal.removeEventListener('abort', onAbort);
+        // Aborting the child fires reverse-cleanup of its listener on the
+        // parent; no-op if it already aborted from the parent or the timeout.
+        waitAbortController.abort();
       }
     }
   }
@@ -1200,6 +1283,11 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Capture the teammate identity frame too, while the loop
+            // frame is still live, so the deferred-approval continuation
+            // can restore it. See `runInAgentFrames` for why this matters
+            // (mis-attributed `from="leader"` + leader-guard bypass).
+            const inheritedTeammateIdentity = getTeammateContext();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1209,6 +1297,7 @@ export class AgentCore {
                 waiting.request.name,
                 waiting.request.args,
               ),
+              args: waiting.request.args,
               confirmationDetails: rest,
               respond: async (
                 outcome: ToolConfirmationOutcome,
@@ -1228,6 +1317,7 @@ export class AgentCore {
                   () => waiting.confirmationDetails.onConfirm(outcome, payload),
                   inheritedView,
                   inheritedAgentId ?? undefined,
+                  inheritedTeammateIdentity,
                 );
               },
               timestamp: Date.now(),
@@ -1324,17 +1414,23 @@ export class AgentCore {
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        // If already aborted before the listener was registered, resolve
+        // immediately to avoid blocking forever.
+        if (abortController.signal.aborted) {
+          onAbort();
+        }
 
-      // If already aborted before the listener was registered, resolve
-      // immediately to avoid blocking forever.
-      if (abortController.signal.aborted) {
-        onAbort();
+        await scheduler.schedule(requests, abortController.signal);
+        await batchDone;
+      } finally {
+        // Always remove `onAbort` — otherwise a throw from scheduler.schedule
+        // or batchDone would leak it on the round controller, and the round's
+        // outer try/finally `.abort()` would later fire spurious cancellation
+        // TOOL_RESULT events for every un-emitted callId (corrupting the
+        // transcript and misleading the model on the next round).
+        abortController.signal.removeEventListener('abort', onAbort);
       }
-
-      await scheduler.schedule(requests, abortController.signal);
-      await batchDone;
-
-      abortController.signal.removeEventListener('abort', onAbort);
     }
 
     // If all tool calls failed, inform the model so it can re-evaluate.

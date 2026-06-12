@@ -44,6 +44,7 @@ import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCa
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   getErrorMessage,
   getErrorStatus,
@@ -60,6 +61,35 @@ import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
+import { hasUserVisibleContent } from './streamContentDetection.js';
+import {
+  retryContext,
+  type RetryAttemptContext,
+} from '../../utils/retryContext.js';
+
+/**
+ * Phase 4b — read the active retry context once, default attempt to 1 when
+ * absent (warmup/side-queries/direct calls). Returns the fields in the exact
+ * shape consumed by `endLLMRequestSpan` so callers can spread the result.
+ *
+ * Called in the SYNCHRONOUS PRELUDE of `generateContent` / `generateContentStream`
+ * — before the first await — because the streaming path returns an
+ * AsyncGenerator that's iterated AFTER `retryWithBackoff` has resolved and
+ * the ALS frame has exited. The closure carries this snapshot to all later
+ * endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+ */
+function snapshotRetryMetadata(): {
+  attempt: number;
+  requestSetupMs?: number;
+  retryTotalDelayMs?: number;
+} {
+  const ctx: RetryAttemptContext | undefined = retryContext.getStore();
+  return {
+    attempt: ctx?.attempt ?? 1,
+    requestSetupMs: ctx?.requestSetupMs,
+    retryTotalDelayMs: ctx?.retryTotalDelayMs,
+  };
+}
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -75,6 +105,8 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private splitToolMedia?: boolean;
+  private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -82,6 +114,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.splitToolMedia = generatorConfig.splitToolMedia;
+    this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -130,7 +164,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         prompt_id,
-        this.config.getAuthType(),
+        this.generatorAuthType,
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
@@ -160,7 +194,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         promptId: prompt_id,
-        authType: this.config.getAuthType(),
+        authType: this.generatorAuthType,
         errorMessage,
         errorType,
         statusCode: errorStatus,
@@ -209,6 +243,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
+    // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', false);
@@ -224,6 +262,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: false,
+        source: 'generateContent',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -278,7 +320,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         success: true,
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
+        cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
         durationMs: Date.now() - startTime,
+        responseId: response.responseId || undefined,
+        finishReason:
+          (response.candidates?.[0]?.finishReason as string) || undefined,
+        thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
+        subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       return response;
     } catch (error) {
@@ -295,6 +344,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        errorType: getErrorType(error),
+        errorStatusCode: getErrorStatus(error),
+        subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
@@ -317,6 +370,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Phase 4b — snapshot retry context in the synchronous prelude. This is
+    // the only point where the ALS frame from `retryWithBackoff` is guaranteed
+    // to be active for the streaming path: once this function returns the
+    // AsyncGenerator, the caller iterates AFTER `retryWithBackoff` has
+    // resolved and the frame has exited. Threaded as a parameter to
+    // loggingStreamWrapper so its closure carries the snapshot to all later
+    // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const retrySnapshot = snapshotRetryMetadata();
+
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
     try {
       llmSpan.setAttribute('llm_request.stream', true);
@@ -334,6 +396,10 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: true,
+        source: 'generateContentStream',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -370,6 +436,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        errorType: getErrorType(error),
+        errorStatusCode: getErrorStatus(error),
+        subagentName: subagentNameContext.getStore() || undefined,
+        ...retrySnapshot,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -403,6 +473,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         llmSpan,
         spanContext,
         req.config?.abortSignal,
+        retrySnapshot,
       ),
     );
   }
@@ -438,6 +509,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     span?: Span,
     spanContext?: Context,
     abortSignal?: AbortSignal,
+    // Phase 4b — snapshot of retry context captured BEFORE the stream wrapper
+    // returned, when the ALS frame from `retryWithBackoff` was still active.
+    // Closure-carried to every endLLMRequestSpan callsite below so the
+    // idle-timeout `setTimeout` callback sees the same values as the
+    // entry-time read.
+    retrySnapshot?: ReturnType<typeof snapshotRetryMetadata>,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -451,6 +528,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
+    let lastFinishReason: string | undefined;
+    let lastError: unknown;
+    const subagentName = subagentNameContext.getStore();
+
+    // TTFT (time to first token): wall-clock from generateContentStream
+    // dispatch to the first stream chunk containing user-visible content.
+    // Method-local closure variable — NEVER an instance field — because
+    // LoggingContentGenerator is shared across concurrent generateContentStream
+    // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
+    // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
+    let ttftMs: number | undefined;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
     // again (the helper would no-op, but more importantly we skip the
@@ -465,7 +553,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Idle timeout: if no chunks arrive for this duration the consumer has
     // likely abandoned the generator without calling .return(). Close the
-    // span so it doesn't leak forever.  The timer resets on every chunk,
+    // span so it doesn't leak forever. The timer resets on every chunk,
     // so legitimately long-running streams are never affected.
     const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 minutes
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -483,6 +571,9 @@ export class LoggingContentGenerator implements ContentGenerator {
               success: false,
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
+              responseId: firstResponseId || undefined,
+              subagentName: subagentName || undefined,
+              ...retrySnapshot,
             });
             spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
@@ -505,6 +596,17 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
+        const candidate = response.candidates?.[0];
+        if (candidate?.finishReason) {
+          lastFinishReason = candidate.finishReason as string;
+        }
+        // Capture TTFT on the first stream chunk that contains user-visible
+        // content. hasUserVisibleContent skips role-only / usageMetadata-only
+        // chunks, so TTFT reflects "model produced something the operator can
+        // attribute to user-perceived latency."
+        if (ttftMs === undefined && hasUserVisibleContent(response)) {
+          ttftMs = Date.now() - startTime;
+        }
         resetSpanTimeout?.();
         yield response;
       }
@@ -520,47 +622,62 @@ export class LoggingContentGenerator implements ContentGenerator {
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(consolidatedResponse);
-      runInSpan(() =>
-        this.safelyLogApiResponse(
-          firstResponseId,
-          durationMs,
-          firstModelVersion || model,
-          userPromptId,
-          lastUsageMetadata,
-          streamResponseText,
-        ),
-      );
-      if (!isInternal && span) {
-        addModelOutputAttributes(this.config, span, streamResponseText);
+      // If the idle timeout already closed the span as failed, do not contradict
+      // it with a "success" api_response log or model-output span attributes.
+      // The OpenAI interaction log is also skipped — telemetry already carries
+      // the timeout signal and a parallel "success" record would be confusing
+      // during incident response.
+      if (!spanEndedByTimeout) {
+        runInSpan(() =>
+          this.safelyLogApiResponse(
+            firstResponseId,
+            durationMs,
+            firstModelVersion || model,
+            userPromptId,
+            lastUsageMetadata,
+            streamResponseText,
+          ),
+        );
+        if (!isInternal && span) {
+          addModelOutputAttributes(this.config, span, streamResponseText);
+        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            consolidatedResponse,
+            undefined,
+            userPromptId,
+          ),
+        );
       }
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          consolidatedResponse,
-          undefined,
-          userPromptId,
-        ),
-      );
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      runInSpan(() =>
-        this.safelyLogApiError(
-          firstResponseId,
-          durationMs,
-          error,
-          firstModelVersion || model,
-          userPromptId,
-        ),
-      );
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          undefined,
-          error,
-          userPromptId,
-        ),
-      );
+      lastError = error;
+      // Same gating as the success path above: if the idle timeout already
+      // closed the span as failed, do not emit a parallel api_error log
+      // (the span is the canonical signal). Otherwise we'd produce the
+      // exact contradictory pair the timeout fix targets — span timed-out
+      // + api_error log — just on the error branch.
+      if (!spanEndedByTimeout) {
+        const durationMs = Date.now() - startTime;
+        runInSpan(() =>
+          this.safelyLogApiError(
+            firstResponseId,
+            durationMs,
+            error,
+            firstModelVersion || model,
+            userPromptId,
+          ),
+        );
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            undefined,
+            error,
+            userPromptId,
+          ),
+        );
+      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {
@@ -576,12 +693,21 @@ export class LoggingContentGenerator implements ContentGenerator {
           success: !errorOccurred,
           inputTokens: lastUsageMetadata?.promptTokenCount,
           outputTokens: lastUsageMetadata?.candidatesTokenCount,
+          cachedInputTokens: lastUsageMetadata?.cachedContentTokenCount,
+          ttftMs,
           durationMs: Date.now() - startTime,
           error: errorOccurred
             ? aborted
               ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
               : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
+          responseId: firstResponseId || undefined,
+          finishReason: lastFinishReason,
+          thoughtsTokenCount: lastUsageMetadata?.thoughtsTokenCount,
+          subagentName: subagentName || undefined,
+          errorType: lastError ? getErrorType(lastError) : undefined,
+          errorStatusCode: lastError ? getErrorStatus(lastError) : undefined,
+          ...retrySnapshot,
         });
       }
     }
@@ -639,6 +765,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     return {
       model,
       modalities: this.modalities ?? {},
+      // Mirror the pipeline default (see pipeline.ts createRequestContext) so the
+      // --openai-logging fallback reconstruction reflects the same split as the
+      // request actually sent. Opt out via generationConfig.splitToolMedia = false.
+      splitToolMedia: this.splitToolMedia ?? true,
       startTime: 0,
     };
   }

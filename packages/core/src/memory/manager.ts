@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   logMemoryDream,
@@ -46,7 +47,7 @@ import {
   MemoryDreamEvent,
   MemoryExtractEvent,
 } from '../telemetry/index.js';
-import { isAutoMemPath } from './paths.js';
+import { isAnyAutoMemPath } from './paths.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -68,7 +69,10 @@ import {
   type ResolveRelevantAutoMemoryPromptOptions,
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
-import { appendManagedAutoMemoryToUserMemory } from './prompt.js';
+import {
+  appendManagedAutoMemoryToUserMemory,
+  type UserAutoMemorySection,
+} from './prompt.js';
 import { writeDreamManualRunToMetadata } from './dream.js';
 import { buildConsolidationTaskPrompt } from './dreamAgentPlanner.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
@@ -249,7 +253,10 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
     const args = part.functionCall?.args as Record<string, unknown> | undefined;
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
-    if (typeof filePath === 'string' && isAutoMemPath(filePath, projectRoot)) {
+    if (
+      typeof filePath === 'string' &&
+      isAnyAutoMemPath(filePath, projectRoot)
+    ) {
       return true;
     }
   }
@@ -288,10 +295,10 @@ async function writeDreamMetadata(
   projectRoot: string,
   metadata: AutoMemoryMetadata,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryMetadataPath(projectRoot),
     `${JSON.stringify(metadata, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
@@ -1242,16 +1249,23 @@ export class MemoryManager {
 
   // ─── Prompt append ────────────────────────────────────────────────────────────
 
-  /** Append the managed auto-memory section to a user memory string. */
+  /**
+   * Append the managed auto-memory section to a user memory string.
+   * When `userSection` is provided, the prompt teaches the model to route
+   * saves between the project dir and the user (cross-project) dir using
+   * the per-type scope guidance.
+   */
   appendToUserMemory(
     userMemory: string,
     memoryDir: string,
     indexContent?: string | null,
+    userSection?: UserAutoMemorySection,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
       memoryDir,
       indexContent,
+      userSection,
     );
   }
 

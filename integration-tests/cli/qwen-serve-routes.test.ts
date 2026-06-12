@@ -180,27 +180,54 @@ describe('qwen serve — CORS browser-origin denial', () => {
 });
 
 describe('qwen serve — capabilities envelope', () => {
-  it('advertises all Stage 1 features', async () => {
+  it('advertises all baseline capabilities', async () => {
     const caps = await client.capabilities();
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
-    // `EXPECTED_STAGE1_FEATURES` in `packages/cli/src/serve/server.test.ts`.
+    // baseline features in `packages/cli/src/serve/server.test.ts`.
     expect(caps.features).toEqual([
       'health',
       'capabilities',
       'session_create',
       'session_scope_override',
       'session_load',
+      'session_resume',
       'unstable_session_resume',
       'session_list',
       'session_prompt',
       'session_cancel',
       'session_events',
+      'slow_client_warning',
+      'typed_event_schema',
       'session_set_model',
       'client_identity',
+      'client_heartbeat',
+      'session_permission_vote',
       'permission_vote',
+      'workspace_mcp',
+      'workspace_skills',
+      'workspace_providers',
+      'workspace_memory',
+      'workspace_agents',
+      'workspace_env',
+      'workspace_preflight',
+      'session_context',
+      'session_supported_commands',
+      'session_tasks',
+      'session_close',
+      'session_metadata',
+      'mcp_guardrails',
+      'mcp_guardrail_events',
+      'workspace_file_read',
+      'workspace_file_bytes',
+      'workspace_file_write',
+      'session_approval_mode_control',
+      'workspace_tool_toggle',
+      'workspace_init',
+      'workspace_mcp_restart',
+      'auth_device_flow',
     ]);
   });
 });
@@ -409,17 +436,77 @@ describe('qwen serve — cancel + list', () => {
     await client.cancel(session.sessionId);
   });
 
-  it('listWorkspaceSessions returns the live session', async () => {
+  it('listWorkspaceSessions returns the live session with metadata', async () => {
     await client.createOrAttachSession({ workspaceCwd: REPO_ROOT });
     const sessions = await client.listWorkspaceSessions(REPO_ROOT);
     expect(sessions.length).toBeGreaterThanOrEqual(1);
-    // Explicit `s` type because the reviewer's tsc run resolves
-    // `@qwen-code/sdk` against a possibly-stale dist .d.ts (per
-    // integration-tests/tsconfig.json `paths` mapping); without
-    // the annotation `s` widens to `any` in that environment and
-    // trips strict-mode TS7006.
     expect(
       sessions.every((s: DaemonSessionSummary) => s.workspaceCwd === REPO_ROOT),
     ).toBe(true);
+    const first = sessions[0]!;
+    expect(first.createdAt).toBeDefined();
+    expect(typeof first.createdAt).toBe('string');
+    expect(typeof first.clientCount).toBe('number');
+    expect(typeof first.hasActivePrompt).toBe('boolean');
+  });
+});
+
+describe('qwen serve — DELETE /session/:id', () => {
+  it('204 on explicit close', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.closeSession(session.sessionId);
+    const sessions = await client.listWorkspaceSessions(REPO_ROOT);
+    expect(
+      sessions.some(
+        (s: DaemonSessionSummary) => s.sessionId === session.sessionId,
+      ),
+    ).toBe(false);
+  });
+
+  it('204 on double close (idempotent via 404 absorption)', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.closeSession(session.sessionId);
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — PATCH /session/:id/metadata', () => {
+  it('updates displayName', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.updateSessionMetadata(session.sessionId, {
+      displayName: 'Integration Test Session',
+    });
+    const sessions = await client.listWorkspaceSessions(REPO_ROOT);
+    const updated = sessions.find(
+      (s: DaemonSessionSummary) => s.sessionId === session.sessionId,
+    );
+    expect(updated?.displayName).toBe('Integration Test Session');
+    await client.closeSession(session.sessionId);
+  });
+
+  it('400 on non-string displayName', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/metadata`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ displayName: 42 }),
+    });
+    expect(res.status).toBe(400);
+    await client.closeSession(session.sessionId);
   });
 });

@@ -792,6 +792,27 @@ describe('parseArguments', () => {
     expect(argv.approvalMode).toBeUndefined();
   });
 
+  it('should accept desktop as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('desktop');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('ACP');
+  });
+
+  it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--channel', 'desktop'];
+    const argv = await parseArguments();
+    // The `!result['channel']` guard must not override an explicitly provided
+    // channel with the ACP default.
+    expect(argv.channel).toBe('desktop');
+    expect(argv.acp).toBe(true);
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -925,6 +946,29 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should enable runtime sleep prevention by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('should propagate runtime sleep prevention setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        general: {
+          preventSystemSleep: false,
+        },
+      },
+      argv,
+    );
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
@@ -1864,7 +1908,7 @@ describe('Approval mode tool exclusion logic', () => {
     await expect(
       loadCliConfig(settings, invalidArgv as CliArgs, undefined, []),
     ).rejects.toThrow(
-      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, yolo',
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, auto, yolo',
     );
   });
 });
@@ -2070,7 +2114,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers();
+    const mcpServers = config.getMcpServers()!;
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2089,7 +2133,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()['direct-server']).toEqual({
+    expect(config.getMcpServers()!['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2103,7 +2147,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()['settings-server']).toEqual({
+    expect(config.getMcpServers()!['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });
@@ -2354,6 +2398,16 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
+  it('should default managed-memory toggles to enabled when not in bare mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+    expect(config.getManagedAutoDreamEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(true);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2388,10 +2442,13 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
     expect(config.getDisableAllHooks()).toBe(true);
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getManagedAutoDreamEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
@@ -2406,8 +2463,20 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
+  });
+
+  it('should preserve plansDirectory in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      plansDirectory: './project-plans',
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPlansDir()).toContain('project-plans');
   });
 });
 
@@ -2828,7 +2897,7 @@ describe('loadCliConfig approval mode', () => {
       tools: { approvalMode: 'invalid_mode' },
     } as unknown as Settings;
     await expect(loadCliConfig(settings, argv, undefined, [])).rejects.toThrow(
-      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, yolo',
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto-edit, auto, yolo',
     );
   });
 
@@ -3391,5 +3460,43 @@ describe('loadCliConfig runtimeOutputDir', () => {
 
     await loadCliConfig({}, argv);
     expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
+  });
+});
+
+describe('loadCliConfig plansDirectory', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.restoreAllMocks();
+  });
+
+  it('should resolve relative plansDirectory against cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      plansDirectory: './project-plans',
+    };
+
+    const config = await loadCliConfig(settings, argv, cwd);
+
+    expect(config.getPlansDir()).toBe(path.join(cwd, 'project-plans'));
+    expect(config.getPlanFilePath()).toContain(path.join(cwd, 'project-plans'));
+  });
+
+  it('should reject plansDirectory values outside cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      plansDirectory: '../plans',
+    };
+
+    await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
+      'plansDirectory must resolve within the project root',
+    );
   });
 });

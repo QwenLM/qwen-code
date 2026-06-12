@@ -126,15 +126,18 @@ describe('SubagentManager', () => {
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
       // Check disallowedTools before tools to avoid substring match
-      if (yamlString.includes('disallowedTools: write_file')) {
-        // Scalar form
-        return {
-          name: 'test-agent',
-          description: 'A test subagent',
-          disallowedTools: 'write_file',
-        };
-      }
       if (yamlString.includes('disallowedTools:')) {
+        const dtLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('disallowedTools:'));
+        const dtInline = dtLine?.replace('disallowedTools:', '').trim();
+        if (dtInline && dtInline !== '') {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            disallowedTools: dtInline,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -142,6 +145,21 @@ describe('SubagentManager', () => {
         };
       }
       if (yamlString.includes('tools:')) {
+        const toolsLine = yamlString
+          .split('\n')
+          .find((l: string) => l.startsWith('tools:'));
+        const inlineValue = toolsLine?.replace('tools:', '').trim();
+        if (
+          inlineValue &&
+          !inlineValue.startsWith('\n') &&
+          inlineValue !== ''
+        ) {
+          return {
+            name: 'test-agent',
+            description: 'A test subagent',
+            tools: inlineValue,
+          };
+        }
         return {
           name: 'test-agent',
           description: 'A test subagent',
@@ -297,6 +315,52 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse comma-separated tools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+tools: Read, Bash, Grep, Glob, WebSearch, WebFetch, mcp__context7__*
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual([
+        'Read',
+        'Bash',
+        'Grep',
+        'Glob',
+        'WebSearch',
+        'WebFetch',
+        'mcp__context7__*',
+      ]);
+    });
+
+    it('should parse single tool string into array', () => {
+      const markdownWithSingle = `---
+name: test-agent
+description: A test subagent
+tools: Read
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithSingle,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.tools).toEqual(['Read']);
+    });
+
     it('should parse content with disallowedTools array', () => {
       const markdownWithDisallowed = `---
 name: test-agent
@@ -335,6 +399,29 @@ You are a helpful assistant.
       );
 
       expect(config.disallowedTools).toEqual(['write_file']);
+    });
+
+    it('should parse comma-separated disallowedTools string into array', () => {
+      const markdownWithCSV = `---
+name: test-agent
+description: A test subagent
+disallowedTools: write_file, mcp__slack, Bash
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithCSV,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual([
+        'write_file',
+        'mcp__slack',
+        'Bash',
+      ]);
     });
 
     it('should parse content with model selector', () => {
@@ -593,6 +680,189 @@ You are an agent.
 
       expect(config.background).toBeUndefined();
     });
+
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    it('should parse valid permissionMode and bridge to approvalMode', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBe('bypassPermissions');
+      expect(config.approvalMode).toBe('yolo');
+    });
+
+    it('should prefer explicit approvalMode over permissionMode bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'plan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: bypassPermissions\napprovalMode: plan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.approvalMode).toBe('plan');
+      expect(config.permissionMode).toBe('bypassPermissions');
+    });
+
+    it('should drop invalid permissionMode and not bridge', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        permissionMode: 'not-a-mode',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\npermissionMode: not-a-mode\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.permissionMode).toBeUndefined();
+      expect(config.approvalMode).toBeUndefined();
+    });
+
+    it('should parse maxTurns as number', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: 42,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: 42\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should parse maxTurns from numeric string', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: '42',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: "42"\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBe(42);
+    });
+
+    it('should drop negative or zero maxTurns', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        maxTurns: -1,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmaxTurns: -1\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.maxTurns).toBeUndefined();
+    });
+
+    it('should parse nested mcpServers as a record', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+        github: { type: 'http', url: 'https://example.com' },
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers:\n  filesystem:\n    type: stdio\n    command: node\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should drop mcpServers of the wrong top-level shape', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        mcpServers: 'just-a-string',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nmcpServers: just-a-string\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.mcpServers).toBeUndefined();
+    });
+
+    it('should parse nested hooks as a record of arrays', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks,
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: echo\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toEqual(hooks);
+    });
+
+    it('should drop hooks with non-array values per event', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        hooks: { PreToolUse: 'not-an-array' },
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\nhooks:\n  PreToolUse: not-an-array\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.hooks).toBeUndefined();
+    });
+
+    it('should preserve color from allowlist', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'cyan',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: cyan\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBe('cyan');
+    });
+
+    it('should drop color not in allowlist (matches CC _Y silent drop)', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'a',
+        description: 'd',
+        color: 'magenta',
+      });
+      const config = manager.parseSubagentContent(
+        '---\nname: a\ndescription: d\ncolor: magenta\n---\nx',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(config.color).toBeUndefined();
+    });
   });
 
   describe('serializeSubagent', () => {
@@ -687,6 +957,40 @@ You are an agent.
       expect(serialized).not.toContain('background');
     });
 
+    it('should include mcpServers in the frontmatter object passed to stringifyYaml', () => {
+      const mcpServers = {
+        filesystem: { type: 'stdio', command: 'node' },
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, mcpServers });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toEqual(mcpServers);
+    });
+
+    it('should include hooks in the frontmatter object passed to stringifyYaml', () => {
+      const hooks = {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] },
+        ],
+      };
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({ ...validConfig, hooks });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.hooks).toEqual(hooks);
+    });
+
+    it('should omit mcpServers / hooks when the record is empty', () => {
+      mockStringifyYaml.mockClear();
+      manager.serializeSubagent({
+        ...validConfig,
+        mcpServers: {},
+        hooks: {},
+      });
+      const frontmatterArg = mockStringifyYaml.mock.calls[0][0];
+      expect(frontmatterArg.mcpServers).toBeUndefined();
+      expect(frontmatterArg.hooks).toBeUndefined();
+    });
+
     it('should roundtrip background through serialize and parse', () => {
       const configWithBackground: SubagentConfig = {
         ...validConfig,
@@ -701,6 +1005,53 @@ You are an agent.
       );
 
       expect(parsed.background).toBe(true);
+    });
+
+    // --- CC 2.1.168 declarative-agent fields serialization ---
+
+    it('should serialize permissionMode when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+      });
+      expect(serialized).toContain('permissionMode: bypassPermissions');
+    });
+
+    it('should serialize maxTurns when set', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        maxTurns: 25,
+      });
+      expect(serialized).toContain('maxTurns: 25');
+    });
+
+    it('should NOT emit permissionMode when approvalMode is also being emitted (avoid round-trip drift)', () => {
+      // Regression for PR #4842 round-2 review: if both fields land on the
+      // serialised frontmatter, the next parse takes approvalMode (explicit
+      // wins over bridge) and silently ignores any user edits to
+      // permissionMode in the file.
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'bypassPermissions',
+        approvalMode: 'yolo',
+      });
+      expect(serialized).toContain('approvalMode: yolo');
+      expect(serialized).not.toContain('permissionMode:');
+    });
+
+    it('should still emit permissionMode when approvalMode is unset (faithful round-trip of the user intent)', () => {
+      const serialized = manager.serializeSubagent({
+        ...validConfig,
+        permissionMode: 'plan',
+      });
+      expect(serialized).toContain('permissionMode: plan');
+      expect(serialized).not.toContain('approvalMode:');
+    });
+
+    it('should not include new fields when undefined', () => {
+      const serialized = manager.serializeSubagent(validConfig);
+      expect(serialized).not.toContain('permissionMode:');
+      expect(serialized).not.toContain('maxTurns:');
     });
   });
 
@@ -1398,9 +1749,23 @@ System prompt 3`);
         expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
 
-      it('should resolve "fast" to Config.getFastModel() when one is configured', async () => {
+      it('should resolve "fast" to the configured current-auth fast model', async () => {
         const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
         vi.spyOn(mockConfig, 'getFastModel').mockReturnValue('fast-model-id');
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig.model).toBe('fast-model-id');
+      });
+
+      it('should resolve "fast" to authType-qualified fast model selectors', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'openai:fast-model-id',
+        );
 
         const runtimeConfig = await manager.convertToRuntimeConfig(
           fastConfig,
@@ -1430,6 +1795,38 @@ System prompt 3`);
         const runtimeConfig = await manager.convertToRuntimeConfig(fastConfig);
 
         expect(runtimeConfig.modelConfig).toEqual({});
+      });
+
+      // --- CC 2.1.168 maxTurns top-level promotion ---
+
+      it('should populate runConfig.max_turns from top-level maxTurns', async () => {
+        const cfg: SubagentConfig = { ...validConfig, maxTurns: 42 };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(42);
+      });
+
+      it('should prefer top-level maxTurns over nested runConfig.max_turns', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          maxTurns: 99,
+          runConfig: { max_turns: 5 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(99);
+      });
+
+      it('should fall back to nested runConfig.max_turns when maxTurns is unset', async () => {
+        const cfg: SubagentConfig = {
+          ...validConfig,
+          runConfig: { max_turns: 7 },
+        };
+        const runtimeConfig = await manager.convertToRuntimeConfig(cfg);
+        expect(runtimeConfig.runConfig.max_turns).toBe(7);
+      });
+
+      it('should leave max_turns undefined when neither is set', async () => {
+        const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
+        expect(runtimeConfig.runConfig.max_turns).toBeUndefined();
       });
     });
 
@@ -1575,6 +1972,62 @@ System prompt 3`);
         );
       });
 
+      it('should build a cross-auth ContentGenerator when "fast" resolves to an authType-qualified selector', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_ANTHROPIC,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'openai:deepseek-v4-flash',
+        );
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
+      it('should resolve bare fast models to their configured auth type when current auth does not own them', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'claude-opus',
+          authType: AuthType.USE_ANTHROPIC,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'deepseek-v4-flash',
+        );
+        vi.spyOn(mockConfig, 'getAllConfiguredModels').mockImplementation(
+          (authTypes) =>
+            authTypes?.includes(AuthType.USE_ANTHROPIC)
+              ? []
+              : [
+                  {
+                    id: 'deepseek-v4-flash',
+                    label: 'deepseek-v4-flash',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ],
+        );
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
       it('should NOT build a new ContentGenerator for "fast" when getFastModel returns undefined', async () => {
         const config = { ...agentConfig, model: 'fast' };
         vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(undefined);
@@ -1587,6 +2040,160 @@ System prompt 3`);
           mockAgentHeadlessCreate.mock.calls[0],
         );
         expect(runtimeView).toBeUndefined();
+      });
+    });
+
+    describe('createAgentHeadless — caller-driven dispose contract', () => {
+      // Regression for self-inflicted leaks (review #4996 round 1):
+      //   1. `wrapAgentHooksForCleanup` relied on `AgentHeadless.execute()`'s
+      //      inner finally firing `onStop`. Two execute() early-exit paths
+      //      (`createChat()` → null and `prepareTools()` throwing) bypass
+      //      that finally, so ephemeral hook entries leaked into the global
+      //      registry for the rest of the session.
+      //   2. The forced tool-registry rebuild for per-agent `mcpServers`
+      //      spawned real MCP client connections (stdio child processes,
+      //      sockets) on a registry distinct from the parent's, but nothing
+      //      stopped it — every subagent invocation declaring `mcpServers`
+      //      orphaned its server processes.
+      //
+      // The unified fix is to return `{ subagent, dispose }` from
+      // `createAgentHeadless` and have callers run `dispose()` in a
+      // `finally` that they already own around `subagent.execute()`. These
+      // tests assert that contract.
+
+      const baseConfig: SubagentConfig = {
+        name: 'cleanup-agent',
+        description: 'dispose contract test',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+      });
+
+      it('returns { subagent, dispose }; dispose unregisters per-agent hooks', async () => {
+        const unregisterSpy = vi.fn();
+        const addAgentHooksSpy = vi.fn().mockReturnValue(unregisterSpy);
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        // The whole point: callers need an explicit cleanup handle they can
+        // invoke from the outer `finally`. A return shape of just
+        // `AgentHeadless` (the pre-fix contract) gives them no way to do
+        // that, because the inner onStop wrap doesn't fire on every
+        // execute() exit path.
+        expect(result).toHaveProperty('subagent');
+        expect(result).toHaveProperty('dispose');
+        expect(typeof result.dispose).toBe('function');
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        expect(unregisterSpy).not.toHaveBeenCalled();
+
+        await result.dispose();
+
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {
+        // Caller pattern:
+        //   const { subagent, dispose } = await createAgentHeadless(...);
+        //   try { await subagent.execute(...); } finally { await dispose(); }
+        // We never call execute() in this test — that simulates the
+        // createChat-returns-null and prepareTools-throws paths where the
+        // pre-fix `onStop` wrapping never fired its cleanup.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+
+        const { dispose } = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: '*',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        await dispose();
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('dispose is a safe no-op when neither hooks nor mcpServers are declared', async () => {
+        const result = await manager.createAgentHeadless(
+          baseConfig,
+          mockConfig,
+        );
+        expect(typeof result.dispose).toBe('function');
+        // Must not throw — the caller's `finally` always invokes dispose,
+        // even for agents that triggered no cleanup-bearing setup.
+        await expect(result.dispose()).resolves.toBeUndefined();
+      });
+
+      it('runs cleanup when AgentHeadless.create throws — caller never gets dispose', async () => {
+        // Constructor-failure path inside createAgentHeadless: the caller
+        // never receives `{ subagent, dispose }`, so the inner catch must
+        // run the same cleanup itself. Without that, a transient
+        // AgentHeadless.create failure (e.g. ContentGenerator init blows
+        // up) would orphan the hook entries we just registered.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockRejectedValueOnce(
+          new Error('synthetic constructor failure'),
+        );
+
+        await expect(
+          manager.createAgentHeadless(
+            {
+              ...baseConfig,
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: '*',
+                    hooks: [{ type: 'command', command: 'echo' }],
+                  },
+                ],
+              },
+            },
+            mockConfig,
+          ),
+        ).rejects.toThrow(/synthetic constructor failure/);
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
       });
     });
   });

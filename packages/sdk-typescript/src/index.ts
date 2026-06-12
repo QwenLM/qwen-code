@@ -3,36 +3,93 @@ export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
 
-// Daemon HTTP client (talks to `qwen serve`; see GitHub issue #3803)
+// Daemon HTTP client (talks to `qwen serve`)
 export {
+  DAEMON_APPROVAL_MODES,
+  DAEMON_ERROR_KINDS,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
   asKnownDaemonEvent,
   createDaemonSessionViewState,
+  isDaemonContentHash,
   isDaemonEventType,
   isKnownDaemonEvent,
+  isWorkspaceScopedBudgetEvent,
   parseSseStream,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
   requireWorkspaceCwd,
   SseFramingError,
   type CreateSessionRequest,
+  type DaemonApprovalMode,
+  type DaemonApprovalModeChangedData,
+  type DaemonApprovalModeChangedEvent,
+  type DaemonApprovalModeResult,
+  type DaemonInitWorkspaceResult,
+  type DaemonMcpRestartResult,
+  type DaemonReloadResponse,
+  type DaemonSessionRecapResult,
+  type DaemonShellCommandResult,
+  type DaemonRuntimeMcpAddRequest,
+  type DaemonRuntimeMcpAddResult,
+  type DaemonRuntimeMcpRemoveResult,
+  type DaemonMcpServerAddedData,
+  type DaemonMcpServerAddedEvent,
+  type DaemonMcpServerRemovedData,
+  type DaemonMcpServerRemovedEvent,
+  type DaemonMcpServerRestartedData,
+  type DaemonMcpServerRestartedEvent,
+  type DaemonMcpServerRestartRefusedData,
+  type DaemonMcpServerRestartRefusedEvent,
+  type DaemonSettingsReloadedData,
+  type DaemonSettingsReloadedEvent,
+  type DaemonToolToggleResult,
+  type DaemonToolToggledData,
+  type DaemonToolToggledEvent,
+  type DaemonWorkspaceInitializedData,
+  type DaemonWorkspaceInitializedEvent,
+  type DaemonAvailableCommand,
   type DaemonCapabilities,
+  type DaemonEnvCell,
+  type DaemonEnvKind,
+  type DaemonErrorKind,
   type DaemonClientEvictedData,
   type DaemonClientEvictedEvent,
+  // Daemon-emitted resync
+  // signal for SSE reconnects past the ring eviction boundary.
+  type DaemonStateResyncRequiredData,
+  type DaemonStateResyncRequiredEvent,
   type DaemonClientOptions,
+  type DaemonContentHash,
   type DaemonControlEvent,
   type DaemonEvent,
   type DaemonEventEnvelope,
   type DaemonKnownEventType,
+  // MCP guardrail push-event types.
+  type DaemonMcpBudgetWarningData,
+  type DaemonMcpBudgetWarningEvent,
+  type DaemonMcpChildRefusedBatchData,
+  type DaemonMcpChildRefusedBatchEvent,
+  type DaemonMcpGuardrailEvent,
+  type DaemonMcpRefusedServer,
+  type DaemonMcpDiscoveryState,
+  type DaemonMcpServerRuntimeStatus,
+  type DaemonMcpTransport,
   type DaemonMode,
   type DaemonModelSwitchedData,
   type DaemonModelSwitchedEvent,
   type DaemonModelSwitchFailedData,
   type DaemonModelSwitchFailedEvent,
   type DaemonPermissionOption,
+  type DaemonPermissionAlreadyResolvedData,
+  type DaemonPermissionAlreadyResolvedEvent,
+  type DaemonPermissionForbiddenData,
+  type DaemonPermissionForbiddenEvent,
+  type DaemonPermissionPartialVoteData,
+  type DaemonPermissionPartialVoteEvent,
   type DaemonPermissionRequestData,
   type DaemonPermissionRequestEvent,
   type DaemonPermissionResolvedData,
@@ -40,20 +97,59 @@ export {
   type DaemonProtocolVersions,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionClosedReason,
   type DaemonSessionClientOptions,
+  type DaemonSessionContextStatus,
+  type DaemonSessionAgentTaskStatus,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonSessionProcessTaskLifecycleStatus,
   type DaemonSessionDiedData,
   type DaemonSessionDiedEvent,
   type DaemonSessionEvent,
+  type DaemonSessionShellTaskStatus,
   type DaemonSessionSubscribeOptions,
   type DaemonSessionState,
   type DaemonSessionSummary,
+  type DaemonSessionSupportedCommandsStatus,
+  type DaemonSessionTaskLifecycleStatus,
+  type DaemonSessionTaskStatus,
+  type DaemonSessionTasksStatus,
+  type DaemonSkillLevel,
+  type DaemonPreflightCell,
+  type DaemonPreflightKind,
+  type DaemonStatus,
+  type DaemonStatusCell,
+  type DaemonWorkspaceEnvStatus,
+  type DaemonWorkspaceFile,
+  type DaemonWorkspaceFileBytes,
+  type DaemonWorkspaceFileEditRequest,
+  type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileWriteRequest,
+  type DaemonWorkspaceFileWriteResult,
+  type DaemonWorkspacePreflightStatus,
   type DaemonSessionUpdateData,
   type DaemonSessionUpdateEvent,
   type DaemonSessionViewState,
+  type DaemonSlowClientWarningData,
+  type DaemonSlowClientWarningEvent,
   type DaemonStreamErrorData,
   type DaemonStreamErrorEvent,
   type DaemonStreamLifecycleEvent,
+  // Daemon assist push (server-side ghost-text suggestion)
+  type DaemonAssistEvent,
+  type DaemonFollowupSuggestionData,
+  type DaemonFollowupSuggestionEvent,
+  type DaemonWorkspaceMcpServerStatus,
+  type DaemonWorkspaceMcpStatus,
+  type DaemonWorkspaceProviderCurrent,
+  type DaemonWorkspaceProviderModel,
+  type DaemonWorkspaceProviderStatus,
+  type DaemonWorkspaceProvidersStatus,
+  type DaemonWorkspaceSkillStatus,
+  type DaemonWorkspaceSkillsStatus,
+  type HeartbeatResult,
   type KnownDaemonEvent,
+  type MCPServerConfigShape,
   type PermissionOutcome,
   type PermissionOutcomeCancelled,
   type PermissionOutcomeSelected,
@@ -73,19 +169,62 @@ export {
   type PromptTextContent,
   type RestoreSessionRequest,
   type SetModelResult,
+  type SetSessionLanguageResult,
+  type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';
 
-// SDK MCP Server exports
-export { tool } from './mcp/tool.js';
-export { createSdkMcpServer } from './mcp/createSdkMcpServer.js';
+// Auth
+// surface. These were re-exported from `./daemon/index.js` but the
+// public SDK entry (this file) never re-exported them, so an
+// `import { DaemonAuthFlow } from '@qwen-code/sdk'` resolved to
+// undefined. The PR description lists `reduceDaemonAuthEvent` as
+// SDK surface and `client.auth.start()` works only because
+// `DaemonClient` (already exported above) constructs `DaemonAuthFlow`
+// internally; every other API path was unreachable.
+export {
+  DaemonAuthFlow,
+  DEVICE_FLOW_EXPIRY_GRACE_MS,
+  createDaemonAuthState,
+  reduceDaemonAuthEvent,
+  reduceDaemonAuthEvents,
+  type AwaitCompletionOptions,
+  type DaemonAuthDeviceFlowAuthorizedData,
+  type DaemonAuthDeviceFlowAuthorizedEvent,
+  type DaemonAuthDeviceFlowCancelledData,
+  type DaemonAuthDeviceFlowCancelledEvent,
+  type DaemonAuthDeviceFlowErrorKind,
+  type DaemonAuthDeviceFlowFailedData,
+  type DaemonAuthDeviceFlowFailedEvent,
+  type DaemonAuthDeviceFlowProviderId,
+  type DaemonAuthDeviceFlowStartedData,
+  type DaemonAuthDeviceFlowStartedEvent,
+  type DaemonAuthDeviceFlowStatus,
+  type DaemonAuthDeviceFlowThrottledData,
+  type DaemonAuthDeviceFlowThrottledEvent,
+  type DaemonAuthEvent,
+  type DaemonAuthFlowHandle,
+  type DaemonAuthProviderId,
+  type DaemonAuthState,
+  type DaemonAuthStatusSnapshot,
+  type DaemonDeviceFlowReducerState,
+  type DaemonDeviceFlowStartResult,
+  type DaemonDeviceFlowState,
+} from './daemon/index.js';
 
-export type { SdkMcpToolDefinition } from './mcp/tool.js';
+// SDK MCP Server exports
+export { tool } from './daemon-mcp/tool.js';
+export { createSdkMcpServer } from './daemon-mcp/createSdkMcpServer.js';
+export { createServeBridgeMcpServer } from './daemon-mcp/serve-bridge/index.js';
+
+export type { SdkMcpToolDefinition } from './daemon-mcp/tool.js';
 
 export type {
   CreateSdkMcpServerOptions,
   McpSdkServerConfigWithInstance,
-} from './mcp/createSdkMcpServer.js';
+} from './daemon-mcp/createSdkMcpServer.js';
+
+export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';

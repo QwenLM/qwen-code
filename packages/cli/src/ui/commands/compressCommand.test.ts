@@ -77,6 +77,8 @@ describe('compressCommand', () => {
     expect(mockTryCompressChat).toHaveBeenCalledWith(
       expect.stringMatching(/^compress-\d+$/),
       true,
+      undefined,
+      undefined,
     );
 
     expect(context.ui.addItem).toHaveBeenCalledWith(
@@ -130,5 +132,135 @@ describe('compressCommand', () => {
     mockTryCompressChat.mockRejectedValue(new Error('some error'));
     await compressCommand.action!(context, '');
     expect(context.ui.setPendingItem).toHaveBeenCalledWith(null);
+  });
+
+  describe('custom instructions argument', () => {
+    beforeEach(() => {
+      mockTryCompressChat.mockResolvedValue({
+        originalTokenCount: 200,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        newTokenCount: 100,
+      } satisfies ChatCompressionInfo);
+    });
+
+    it('forwards trimmed instructions as the 4th argument', async () => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+        invocation: {
+          raw: '/compress   focus on auth bug   ',
+          name: 'compress',
+          args: '  focus on auth bug  ',
+        },
+      });
+      await compressCommand.action!(ctx, '');
+      expect(mockTryCompressChat).toHaveBeenCalledWith(
+        expect.stringMatching(/^compress-\d+$/),
+        true,
+        undefined,
+        'focus on auth bug',
+      );
+    });
+
+    it('passes undefined when args is empty or whitespace only', async () => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+        invocation: { raw: '/compress    ', name: 'compress', args: '    ' },
+      });
+      await compressCommand.action!(ctx, '');
+      expect(mockTryCompressChat).toHaveBeenCalledWith(
+        expect.stringMatching(/^compress-\d+$/),
+        true,
+        undefined,
+        undefined,
+      );
+    });
+
+    it('caps overlong instructions at 2000 chars', async () => {
+      const long = 'x'.repeat(3000);
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+        invocation: {
+          raw: `/compress ${long}`,
+          name: 'compress',
+          args: long,
+        },
+      });
+      await compressCommand.action!(ctx, '');
+      const call = mockTryCompressChat.mock.calls[0];
+      expect(call[3]).toBeDefined();
+      expect((call[3] as string).length).toBe(2000);
+    });
+
+    it('surfaces an INFO notice to the user when instructions are truncated', async () => {
+      const long = 'x'.repeat(3000);
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+        invocation: { raw: `/compress ${long}`, name: 'compress', args: long },
+      });
+      await compressCommand.action!(ctx, '');
+      expect(ctx.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('truncated'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('does NOT show a truncation notice when instructions fit under the cap', async () => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getGeminiClient: () =>
+              ({
+                tryCompressChat: mockTryCompressChat,
+              }) as unknown as GeminiClient,
+          },
+        },
+        invocation: {
+          raw: '/compress short',
+          name: 'compress',
+          args: 'short',
+        },
+      });
+      await compressCommand.action!(ctx, '');
+      const infoCalls = (
+        ctx.ui.addItem as ReturnType<typeof vi.fn>
+      ).mock.calls.filter(
+        (c) =>
+          (c[0] as { type?: MessageType }).type === MessageType.INFO &&
+          typeof (c[0] as { text?: string }).text === 'string' &&
+          (c[0] as { text: string }).text.includes('truncated'),
+      );
+      expect(infoCalls).toHaveLength(0);
+    });
   });
 });

@@ -17,18 +17,26 @@ import {
   type Config,
   createDebugLogger,
   writeRuntimeStatus,
+  persistSessionUsage,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
-import { basename } from 'node:path';
+import path, { basename } from 'node:path';
 import v8 from 'node:v8';
 import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+  parseArguments,
+} from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
@@ -38,7 +46,14 @@ import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
+import { handleList as handleListExtensions } from './commands/extensions/list.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
+import {
+  setupStartupWorktree,
+  persistStartupWorktreeSidecar,
+  buildStartupWorktreeNotice,
+  type StartupWorktreeContext,
+} from './startup/worktreeStartup.js';
 import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
 import { AppContainer } from './ui/AppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
@@ -78,7 +93,9 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
+import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
+import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import {
   startEarlyInputCapture,
@@ -96,6 +113,11 @@ import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimiz
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+function clearCorruptionEnvVars(): void {
+  delete process.env[ENV_CORRUPTED_PATH];
+  delete process.env[ENV_WAS_RECOVERED];
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -402,6 +424,7 @@ export async function main() {
     setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
   }
   setupUnhandledRejectionHandler();
+  initializeWarningHandler();
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -418,11 +441,42 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  // Load user settings — bare mode uses minimal config, normal mode loads full.
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+
+  // Propagate corruption state to child process via env vars so
+  // relaunchAppInChildProcess() doesn't lose the marker.
+  if (settings.corruptedPath) {
+    process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
+    process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
+  }
   await cleanupCheckpoints();
+  // Performance checkpoint
   profileCheckpoint('after_load_settings');
+
+  // Emit settings warnings early so the parent process surfaces them
+  // before relaunchAppInChildProcess() exits (the child has empty
+  // migrationWarnings because the parent already renamed the file).
+  const settingsWarnings = getSettingsWarnings(settings);
+  for (const warning of settingsWarnings) {
+    writeStderrLine(warning);
+  }
+  // Corruption notification no longer goes through migrationWarnings —
+  // check corruptedPath directly to keep stderr visible in relaunch.
+  if (settings.corruptedPath) {
+    writeStderrLine(
+      'Warning: Settings file had invalid JSON and was reset. ' +
+        'A copy of the corrupted file has been saved at: ' +
+        settings.corruptedPath,
+    );
+  }
+
+  if (argv.listExtensions) {
+    await handleListExtensions();
+    process.exit(0);
+  }
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -481,6 +535,7 @@ export async function main() {
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
+        buildDisabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -577,7 +632,89 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, []);
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        afterSpawn: clearCorruptionEnvVars,
+      });
+    }
+  }
+
+  // When --worktree is going to chdir us into a worktree below, resolve
+  // any relative-path argv fields to absolute paths now — BEFORE the
+  // chdir. Otherwise downstream `fs.existsSync('./mcp.json')` calls in
+  // `loadCliConfig` re-resolve against the worktree dir, where the file
+  // doesn't exist. Only touches values that look like paths (mcpConfig
+  // also accepts inline JSON — skip those).
+  //
+  // The list of fields below is hand-maintained. If you add a new
+  // CLI flag that takes a relative path, register it here too,
+  // otherwise --worktree silently breaks for that flag.
+  if (argv.worktree !== undefined) {
+    const launchCwdForPaths = process.cwd();
+    const looksLikeInlineJson = (v: string): boolean => {
+      const t = v.trim();
+      return t.startsWith('{') || t.startsWith('[');
+    };
+    const resolveIfPath = (v: string | undefined): string | undefined => {
+      if (typeof v !== 'string' || v.length === 0) return v;
+      if (looksLikeInlineJson(v)) return v;
+      return path.resolve(launchCwdForPaths, v);
+    };
+    argv.mcpConfig = resolveIfPath(argv.mcpConfig);
+    argv.openaiLoggingDir = resolveIfPath(argv.openaiLoggingDir);
+    argv.jsonFile = resolveIfPath(argv.jsonFile);
+    argv.inputFile = resolveIfPath(argv.inputFile);
+    argv.telemetryOutfile = resolveIfPath(argv.telemetryOutfile);
+    if (Array.isArray(argv.includeDirectories)) {
+      argv.includeDirectories = argv.includeDirectories.map((d) =>
+        typeof d === 'string' && d.length > 0
+          ? path.resolve(launchCwdForPaths, d)
+          : d,
+      );
+    }
+    // `--json-schema` accepts either an inline schema or `@<path>`. The
+    // `@`-prefixed form is read from disk inside `resolveJsonSchemaArg`
+    // (`packages/cli/src/config/config.ts`), AFTER chdir, so a relative
+    // value would resolve against the worktree — fix the prefix path
+    // here.
+    if (typeof argv.jsonSchema === 'string') {
+      const trimmedSchema = argv.jsonSchema.trim();
+      if (trimmedSchema.startsWith('@')) {
+        const rel = trimmedSchema.slice(1);
+        if (rel.length > 0 && !path.isAbsolute(rel)) {
+          argv.jsonSchema = '@' + path.resolve(launchCwdForPaths, rel);
+        }
+      }
+    }
+  }
+
+  // Phase D-1: process --worktree before the resume picker so the picker
+  // (which uses process.cwd() to scope its session search) finds sessions
+  // saved inside the target worktree. Creates the worktree directory on
+  // disk and chdirs into it; on failure we emit to stderr and exit before
+  // any expensive initialization runs.
+  //
+  // ACP mode is exempt: the ACP host (Zed, etc.) supplies its own per-session
+  // cwd, and the startup-level chdir would not propagate. Reject the
+  // combination with a clear error rather than silently dropping --worktree.
+  let startupWorktreeContext: StartupWorktreeContext | null = null;
+  if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
+    writeStderrLine(
+      '--worktree cannot be combined with --acp / --experimental-acp. ' +
+        'Pass the worktree path as the cwd of the ACP loadSession / newSession ' +
+        'request instead.',
+    );
+    process.exit(1);
+  }
+  {
+    const startupRes = await setupStartupWorktree(argv.worktree, {
+      symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
+    });
+    if (startupRes !== null) {
+      if (!startupRes.ok) {
+        writeStderrLine(startupRes.error);
+        process.exit(1);
+      }
+      startupWorktreeContext = startupRes.context;
     }
   }
 
@@ -650,8 +787,77 @@ export async function main() {
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
+      buildDisabledSkillNamesProvider(settings),
     );
     profileCheckpoint('after_load_cli_config');
+
+    // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
+    // machinery on a subsequent `--resume` picks the worktree back up, and
+    // capture any override of a previously-resumed session's worktree so
+    // we can emit a one-shot notice on the model's first prompt.
+    //
+    // The notice is set BEFORE the persist attempt and AGAIN inside the
+    // try block (so the override addendum can be appended on success).
+    // A persist failure must NOT silently drop the notice — the cwd is
+    // already switched, and the model needs to know which worktree it's
+    // operating in regardless of whether the sidecar landed.
+    if (startupWorktreeContext) {
+      config.setPendingStartupWorktreeNotice(
+        buildStartupWorktreeNotice(startupWorktreeContext),
+      );
+      try {
+        const startupWorktreePersist = await persistStartupWorktreeSidecar(
+          config,
+          startupWorktreeContext,
+        );
+        if (startupWorktreePersist.overrodeResumedWorktree) {
+          writeStderrLine(
+            `--worktree overrode the resumed session's previous worktree ` +
+              `"${startupWorktreePersist.overriddenSlug ?? '(unknown)'}". ` +
+              `That worktree directory was left intact on disk.`,
+          );
+        }
+        // Refresh the notice with the override addendum (if any). When
+        // there is no override this is a no-op text-wise; on override it
+        // gives the model the "you overrode <previous-slug>" hint. TUI
+        // and headless consume this via Config.consumePendingStartupWorktreeNotice();
+        // ACP is excluded above (`--worktree` × `--acp` is mutually
+        // exclusive — see the mutex check earlier in this function).
+        config.setPendingStartupWorktreeNotice(
+          buildStartupWorktreeNotice(
+            startupWorktreeContext,
+            startupWorktreePersist,
+          ),
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // Persist session usage for cross-session reports (must run before
+    // config.shutdown() which clears telemetry state).
+    // sessionStartTime is read from uiTelemetryService so it stays correct
+    // after /clear resets the session (reset() updates the internal timestamp).
+    registerCleanup(() => {
+      try {
+        const metrics = uiTelemetryService.getMetrics();
+        const hasActivity = Object.values(metrics.models).some(
+          (m) => m.api.totalRequests > 0,
+        );
+        if (!hasActivity) return;
+        persistSessionUsage({
+          sessionId: config.getSessionId(),
+          startTime: uiTelemetryService.getSessionStartTime(),
+          endTime: new Date(),
+          project: config.getProjectRoot(),
+          metrics,
+        });
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+    });
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -671,15 +877,6 @@ export async function main() {
         `Preconnect skipped due to error getting authType: ${error}`,
       );
     }
-
-    // FIXME: list extensions after the config initialize
-    // if (config.getListExtensions()) {
-    //   console.log('Installed extensions:');
-    //   for (const extension of extensions) {
-    //     console.log(`- ${extension.config.name}`);
-    //   }
-    //   process.exit(0);
-    // }
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -741,6 +938,25 @@ export async function main() {
       process.exit(0);
     }
 
+    // Background housekeeping: file-history cleanup and (future) other
+    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
+    // don't create the file-history dirs this cleans, so they skip.
+    // Dynamic import keeps --help / one-shot --prompt paths from loading
+    // this code at all. Timers inside are .unref()'d so they never block
+    // process exit.
+    if (config.isInteractive()) {
+      // .catch() is intentional: a dynamic-import or module-init failure
+      // (theoretically near-impossible — the module has no top-level side
+      // effects — but defense in depth matches the runPass try/catch in
+      // scheduler.ts) becomes a swallowed log instead of an unhandled
+      // promise rejection that crashes the REPL.
+      void import('./utils/housekeeping/scheduler.js')
+        .then((m) => m.startBackgroundHousekeeping(config, settings))
+        .catch((err) => {
+          debugLogger.warn('failed to start background housekeeping:', err);
+        });
+    }
+
     let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
@@ -760,6 +976,17 @@ export async function main() {
           : []),
       ]),
     ];
+
+    // Surface critical startup warnings (corrupted settings, recovery, etc.)
+    // to stderr so they are visible regardless of UI mode. In interactive
+    // mode the TUI's Notifications component also renders them, but the
+    // onboarding flow can obscure the notification area, leaving users
+    // unaware that their settings were reset. Writing to stderr before
+    // the TUI takes over ensures the message is visible in the terminal
+    // scrollback. In non-interactive mode this is the *only* channel.
+    for (const warning of startupWarnings) {
+      writeStderrLine(warning);
+    }
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
@@ -802,8 +1029,15 @@ export async function main() {
         process.cwd(),
         initializationResult!,
       );
+      // Clean up corruption env vars so subsequent relaunch children
+      // and subprocesses don't inherit stale state.
+      clearCorruptionEnvVars();
       return;
     }
+
+    // Also clean up env vars for non-interactive paths so that
+    // subprocesses don't inherit stale state.
+    clearCorruptionEnvVars();
 
     // Non-interactive: defer finalize until after `config.initialize()` runs
     // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
@@ -822,6 +1056,17 @@ export async function main() {
       }
     }
 
+    // Headless + YOLO without a sandbox lets the model auto-approve and
+    // execute shell / write / edit tools at the current process's
+    // privilege level. Emit a one-line stderr warning so unattended runs
+    // have at least an observable signal. Interactive runs are excluded
+    // because the user is at the keyboard and the TUI shows approval
+    // state directly. See issue #4103.
+    if (!config.isInteractive()) {
+      const yoloWarning = getHeadlessYoloSafetyWarning(config);
+      if (yoloWarning) writeStderrLine(yoloWarning);
+    }
+
     // For non-stream-json mode, initialize config here. Stream-json defers
     // `config.initialize()` to inside `Session.ensureConfigInitialized`
     // because the initial control_request may register SDK MCP servers
@@ -830,6 +1075,7 @@ export async function main() {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
+
       // Non-interactive paths feed a prompt to the model immediately after
       // init. Under PR-A's progressive MCP availability,
       // `config.initialize()` returns BEFORE MCP servers settle, so
@@ -891,7 +1137,7 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = Math.random().toString(16).slice(2);
+    const prompt_id = createNonInteractivePromptId(config.getSessionId());
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
@@ -946,6 +1192,10 @@ export async function main() {
     await runExitCleanup();
     process.exit(exitCode);
   }
+}
+
+export function createNonInteractivePromptId(sessionId: string): string {
+  return `${sessionId}########0`;
 }
 
 function setWindowTitle(title: string, settings: LoadedSettings) {

@@ -13,6 +13,9 @@ import { ToolNames } from '../../tools/tool-names.js';
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
+// IMPORTANT: any new file-touching tool added here MUST also be added
+// to FILE_PATH_TOOLS below, or microcompaction will blank its output
+// without reporting the eviction — silently reintroducing issue #4239.
 const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.SHELL,
@@ -22,6 +25,54 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
 ]);
+
+/**
+ * Tools whose blanked output drops a file's bytes from history. We
+ * report their path so the caller can disarm just that file's
+ * fast-path (issue #4239) instead of wiping the whole cache. All three
+ * take the target as a `file_path` arg.
+ */
+const FILE_PATH_TOOLS = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+]);
+
+/**
+ * Build a `callId → file_path[]` map for every file-tool call. The path
+ * lives on the request-side `functionCall.args`, not on the
+ * `functionResponse` microcompaction blanks, so this is the only way
+ * to recover which file a cleared result referred to. Calls missing an
+ * id or file_path are absent (the caller treats that as unresolvable).
+ *
+ * Paths accumulate per id rather than overwrite: if a (malformed or
+ * resumed) history reuses a `functionCall.id` across different files,
+ * disarming *all* candidate paths is the safe choice — over-disarming
+ * costs at most a redundant re-read, whereas keeping the wrong file
+ * armed would resurrect the dangling-placeholder hazard (issue #4239).
+ */
+function buildCallIdToFilePath(history: Content[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const content of history) {
+    // functionCall parts are always model-role; skip user/system turns
+    // (mirrors collectCompactablePartRefs' role short-circuit).
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id || !call.name || !FILE_PATH_TOOLS.has(call.name)) {
+        continue;
+      }
+      const filePath = (call.args as { file_path?: unknown } | undefined)
+        ?.file_path;
+      if (typeof filePath === 'string' && filePath.length > 0) {
+        const existing = map.get(call.id);
+        if (existing) existing.push(filePath);
+        else map.set(call.id, [filePath]);
+      }
+    }
+  }
+  return map;
+}
 
 // --- Trigger evaluation ---
 
@@ -200,11 +251,23 @@ export interface MicrocompactMeta {
   mediaKept: number;
   keepRecent: number;
   tokensSaved: number;
+  /** Recovered paths of files whose read/edit/write result was blanked; the caller disarms their fast-path (issue #4239). */
+  evictedReadPaths: string[];
+  /**
+   * Count of blanked file results whose path could NOT be recovered
+   * (e.g. provider didn't populate `functionCall.id`). Non-zero means
+   * the caller MUST fall back to the blanket wipe — an unrecovered
+   * armed entry would serve a dangling placeholder.
+   */
+  unresolvedEvictedReads: number;
 }
 
 /**
  * Microcompact history: clear old compactable tool results when the
  * time-based trigger fires.
+ *
+ * Pass `opts.force: true` to skip the time-based trigger check and
+ * always run the clearing logic (used by `/compress-fast`).
  *
  * Returns the (potentially modified) history and optional metadata
  * about what was cleared (for logging by the caller).
@@ -213,11 +276,11 @@ export function microcompactHistory(
   history: Content[],
   lastApiCompletionTimestamp: number | null,
   settings: ClearContextOnIdleSettings,
+  opts?: { force?: boolean },
 ): { history: Content[]; meta?: MicrocompactMeta } {
-  const trigger = evaluateTimeBasedTrigger(
-    lastApiCompletionTimestamp,
-    settings,
-  );
+  const trigger = opts?.force
+    ? { gapMs: 0 }
+    : evaluateTimeBasedTrigger(lastApiCompletionTimestamp, settings);
   if (!trigger) {
     return { history };
   }
@@ -261,6 +324,10 @@ export function microcompactHistory(
     parts.set(ref.partIndex, ref.kind);
   }
 
+  const callIdToFilePath = buildCallIdToFilePath(history);
+  const evictedReadPaths = new Set<string>();
+  let unresolvedEvictedReads = 0;
+
   let tokensSaved = 0;
   let toolsCleared = 0;
   let mediaCleared = 0;
@@ -284,6 +351,19 @@ export function microcompactHistory(
         tokensSaved += estimatePartTokens(part);
         toolsCleared++;
         touched = true;
+        // Record the blanked file's path so the caller disarms its
+        // fast-path; if unrecoverable, count it so the caller falls
+        // back to the blanket wipe (issue #4239).
+        if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
+          const filePaths = part.functionResponse.id
+            ? callIdToFilePath.get(part.functionResponse.id)
+            : undefined;
+          if (filePaths && filePaths.length > 0) {
+            for (const p of filePaths) evictedReadPaths.add(p);
+          } else {
+            unresolvedEvictedReads++;
+          }
+        }
         return {
           functionResponse: {
             ...stripNestedMedia(part.functionResponse),
@@ -332,8 +412,10 @@ export function microcompactHistory(
   }
 
   const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
-  const toolsKept = tool.length - toolsCleared;
-  const mediaKept = media.length + nestedMedia.length - mediaCleared;
+  // Only count items that were actually protected by keepRecent, not
+  // already-cleared items that were skipped during the clearing pass.
+  const toolsKept = Math.min(tool.length, keepRecent);
+  const mediaKept = Math.min(media.length + nestedMedia.length, keepRecent);
 
   return {
     history: result,
@@ -346,6 +428,8 @@ export function microcompactHistory(
       mediaKept,
       keepRecent,
       tokensSaved,
+      evictedReadPaths: [...evictedReadPaths],
+      unresolvedEvictedReads,
     },
   };
 }

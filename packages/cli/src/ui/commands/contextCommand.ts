@@ -13,6 +13,7 @@ import {
   MessageType,
   type HistoryItemContextUsage,
   type ContextCategoryBreakdown,
+  type ContextTier,
   type ContextToolDetail,
   type ContextMemoryDetail,
   type ContextSkillDetail,
@@ -24,14 +25,26 @@ import {
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
+  computeThresholds,
+  type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 /**
- * Default compression token threshold (triggers compression at 70% usage).
- * The autocompact buffer is (1 - threshold) * contextWindowSize.
+ * Classify a token count against the three-tier compaction ladder. Mirrors
+ * the gating logic in `chatCompressionService` / `geminiChat` so the
+ * `/context` output's "current tier" label reflects exactly which tier the
+ * runtime would treat the session as sitting in.
  */
-const DEFAULT_COMPRESSION_THRESHOLD = 0.7;
+function currentTier(
+  tokens: number,
+  thresholds: CompactionThresholds,
+): ContextTier {
+  if (tokens >= thresholds.hard) return 'hard';
+  if (tokens >= thresholds.auto) return 'auto';
+  if (tokens >= thresholds.warn) return 'warn';
+  return 'safe';
+}
 
 /**
  * Estimate token count for a string using a character-based heuristic.
@@ -103,13 +116,14 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Pass includeDeferred so this token estimate lines up with the per-tool
-  // breakdown below (which iterates getAllTools, unfiltered). Without it the
-  // "all tools" total would exclude deferred tools while the per-tool sum
-  // still includes them, and displayBuiltinTools = total - mcp would go
-  // negative.
+  // Match what's actually sent to the model: deferred tools — MCP tools and
+  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
+  // from the prompt unless ToolSearch has revealed them this session. See
+  // client.ts which calls getFunctionDeclarations() with no args. The
+  // per-tool loop below applies the same filter so allToolsTokens stays
+  // aligned with the breakdown sum.
   const toolDeclarations = toolRegistry
-    ? toolRegistry.getFunctionDeclarations({ includeDeferred: true })
+    ? toolRegistry.getFunctionDeclarations()
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateTokens(toolsJsonStr);
@@ -117,6 +131,13 @@ export async function collectContextData(
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
+    if (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !toolRegistry?.isDeferredToolRevealed(tool.name)
+    ) {
+      continue;
+    }
     const toolJsonStr = JSON.stringify(tool.schema);
     const tokens = estimateTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
@@ -174,13 +195,16 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const compressionThreshold =
-    config.getChatCompression()?.contextPercentageThreshold ??
-    DEFAULT_COMPRESSION_THRESHOLD;
-  const autocompactBuffer =
-    compressionThreshold > 0
-      ? Math.round((1 - compressionThreshold) * contextWindowSize)
-      : 0;
+  const thresholds = computeThresholds(contextWindowSize);
+  // Keep the `(window - auto)` buffer for the legacy three-segment progress
+  // bar in ContextUsage.tsx — it visualizes the headroom between the auto
+  // threshold and the window edge, which is exactly `contextWindowSize -
+  // thresholds.auto`. New consumers should read `breakdown.thresholds`
+  // directly.
+  const autocompactBuffer = Math.max(
+    0,
+    Math.round(contextWindowSize - thresholds.auto),
+  );
 
   const rawOverhead =
     systemPromptTokens +
@@ -287,6 +311,26 @@ export async function collectContextData(
         : skills;
   }
 
+  // Tier classification: prefer the API-reported total when available.
+  // When no API call has happened yet (first /context, --continue resume,
+  // sub-agent inheritance), classify against `rawOverhead` so a session
+  // dominated by system prompt / skills / MCP tools doesn't silently show
+  // "safe". (R2.2)
+  //
+  // SCOPE GAP (R5.1): `rawOverhead` excludes `messagesTokens` — the actual
+  // chat history. A `--continue` restore with 100K of historical messages
+  // (but small overhead) will still display "safe" here, even though the
+  // cheap-gate inside chatCompressionService will trigger compression on
+  // the very next send (it uses `estimatePromptTokens(history, ...)` which
+  // walks the real history). This is a UI/runtime divergence — for a
+  // single render — that resolves the moment any send happens.
+  //
+  // TODO: plumb the chat history into collectContextData and use
+  // estimatePromptTokens(history, undefined, 0, imageTokenEstimate) here
+  // for same-source-of-truth as the cheap-gate. Defer because Config
+  // doesn't expose the active chat instance today.
+  const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
+
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
@@ -296,6 +340,8 @@ export async function collectContextData(
     messages: messagesTokens,
     freeSpace,
     autocompactBuffer,
+    thresholds,
+    currentTier: currentTier(tierTokens, thresholds),
   };
 
   return {
@@ -332,12 +378,20 @@ function fmtCategoryRow(
   contextWindowSize: number,
   indent = '  ',
 ): string {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const percentage =
+    contextWindowSize > 0
+      ? ((tokens / contextWindowSize) * 100).toFixed(1)
+      : '0.0';
   const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
   const leftPart = `${indent}${label}`;
   const totalWidth = 56;
   const dots = Math.max(1, totalWidth - leftPart.length - right.length);
   return `${leftPart}${' '.repeat(dots)}${right}`;
+}
+
+/** Locale-grouped integer (e.g. 147000 -> "147,000"). */
+function formatNum(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
 }
 
 /**
@@ -377,13 +431,15 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     lines.push('');
     lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
     lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
+    lines.push('');
+    lines.push('**Compaction thresholds**');
     lines.push(
-      fmtCategoryRow(
-        'Autocompact buffer',
-        breakdown.autocompactBuffer,
-        contextWindowSize,
-      ),
+      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − ${formatNum(contextWindowSize - breakdown.thresholds.effectiveWindow)} reserve)`,
     );
+    lines.push(`  Warn threshold:     ${formatNum(breakdown.thresholds.warn)}`);
+    lines.push(`  Auto threshold:     ${formatNum(breakdown.thresholds.auto)}`);
+    lines.push(`  Hard threshold:     ${formatNum(breakdown.thresholds.hard)}`);
+    lines.push(`  Current tier:       ${breakdown.currentTier}`);
     lines.push('');
     lines.push('**Usage by category**');
   }
@@ -483,9 +539,8 @@ export const contextCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
-    const showDetails =
-      args?.trim().toLowerCase() === 'detail' ||
-      args?.trim().toLowerCase() === '-d';
+    const normalizedArgs = args?.trim().toLowerCase();
+    const showDetails = normalizedArgs === 'detail' || normalizedArgs === '-d';
     const executionMode = context.executionMode ?? 'interactive';
     const { config } = context.services;
     if (!config) {
@@ -511,13 +566,12 @@ export const contextCommand: SlashCommand = {
     if (executionMode === 'interactive') {
       context.ui.addItem(contextUsageItem, Date.now());
       return;
-    } else {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: formatContextUsageText(contextUsageItem),
-      };
     }
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: formatContextUsageText(contextUsageItem),
+    };
   },
   subCommands: [
     {

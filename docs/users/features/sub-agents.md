@@ -134,7 +134,7 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 ---
 name: agent-name
 description: Brief description of when and how to use this agent
-model: inherit # Optional: inherit or model-id
+model: inherit # Optional: inherit, fast, modelId, or authType:modelId
 approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo
 tools:         # Optional: allowlist of tools
   - tool1
@@ -151,10 +151,48 @@ Multiple paragraphs are supported.
 
 Use the optional `model` frontmatter field to control which model a subagent uses:
 
-- `inherit`: Use the same model as the main conversation
-- Omit the field: Same as `inherit`
-- `glm-5`: Use that model ID with the main conversation's auth type
-- `openai:gpt-4o`: Use a different provider (resolves credentials from env vars)
+- `inherit`: Use the same model as the main conversation.
+- Omit the field: Same as `inherit`.
+- `fast`: Use the configured `fastModel`. If no valid fast model is configured,
+  the subagent falls back to `inherit`.
+- `glm-5`: Use that model ID. Qwen Code first checks the main conversation's
+  auth type; if the model is not available there, it can resolve the model from
+  another configured provider.
+- `openai:gpt-4o`: Use an explicit provider and model ID. This is useful when a
+  subagent should run on a model registered under a different auth type from the
+  main conversation.
+
+For example:
+
+```
+---
+name: fast-reviewer
+description: Reviews small diffs with the configured fast model
+model: fast
+tools:
+  - read_file
+  - grep_search
+---
+```
+
+```
+---
+name: openai-researcher
+description: Uses an OpenAI-compatible provider for research tasks
+model: openai:gpt-4o
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+```
+
+The `fast` selector uses the same `fastModel` setting configured in
+`settings.json` or with `/model --fast`. That setting may itself refer to a
+model under another configured auth type, such as `openai:deepseek-v4-flash`.
+When the selector resolves to another auth type, Qwen Code creates a dedicated
+runtime provider for that subagent request and sends the provider only the bare
+model ID.
 
 #### Permission Mode
 
@@ -236,6 +274,66 @@ disallowedTools:
   - mcp__slack
 ---
 ```
+
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
+
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                           |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins. The legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                           |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is preserved for backward compatibility. Other values are silently dropped on parse.                                         |
+| `mcpServers`     | record of specs  | Per-agent MCP server overrides. Merged with the session-level MCP server set when the agent spawns; on key collision the agent's spec wins (matching CC's `scope: 'agent'` semantics). Malformed entries are dropped per-key with a warning rather than failing the whole agent. |
+| `hooks`          | record of arrays | Per-agent hooks. Keys are CC hook event names (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, …); values are arrays of `{ matcher?, hooks: [...] }` definitions in the same shape as `settings.json`'s `hooks` field. Registered while the agent runs, removed when it stops.  |
+
+Example with all of the above:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with a turn cap
+permissionMode: plan
+maxTurns: 50
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+mcpServers:
+  filesystem:
+    type: stdio
+    command: node
+    args: [/usr/local/lib/mcp-fs/server.js]
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo "review-agent about to run a shell command"
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation` — are documented in the declarative-agent design doc
+and land in follow-up PRs once the prerequisite infrastructure exists
+(`effort` needs a model-layer parameter; `memory` needs a scoped memory
+subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
+
+> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
+> its hook entries fire for every matching event in the session, not only
+> for that subagent's own tool calls. If two subagents with different
+> per-agent hook sets run concurrently, both sets fire for both agents.
+> Per-agent scope filtering at hook-firing time is left to a follow-up;
+> for v1, prefer per-agent hooks that are safe to fire globally for the
+> duration of the agent's run (e.g. logging) over hooks that mutate
+> behavior.
 
 #### Example Usage
 
@@ -620,6 +718,10 @@ Always follow these standards:
 
 - **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
 - **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
+- **Provider Selection**: A subagent with `model: authType:modelId`, or
+  `model: fast` where `fastModel` resolves to another auth type, sends that
+  subagent's model requests to the selected provider. Make sure that provider is
+  appropriate for the subagent's task and data.
 - **Sandboxing**: All tool execution follows the same security model as direct tool use
 - **Audit Trail**: All Subagents actions are logged and visible in real-time
 - **Access Control**: Project and user-level separation provides appropriate boundaries

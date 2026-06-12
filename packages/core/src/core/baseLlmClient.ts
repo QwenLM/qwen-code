@@ -19,10 +19,17 @@ import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { resolveModelId, type ResolvedModelId } from '../utils/modelId.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -173,6 +180,10 @@ export class BaseLlmClient {
     private readonly config: Config,
   ) {}
 
+  private getCurrentContentGenerator(): ContentGenerator {
+    return this.config.getContentGenerator?.() ?? this.contentGenerator;
+  }
+
   async generateJson(
     options: GenerateJsonOptions,
   ): Promise<Record<string, unknown>> {
@@ -235,6 +246,20 @@ export class BaseLlmClient {
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
           );
         },
       });
@@ -337,6 +362,20 @@ export class BaseLlmClient {
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
           );
         },
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: requestModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
+          );
+        },
       });
 
       return {
@@ -423,7 +462,7 @@ export class BaseLlmClient {
       (!selector?.authType || selector.authType === mainAuthType)
     ) {
       return {
-        contentGenerator: this.contentGenerator,
+        contentGenerator: this.getCurrentContentGenerator(),
         retryAuthType: mainAuthType,
         retryErrorCodes: mainRetryErrorCodes,
         model: requestModel,
@@ -507,17 +546,21 @@ export class BaseLlmClient {
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+
+    if (!resolvedModel) {
+      debugLogger.warn(
+        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+      );
+      // Do not cache the fallback: getCurrentContentGenerator() reads the
+      // runtime view from AsyncLocalStorage, which can differ between calls
+      // (e.g. inside a subagent vs. on the main session). Caching here would
+      // pin the first-call view's generator under this selector key.
+      return this.getCurrentContentGenerator();
+    }
+
     const generatorPromise = (async () => {
       try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
-
-        if (!resolvedModel) {
-          debugLogger.warn(
-            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
-          );
-          return this.contentGenerator;
-        }
-
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
@@ -538,7 +581,7 @@ export class BaseLlmClient {
           err instanceof Error ? err.message : String(err),
         );
         this.perModelGeneratorCache.delete(cacheKey);
-        return this.contentGenerator;
+        return this.getCurrentContentGenerator();
       }
     })();
 
@@ -547,12 +590,6 @@ export class BaseLlmClient {
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {
-    return resolveModelId(model, {
-      currentModel: this.config.getModel(),
-      currentAuthType: this.config.getContentGeneratorConfig()?.authType,
-      fastModel:
-        this.config.getFastModelForSideQuery?.() ??
-        this.config.getFastModel?.(),
-    });
+    return resolveModelId(model, buildModelIdContext(this.config));
   }
 }

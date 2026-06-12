@@ -8,7 +8,6 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
-  GitService,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -50,7 +49,6 @@ export interface CommandContext {
     // TODO(abhipatel12): Ensure that config is never null.
     config: Config | null;
     settings: LoadedSettings;
-    git: GitService | undefined;
     logger: Logger | null;
   };
   // UI state and history management
@@ -131,7 +129,7 @@ export interface QuitActionReturn {
  */
 export interface MessageActionReturn {
   type: 'message';
-  messageType: 'info' | 'error';
+  messageType: 'info' | 'warning' | 'error';
   content: string;
 }
 
@@ -142,7 +140,7 @@ export interface MessageActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'error'; content: string },
+    { messageType: 'info' | 'warning' | 'error'; content: string },
     void,
     unknown
   >;
@@ -177,9 +175,9 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
-    | 'manage-models'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
@@ -189,7 +187,9 @@ export interface OpenDialogActionReturn {
     | 'extensions_manage'
     | 'hooks'
     | 'mcp'
-    | 'rewind';
+    | 'rewind'
+    | 'diff'
+    | 'stats';
 }
 
 /**
@@ -292,6 +292,8 @@ export interface CommandCompletionItem {
   value: string;
   label?: string;
   description?: string;
+  /** Whether the completion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
+  isDirectory?: boolean;
 }
 
 // The standardized contract for any command in the system.
@@ -363,6 +365,25 @@ export interface SlashCommand {
   argumentHint?: string;
 
   /**
+   * Whether command-picker clients should wait for additional user input before
+   * submitting this command. Defaults are inferred from command metadata.
+   */
+  acceptsInput?: boolean;
+
+  /**
+   * When true, accepting this command from the slash auto-completion popup
+   * (e.g. typing `/skil` and pressing Enter on the highlighted `skills`
+   * suggestion) submits `/<name>` immediately rather than just inserting
+   * the text and forcing a second Enter.
+   *
+   * Set this only on commands whose bare action takes no required argument
+   * — typically commands whose action just opens a dialog. Commands with
+   * subCommands or arg-based completion should leave this false so users
+   * can navigate further.
+   */
+  submitOnAccept?: boolean;
+
+  /**
    * Describes when to use this command — injected into the model-visible
    * description for modelInvocable commands.
    */
@@ -376,6 +397,15 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
+  skillDetail?: {
+    name: string;
+    description?: string;
+    body?: string;
+    filePath?: string;
+    level?: string;
+  };
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

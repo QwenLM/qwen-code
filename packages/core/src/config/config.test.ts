@@ -7,8 +7,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode, MCPServerConfig } from './config.js';
+import {
+  Config,
+  ApprovalMode,
+  APPROVAL_MODES,
+  APPROVAL_MODE_INFO,
+  MCPServerConfig,
+  TrustGateError,
+} from './config.js';
+import { Storage } from './storage.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -31,7 +40,6 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
-import { GitService } from '../services/gitService.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
@@ -41,7 +49,9 @@ import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
@@ -60,12 +70,16 @@ vi.mock('node:fs', async (importOriginal) => {
   const mocked = {
     ...actual,
     existsSync: vi.fn().mockReturnValue(true),
+    readdirSync: vi.fn().mockReturnValue([]),
     statSync: vi.fn().mockReturnValue({
       isDirectory: vi.fn().mockReturnValue(true),
     }),
     realpathSync: vi.fn((path) => path),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    unlinkSync: vi.fn(),
     readFileSync: vi.fn(),
   };
   return {
@@ -86,6 +100,34 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
+  // PR 14b fix (codex round 4): per-instance manager stub so the
+  // `setMcpBudgetEventCallback → createToolRegistry → manager.setOnBudgetEvent`
+  // integration test can observe each instance's callback wiring.
+  // The mock constructor stamps a fresh `__mcpManagerMock` onto each
+  // ToolRegistry instance so tests can inspect it via
+  // `(registry as unknown as { __mcpManagerMock }).__mcpManagerMock`
+  // (escape hatch — production code reads it via `getMcpClientManager`).
+  ToolRegistryMock.mockImplementation(function (this: {
+    __mcpManagerMock: {
+      setOnBudgetEvent: Mock;
+      discoverAllMcpToolsIncremental: Mock;
+    };
+  }) {
+    this.__mcpManagerMock = {
+      setOnBudgetEvent: vi.fn(),
+      // Stubbed so `Config.startMcpDiscoveryInBackground` (kicked off
+      // at the tail of `initialize`) doesn't crash on missing method.
+      // Test cares only about the `setOnBudgetEvent` wiring; discovery
+      // itself is a no-op here.
+      discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+    };
+    return this;
+  });
+  ToolRegistryMock.prototype.getMcpClientManager = function (this: {
+    __mcpManagerMock: { setOnBudgetEvent: Mock };
+  }) {
+    return this.__mcpManagerMock;
+  };
   return { ToolRegistry: ToolRegistryMock };
 });
 
@@ -101,6 +143,7 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../hooks/index.js', () => {
@@ -111,6 +154,29 @@ vi.mock('../hooks/index.js', () => {
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),
+    createInstructionsLoadedCallback:
+      (
+        getHookSystem: () => {
+          fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
+        },
+      ) =>
+      async (notification: {
+        filePath: string;
+        memoryType: string;
+        loadReason: string;
+        triggerFilePath?: string;
+        parentFilePath?: string;
+      }) => {
+        await getHookSystem()?.fireInstructionsLoadedEvent?.(
+          notification.filePath,
+          notification.memoryType,
+          notification.loadReason,
+          {
+            triggerFilePath: notification.triggerFilePath,
+            parentFilePath: notification.parentFilePath,
+          },
+        );
+      },
   };
 });
 
@@ -196,12 +262,6 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/gitService.js', () => {
-  const GitServiceMock = vi.fn();
-  GitServiceMock.prototype.initialize = vi.fn();
-  return { GitService: GitServiceMock };
-});
-
 vi.mock('../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
   SkillManagerMock.prototype.startWatching = vi
@@ -249,6 +309,13 @@ vi.mock('../ide/ide-client.js', () => ({
 
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
+const MEMORY_PRESSURE_ENV_KEYS = [
+  'QWEN_MEMORY_PRESSURE_SOFT',
+  'QWEN_MEMORY_PRESSURE_HARD',
+  'QWEN_MEMORY_PRESSURE_CRITICAL',
+  'QWEN_MEMORY_ENABLE_GC',
+];
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -289,6 +356,21 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+      delete process.env[envName];
+    }
+    (fs.existsSync as Mock).mockReturnValue(true);
+    (fs.readdirSync as Mock).mockReturnValue([]);
+    (fs.statSync as Mock).mockReturnValue({
+      isDirectory: vi.fn().mockReturnValue(true),
+    });
+    vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
+    (fs.mkdirSync as Mock).mockImplementation(() => undefined);
+    (fs.writeFileSync as Mock).mockImplementation(() => undefined);
+    (fs.renameSync as Mock).mockImplementation(() => undefined);
+    (fs.copyFileSync as Mock).mockImplementation(() => undefined);
+    (fs.unlinkSync as Mock).mockImplementation(() => undefined);
+    (fs.readFileSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
@@ -368,6 +450,195 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('MemoryPressureMonitor isolation', () => {
+    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+      const child = Object.create(parent) as Config;
+
+      const parentMonitor = parent.getMemoryPressureMonitor();
+      const childMonitor = child.getMemoryPressureMonitor();
+
+      expect(parentMonitor).toBeDefined();
+      expect(childMonitor).toBeDefined();
+      expect(childMonitor).not.toBe(parentMonitor);
+      expect(child.getMemoryPressureMonitor()).toBe(childMonitor);
+    });
+
+    it('resets monitor cleanup state when starting a new session', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      const monitor = config.getMemoryPressureMonitor();
+      expect(monitor).toBeDefined();
+      const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
+
+      config.startNewSession();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('MemoryPressure configuration environment', () => {
+    const restorers: Array<() => void> = [];
+    const originalEnv = new Map<string, string | undefined>();
+
+    beforeEach(() => {
+      originalEnv.clear();
+      for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+        originalEnv.set(envName, process.env[envName]);
+        delete process.env[envName];
+      }
+    });
+
+    afterEach(() => {
+      while (restorers.length > 0) {
+        restorers.pop()?.();
+      }
+      for (const [envName, value] of originalEnv) {
+        if (value === undefined) {
+          delete process.env[envName];
+        } else {
+          process.env[envName] = value;
+        }
+      }
+      originalEnv.clear();
+    });
+
+    function mockMemoryRatio(rssRatio: number, heapUsedBytes = 0): void {
+      const spy = vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: Math.ceil(os.totalmem() * rssRatio),
+        heapTotal: 512 * 1024 * 1024,
+        heapUsed: heapUsedBytes,
+        external: 0,
+        arrayBuffers: 0,
+      });
+      restorers.push(() => spy.mockRestore());
+    }
+
+    function mockStderrWrite(): Mock {
+      const spy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      restorers.push(() => spy.mockRestore());
+      return spy as unknown as Mock;
+    }
+
+    it('applies valid memory pressure env overrides', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'soft',
+      );
+    });
+
+    it('falls back to defaults and warns on strict env parse failures', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3extra';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'normal',
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid memory pressure config'),
+      );
+    });
+
+    it('falls back to defaults and warns on invalid threshold ordering', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+
+      expect(config.getMemoryPressureMonitor()).toBeDefined();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'softPressureRatio must be < hardPressureRatio',
+        ),
+      );
+    });
+
+    it.each(['NaN', 'Infinity', '0'])(
+      'falls back to defaults for invalid soft threshold %s',
+      async (value) => {
+        const stderrSpy = mockStderrWrite();
+        process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
+
+        const config = new Config(baseParams);
+        await config.initialize({ skipGeminiInitialization: true });
+        mockMemoryRatio(0.35);
+
+        expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+          'normal',
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Invalid memory pressure config'),
+        );
+      },
+    );
+
+    it('enables explicit GC when requested by env', async () => {
+      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+      const globalWithGc = global as typeof global & { gc?: () => void };
+      const originalGc = globalWithGc.gc;
+      const gcSpy = vi.fn();
+      Object.defineProperty(globalWithGc, 'gc', {
+        value: gcSpy,
+        configurable: true,
+      });
+      restorers.push(() => {
+        if (originalGc) {
+          Object.defineProperty(globalWithGc, 'gc', {
+            value: originalGc,
+            configurable: true,
+          });
+        } else {
+          delete globalWithGc.gc;
+        }
+      });
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.85);
+
+      config.getMemoryPressureMonitor()?.performCheck();
+      // Critical tier has 4 async steps, need enough microtask drains
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await Promise.resolve();
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('child Config monitors inherit the parent memory pressure config snapshot', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
+      const child = Object.create(parent) as Config;
+      mockMemoryRatio(0.35);
+
+      expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
     });
   });
 
@@ -515,34 +786,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
-    it('should throw an error if checkpointing is enabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: true,
-      });
-
-      await expect(config.initialize()).rejects.toThrow(gitError);
-    });
-
-    it('should not throw an error if checkpointing is disabled and GitService fails', async () => {
-      const gitError = new Error('Git is not installed');
-      (GitService.prototype.initialize as Mock).mockRejectedValue(gitError);
-
-      const config = new Config({
-        ...baseParams,
-        checkpointing: false,
-      });
-
-      await expect(config.initialize()).resolves.toBeUndefined();
-    });
-
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
       });
 
       await expect(config.initialize()).resolves.toBeUndefined();
@@ -558,7 +804,6 @@ describe('Server Config (config.ts)', () => {
 
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         bareMode: true,
       });
 
@@ -573,11 +818,16 @@ describe('Server Config (config.ts)', () => {
         (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
           (call) => call[0],
         ),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
 
       // Default path passes `skipDiscovery: true` to createToolRegistry,
@@ -590,7 +840,7 @@ describe('Server Config (config.ts)', () => {
       const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
       try {
-        const config = new Config({ ...baseParams, checkpointing: false });
+        const config = new Config({ ...baseParams });
         await config.initialize();
 
         // Legacy escape hatch must call back into the synchronous discover
@@ -611,7 +861,7 @@ describe('Server Config (config.ts)', () => {
       // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
       // is called but the registry mock returns no manager, so the discovery
       // promise stays undefined and waitForMcpReady is a no-op.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       await config.initialize();
       await expect(config.waitForMcpReady()).resolves.toBeUndefined();
     });
@@ -621,7 +871,7 @@ describe('Server Config (config.ts)', () => {
       // failed to start" emission. Must be a no-op when there's nothing
       // to warn about, otherwise --prompt runs with no MCP config would
       // emit a spurious warning every time.
-      const config = new Config({ ...baseParams, checkpointing: false });
+      const config = new Config({ ...baseParams });
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
 
@@ -632,7 +882,6 @@ describe('Server Config (config.ts)', () => {
       // `excludedMcpServers` (see `isMcpServerDisabled`).
       const config = new Config({
         ...baseParams,
-        checkpointing: false,
         mcpServers: { off: new MCPServerConfig() },
         excludedMcpServers: ['off'],
       } as ConfigParameters);
@@ -867,7 +1116,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+    it('returns a bare fast model selector when the model is configured under another auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -893,11 +1142,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
     });
 
-    it('returns an authType-qualified fast model selector for side queries', () => {
+    it('returns an authType-qualified fast model selector', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -923,11 +1171,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+      expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
-    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+    it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI,
@@ -945,10 +1192,7 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:deepseek-v4-flash',
-      );
+      expect(config.getFastModel()).toBe('openai:deepseek-v4-flash');
     });
 
     it('accepts runtime fast models for authType-qualified selectors', () => {
@@ -979,10 +1223,7 @@ describe('Server Config (config.ts)', () => {
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
 
-      expect(config.getFastModel()).toBe('runtime-fast-model');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:runtime-fast-model',
-      );
+      expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
     it('returns undefined when the fast model is not configured for any auth type', () => {
@@ -1004,7 +1245,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when the fast model selector is malformed', () => {
@@ -1026,7 +1266,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when fastModel points back to the fast selector', () => {
@@ -1048,7 +1287,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {
@@ -1141,6 +1379,21 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toBe('');
   });
 
+  it('Config constructor should enable runtime sleep prevention by default', () => {
+    const config = new Config(baseParams);
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(true);
+  });
+
+  it('Config constructor should store runtime sleep prevention override', () => {
+    const config = new Config({
+      ...baseParams,
+      preventSystemSleep: false,
+    });
+
+    expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
   it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
     const config = new Config(baseParams);
 
@@ -1160,6 +1413,349 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('relocateWorkingDirectory should update the session working roots', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const workspaceContext = config.getWorkspaceContext();
+    const directoriesChanged = vi.fn();
+    workspaceContext.onDirectoriesChanged(directoriesChanged);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(config.getProjectRoot()).toBe(newDir);
+    expect(config.getCwd()).toBe(newDir);
+    expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getWorkspaceContext()).toBe(workspaceContext);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
+    expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(directoriesChanged).toHaveBeenCalled();
+    expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+      newDir,
+      expect.any(Array),
+      expect.any(Object),
+      expect.any(Array),
+      expect.any(Boolean),
+      expect.any(String),
+      expect.any(Array),
+      expect.any(Object),
+    );
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const fileServiceBefore = config.getFileService();
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+    const config = new Config(baseParams);
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const oldWorktreeSessionPath = path.join(
+      oldChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newWorktreeSessionPath = path.join(
+      newChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const existingArtifacts = [
+      oldTranscriptPath,
+      oldRuntimeStatusPath,
+      oldWorktreeSessionPath,
+    ];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.mkdirSync).toHaveBeenCalledWith(newChatsDir, {
+      recursive: true,
+    });
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldWorktreeSessionPath,
+      newWorktreeSessionPath,
+    );
+    expect(config.getTranscriptPath()).toBe(newTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue(newRuntimeStatusPath);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+      sessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+
+    writeRuntimeStatusSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const moveError = new Error('move failed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    const existingArtifacts = [oldTranscriptPath, oldRuntimeStatusPath];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw moveError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      moveError,
+    );
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      newTranscriptPath,
+      oldTranscriptPath,
+    );
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should remove a partial EXDEV copy when source cleanup fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const cleanupError = new Error('cleanup failed');
+    const exdevError = Object.assign(new Error('cross device'), {
+      code: 'EXDEV',
+    });
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw exdevError;
+      }
+    });
+    vi.mocked(fs.unlinkSync).mockImplementation((pathToUnlink) => {
+      if (pathToUnlink === oldRuntimeStatusPath) {
+        throw cleanupError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      cleanupError,
+    );
+
+    expect(fs.copyFileSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.unlinkSync).toHaveBeenCalledWith(newRuntimeStatusPath);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const expectedDir = path.resolve('/path/to/confirmed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, expectedDir),
+    ).rejects.toThrow(
+      `Changed directory to ${newDir}, expected ${expectedDir}.`,
+    );
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject before mutating config when include directories are stale', async () => {
+    const staleIncludeDir = path.resolve('/path/to/stale-include');
+    const config = new Config({
+      ...baseParams,
+      includeDirectories: [staleIncludeDir],
+    });
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(oldDir);
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck !== staleIncludeDir,
+    );
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      `Directory does not exist: ${staleIncludeDir}`,
+    );
+
+    expect(chdirSpy).not.toHaveBeenCalled();
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should return memory refresh failures after moving', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
   });
 
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
@@ -1198,7 +1794,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
@@ -1226,7 +1822,49 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.[1]).toEqual([explicitDir]);
-    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
+  });
+
+  it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
+    const config = new Config(baseParams);
+    const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    config['hookSystem'] = {
+      fireInstructionsLoadedEvent,
+    } as unknown as HookSystem;
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    const options = lastCall?.at(-1) as
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
+    expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
+
+    await options?.onInstructionsLoaded?.({
+      filePath: '/tmp/project/QWEN.md',
+      memoryType: 'project',
+      loadReason: 'include',
+      triggerFilePath: '/tmp/project/AGENTS.md',
+      parentFilePath: '/tmp/project/AGENTS.md',
+    });
+
+    expect(fireInstructionsLoadedEvent).toHaveBeenCalledWith(
+      '/tmp/project/QWEN.md',
+      'project',
+      'include',
+      {
+        triggerFilePath: '/tmp/project/AGENTS.md',
+        parentFilePath: '/tmp/project/AGENTS.md',
+      },
+    );
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
@@ -1610,6 +2248,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
+        outboundCorrelation: { propagateTraceContext: true },
+        expected: true,
+      },
+      {
+        label: 'explicit false',
+        outboundCorrelation: { propagateTraceContext: false },
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
@@ -1696,20 +2365,26 @@ describe('Server Config (config.ts)', () => {
       expect(config.getCoreTools()).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
-      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for
       // --json-schema runs. Without it the model loops until
       // maxSessionTurns and exits via the "plain text" failure path —
       // expensive in tokens for what's almost always a CI use case. The
-      // synthetic tool must be registered alongside the bare three.
+      // synthetic tool must be registered alongside the bare toolset.
       const config = new Config({
         ...baseParams,
         bareMode: true,
@@ -1728,6 +2403,7 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
@@ -1756,8 +2432,8 @@ describe('Server Config (config.ts)', () => {
           ToolRegistry: { prototype: { registerFactory: Mock } };
         }
       ).ToolRegistry.prototype.registerFactory;
-      // Initial bare init registers READ_FILE / EDIT / SHELL /
-      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // Initial bare init registers READ_FILE / EDIT / NOTEBOOK_EDIT /
+      // SHELL / STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
       // observe ONLY the forSubAgent rebuild's calls.
       (registerToolMock as Mock).mockClear();
 
@@ -1771,10 +2447,11 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
-      // The bare three still register so the subagent has its toolset.
+      // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
     });
@@ -2062,6 +2739,116 @@ describe('Server Config (config.ts)', () => {
       );
     });
   });
+
+  // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the
+  // `Config.setMcpBudgetEventCallback → pendingMcpBudgetCallback →
+  // createToolRegistry → registry.getMcpClientManager().setOnBudgetEvent`
+  // boundary previously had NO test. The acpAgent test stubs the
+  // setter (proves QwenAgent calls it pre-`initialize`); the manager
+  // tests bypass Config by passing `onBudgetEvent` directly to
+  // `McpClientManager`. Neither covers the actual stash + apply path
+  // inside Config — and that path is the safety net that prevents
+  // startup-window MCP guardrail events from being dropped under
+  // legacy blocking discovery + closes the progressive-mode race
+  // window. These two tests exercise both call orderings (pre-init
+  // and late-call).
+  describe('setMcpBudgetEventCallback handoff to McpClientManager', () => {
+    it('applies pending callback when registry is created during initialize()', async () => {
+      const config = new Config(baseParams);
+      const cb = vi.fn();
+      // Setter called BEFORE initialize — value stashed on
+      // `pendingMcpBudgetCallback` and applied inside
+      // `createToolRegistry` after the manager is constructed but
+      // BEFORE `discoverAllTools` / background discovery fires.
+      config.setMcpBudgetEventCallback(cb);
+      await config.initialize();
+
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+      // Exactly once — the apply path fires only once per
+      // `createToolRegistry` invocation.
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent.mock.calls,
+      ).toHaveLength(1);
+    });
+
+    it('applies callback directly to existing manager when called after initialize()', async () => {
+      const config = new Config(baseParams);
+      // Initialize WITHOUT a pending callback first — the
+      // createToolRegistry apply branch is a no-op.
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      // Sanity: no apply happened during init since callback was
+      // never registered.
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).not.toHaveBeenCalled();
+
+      // Late-call path: setter dispatches DIRECTLY to the existing
+      // manager via the `if (this.toolRegistry)` branch in
+      // `setMcpBudgetEventCallback`. This is the path tests/adapters
+      // use when they discover the manager only after Config is up.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Calling with `undefined` clears the registration on the
+      // manager (parity with the constructor-time `off`-mode strip
+      // in McpClientManager).
+      config.setMcpBudgetEventCallback(undefined);
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent,
+      ).toHaveBeenLastCalledWith(undefined);
+    });
+
+    it('does NOT stash the callback when called after initialize() (codex round 7 fix — subagent isolation)', async () => {
+      // Codex round 7 finding: pre-fix, the late-call path assigned
+      // to `pendingMcpBudgetCallback` BEFORE applying directly to
+      // the existing manager. A subsequent `createToolRegistry`
+      // (e.g. subagent override via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) would inherit the stash and
+      // wire the parent session's ACP push callback into the
+      // subagent's fresh manager, routing subagent telemetry
+      // through the wrong session.
+      //
+      // Fix: late-call path applies directly + sets
+      // `pendingMcpBudgetCallback = undefined`. Pre-init path still
+      // stashes (the only way to reach a manager that doesn't
+      // exist yet — round 1 fix #2 contract).
+      const config = new Config(baseParams);
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+
+      // Late-call: apply.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Now rebuild a registry as if for a subagent override. With
+      // the round-7 fix, the new manager should NOT receive the
+      // parent session's callback — pre-fix this would re-apply
+      // `cb` to the new manager.
+      const subagentRegistry = (await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      })) as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(
+        subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
+      ).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('setApprovalMode with folder trust', () => {
@@ -2072,17 +2859,28 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
+    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
+    // not just message text. The 403 mapping in `serve/server.ts`
+    // matches `err instanceof TrustGateError`; an accidental revert
+    // to `throw new Error(...)` would silently downgrade to 500
+    // while the message text test kept passing.
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -2160,8 +2958,160 @@ describe('setApprovalMode with folder trust', () => {
     });
   });
 
+  describe('AUTO mode', () => {
+    it('should throw an error when setting AUTO mode in an untrusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    });
+
+    it('should NOT throw when setting AUTO mode in a trusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).not.toThrow();
+    });
+
+    it('should persist AUTO as the active mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('setApprovalMode resets the denial-tracking counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Enter AUTO and simulate having accumulated denial counters.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setAutoModeDenialState({
+        consecutiveBlock: 3,
+        consecutiveUnavailable: 2,
+        totalBlock: 5,
+        totalUnavailable: 2,
+      });
+
+      // Switch away and back; the counters must be wiped clean.
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+
+      // And entering AUTO again should also start fresh (no leftover state).
+      config.setAutoModeDenialState({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('setApprovalMode(sameMode) does NOT reset counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      const populated = {
+        consecutiveBlock: 2,
+        consecutiveUnavailable: 0,
+        totalBlock: 2,
+        totalUnavailable: 0,
+      };
+      config.setAutoModeDenialState(populated);
+
+      // No-op mode set — state should be preserved.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual(populated);
+    });
+
+    it('should track AUTO as prePlanMode when entering PLAN from AUTO', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('AUTO appears in APPROVAL_MODES between AUTO_EDIT and YOLO', () => {
+      const autoEditIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO_EDIT);
+      const autoIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO);
+      const yoloIdx = APPROVAL_MODES.indexOf(ApprovalMode.YOLO);
+      expect(autoIdx).toBeGreaterThan(autoEditIdx);
+      expect(autoIdx).toBeLessThan(yoloIdx);
+    });
+
+    it('APPROVAL_MODE_INFO has an entry for AUTO', () => {
+      expect(APPROVAL_MODE_INFO[ApprovalMode.AUTO]).toEqual({
+        id: ApprovalMode.AUTO,
+        name: 'Auto',
+        description: expect.stringContaining('classifier'),
+      });
+    });
+  });
+
+  describe('getAutoModeSettings', () => {
+    it('returns an empty object when no autoMode settings are provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getAutoModeSettings()).toEqual({});
+    });
+
+    it('returns the provided autoMode classifier settings, hints, and environment', () => {
+      const config = new Config({
+        ...baseParams,
+        permissions: {
+          autoMode: {
+            classifier: {
+              timeouts: {
+                stage1Ms: 12_345,
+                stage2Ms: 67_890,
+              },
+              thinking: {
+                stage2Enabled: true,
+              },
+            },
+            hints: {
+              allow: ['Allow xyz commands'],
+              deny: ['Block intranet calls'],
+            },
+            environment: ['Open-source monorepo'],
+          },
+        },
+      });
+      expect(config.getAutoModeSettings()).toEqual({
+        classifier: {
+          timeouts: {
+            stage1Ms: 12_345,
+            stage2Ms: 67_890,
+          },
+          thinking: {
+            stage2Enabled: true,
+          },
+        },
+        hints: {
+          allow: ['Allow xyz commands'],
+          deny: ['Block intranet calls'],
+        },
+        environment: ['Open-source monorepo'],
+      });
+    });
+  });
+
   describe('plan file persistence', () => {
-    it('should save plan to disk', () => {
+    it('should save plan to disk atomically', () => {
       const config = new Config(baseParams);
 
       config.savePlan('# My Plan\n1. Step one\n2. Step two');
@@ -2170,10 +3120,16 @@ describe('setApprovalMode with folder trust', () => {
         expect.stringContaining('plans'),
         { recursive: true },
       );
+      // Writes to temp file first
       expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('.md'),
+        expect.stringContaining('.tmp'),
         '# My Plan\n1. Step one\n2. Step two',
         'utf-8',
+      );
+      // Then atomically renames to final path
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+        expect.stringContaining('.md'),
       );
     });
 
@@ -2217,6 +3173,323 @@ describe('setApprovalMode with folder trust', () => {
       const filePath = config.getPlanFilePath();
       expect(filePath).toContain('test-session-123');
       expect(filePath).toMatch(/\.md$/);
+    });
+
+    it('should sanitize session ID when building plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: '../../../escape',
+        plansDirectory: './project-plans',
+      });
+
+      expect(config.getPlanFilePath()).toBe(
+        path.join(
+          path.resolve(baseParams.targetDir),
+          'project-plans',
+          'escape.md',
+        ),
+      );
+    });
+
+    it('should use configured plansDirectory for plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+
+      expect(config.getPlansDir()).toBe(
+        path.join(path.resolve(baseParams.targetDir), 'project-plans'),
+      );
+      expect(config.getPlanFilePath()).toBe(
+        path.join(
+          path.resolve(baseParams.targetDir),
+          'project-plans',
+          'test-session-123.md',
+        ),
+      );
+    });
+
+    it('should save and load plan from configured plansDirectory', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const tmpPath = `${filePath}.tmp`;
+      const storedFiles = new Map<string, string>();
+      (fs.writeFileSync as Mock).mockImplementation((pathToWrite, contents) => {
+        storedFiles.set(pathToWrite.toString(), contents.toString());
+      });
+      (fs.renameSync as Mock).mockImplementation((fromPath, toPath) => {
+        const contents = storedFiles.get(fromPath.toString());
+        if (contents === undefined) {
+          throw new Error(`missing temp file: ${fromPath.toString()}`);
+        }
+        storedFiles.set(toPath.toString(), contents);
+        storedFiles.delete(fromPath.toString());
+      });
+      (fs.readFileSync as Mock).mockImplementation((pathToRead) => {
+        const contents = storedFiles.get(pathToRead.toString());
+        if (contents === undefined) {
+          const enoent = new Error('ENOENT') as NodeJS.ErrnoException;
+          enoent.code = 'ENOENT';
+          throw enoent;
+        }
+        return contents;
+      });
+
+      config.savePlan('# My Plan');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(plansDir, { recursive: true });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        tmpPath,
+        '# My Plan',
+        'utf-8',
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
+      expect(config.loadPlan()).toBe('# My Plan');
+      expect(fs.readFileSync).toHaveBeenCalledWith(filePath, 'utf-8');
+    });
+
+    it('should fall back to copyFileSync when renameSync hits EXDEV', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const exdevError = new Error('EXDEV') as NodeJS.ErrnoException;
+      exdevError.code = 'EXDEV';
+      (fs.renameSync as Mock).mockImplementation(() => {
+        throw exdevError;
+      });
+
+      config.savePlan('# My Plan');
+
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+        expect.stringContaining('project-plans'),
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+      );
+    });
+
+    it('should remove plan file when post-write containment check fails', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const outsideFilePath = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+        'test-session-123.md',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir || resolvedPath === plansDir) {
+          return resolvedPath;
+        }
+        if (resolvedPath === filePath) {
+          return outsideFilePath;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.savePlan('# My Plan')).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.unlinkSync).toHaveBeenCalledWith(filePath);
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
+    });
+
+    it('should reject loading a plan when final file path escapes targetDir', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const outsideFilePath = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+        'test-session-123.md',
+      );
+      vi.mocked(fs.readFileSync).mockClear();
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir || resolvedPath === plansDir) {
+          return resolvedPath;
+        }
+        if (resolvedPath === filePath) {
+          return outsideFilePath;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.loadPlan()).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
+    });
+
+    it('should warn when configured plansDirectory hides a legacy plan file', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentPlansDir = path.join(targetDir, 'project-plans');
+      const legacyPlansDir = Storage.getPlansDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentPlansDir) {
+          return [];
+        }
+        if (resolvedPath === legacyPlansDir) {
+          return ['other-session.md'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyPlansDir),
+        );
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('plansDirectory is configured'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should warn when configured plansDirectory has only some legacy plan files', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentPlansDir = path.join(targetDir, 'project-plans');
+      const legacyPlansDir = Storage.getPlansDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentPlansDir) {
+          return ['migrated-session.md'];
+        }
+        if (resolvedPath === legacyPlansDir) {
+          return ['migrated-session.md', 'hidden-session.md'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyPlansDir),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should surface legacy plan directory read failures as warnings', () => {
+      const legacyError = new Error('EACCES') as NodeJS.ErrnoException;
+      legacyError.code = 'EACCES';
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (
+          resolvedPath ===
+          path.join(path.resolve(baseParams.targetDir), 'project-plans')
+        ) {
+          return [];
+        }
+        throw legacyError;
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('Failed to read plan directory'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should reject configured plansDirectory outside targetDir', () => {
+      expect(
+        () =>
+          new Config({
+            ...baseParams,
+            plansDirectory: '../project-plans',
+          }),
+      ).toThrow('plansDirectory must resolve within the project root');
+    });
+
+    it('should revalidate configured plansDirectory before plan I/O', () => {
+      const config = new Config({
+        ...baseParams,
+        plansDirectory: './project-plans',
+      });
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.readFileSync).mockClear();
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const outsidePlansDir = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir) {
+          return targetDir;
+        }
+        if (resolvedPath === plansDir) {
+          return outsidePlansDir;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.savePlan('# My Plan')).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(() => config.loadPlan()).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.mkdirSync).not.toHaveBeenCalled();
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
     });
   });
 
@@ -2334,6 +3607,68 @@ describe('setApprovalMode with folder trust', () => {
       expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `disabledTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['Foo', 'Bar'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `disabledTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+
+  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
+    // The daemon's `acpAgent` MCP-restart handler calls
+    // `setDisabledTools(new Set(disabledList))` after re-reading
+    // workspace settings, so a `tools.disabled` toggle applied
+    // since this Config was constructed takes effect on the next
+    // `ToolRegistry.registerTool` call. Pin that contract so a
+    // future regression that drops the setter (or re-freezes the
+    // field) fails this test instead of silently re-enabling
+    // tools the user just disabled.
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
+    config.setDisabledTools(new Set(['B', 'C']));
+    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
+  });
+
+  it('setDisabledTools copies the input — caller mutations do not leak', () => {
+    // The setter constructs a fresh `new Set(disabled)` from the
+    // input, so a caller that holds a reference to the input set
+    // and later mutates it cannot retroactively change the live
+    // Config snapshot. Locks this defensive-copy contract.
+    const config = new Config(baseParams);
+    const liveInput = new Set(['X']);
+    config.setDisabledTools(liveInput);
+    liveInput.add('Y');
+    expect(config.getDisabledTools()).toEqual(new Set(['X']));
+    expect(config.getDisabledTools().has('Y')).toBe(false);
+  });
+
+  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    config.setDisabledTools(new Set());
+    expect(config.getDisabledTools()).toEqual(new Set());
   });
 });
 
@@ -2711,6 +4046,144 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
+    });
+  });
+
+  describe('Config runtime MCP overlay', () => {
+    it('addRuntimeMcpServer does not mutate this.mcpServers', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          'settings-server': new MCPServerConfig('cmd-a'),
+        },
+      });
+      // Simulate post-init state
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer(
+        'runtime-server',
+        new MCPServerConfig('cmd-b'),
+      );
+      const settingsLayer = (
+        config as unknown as {
+          mcpServers: Record<string, MCPServerConfig>;
+        }
+      ).mcpServers;
+      expect(Object.keys(settingsLayer)).toEqual(['settings-server']);
+      expect(settingsLayer['runtime-server']).toBeUndefined();
+    });
+
+    it('removeRuntimeMcpServer returns false when name not present', () => {
+      const config = new Config(baseParams);
+      expect(config.removeRuntimeMcpServer('does-not-exist')).toBe(false);
+    });
+
+    it('removeRuntimeMcpServer returns true and drops the entry', () => {
+      const config = new Config(baseParams);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('x', new MCPServerConfig('cmd'));
+      expect(config.removeRuntimeMcpServer('x')).toBe(true);
+      expect(config.removeRuntimeMcpServer('x')).toBe(false);
+    });
+  });
+
+  describe('getMcpServers cascade with runtime overlay', () => {
+    it('runtime layer overlays settings layer (last write wins)', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['shared'].command).toBe('runtime-cmd');
+    });
+
+    it('runtime-only entries appear in cascade', () => {
+      const config = new Config({ ...baseParams, mcpServers: {} });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('only-runtime', new MCPServerConfig('cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['only-runtime']).toBeDefined();
+    });
+
+    it('removing runtime entry restores settings entry', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      expect(config.getMcpServers()!['shared'].command).toBe('runtime-cmd');
+      config.removeRuntimeMcpServer('shared');
+      expect(config.getMcpServers()!['shared'].command).toBe('settings-cmd');
+    });
+
+    it('isMcpServerDisabled still flags runtime entries when excluded', () => {
+      const config = new Config({ ...baseParams });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('blocked', new MCPServerConfig('cmd'));
+      config.setExcludedMcpServers(['blocked']);
+      // The entry appears in getMcpServers (UI layer filters via isMcpServerDisabled)
+      expect(config.getMcpServers()!['blocked']).toBeDefined();
+      expect(config.isMcpServerDisabled('blocked')).toBe(true);
+    });
+  });
+
+  describe('getModelDisplayName', () => {
+    it('should return resolved name when model is in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4o',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('GPT-4o');
+    });
+
+    it('should return raw modelId when model is not in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'custom-runtime-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('custom-runtime-model');
+    });
+
+    it('should return raw modelId when currentAuthType is falsy', () => {
+      const config = new Config({
+        ...baseParams,
+        model: 'some-model',
+        // authType is not set
+      });
+
+      // getModel() returns 'some-model', getModelDisplayName returns it as-is
+      // because currentAuthType is falsy
+      expect(config.getModelDisplayName()).toBe('some-model');
     });
   });
 });

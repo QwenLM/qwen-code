@@ -32,7 +32,7 @@ Suggestions are generated when all of the following conditions are met:
 - There are no errors in the most recent response
 - No confirmation dialogs are pending (e.g., shell confirmation, permissions)
 - The approval mode is not set to `plan`
-- The feature is enabled in settings (enabled by default)
+- The feature is enabled in settings (disabled by default — set `ui.enableFollowupSuggestions` to `true` to turn it on)
 
 Suggestions will not appear in non-interactive mode (e.g., headless/SDK mode).
 
@@ -72,7 +72,7 @@ These settings can be configured in `settings.json`:
 
 | Setting                        | Type    | Default | Description                                                        |
 | ------------------------------ | ------- | ------- | ------------------------------------------------------------------ |
-| `ui.enableFollowupSuggestions` | boolean | `true`  | Enable or disable followup suggestions                             |
+| `ui.enableFollowupSuggestions` | boolean | `false` | Enable or disable followup suggestions                             |
 | `ui.enableCacheSharing`        | boolean | `true`  | Use cache-aware forked queries to reduce cost (experimental)       |
 | `ui.enableSpeculation`         | boolean | `false` | Speculatively execute suggestions before submission (experimental) |
 | `fastModel`                    | string  | `""`    | Model for prompt suggestions and speculative execution             |

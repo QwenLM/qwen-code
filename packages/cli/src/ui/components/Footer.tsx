@@ -19,7 +19,8 @@ import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
@@ -28,8 +29,14 @@ import { t } from '../../i18n/index.js';
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
-  const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines, useThemeColors } = useStatusLine();
+  const settings = useSettings();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const {
+    lines: statusLineLines,
+    useThemeColors,
+    respectUserColors,
+    hideContextIndicator,
+  } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -81,6 +88,8 @@ export const Footer: React.FC = () => {
     </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
+  ) : vimEnabled && vimMode === 'NORMAL' ? (
+    <Text color={theme.text.secondary}>-- NORMAL --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
   ) : configInitMessage ? (
@@ -111,7 +120,7 @@ export const Footer: React.FC = () => {
   // alongside the other background-task kinds. The previous `✦ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
-  if (promptTokenCount > 0 && contextWindowSize) {
+  if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
     rightItems.push({
       key: 'context',
       node: (
@@ -151,13 +160,38 @@ export const Footer: React.FC = () => {
           statusLineLines.map((line, i) => (
             <Text
               key={`status-line-${i}`}
-              color={useThemeColors ? theme.text.accent : undefined}
-              dimColor={!useThemeColors}
+              color={
+                respectUserColors
+                  ? undefined
+                  : useThemeColors
+                    ? theme.text.accent
+                    : undefined
+              }
+              dimColor={respectUserColors ? false : !useThemeColors}
               wrap="truncate"
             >
               {line}
             </Text>
           ))}
+        {/* Built-in worktree indicator. Shown by default whenever a
+            worktree is active so the user always has a UI affordance,
+            even when a custom statusline is configured — their script
+            may not render `payload.worktree` (written before Phase C,
+            ignored by choice, or only rendering some fields), and
+            silently hiding the indicator could let the user operate
+            in the wrong cwd. Users who want the suppression behaviour
+            (e.g. their statusline already renders worktree) can opt
+            in via the `ui.hideBuiltinWorktreeIndicator` setting.
+            Hidden during ctrl-quit warnings so they take precedence.
+            (PR #4174 review #3256241831.) */}
+        {uiState.activeWorktree &&
+          !settings.merged.ui?.hideBuiltinWorktreeIndicator &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text dimColor wrap="truncate">
+              {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />

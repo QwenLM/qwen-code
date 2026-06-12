@@ -32,11 +32,6 @@ const RECAP_USER_PROMPT =
 const RECAP_OPEN_TAG = '<recap>';
 const RECAP_TAG_RE = /<recap>([\s\S]*?)<\/recap>/i;
 
-export interface SessionRecapResult {
-  text: string;
-  modelUsed: string;
-}
-
 /**
  * Generate a 1-2 sentence "where did I leave off" summary of the current
  * session. Uses the configured fast model (falls back to main model) with
@@ -49,23 +44,32 @@ export interface SessionRecapResult {
 export async function generateSessionRecap(
   config: Config,
   abortSignal: AbortSignal,
-): Promise<SessionRecapResult | null> {
+): Promise<string | null> {
   try {
     const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return null;
+    if (!geminiClient) {
+      debugLogger.debug('recap skipped: no geminiClient available');
+      return null;
+    }
 
-    const fullHistory = geminiClient.getChat().getHistory();
-    if (fullHistory.length < 2) return null;
+    const fullHistory = geminiClient.getHistoryShallow();
+    if (fullHistory.length < 2) {
+      debugLogger.debug(
+        `recap skipped: history too short (${fullHistory.length} messages)`,
+      );
+      return null;
+    }
 
     const dialog = filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
-    if (recentHistory.length === 0) return null;
+    if (recentHistory.length === 0) {
+      debugLogger.debug('recap skipped: no dialog messages after filtering');
+      return null;
+    }
 
-    const model =
-      config.getFastModelForSideQuery?.() ??
-      config.getFastModel() ??
-      config.getModel();
-
+    debugLogger.debug(
+      `recap: sending side-query with ${recentHistory.length} messages`,
+    );
     const result = await runSideQuery(config, {
       purpose: 'session-recap',
       contents: [
@@ -82,14 +86,24 @@ export async function generateSessionRecap(
       maxAttempts: 1,
     });
 
-    if (abortSignal.aborted) return null;
+    if (abortSignal.aborted) {
+      debugLogger.debug('recap aborted by signal');
+      return null;
+    }
 
-    if (!result.text) return null;
+    if (!result.text) {
+      debugLogger.debug('recap: model returned empty text');
+      return null;
+    }
 
     const text = extractRecap(result.text);
-    if (!text) return null;
+    if (!text) {
+      debugLogger.debug('recap: failed to extract <recap> tags from response');
+      return null;
+    }
 
-    return { text, modelUsed: model };
+    debugLogger.debug(`recap generated: len=${text.length}`);
+    return text;
   } catch (err) {
     debugLogger.warn(
       `Recap generation failed: ${err instanceof Error ? err.message : String(err)}`,

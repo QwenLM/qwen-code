@@ -245,10 +245,10 @@ export class QwenAgentManager {
       return { optionId: 'cancel' };
     };
 
-    this.connection.onEndTurn = (reason?: string) => {
+    this.connection.onEndTurn = (reason?: string, source?: string) => {
       try {
         if (this.callbacks.onEndTurn) {
-          this.callbacks.onEndTurn(reason);
+          this.callbacks.onEndTurn(reason, source);
         } else if (this.callbacks.onStreamChunk) {
           // Fallback: send a zero-length chunk then rely on streamEnd elsewhere
           this.callbacks.onStreamChunk('');
@@ -284,9 +284,14 @@ export class QwenAgentManager {
         const obj = (init || {}) as Record<string, unknown>;
         const modes = obj['modes'] as
           | {
-              currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
+              currentModeId?:
+                | 'plan'
+                | 'default'
+                | 'auto-edit'
+                | 'auto'
+                | 'yolo';
               availableModes?: Array<{
-                id: 'plan' | 'default' | 'auto-edit' | 'yolo';
+                id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
                 name: string;
                 description: string;
               }>;
@@ -1424,7 +1429,7 @@ export class QwenAgentManager {
    *
    * @param callback - Called when ACP stopReason is reported
    */
-  onEndTurn(callback: (reason?: string) => void): void {
+  onEndTurn(callback: (reason?: string, source?: string) => void): void {
     this.callbacks.onEndTurn = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
@@ -1434,9 +1439,9 @@ export class QwenAgentManager {
    */
   onModeInfo(
     callback: (info: {
-      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
+      currentModeId?: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
       availableModes?: Array<{
-        id: 'plan' | 'default' | 'auto-edit' | 'yolo';
+        id: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
         name: string;
         description: string;
       }>;
@@ -1450,7 +1455,9 @@ export class QwenAgentManager {
    * Register mode changed callback
    */
   onModeChanged(
-    callback: (modeId: 'plan' | 'default' | 'auto-edit' | 'yolo') => void,
+    callback: (
+      modeId: 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo',
+    ) => void,
   ): void {
     this.callbacks.onModeChanged = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);

@@ -215,6 +215,50 @@ describe('useCommandCompletion', () => {
         });
       });
 
+      it('should not trigger AT completion when @ is not preceded by whitespace', async () => {
+        const text = 'cici@192.168.0.160';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion for email-like patterns', async () => {
+        const text = 'user@example.com';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
       it('should correctly identify the completion context with multiple @ symbols', async () => {
         const text = '@file1 @file2';
         const cursorOffset = 3; // @fi|le1 @file2
@@ -552,6 +596,41 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe('@src/file1.txt ');
     });
 
+    it('should not append trailing space for directory completions', async () => {
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('@src/com');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/');
+    });
+
     it('should complete a file path when cursor is not at the end of the line', async () => {
       const text = '@src/fi is a good file';
       const cursorOffset = 7; // after "i"
@@ -584,6 +663,44 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe(
         '@src/file1.txt is a good file',
       );
+    });
+
+    it('should preserve existing space after directory completions at mid-line cursor', async () => {
+      const text = '@src/com is a dir';
+      const cursorOffset = 8; // after "m"
+
+      setupMocks({
+        atSuggestions: [
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
+        ],
+      });
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest(text, cursorOffset);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('@src/components/ is a dir');
     });
   });
 

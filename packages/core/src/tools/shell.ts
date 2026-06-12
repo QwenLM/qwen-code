@@ -34,6 +34,8 @@ import type {
   ShellExecutionConfig,
   ShellExecutionResult,
   ShellOutputEvent,
+  ShellPostPromoteHandlers,
+  ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
@@ -42,9 +44,11 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
+  buildShellExecWarnings,
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  hasShellSubstitution,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -905,6 +909,64 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
+/** Maximum wait for the output stream flush before transitioning the registry. */
+const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+
+/**
+ * PR-2.5 slots shared between the foreground `execute()` postPromote
+ * handlers and the post-resolve `handlePromotedForeground` finalizer.
+ * The handlers fire on the service side as soon as promote happens;
+ * the finalizer runs after `await resultPromise` returns. They race —
+ * the buffer + settle-queue absorb the race so neither chunks nor the
+ * eventual exit info are lost. See `executeForeground` for the wiring
+ * and `handlePromotedForeground` for the drain logic.
+ */
+interface PromoteArtifacts {
+  /**
+   * Chunks observed by `postPromote.onData` BEFORE the stream is
+   * open. Drained into the stream once `handlePromotedForeground`
+   * opens it. After drain this stays empty for the rest of the run.
+   */
+  buffer: string[];
+  /**
+   * Append-mode write stream to `bg_xxx.output`. Null until
+   * `handlePromotedForeground` opens it. Closed by `onSettleWired`.
+   */
+  stream: fs.WriteStream | null;
+  /**
+   * Latched true when the output stream is no longer accepting writes.
+   * Two paths set it:
+   *
+   * 1. Stream open failed (`fs.createWriteStream` threw OR fired an
+   *    async `'error'` event before bytes could land). The stream
+   *    will never reopen; future `onData` chunks must drop.
+   * 2. Settle has fired and `onSettleWired` has drained the buffer
+   *    and called `stream.end()`. The stream is closing; any chunk
+   *    that arrives during the `.end()` flush window (rare but
+   *    possible on PTY when kernel buffers deliver late) MUST drop
+   *    rather than be pushed into the buffer — at this point the
+   *    buffer has no remaining drain path (the foreground finalizer
+   *    has returned).
+   *
+   * Without this flag the buffer would grow without bound under a
+   * sustained child whose output file we can't open, OR strand
+   * late-arriving post-settle bytes in an undrainable buffer.
+   */
+  streamClosed: boolean;
+  /**
+   * Settle handler installed by `handlePromotedForeground` once the
+   * registry entry exists. Null until then; `onSettle` calls below
+   * queue into `settleQueued` if this isn't yet set.
+   */
+  onSettleWired: ((info: ShellPostPromoteSettleInfo) => void) | null;
+  /**
+   * Settle info captured by `postPromote.onSettle` before the wired
+   * handler was installed. `handlePromotedForeground` checks this and
+   * fires the wired handler synchronously after registering.
+   */
+  settleQueued: ShellPostPromoteSettleInfo | null;
+}
+
 // Long-run advisory threshold: half the EFFECTIVE foreground timeout
 // (not the default), computed per-invocation by `longRunThresholdFor`.
 // Couples to whichever timeout actually governs THIS command — so a
@@ -960,17 +1022,31 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
 /**
  * Detect standalone or leading `sleep N` patterns that should use Monitor
  * instead. Catches `sleep 5`, `sleep 2.5`, `sleep 2s`,
- * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` — but not sleep
+ * `sleep 5 && check`, `sleep 5; check`, `sleep 5 # wait` -- but not sleep
  * inside pipelines, subshells, backgrounded commands, or scripts (those are
  * fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
+  return detectBlockedSleepPatternDetails(command)?.description ?? null;
+}
+
+type BlockedSleepPatternDetails = {
+  description: string;
+  isStandalone: boolean;
+  intentionalSleepRejection?: string;
+};
+
+function detectBlockedSleepPatternDetails(
+  command: string,
+): BlockedSleepPatternDetails | null {
   // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
   // present `# wait` as the suffix, which `getSleepSequentialSeparator`
   // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
   // bypass the guard. Shell ignores top-level trailing comments, so for the
   // purposes of detection they are equivalent to end-of-command.
-  const trimmed = trimTrailingShellComment(command).trim();
+  const { command: uncommentedCommand, comment } =
+    splitTrailingShellComment(command);
+  const trimmed = uncommentedCommand.trim();
   if (!trimmed.startsWith('sleep')) return null;
   const afterSleep = trimmed.slice('sleep'.length);
   if (!afterSleep || !/\s/.test(afterSleep[0]!)) return null;
@@ -997,9 +1073,51 @@ export function detectBlockedSleepPattern(command: string): string | null {
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
-  return rest
+  const isStandalone = !rest;
+  const description = rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
+  const trimmedComment = comment?.trim();
+  if (
+    isStandalone &&
+    trimmedComment?.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)
+  ) {
+    const reason = getIntentionalSleepReason(trimmedComment);
+    if (reason === null) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but the reason is too short; explain why the delay is needed after `intentional-sleep:`.',
+      };
+    }
+    if (secs > MAX_INTENTIONAL_SLEEP_SECONDS) {
+      return {
+        description,
+        isStandalone,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but foreground sleeps over 10 minutes are not allowed; use is_background: true or Monitor for longer waits.',
+      };
+    }
+    debugLogger.debug('intentional sleep allowed', {
+      durationSeconds: secs,
+      reason,
+    });
+    return null;
+  }
+  return { description, isStandalone };
+}
+
+const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
+const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
+// Require a real reason, not a trivial opt-out like "wait".
+const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
+
+function getIntentionalSleepReason(trimmedComment: string): string | null {
+  const reason = trimmedComment
+    .slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length)
+    .trim();
+  return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH ? reason : null;
 }
 
 function parseSleepDurationToSeconds(token: string): number | null {
@@ -1068,7 +1186,13 @@ function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
   return null;
 }
 
-function trimTrailingShellComment(command: string): string {
+function splitTrailingShellComment(
+  command: string,
+  keepCommandsAfterCommentNewline = true,
+): {
+  command: string;
+  comment: string | null;
+} {
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
@@ -1154,11 +1278,25 @@ function trimTrailingShellComment(command: string): string {
       commandSubstitutionDepth === 0 &&
       (i === 0 || /\s/.test(command[i - 1]!))
     ) {
-      return command.slice(0, i);
+      const newlineIndex = command.indexOf('\n', i + 1);
+      return {
+        command:
+          newlineIndex === -1 || !keepCommandsAfterCommentNewline
+            ? command.slice(0, i)
+            : command.slice(0, i) + command.slice(newlineIndex),
+        comment:
+          newlineIndex === -1
+            ? command.slice(i + 1)
+            : command.slice(i + 1, newlineIndex),
+      };
     }
   }
 
-  return command;
+  return { command, comment: null };
+}
+
+function trimTrailingShellComment(command: string): string {
+  return splitTrailingShellComment(command, false).command;
 }
 
 function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
@@ -1317,10 +1455,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * AST-based permission check for the shell command.
+   * - Substitution-bearing commands (any form, including inside an
+   *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    // Gate on the RAW command before `stripShellWrapper` runs.
+    // `stripShellWrapper` drops leading env-assignment tokens AND
+    // unwraps `bash -c '...'` to its inner script — so for
+    // `FOO=$(curl evil) bash -c 'echo ok'` the stripped form is just
+    // `echo ok`, which the AST classifies as read-only. Without this
+    // gate the command auto-executes silently with no confirmation
+    // dialog and no warning. See PR #4386 R6 (cid 3298521039).
+    if (hasShellSubstitution(this.params.command)) {
+      return 'ask';
+    }
+
     const command = stripShellWrapper(this.params.command);
 
     // AST-based read-only detection
@@ -1404,6 +1555,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn('Failed to extract command rules:', e);
     }
 
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. We surface this
+    // as an informational warning rather than denying outright; the deny
+    // path was inconsistent and could not be overridden by YOLO mode
+    // (see issue #4093). Substitution is detected on both the stripped
+    // and original command so wrappers like `bash -c "..."` are checked
+    // along with their inner contents.
+    const warnings = buildShellExecWarnings(command, this.params.command);
+
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
@@ -1417,6 +1577,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
+    if (warnings) {
+      confirmationDetails.warnings = warnings;
+    }
     return confirmationDetails;
   }
 
@@ -1619,6 +1782,77 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     };
 
+    // Pre-allocate the promote artifacts (PR-2.5). Lazily created — no
+    // disk I/O unless the user actually fires Ctrl+B / promote signal.
+    // The handlers below close over these slots; once promote happens,
+    // `handlePromotedForeground` populates them (opens the stream, sets
+    // the shellId / onSettle wiring), and any onData chunks that the
+    // service forwarded BEFORE handlePromotedForeground caught up land
+    // in `postPromoteBuffer` and drain to the stream once it opens.
+    const promoteArtifacts: PromoteArtifacts = {
+      buffer: [],
+      stream: null,
+      streamClosed: false,
+      onSettleWired: null,
+      settleQueued: null,
+    };
+    const postPromote: ShellPostPromoteHandlers = {
+      onData: (event) => {
+        if (event.type !== 'data') return;
+        // ANSI structured chunks have no append semantics — coerce to
+        // string. The output file is plain text; live ANSI updates are
+        // owned by the foreground stream, which by promote-time has
+        // already terminated.
+        //
+        // PR-2.5 wave-4: strip ANSI before writing so
+        // the post-promote tail of `bg_xxx.output` matches the format
+        // of the snapshot above (which is rendered terminal text, not
+        // raw escape sequences) AND matches the regular
+        // `executeBackground` path's `outputStream.write(stripAnsi(chunk))`
+        // contract. Without this, an agent reading the file after a
+        // promote would see plain text up to the promote moment, then
+        // raw `\x1b[...m` color codes / cursor moves / clear-screen
+        // sequences for any post-promote output — which is unreadable
+        // and inconsistent.
+        const rawChunk =
+          typeof event.chunk === 'string'
+            ? event.chunk
+            : event.chunk
+                .map((line) => line.map((tok) => tok.text).join(''))
+                .join('\n');
+        const chunk = stripAnsi(rawChunk);
+        if (promoteArtifacts.stream) {
+          try {
+            promoteArtifacts.stream.write(chunk);
+          } catch (err) {
+            debugLogger.warn(
+              `promote: postPromote stream.write failed: ${getErrorMessage(err)}`,
+            );
+          }
+        } else if (promoteArtifacts.streamClosed) {
+          // Stream-open already failed permanently — drop chunks
+          // rather than buffer them. Without this guard the buffer
+          // would grow without bound under a sustained child whose
+          // output file we couldn't open.
+          debugLogger.debug(
+            'promote: dropping post-promote chunk because output stream open failed',
+          );
+        } else {
+          promoteArtifacts.buffer.push(chunk);
+        }
+      },
+      onSettle: (info) => {
+        if (promoteArtifacts.onSettleWired) {
+          promoteArtifacts.onSettleWired(info);
+        } else {
+          // Service observed the child exit before handlePromotedForeground
+          // finished registering. Queue the settle info — handlePromotedForeground
+          // applies it as soon as the registry entry exists.
+          promoteArtifacts.settleQueued = info;
+        }
+      },
+    };
+
     let executionHandle;
     try {
       executionHandle = await ShellExecutionService.execute(
@@ -1628,6 +1862,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         combinedSignal,
         this.config.getShouldUseNodePtyShell(),
         shellExecutionConfig ?? {},
+        { postPromote },
       );
     } catch (err) {
       // ShellExecutionService.execute() can throw before resolving (e.g.
@@ -1725,6 +1960,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         cwd,
         commandToExecute,
         promoteAbortController,
+        promoteArtifacts,
       );
       return promotedToolResult;
     }
@@ -1930,6 +2166,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         this.config,
         ShellTool.Name,
         llmContent,
+        // Per-tool char budget; mirrors ShellTool.maxOutputChars. keep='both'
+        // preserves the command's start AND its trailing exit/error summary
+        // (where shell failures report). Kept in-tool (not deferred to the
+        // scheduler) so the long-run hint below is appended OUTSIDE the
+        // truncation envelope; the scheduler's sentinel makes its later pass a
+        // no-op here. lines: Infinity keeps this char-only so the global line
+        // cap can't undercut the declared 30k char budget — many short lines
+        // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
+        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
       );
 
       if (truncatedResult.outputFile) {
@@ -2033,27 +2278,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
   /**
    * Foreground → background promote handler. Called when the foreground
    * execute path observes `result.promoted: true` (the user pressed
-   * Ctrl+B mid-flight). Snapshots captured output to a `bg_xxx.output`
-   * file, registers a `BackgroundShellEntry` in the same registry the
-   * `is_background: true` path uses, and returns a model-facing
-   * `ToolResult` pointing at `/tasks` / the dialog / `task_stop` for
-   * follow-up.
+   * Ctrl+B mid-flight). Writes the initial snapshot + open the
+   * post-promote append stream so subsequent child bytes land in
+   * `bg_xxx.output`, registers a `BackgroundShellEntry` in the same
+   * registry the `is_background: true` path uses, wires settle so
+   * natural child exit transitions the entry to `'completed'` /
+   * `'failed'`, and returns a model-facing `ToolResult` pointing at
+   * `/tasks` / the dialog / `task_stop` for follow-up.
    *
-   * Limitations (PR-2.5 follow-up):
-   *   - The registry entry stays `'running'` until `task_stop bg_xxx`
-   *     or session-end `abortAll` clears it; natural child exit does
-   *     NOT auto-settle the entry today (no settle hook from the
-   *     service after promote — the listener was detached as part of
-   *     PR-1's ownership-transfer contract).
-   *   - The `outputPath` content is FROZEN at the promote moment; the
-   *     service no longer streams post-promote bytes to the file.
-   *     Caller-side stream redirect lands in PR-2.5.
+   * PR-2.5: post-promote stream redirect + natural-exit registry
+   * settle are now live via the `postPromote` callbacks wired in
+   * `executeForeground`. The `promoteArtifacts` parameter carries the
+   * pre-allocated buffer/stream slots that absorb the race between
+   * service-side promote-time data flush and this finalizer running.
    */
   private async handlePromotedForeground(
     result: ShellExecutionResult,
     cwd: string,
     commandToExecute: string,
     abortController: AbortController,
+    promoteArtifacts: PromoteArtifacts,
   ): Promise<ToolResult> {
     // Mirror executeBackground's outputPath layout so /tasks-on-disk and
     // ReadFileTool's auto-allow rules treat foreground-promoted shells
@@ -2110,15 +2354,108 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
-    // Best-effort initial snapshot write — if disk is full or
-    // permission flips, log + continue (the registry entry is still
-    // valuable on its own; the file is only the inspection surface).
+    // PR-2.5: open an append-mode write stream so the initial snapshot
+    // AND post-promote bytes from the still-running child both land in
+    // the same file. Synchronous open via `createWriteStream` with
+    // `flags: 'w'` (overwrite) — if a stale file is somehow there from
+    // a prior session with the same shellId (vanishingly unlikely
+    // given the randomBytes), start fresh. Stream errors (ENOSPC mid-
+    // stream, permission flip) are logged via 'error' listener; we
+    // never let them crash the daemon.
+    let outputStream: fs.WriteStream | null = null;
     try {
-      fs.writeFileSync(outputPath, result.output);
+      outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
+      // PR-2.5 wave-2: `createWriteStream` reports common
+      // failures (ENOENT / EACCES / ENOSPC during the async libuv
+      // `open`) via an `'error'` event AFTER this synchronous call
+      // returns — they do NOT throw. Without latching the failure
+      // here, `promoteArtifacts.stream` would still point at an
+      // already-broken stream, `postPromote.onData` would `write` into
+      // it (catching the throw via its own try/catch but never
+      // releasing the buffer), and `onSettleWired` would attach a
+      // `'finish'` listener that never fires → registry stuck on
+      // `running` forever. Latch the failure: null the stream,
+      // mark `streamClosed` so `onData` drops chunks, and let
+      // `onSettleWired` transition the registry immediately (its
+      // existing `if (!stream)` branch handles that case).
+      outputStream.on('error', (err) => {
+        debugLogger.warn(
+          `promote: output write stream error for ${outputPath}: ${getErrorMessage(err)}`,
+        );
+        const droppedChunks = promoteArtifacts.buffer.length;
+        promoteArtifacts.stream = null;
+        promoteArtifacts.streamClosed = true;
+        try {
+          fs.appendFileSync(
+            outputPath,
+            `\n[WARNING: post-promote output lost — stream error (${getErrorMessage(err)}). ${droppedChunks} buffered chunks dropped.]\n`,
+          );
+        } catch {
+          // Best-effort diagnostic — if the append itself fails
+          // (e.g. disk full), the debugLogger.warn above is the
+          // only trace left.
+        }
+      });
+      // Initial snapshot first, so it always precedes post-promote
+      // bytes in the file (write ordering is FIFO on a single stream).
+      outputStream.write(result.output);
+      // PR-2.5 wave-4: assign the stream BEFORE draining
+      // the buffer, not after. The drain + assign block is synchronous
+      // today (single-tick JS, so a service-side `onData` callback
+      // cannot fire between drain-end and assign), but the assign-
+      // after-drain order leaves a hazard for any future refactor
+      // that introduces an `await` inside the drain — a chunk arriving
+      // in that window would be pushed into `promoteArtifacts.buffer`
+      // (because `stream` is still null), then later chunks would write
+      // directly to the stream after assign, producing out-of-order
+      // bytes in `bg_xxx.output` until the settle drain caught the
+      // straggler. Assign-first eliminates the hazard entirely:
+      // concurrent `onData` writes go straight through after the
+      // queued snapshot + the queued drained chunks, in the correct
+      // FIFO order on the stream.
+      promoteArtifacts.stream = outputStream;
+      while (promoteArtifacts.buffer.length > 0) {
+        const chunk = promoteArtifacts.buffer.shift()!;
+        outputStream.write(chunk);
+      }
     } catch (err) {
       debugLogger.warn(
-        `promote: failed to write initial output snapshot to ${outputPath}: ${getErrorMessage(err)}`,
+        `promote: failed to open output stream for ${outputPath}: ${getErrorMessage(err)}`,
       );
+      // Stream failure is recoverable — the registry entry is still
+      // valuable on its own; the file is the inspection surface only.
+      // Continue without a stream; future onData chunks are dropped
+      // (their warns will accumulate in the log, which is enough
+      // observability for a rare disk failure case).
+      promoteArtifacts.stream = null;
+      // Latch streamClosed so the foreground postPromote.onData
+      // handler stops buffering chunks that would never be drained
+      // (the drain path only runs when `stream` becomes non-null,
+      // which never happens after this branch).
+      promoteArtifacts.streamClosed = true;
+      // PR-2.5 wave-3: record how many pre-
+      // finalizer post-promote chunks are being dropped. Without
+      // this an oncall engineer reading a truncated `bg_xxx.output`
+      // has no signal that the truncation is due to stream-open
+      // failure rather than the child not producing more output.
+      // The chunks themselves are gone (no salvage path exists once
+      // the stream open has failed and the buffer drain depends on
+      // a non-null stream slot).
+      if (promoteArtifacts.buffer.length > 0) {
+        debugLogger.warn(
+          `promote: dropping ${promoteArtifacts.buffer.length} buffered post-promote chunks for ${outputPath} (stream open failed before drain)`,
+        );
+        promoteArtifacts.buffer.length = 0;
+      }
+      // Last-ditch: try a sync snapshot write so /tasks still has
+      // SOMETHING readable; the buffer chunks are lost in this branch.
+      try {
+        fs.writeFileSync(outputPath, result.output);
+      } catch (err2) {
+        debugLogger.warn(
+          `promote: snapshot fallback writeFileSync also failed for ${outputPath}: ${getErrorMessage(err2)}`,
+        );
+      }
     }
 
     const startTime = Date.now();
@@ -2237,15 +2574,216 @@ export class ShellToolInvocation extends BaseToolInvocation<
       } catch {
         /* swallow — we're already in an error path */
       }
+      // PR-2.5: close the output stream so the FD doesn't leak past
+      // the throw. Best-effort — if .end() itself throws we're
+      // already in an error path with the orphan-child kill already
+      // in flight.
+      try {
+        promoteArtifacts.stream?.end();
+      } catch {
+        /* swallow */
+      }
+      promoteArtifacts.stream = null;
       throw e;
     }
 
+    // PR-2.5: wire the post-promote settle so a natural child exit
+    // (or spawn-side error) transitions the registry entry from
+    // `'running'` to `'completed'` / `'failed'`. Without this the
+    // entry stays `'running'` until `task_stop` / session-end. The
+    // service's `postPromote.onSettle` fires AT MOST ONCE per
+    // promote, and `registry.complete` / `registry.fail` are
+    // idempotent (no-op when status !== 'running'), so a race with
+    // `entryAc.abort() → registry.cancel` (task_stop fired during the
+    // exit window) is safe: whichever lands first wins, the other
+    // becomes a no-op.
+    // Status flags consumed by the model-facing copy below.
+    //
+    // - `postPromoteSettleObserved`: SET SYNCHRONOUSLY inside
+    //   `onSettleWired` the moment we know the child has exited (the
+    //   service has called us with settle info). Independent of
+    //   whether the registry transition has actually completed yet,
+    //   because the transition may be deferred awaiting the output
+    //   stream's `'finish'` event (libuv flush). This is the flag
+    //   the model-facing copy branches on: once we know the child has
+    //   exited, saying "Status: running" + suggesting `task_stop`
+    //   would mislead the agent.
+    // - `postPromoteFinalStatus`: classified from the settle info at
+    //   the same synchronous moment, so the status line can report
+    //   the right terminal status even if the registry transition is
+    //   still in flight.
+    //
+    // PR-2.5 wave-2: originally the model-facing copy
+    // checked a `postPromoteAlreadySettled` flag that was only flipped
+    // AFTER the registry transition fired (post-flush). A fast-exited
+    // promoted command could therefore land "Status: running" +
+    // `task_stop` instructions in the model copy even when settle was
+    // already queued, because the queued-settle drain returned before
+    // the stream's 'finish' event fired. The two flags decouple
+    // "child has exited" (what the agent cares about) from "registry
+    // transition has run" (which can lag behind libuv flush).
+    let postPromoteSettleObserved = false;
+    let postPromoteFinalStatus: 'completed' | 'failed' | null = null;
+    const classifySettle = (
+      info: ShellPostPromoteSettleInfo,
+    ): { status: 'completed' | 'failed'; failMsg: string | null } => {
+      // Decision table: `error` → fail (spawn-side failure); `exitCode
+      // === 0` → complete; non-zero exitCode → fail; signal-killed
+      // (no exitCode, signal set) → fail with descriptive message;
+      // everything-null → fail with generic message.
+      if (info.error) return { status: 'failed', failMsg: info.error.message };
+      if (info.exitCode === 0) return { status: 'completed', failMsg: null };
+      if (info.exitCode !== null)
+        return {
+          status: 'failed',
+          failMsg: `Exited with code ${info.exitCode}`,
+        };
+      if (info.signal !== null)
+        return {
+          status: 'failed',
+          failMsg: `Terminated by signal ${info.signal}`,
+        };
+      // PR-2.5 wave-3: this branch is meant to
+      // be unreachable — the service always populates one of
+      // `error` / `exitCode` / `signal`. Hitting it means the
+      // service emitted a defective settle info object, which is a
+      // logic bug. Capture the actual field values in the failure
+      // message AND warn-log so the oncall engineer reading
+      // `/tasks` or the debug log can tell THIS path apart from the
+      // other "failed" branches. (`info.error` has been narrowed to
+      // `never` by the preceding `if (info.error) return`, so we
+      // can't read `.message` here — by construction it would be
+      // `undefined` at runtime anyway.)
+      debugLogger.warn(
+        `promote: classifySettle all-null fallback hit for ${shellId} — ` +
+          `exitCode=${info.exitCode}, signal=${info.signal}, error=undefined`,
+      );
+      return {
+        status: 'failed',
+        failMsg: `Exited with unknown status (exitCode=${info.exitCode}, signal=${info.signal}, error=undefined)`,
+      };
+    };
+    const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+      const cls = classifySettle(info);
+      if (cls.status === 'completed') {
+        registry.complete(shellId, info.exitCode as number, info.endTime);
+      } else {
+        registry.fail(shellId, cls.failMsg as string, info.endTime);
+      }
+    };
+    promoteArtifacts.onSettleWired = (info) => {
+      // Synchronous observation — the child has exited; classify now
+      // so the model-facing copy can branch correctly even when the
+      // registry transition is deferred behind the stream's flush.
+      const cls = classifySettle(info);
+      postPromoteFinalStatus = cls.status;
+      postPromoteSettleObserved = true;
+      // Wait for the output stream to fully FLUSH before transitioning
+      // the registry. `stream.end()` is asynchronous — pending writes
+      // can still be in the libuv queue when it returns. Without the
+      // 'finish' wait, `/tasks` consumers can observe the entry as
+      // `completed`/`failed` and read the output file BEFORE the
+      // trailing bytes are on disk, producing truncated logs.
+      const stream = promoteArtifacts.stream;
+      // PR-2.5 wave-3: drain the pre-settle
+      // buffer to the stream BEFORE nulling the shared slot. Service-
+      // side `onData` callbacks that race the foreground finalizer
+      // can land chunks in the buffer between when the wire fires
+      // and when the buffer drain (during stream-open) sees them.
+      // Without this drain those chunks are stranded. AND latch
+      // `streamClosed` together with the null so that any
+      // chunk arriving AFTER `.end()` (during the flush window —
+      // unlikely once the service has emitted settle, but kernel
+      // buffers can deliver late on PTY) is DROPPED via the
+      // `else if (promoteArtifacts.streamClosed)` arm in `onData`
+      // instead of being pushed into the now-undrainable buffer.
+      if (stream) {
+        while (promoteArtifacts.buffer.length > 0) {
+          try {
+            stream.write(promoteArtifacts.buffer.shift()!);
+          } catch (writeErr) {
+            // Stream write failure during pre-end drain — log + drop,
+            // same recovery posture as the foreground `onData` write
+            // path. The error event will fire async if the stream is
+            // dead, latching `streamClosed` via the 'error' handler.
+            debugLogger.warn(
+              `promote: pre-end buffer drain write failed: ${getErrorMessage(writeErr)}`,
+            );
+          }
+        }
+      }
+      promoteArtifacts.stream = null;
+      promoteArtifacts.streamClosed = true;
+      if (!stream) {
+        // No stream (open failed or already ended) — transition right
+        // away, no flush to wait on.
+        transitionRegistry(info);
+        return;
+      }
+      try {
+        // `finish` fires after all queued writes have been flushed to
+        // the underlying fd. `error` covers a late EIO / ENOSPC that
+        // doesn't reach the existing `'error'` listener — race with
+        // `.end()` itself. Either way, run the transition once.
+        let transitioned = false;
+        const finalize = () => {
+          if (transitioned) return;
+          transitioned = true;
+          transitionRegistry(info);
+        };
+        const flushTimer = setTimeout(() => {
+          debugLogger.warn(
+            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+          );
+          finalize();
+        }, PROMOTE_FLUSH_TIMEOUT_MS);
+        flushTimer.unref();
+        stream.once('finish', () => {
+          clearTimeout(flushTimer);
+          finalize();
+        });
+        stream.once('error', () => {
+          clearTimeout(flushTimer);
+          finalize();
+        });
+        stream.end();
+      } catch (closeErr) {
+        debugLogger.warn(
+          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+        );
+        transitionRegistry(info);
+      }
+    };
+    // Drain a settle that landed BEFORE the wire installed (fast
+    // commands can exit between `result.promoted` and this line).
+    // After this call returns, `postPromoteSettleObserved` is true
+    // if a settle was queued — that's the case the model-facing copy
+    // below branches on so the message doesn't say "Status: running"
+    // for a process that already finished during the registration
+    // window.
+    if (promoteArtifacts.settleQueued) {
+      const queued = promoteArtifacts.settleQueued;
+      promoteArtifacts.settleQueued = null;
+      promoteArtifacts.onSettleWired(queued);
+    }
+
+    // Build the model-facing status line based on whether the settle
+    // was observed synchronously (i.e. the child has exited). Branch
+    // on `postPromoteSettleObserved` rather than the post-flush latch
+    // — see the flag block above for the rationale.
+    const statusLine = postPromoteSettleObserved
+      ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
+      : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
+    const inspectLine = `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
+    const stopLine = postPromoteSettleObserved
+      ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
+      : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
       `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
-      `Status: running. PID: ${result.pid ?? '(unknown)'}.`,
+      statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
-      `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`,
-      `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`,
+      inspectLine,
+      stopLine,
     ].join('\n');
 
     debugLogger.debug(
@@ -3729,6 +4267,10 @@ export class ShellTool extends BaseDeclarativeTool<
 > {
   static Name: string = ToolNames.SHELL;
 
+  override get maxOutputChars(): number {
+    return 30_000;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ShellTool.Name,
@@ -3832,15 +4374,19 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPattern(
-        stripShellWrapper(params.command),
-      );
+      const sleepPattern = detectBlockedSleepPatternDetails(strippedCommand);
       if (sleepPattern !== null) {
+        const intentionalSleepGuidance =
+          sleepPattern.intentionalSleepRejection ??
+          (sleepPattern.isStandalone
+            ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
+              'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
+            : 'Split into two calls: first `sleep N # intentional-sleep: <reason>` (standalone), then the follow-up command.');
         return (
-          `Blocked: ${sleepPattern}. ` +
+          `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +
           'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
-          'If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds.'
+          intentionalSleepGuidance
         );
       }
     }
@@ -3851,5 +4397,15 @@ export class ShellTool extends BaseDeclarativeTool<
     params: ShellToolParams,
   ): ToolInvocation<ShellToolParams, ToolResult> {
     return new ShellToolInvocation(this.config, params);
+  }
+
+  override toAutoClassifierInput(
+    params: ShellToolParams,
+  ): Record<string, unknown> {
+    // The full command is required for safety classification — do not redact.
+    return {
+      command: params.command,
+      cwd: params.directory ?? this.config.getTargetDir(),
+    };
   }
 }

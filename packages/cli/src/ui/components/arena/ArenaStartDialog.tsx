@@ -29,6 +29,7 @@ export function ArenaStartDialog({
 }: ArenaStartDialogProps): React.JSX.Element {
   const config = useConfig();
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
 
   const modelItems = useMemo(() => {
     const allModels = config.getAllConfiguredModels();
@@ -95,6 +96,8 @@ export function ArenaStartDialog({
           <MultiSelect
             items={modelItems}
             initialIndex={0}
+            selectedKeys={selectedKeys}
+            onSelectedKeysChange={setSelectedKeys}
             onConfirm={handleConfirm}
             showNumbers
             showScrollArrows

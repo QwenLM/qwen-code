@@ -31,6 +31,7 @@ import {
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
+import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import { ContextState, AgentHeadless } from './agent-headless.js';
@@ -79,17 +80,17 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 vi.mock('../../utils/environmentContext.js', () => ({
+  SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: 'Env Context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
-    },
-    ...(extraHistory ?? []),
+    [
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
+      },
+      ...(extraHistory ?? []),
+    ],
+    [],
   ]),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
@@ -464,11 +465,16 @@ describe('subagent.ts', () => {
 
         // Check History (should include environment context)
         const history = callArgs[2];
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: true,
+        });
         expect(history).toEqual([
-          { role: 'user', parts: [{ text: 'Env Context' }] },
           {
-            role: 'model',
-            parts: [{ text: 'Got it. Thanks for the context!' }],
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
+            ],
           },
         ]);
       });

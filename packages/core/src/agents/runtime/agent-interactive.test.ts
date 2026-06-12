@@ -342,6 +342,76 @@ describe('AgentInteractive', () => {
     await agent.shutdown();
   });
 
+  it('processes a message enqueued synchronously during the IDLE status emit', async () => {
+    // Regression: TeamManager's status bridge flushes a held message the
+    // instant a teammate settles to IDLE — synchronously, from inside the
+    // STATUS_CHANGE emit. At that point the run loop has already passed
+    // its final empty-queue check but `processing` is still true, so
+    // enqueueMessage won't restart the loop; without the run-loop
+    // re-check the message strands in a dead queue forever.
+    const { core, emitter } = createMockCore();
+    const processed: string[] = [];
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      (
+        _chat: unknown,
+        initialMessages: Array<{ parts: [{ text: string }] }>,
+      ) => {
+        processed.push(initialMessages[0]!.parts[0].text);
+        return Promise.resolve({
+          text: 'ok',
+          terminateMode: null,
+          turnsUsed: 1,
+        });
+      },
+    );
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    let flushedOnce = false;
+    emitter.on(AgentEventType.STATUS_CHANGE, (payload) => {
+      if (payload.newStatus === AgentStatus.IDLE && !flushedOnce) {
+        flushedOnce = true;
+        agent.enqueueMessage('flushed message');
+      }
+    });
+
+    agent.enqueueMessage('first message');
+
+    await vi.waitFor(() => {
+      expect(processed).toEqual(['first message', 'flushed message']);
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    await agent.shutdown();
+  });
+
+  it('reaches a terminal status when aborted while idle', async () => {
+    // Regression: abort() on an agent with no run loop in flight used to
+    // only set the signal — nothing observed it, so the agent never
+    // reached a terminal status and terminal-status cleanup never fired.
+    const { core } = createMockCore();
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    agent.enqueueMessage('task');
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    agent.abort();
+    expect(agent.getStatus()).toBe('cancelled');
+    await agent.waitForCompletion();
+  });
+
+  it('reaches a terminal status when aborted before any message', async () => {
+    const { core } = createMockCore();
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+
+    agent.abort();
+    expect(agent.getStatus()).toBe('cancelled');
+  });
+
   it('should abort immediately', async () => {
     const { core } = createMockCore();
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(

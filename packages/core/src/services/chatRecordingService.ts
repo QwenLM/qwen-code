@@ -28,6 +28,11 @@ import type {
 import type { Status } from '../core/coreToolScheduler.js';
 import type { AgentResultDisplay, FileDiff } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
+import type {
+  FileHistorySnapshot,
+  SerializedFileHistorySnapshot,
+} from './fileHistoryService.js';
+import { serializeSnapshot } from './fileHistoryService.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -200,12 +205,12 @@ function autoTitleDisabledByEnv(): boolean {
 
 /**
  * A single record stored in the JSONL file.
- * Forms a tree structure via uuid/parentUuid for future checkpointing support.
+ * Forms a tree structure via uuid/parentUuid for future conversation branching support.
  *
  * Each record is self-contained with full metadata, enabling:
  * - Append-only writes (crash-safe)
  * - Tree reconstruction by following parentUuid chain
- * - Future checkpointing by branching from any historical record
+ * - Future conversation branching by forking from any historical record
  */
 export interface ChatRecord {
   /** Unique identifier for this logical message */
@@ -222,7 +227,7 @@ export interface ChatRecord {
    * (e.g., chat compression checkpoints) while keeping the original UI history intact.
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
-  /** Optional system subtype for distinguishing system behaviors */
+  /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
     | 'slash_command'
@@ -231,10 +236,12 @@ export interface ChatRecord {
     | 'attribution_snapshot'
     | 'notification'
     | 'cron'
+    | 'mid_turn_user_message'
     | 'custom_title'
     | 'rewind'
     | 'agent_bootstrap'
-    | 'agent_launch_prompt';
+    | 'agent_launch_prompt'
+    | 'file_history_snapshot';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -267,8 +274,9 @@ export interface ChatRecord {
   toolCallResult?: Partial<ToolCallResponseInfo>;
 
   /**
-   * Payload for system records. For chat compression, this stores all data needed
-   * to reconstruct the compressed history without mutating the original UI list.
+   * Payload for records that need non-API metadata. For chat compression, this
+   * stores all data needed to reconstruct the compressed history without
+   * mutating the original UI list.
    */
   systemPayload?:
     | ChatCompressionRecordPayload
@@ -279,7 +287,8 @@ export interface ChatRecord {
     | CustomTitleRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
-    | AgentBootstrapRecordPayload;
+    | AgentBootstrapRecordPayload
+    | FileHistorySnapshotRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -356,6 +365,8 @@ export interface SlashCommandRecordPayload {
   phase: 'invocation' | 'result';
   /** Raw user-entered slash command (e.g., "/about"). */
   rawCommand: string;
+  /** Whether the visible slash-command invocation reached model history. */
+  sentToModel?: boolean;
   /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.
@@ -425,6 +436,14 @@ export interface RewindRecordPayload {
 }
 
 /**
+ * Stored payload for file history snapshot persistence.
+ * Each entry records one or more snapshots for session resume.
+ */
+export interface FileHistorySnapshotRecordPayload {
+  snapshots: SerializedFileHistorySnapshot[];
+}
+
+/**
  * Service for recording the current chat session to disk.
  *
  * This service provides comprehensive conversation recording that captures:
@@ -442,7 +461,7 @@ export interface RewindRecordPayload {
  * Each record has uuid/parentUuid fields enabling:
  * - Append-only writes (never rewrite the file)
  * - Linear history reconstruction
- * - Future checkpointing (branch from any historical point)
+ * - Future conversation branching (fork from any historical point)
  *
  * File location: ~/.qwen/tmp/<project_id>/chats/
  *
@@ -806,6 +825,16 @@ export class ChatRecordingService {
   }
 
   /**
+   * Clears cached filesystem paths after Config swaps to a new working
+   * directory. The recorder keeps session state, but future appends must
+   * resolve the JSONL path through the updated Config.storage.
+   */
+  resetStoragePaths(): void {
+    this.chatsDirEnsured = false;
+    this.cachedConversationFile = undefined;
+  }
+
+  /**
    * Records a user message.
    * Writes immediately to disk.
    *
@@ -821,6 +850,29 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
+    }
+  }
+
+  /**
+   * Records a user message drained while tool results are being submitted.
+   *
+   * The model sees these as extra user-role parts in the same API Content as
+   * tool results. Keeping a distinct subtype lets resume reconstruct that shape
+   * instead of replaying consecutive user-role entries.
+   */
+  recordMidTurnUserMessage(message: PartListUnion, displayText?: string): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        subtype: 'mid_turn_user_message',
+        message: createUserContent(message),
+        systemPayload: displayText
+          ? ({ displayText } as NotificationRecordPayload)
+          : undefined,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving mid-turn user message:', error);
     }
   }
 
@@ -928,11 +980,16 @@ export class ChatRecordingService {
     // Headless/one-shot CLI flows (`qwen -p "…"`, cron, CI scripts) run a
     // single prompt and throw the session away. Spending fast-model tokens
     // on a title no one will ever resume is pure waste; skip entirely.
-    // Checked before `getFastModelForSideQuery()` because it's strictly
-    // cheaper (a bool field read vs. a method that looks up available models).
-    if (!this.config.isInteractive()) return;
-    const fastModel =
-      this.config.getFastModelForSideQuery?.() ?? this.config.getFastModel();
+    // Daemon (ACP) sessions are long-lived and user-resumable, so they
+    // DO need auto-titles even though `isInteractive()` returns false
+    // (the ACP child is spawned with pipe stdio, not a TTY).
+    if (
+      !this.config.isInteractive() &&
+      !this.config.getExperimentalZedIntegration()
+    ) {
+      return;
+    }
+    const fastModel = this.config.getFastModel();
     if (!fastModel) return;
 
     this.autoTitleAttempts++;
@@ -1108,7 +1165,11 @@ export class ChatRecordingService {
    *   nothing before it), 1 means keep the first user turn, etc.
    * @param payload Additional metadata to persist with the rewind record.
    */
-  rewindRecording(targetTurnIndex: number, payload: RewindRecordPayload): void {
+  rewindRecording(
+    targetTurnIndex: number,
+    payload: RewindRecordPayload,
+    survivingFileHistorySnapshots?: FileHistorySnapshot[],
+  ): void {
     try {
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
@@ -1129,6 +1190,12 @@ export class ChatRecordingService {
       };
 
       this.appendRecord(record);
+
+      // Re-record surviving file history snapshots on the active branch so
+      // they are visible to reconstructHistory on resume.
+      if (survivingFileHistorySnapshots?.length) {
+        this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
+      }
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
     }
@@ -1153,7 +1220,8 @@ export class ChatRecordingService {
       if (
         record.type === 'user' &&
         record.subtype !== 'notification' &&
-        record.subtype !== 'cron'
+        record.subtype !== 'cron' &&
+        record.subtype !== 'mid_turn_user_message'
       ) {
         this.turnParentUuids.push(prevUuid);
       }
@@ -1311,6 +1379,25 @@ export class ChatRecordingService {
         this.lastAttributionSnapshotJson = undefined;
       }
       debugLogger.error('Error saving attribution snapshot:', error);
+    }
+  }
+
+  recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
+    this.recordFileHistorySnapshotBatch([snapshot]);
+  }
+
+  recordFileHistorySnapshotBatch(snapshots: FileHistorySnapshot[]): void {
+    if (snapshots.length === 0) return;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: snapshots.map(serializeSnapshot) },
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving file history snapshot batch:', error);
     }
   }
 }

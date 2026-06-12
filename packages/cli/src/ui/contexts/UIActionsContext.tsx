@@ -44,8 +44,6 @@ export interface UIActions {
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
-  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -59,7 +57,7 @@ export interface UIActions {
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
-  onSuggestionsVisibilityChange: (visible: boolean) => void;
+  onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
@@ -68,9 +66,26 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Worktree exit dialog
+  handleWorktreeExit: (
+    choice: 'keep' | 'remove' | 'cancel',
+  ) => void | Promise<void>;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Skills manager dialog (`/skills`)
+  openSkillsManagerDialog: () => void;
+  closeSkillsManagerDialog: () => void;
+  // Trigger a CommandService rebuild — dialogs that mutate settings
+  // affecting the slash-command surface (e.g. SkillsManagerDialog)
+  // call this after `setValue` so `/<skill-name>` and the skills
+  // listing reflect the new state without restarting the CLI.
+  reloadCommands: () => void | Promise<void>;
+  // Replace the chat input buffer's text without submitting. Used by
+  // dialogs that want to "pick" something into the prompt and let the
+  // user review/edit before sending — e.g. SkillsManagerDialog Enter
+  // closes the dialog and drops `/<skill-name>` into the input.
+  setInputBuffer: (text: string) => void;
   // Extensions manager dialog
   closeExtensionsManagerDialog: () => void;
   // MCP dialog
@@ -79,6 +94,7 @@ export interface UIActions {
   openHooksDialog: () => void;
   // Hooks dialog
   closeHooksDialog: () => void;
+  closeStatsDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
@@ -103,6 +119,9 @@ export interface UIActions {
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
   handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
+  // Diff dialog
+  openDiffDialog: () => void;
+  closeDiffDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

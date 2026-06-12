@@ -8,14 +8,14 @@ import process from 'node:process';
 import os from 'node:os';
 import { getNpmVersion, getGitVersion } from './systemInfo.js';
 import { validateAuthMethod } from '../config/auth.js';
-import { findProviderByCredentials } from '../auth/allProviders.js';
-import type { CommandContext } from '../ui/commands/types.js';
-import type { DoctorCheckResult } from '../ui/types.js';
 import {
+  findProviderByCredentials,
   canUseRipgrep,
   getMCPServerStatus,
   MCPServerStatus,
 } from '@qwen-code/qwen-code-core';
+import type { CommandContext } from '../ui/commands/types.js';
+import type { DoctorCheckResult } from '../ui/types.js';
 import { t } from '../i18n/index.js';
 
 const MIN_NODE_MAJOR = 22;
@@ -341,16 +341,7 @@ async function checkRipgrep(
   }
 }
 
-async function checkGit(context: CommandContext): Promise<DoctorCheckResult> {
-  if (context.services.git) {
-    return {
-      category: t('Git'),
-      name: t('Git'),
-      status: 'pass',
-      message: t('available'),
-    };
-  }
-  // services.git is undefined in non-interactive mode — probe the binary directly
+async function checkGit(_context: CommandContext): Promise<DoctorCheckResult> {
   const version = await getGitVersion();
   if (version === 'unknown') {
     return {

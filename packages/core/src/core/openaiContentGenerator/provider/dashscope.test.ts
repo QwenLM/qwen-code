@@ -164,6 +164,106 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for Token Plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for internal alibaba-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+    });
+
+    it('should return true for internal aliyun-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://model-gateway.aliyun-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for multi-level internal subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://a.b.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for port-bearing internal URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com:8443/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alibaba-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alibaba-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for bare aliyun-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://aliyun-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for lookalike internal domains without dot boundary', () => {
+      const configs = [
+        'https://notalibaba-inc.com/v1',
+        'https://notaliyun-inc.com/v1',
+        'https://alibaba-inc.com.evil.com/v1',
+        'https://aliyun-inc.com.evil.com/v1',
+        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+      ];
+
+      configs.forEach((baseUrl) => {
+        const result = DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        } as ContentGeneratorConfig);
+        expect(result).toBe(false);
+      });
+    });
+
     it('should return false for non-DashScope configurations', () => {
       const configs = [
         {
@@ -269,6 +369,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       expect(result).toBe(false);
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
+        ),
+      );
+    });
+
+    it('should log internal-origin activation instead of proxy mismatch for internal domains', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via internal origin: gateway.alibaba-inc.com',
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
         expect.stringContaining(
           'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
         ),

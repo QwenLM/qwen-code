@@ -227,7 +227,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Permission Priority Chain
@@ -496,7 +496,7 @@ Version 0.1.0 requires [Qwen Code](https://github.com/QwenLM/qwen-code) **>= 0.4
 
 ```bash
 # Install Qwen Code globally
-npm install -g qwen-code@^0.4.0
+npm install -g @qwen-code/qwen-code@latest
 ```
 
 **Note**: From version **0.1.1** onwards, the CLI is bundled with the SDK, so no separate Qwen Code installation is needed.

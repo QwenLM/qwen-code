@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
+import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -43,7 +44,6 @@ import {
   type HistoryItemWithoutId,
   ToolCallStatus,
 } from './types.js';
-import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
@@ -94,6 +94,8 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/usePreferredEditor.js');
+vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
@@ -108,7 +110,6 @@ vi.mock('./contexts/AgentViewContext.js', () => ({
     agents: new Map(),
   })),
   useAgentViewActions: vi.fn(() => ({
-    switchToMain: vi.fn(),
     switchToAgent: vi.fn(),
     switchToNext: vi.fn(),
     switchToPrevious: vi.fn(),
@@ -139,7 +140,11 @@ import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import {
+  useVimMode,
+  useVimModeActions,
+  useVimModeState,
+} from './contexts/VimModeContext.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -169,6 +174,8 @@ describe('AppContainer State Management', () => {
   const mockedUseAutoAcceptIndicator = useAutoAcceptIndicator as Mock;
   const mockedUseGitBranchName = useGitBranchName as Mock;
   const mockedUseVimMode = useVimMode as Mock;
+  const mockedUseVimModeActions = useVimModeActions as Mock;
+  const mockedUseVimModeState = useVimModeState as Mock;
   const mockedUseSessionStats = useSessionStats as Mock;
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
@@ -236,21 +243,15 @@ describe('AppContainer State Management', () => {
           authMessage: null,
         },
       },
-      handleAuthSelect: vi.fn(),
-      handleSubscriptionPlanSubmit: vi.fn(),
-      handleCodingPlanSubmit: vi.fn(),
-      handleTokenPlanSubmit: vi.fn(),
-      handleApiKeyProviderSubmit: vi.fn(),
-      handleOpenRouterSubmit: vi.fn(),
-      handleCustomApiKeySubmit: vi.fn(),
+      closeAuthDialog: vi.fn(),
+      handleProviderSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
       actions: {
         setAuthState: vi.fn(),
         onAuthError: vi.fn(),
-        handleAuthSelect: vi.fn(),
+        closeAuthDialog: vi.fn(),
         handleProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       },
@@ -312,6 +313,14 @@ describe('AppContainer State Management', () => {
     mockedUseVimMode.mockReturnValue({
       isVimEnabled: false,
       toggleVimEnabled: vi.fn(),
+    });
+    mockedUseVimModeActions.mockReturnValue({
+      toggleVimEnabled: vi.fn(),
+      setVimMode: vi.fn(),
+    });
+    mockedUseVimModeState.mockReturnValue({
+      vimEnabled: false,
+      vimMode: 'NORMAL',
     });
     mockedUseSessionStats.mockReturnValue({ stats: {} });
     mockedUseTextBuffer.mockReturnValue({
@@ -505,7 +514,47 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('does not clear the terminal just because width changed', () => {
+    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      capturedUIActions.refreshStatic();
+
+      // VP mode owns the viewport via the React tree, so refreshStatic must not
+      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
+    // #4891 changed the resize contract: width changes now trigger ONE full
+    // clearTerminal after RESIZE_REPAINT_SETTLE_MS (trailing-edge debounce),
+    // instead of never (#3967) or per-event (pre-#3967). This test pins the
+    // synchronous half: no immediate clear during the burst. The settle-time
+    // half is not observable here — ink-testing-library's rerender does not
+    // flush update-time passive effects — and is covered by
+    // useResizeSettleRepaint.test.ts.
+    it('does not clear the terminal synchronously on width change', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       const { rerender } = render(
@@ -773,6 +822,71 @@ describe('AppContainer State Management', () => {
       }
       capturedOnCancelSubmit(info);
     };
+
+    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      const cancelSpy = vi.fn();
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleExit'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const escKey: Key = {
+        name: 'escape',
+        sequence: '\u001b',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+      };
+      handleKeypress!(escKey);
+
+      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
+      expect(cancelSpy).not.toHaveBeenCalled();
+    });
 
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
       const mockSetText = vi.fn();
@@ -2341,7 +2455,13 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
-    it('does not remeasure footer height for sticky todo status-only updates', () => {
+    it('does not remeasure footer height for sticky todo status-only updates', async () => {
+      // Scoped stub: makeFakeConfig().initialize() rejects on React's
+      // double-mount, which leaks async renders and destabilizes the
+      // footer-measurement timing this test depends on. Kept per-test so
+      // unrelated tests in this block still exercise the real init gate.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       const historyManager = {
         history: makeTodoHistory('pending'),
         addItem: vi.fn(),
@@ -2354,29 +2474,55 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
 
-      const view = render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      // Let any pending state updates from useLayoutEffect settle.
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      const heightAfterSettle = capturedUIState.availableTerminalHeight;
+
+      // Switch the mock to a different height so any re-measurement triggered
+      // by the status-only rerender below would change controlsHeight (and
+      // therefore availableTerminalHeight). Without this, the production
+      // same-value short-circuit on setControlsHeight makes the equality
+      // assertion pass even when the optimization regresses.
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
 
       historyManager.history = makeTodoHistory('in_progress');
-      view.rerender(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
 
-      expect(mockedMeasureElement).toHaveBeenCalledTimes(
-        callsAfterInitialRender,
-      );
+      // The sticky todo status change (pending → in_progress) must not alter
+      // the computed terminal height. Combined with the mock-height swap
+      // above, this fails iff the footer was re-measured.
+      expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });
 
@@ -2408,21 +2554,15 @@ describe('AppContainer State Management', () => {
             authMessage: null,
           },
         },
-        handleAuthSelect: vi.fn(),
-        handleSubscriptionPlanSubmit: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleTokenPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit: vi.fn(),
+        closeAuthDialog: vi.fn(),
+        handleProviderSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
         actions: {
           setAuthState: vi.fn(),
           onAuthError: vi.fn(),
-          handleAuthSelect: vi.fn(),
+          closeAuthDialog: vi.fn(),
           handleProviderSubmit: vi.fn(),
-          handleOpenRouterSubmit: vi.fn(),
           openAuthDialog: vi.fn(),
           cancelAuthentication: vi.fn(),
         },

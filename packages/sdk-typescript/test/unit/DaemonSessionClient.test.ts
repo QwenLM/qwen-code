@@ -189,7 +189,7 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
-  it('loads an existing daemon session and seeds replay from the start', async () => {
+  it('loads an existing daemon session using server watermark and replay snapshot', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
         return jsonResponse(200, {
@@ -198,6 +198,9 @@ describe('DaemonSessionClient', () => {
           attached: false,
           clientId: 'client-1',
           state: { configOptions: [] },
+          lastEventId: 42,
+          compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+          liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
         });
       }
       if (req.url.endsWith('/session/s-1/events')) {
@@ -214,15 +217,17 @@ describe('DaemonSessionClient', () => {
     expect(session.sessionId).toBe('s-1');
     expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ configOptions: [] });
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
 
     for await (const _event of session.events()) {
       /* empty */
     }
-    expect(calls[1]?.headers['last-event-id']).toBe('0');
+    expect(calls[1]?.headers['last-event-id']).toBe('42');
   });
 
-  it('resumes an existing daemon session and seeds replay from the start', async () => {
+  it('resumes an existing daemon session using server watermark', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
         return jsonResponse(200, {
@@ -231,6 +236,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
           clientId: 'client-1',
           state: { modes: null },
+          lastEventId: 99,
         });
       }
       if (req.url.endsWith('/session/s-1/events')) {
@@ -245,12 +251,56 @@ describe('DaemonSessionClient', () => {
     expect(session.attached).toBe(true);
     expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ modes: null });
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(0);
     for await (const _event of session.events()) {
       /* empty */
     }
-    // Symmetric to load(): `unstable_resumeSession` schedules an
-    // `available_commands_update` via setTimeout(0) on the agent side,
-    // so the SDK seeds the subscription from the start of the ring.
+    expect(calls[1]?.headers['last-event-id']).toBe('99');
+  });
+
+  it('replays from id 0 on freshly-created sessions so startup-window guardrail events are observable (codex review fix #1)', async () => {
+    // Codex review round 2, finding #1: PR 14b's
+    // `mcp_budget_warning` / `mcp_child_refused_batch` events fire
+    // during the child's `newSession` handler and are buffered on
+    // `BridgeClient.earlyEvents` until `byId.set(sessionId, entry)`
+    // runs. The bridge drains them onto the per-session bus before
+    // `spawnOrAttach` returns, so they live in the replay ring with
+    // ids — but the SDK's old default of `lastEventId: undefined`
+    // started subscriptions live, so consumers never observed them.
+    //
+    // Fix: when `session.attached === false` (newly-created), seed
+    // `Last-Event-ID: 0` to replay the startup-window events. The
+    // existing `modelServiceId` carve-out still triggers seed for
+    // re-attached sessions where attach-time switch events need to
+    // replay.
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.createOrAttach(client, {
+      workspaceCwd: '/work/a',
+      // No `modelServiceId` — the only signal that triggered seed
+      // pre-fix. With the fix, `attached: false` alone is enough.
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(session.attached).toBe(false);
+    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
@@ -283,6 +333,64 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBeUndefined();
   });
 
+  it('forwards heartbeat through DaemonClient with the bound clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        clientId: 'client-1',
+        lastSeenAt: 1_700_000_000_002,
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const result = await session.heartbeat();
+    expect(result).toEqual({
+      sessionId: 's-1',
+      clientId: 'client-1',
+      lastSeenAt: 1_700_000_000_002,
+    });
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/heartbeat');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards recap through DaemonClient with the bound clientId and signal', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        recap: 'Refactoring the auth flow. Next: run the integration tests.',
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const ctrl = new AbortController();
+    const result = await session.recap({ signal: ctrl.signal });
+    expect(result).toEqual({
+      sessionId: 's-1',
+      recap: 'Refactoring the auth flow. Next: run the integration tests.',
+    });
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/recap');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(calls[0]?.signal).toBe(ctrl.signal);
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {
@@ -291,11 +399,53 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/model')) {
         return jsonResponse(200, { modelId: 'qwen3-coder' });
       }
+      if (req.url.endsWith('/session/s-1/context')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: { models: { currentModelId: 'qwen3-coder' } },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/supported-commands')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize',
+              input: null,
+            },
+          ],
+          availableSkills: ['review'],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/tasks')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          now: 1_700_000_000_000,
+          tasks: [],
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
       if (req.url.endsWith('/permission/req-1')) {
         return jsonResponse(200, {});
+      }
+      if (req.url.endsWith('/session/s-1/permission/req-2')) {
+        return jsonResponse(200, {});
+      }
+      if (req.method === 'DELETE' && req.url.endsWith('/session/s-1')) {
+        return new Response(null, { status: 204 });
+      }
+      if (req.url.endsWith('/session/s-1/metadata')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
     });
@@ -320,21 +470,66 @@ describe('DaemonSessionClient', () => {
     await expect(session.setModel('qwen3-coder')).resolves.toEqual({
       modelId: 'qwen3-coder',
     });
+    await expect(session.context()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      state: { models: { currentModelId: 'qwen3-coder' } },
+    });
+    await expect(session.supportedCommands()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      availableCommands: [
+        {
+          name: 'init',
+          description: 'Initialize',
+          input: null,
+        },
+      ],
+      availableSkills: ['review'],
+    });
+    await expect(session.tasks()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      now: 1_700_000_000_000,
+      tasks: [],
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
         outcome: { outcome: 'selected', optionId: 'allow' },
       }),
     ).resolves.toBe(true);
+    await expect(
+      session.respondToSessionPermission('req-2', {
+        outcome: { outcome: 'cancelled' },
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      session.updateMetadata({ displayName: 'My Session' }),
+    ).resolves.toEqual({ displayName: 'My Session' });
+    await expect(session.close()).resolves.toBeUndefined();
 
     expect(calls.map((c) => c.url)).toEqual([
       'http://daemon/session/s-1/prompt',
       'http://daemon/session/s-1/model',
+      'http://daemon/session/s-1/context',
+      'http://daemon/session/s-1/supported-commands',
+      'http://daemon/session/s-1/tasks',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
+      'http://daemon/session/s-1/permission/req-2',
+      'http://daemon/session/s-1/metadata',
+      'http://daemon/session/s-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',
