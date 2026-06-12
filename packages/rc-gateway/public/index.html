@@ -782,9 +782,37 @@
         save.textContent = 'Save';
         save.onclick = () =>
           saveSub(s.id, { from, to, tz, max }, save, note);
-        for (const el of [head, from, to, tz, max, save, note])
+        const unsub = document.createElement('button');
+        unsub.textContent = 'Unsubscribe';
+        unsub.onclick = () => unsubscribeSub(s.id, row, unsub);
+        for (const el of [head, from, to, tz, max, save, unsub, note])
           row.appendChild(el);
         return row;
+      }
+      // Cycle 59: OWNER prunes a subscription via the existing DELETE route
+      // (owner scope bypasses ownership). Mirrors cycle-56 revokeToken: disable
+      // sync before the await, collapse the row to text on success (destroys
+      // the detached buttons -> no dangling handler), re-enable on error.
+      async function unsubscribeSub(id, row, btn) {
+        btn.disabled = true;
+        try {
+          const res = await fetch(
+            '/rc/push/subscriptions/' + encodeURIComponent(id),
+            {
+              method: 'DELETE',
+              headers: { Authorization: 'Bearer ' + token() },
+            },
+          );
+          if (res.status === 204) row.textContent = 'unsubscribed: ' + id;
+          else if (res.status === 404) row.textContent = 'already gone: ' + id;
+          else {
+            btn.disabled = false;
+            setStatus('unsubscribe failed (' + res.status + ')');
+          }
+        } catch (e) {
+          btn.disabled = false;
+          setStatus('unsubscribe error: ' + e);
+        }
       }
       async function saveSub(id, fields, btn, note) {
         const f = fields.from.value.trim();
