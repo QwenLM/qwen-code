@@ -209,7 +209,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
       textColor={theme.text.accent}
       ariaLabel={SCREEN_READER_USER_PREFIX}
       alignSelf="flex-start"
-      marginTop={useBand ? 0 : 1}
+      marginTop={1}
     />
   );
 
