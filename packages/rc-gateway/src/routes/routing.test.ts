@@ -169,4 +169,57 @@ describe('routing routes', () => {
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe('invalid_snooze');
   });
+
+  // --- cycle 77: multi-snooze ---
+
+  async function postSnooze(
+    url: string,
+    durationSec: number,
+    scope?: string,
+  ): Promise<Response> {
+    return fetch(`${url}/rc/routing/snooze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(scope ? { durationSec, scope } : { durationSec }),
+    });
+  }
+
+  it('two POSTs accumulate; GET /snooze lists both in snoozes[]', async () => {
+    const url = await mount();
+    await postSnooze(url, 60, 'permission.required');
+    await postSnooze(url, 120, 'task.completed');
+    const res = await fetch(`${url}/rc/routing/snooze`);
+    const body = (await res.json()) as { snoozes: Array<{ scope: string }> };
+    const scopes = body.snoozes.map((e) => e.scope).sort();
+    expect(scopes).toEqual(['permission.required', 'task.completed']);
+    // Both are independently active.
+    expect(snooze.isSnoozed('permission.required')).toBe(true);
+    expect(snooze.isSnoozed('task.completed')).toBe(true);
+  });
+
+  it('DELETE /snooze?scope=<s> clears only that scope and audits it', async () => {
+    const url = await mount();
+    await postSnooze(url, 60, 'all');
+    await postSnooze(url, 60, 'task.completed');
+    const del = await fetch(`${url}/rc/routing/snooze?scope=all`, {
+      method: 'DELETE',
+    });
+    expect(del.status).toBe(204);
+    expect(snooze.isSnoozed('permission.required')).toBe(false); // 'all' gone
+    expect(snooze.isSnoozed('task.completed')).toBe(true); // kept
+    const a = audit.calls.find((c) => c.action === 'routing_unsnoozed');
+    expect(a!.detail).toEqual({ scope: 'all' });
+  });
+
+  it('DELETE /snooze with no scope clears everything', async () => {
+    const url = await mount();
+    await postSnooze(url, 60, 'all');
+    await postSnooze(url, 60, 'task.completed');
+    const del = await fetch(`${url}/rc/routing/snooze`, { method: 'DELETE' });
+    expect(del.status).toBe(204);
+    const res = await fetch(`${url}/rc/routing/snooze`);
+    const body = (await res.json()) as { active: boolean; snoozes: unknown[] };
+    expect(body.active).toBe(false);
+    expect(body.snoozes).toEqual([]);
+  });
 });

@@ -44,19 +44,31 @@ export function createRoutingRouter(
   });
 
   router.get('/snooze', (_req, res) => {
+    // Legacy fields (active/until/scope) reflect a single REPRESENTATIVE snooze
+    // (cycle 15 / the cycle-70 UI); `snoozes` is the full per-scope list
+    // (cycle 77). Adding the array is purely additive.
+    const list = snooze.activeList();
     const s = snooze.active();
     if (s) {
-      res.json({ active: true, until: s.until, scope: s.scope });
+      res.json({ active: true, until: s.until, scope: s.scope, snoozes: list });
     } else {
-      res.json({ active: false });
+      res.json({ active: false, snoozes: list });
     }
   });
 
   router.delete('/snooze', async (req, res) => {
-    await snooze.clear();
+    // ?scope=<s> clears ONE scope (including the global 'all' entry by name);
+    // no ?scope clears EVERY snooze (back-compat with the cycle-70 Unsnooze).
+    const rawScope = req.query.scope;
+    const scope =
+      typeof rawScope === 'string' && rawScope.length > 0
+        ? rawScope
+        : undefined;
+    await snooze.clear(scope);
     void audit?.record({
       action: 'routing_unsnoozed',
       actorTokenId: req.rcClient?.id,
+      ...(scope !== undefined ? { detail: { scope } } : {}),
     });
     res.status(204).end();
   });
