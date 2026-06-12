@@ -268,4 +268,30 @@ describe('getRetryDelayMs - exponential overflow', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('clamps to the setTimeout ceiling when maxDelayMs itself is oversized', () => {
+    // A caller-supplied maxDelayMs above the 32-bit setTimeout limit must not
+    // let the exponential delay overflow the timer.
+    expect(
+      getRetryDelayMs({
+        attempt: 5000,
+        initialDelayMs: 1000,
+        maxDelayMs: 5_000_000_000,
+      }),
+    ).toBe(2_147_483_647);
+  });
+
+  it('clamps jitter to the setTimeout ceiling when maxDelayMs is oversized', () => {
+    // Max positive jitter on a maxed-out exponential must still not exceed the
+    // setTimeout ceiling.
+    expect(
+      getRetryDelayMs({
+        attempt: 5000,
+        initialDelayMs: 1000,
+        maxDelayMs: 5_000_000_000,
+        jitterRatio: 0.3,
+        random: () => 1,
+      }),
+    ).toBe(2_147_483_647);
+  });
 });

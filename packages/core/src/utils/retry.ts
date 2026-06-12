@@ -262,6 +262,13 @@ export async function retryWithBackoff<T>(
         extraRetryErrorCodes,
       });
 
+      // Cancellation is authoritative: once the caller aborts (or the call
+      // throws an abort/cancel error), never schedule another attempt,
+      // regardless of a permissive shouldRetryOnError predicate.
+      if (retryDiagnostics.kind === 'abort') {
+        throw error;
+      }
+
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         debugLogger.error(

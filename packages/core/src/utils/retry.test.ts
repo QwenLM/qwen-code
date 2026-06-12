@@ -166,6 +166,26 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(1);
   });
 
+  it('fast-fails on an abort error even with a permissive shouldRetryOnError', async () => {
+    const abortError = Object.assign(new Error('The operation was aborted'), {
+      name: 'AbortError',
+    });
+    const mockFn = vi.fn().mockRejectedValue(abortError);
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 5,
+      initialDelayMs: 10,
+      // Permissive predicate must not override cancellation.
+      shouldRetryOnError: () => true,
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertion = expect(promise).rejects.toBe(abortError);
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
   describe('shouldRetryOnContent', () => {
     it('retries on invalid content then returns the valid result', async () => {
       const bad = { text: 'bad' } as unknown;

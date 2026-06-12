@@ -41,10 +41,13 @@ export interface RetryErrorClassification {
 }
 
 /**
- * Classifies retry-related failures for diagnostics.
+ * Classifies retry-related failures.
  *
- * The result is intentionally conservative: it labels the observed error shape
- * without performing or driving retry control.
+ * The result is primarily diagnostic — it labels the observed error shape for
+ * logging. It also feeds a single control decision in `retryWithBackoff`: a
+ * `'fail-fast'` diagnosis keeps a permanent error (e.g. allocated-quota
+ * exhaustion surfacing as HTTP 429) out of the unbounded persistent loop.
+ * Beyond that, it does not drive retry, fail-fast, or fallback control.
  */
 export function classifyRetryError(
   error: unknown,

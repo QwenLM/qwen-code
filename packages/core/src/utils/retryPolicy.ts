@@ -42,20 +42,27 @@ export interface RetryDelayPolicyOptions {
  */
 export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
   const normalizedAttempt = Math.max(1, options.attempt);
+  // Bound every cap by the setTimeout ceiling, including the caller-supplied
+  // maxDelayMs itself — otherwise an oversized maxDelayMs could let the
+  // exponential or jittered delay overflow the timer and fire immediately.
+  const delayCeilingMs = Math.min(options.maxDelayMs, MAX_TIMEOUT_MS);
   // Cap the exponent so a large attempt count in persistent mode cannot push
   // `Math.pow(2, n)` to Infinity. `2^31` already exceeds any realistic
   // maxDelayMs, so the subsequent Math.min still clamps correctly.
   const exponent = Math.min(normalizedAttempt - 1, 31);
   const cappedExponentialDelayMs = Math.min(
     options.initialDelayMs * Math.pow(2, exponent),
-    options.maxDelayMs,
+    delayCeilingMs,
   );
   const retryAfterMode = options.retryAfterMode ?? 'ignore';
   const retryAfterMs =
     retryAfterMode === 'ignore' ? null : getRetryAfterDelayMs(options.error);
 
   if (retryAfterMs !== null && retryAfterMs > 0) {
-    const retryAfterCapMs = options.retryAfterMaxDelayMs ?? options.maxDelayMs;
+    const retryAfterCapMs = Math.min(
+      options.retryAfterMaxDelayMs ?? options.maxDelayMs,
+      MAX_TIMEOUT_MS,
+    );
     const cappedRetryAfterMs = Math.min(retryAfterMs, retryAfterCapMs);
     return Math.max(cappedExponentialDelayMs, cappedRetryAfterMs);
   }
@@ -67,7 +74,7 @@ export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
   const jitter = cappedExponentialDelayMs * jitterRatio * (random() * 2 - 1);
   return Math.min(
     Math.max(0, cappedExponentialDelayMs + jitter),
-    options.maxDelayMs,
+    delayCeilingMs,
   );
 }
 
