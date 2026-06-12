@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AuditRecorder } from '../auditLog.js';
 import { parseFrontMatter } from './parse.js';
@@ -87,6 +87,8 @@ export class CommandLoader {
   /** `source:file:reason` keys already audited, to dedup parse_failed across the
    * per-request `load()` calls (mirrors `warnedCollisions`). */
   private readonly warnedParseFailures = new Set<string>();
+  /** mtime-cache (cycle 78): last computed signature + its parsed result. */
+  private cache?: { signature: string; commands: LoadedCommand[] };
 
   constructor(
     private readonly resolveWorkspaceCwd: () => Promise<string | undefined>,
@@ -95,13 +97,25 @@ export class CommandLoader {
   ) {}
 
   async load(): Promise<LoadedCommand[]> {
-    const userCmds = await this.readDir(this.userCommandsDir, 'user');
-
     const cwd = await this.resolveWorkspaceCwd();
-    const workspaceCmds =
+    const workspaceDir =
       typeof cwd === 'string' && cwd.length > 0
-        ? await this.readDir(join(cwd, '.qwen', 'commands'), 'workspace')
-        : [];
+        ? join(cwd, '.qwen', 'commands')
+        : undefined;
+
+    // Cheap-poll cache (cycle 78): if the directory signature (file set +
+    // per-file mtimeMs/size + workspace dir) is unchanged since the last load,
+    // return the cached parse without re-reading/re-parsing any file. The
+    // returned array is treated read-only by callers (.map / .find).
+    const signature = await this.computeSignature(workspaceDir);
+    if (this.cache && this.cache.signature === signature) {
+      return this.cache.commands;
+    }
+
+    const userCmds = await this.readDir(this.userCommandsDir, 'user');
+    const workspaceCmds = workspaceDir
+      ? await this.readDir(workspaceDir, 'workspace')
+      : [];
 
     const map = new Map<string, LoadedCommand>();
     for (const cmd of userCmds) map.set(cmd.name, cmd);
@@ -120,7 +134,50 @@ export class CommandLoader {
       map.set(cmd.name, cmd);
     }
 
-    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const commands = [...map.values()].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    this.cache = { signature, commands };
+    return commands;
+  }
+
+  /**
+   * A cheap signature of both command roots: file set + per-file mtimeMs/size +
+   * the workspace dir path. Changes on any add/remove/edit/workspace-change.
+   * Fail-soft like readDir — an unreadable root contributes a sentinel and never
+   * throws, so the signature and the read path always agree on "missing root →
+   * nothing". Does NOT read file CONTENT (the whole point: avoid the parse).
+   */
+  private async computeSignature(
+    workspaceDir: string | undefined,
+  ): Promise<string> {
+    const parts: string[] = [`w-dir:${workspaceDir ?? ''}`];
+    const roots: Array<[string, string | undefined]> = [
+      ['u', this.userCommandsDir],
+      ['w', workspaceDir],
+    ];
+    for (const [tag, dir] of roots) {
+      if (!dir) {
+        parts.push(`${tag}:-`);
+        continue;
+      }
+      let names: string[];
+      try {
+        names = await readdir(dir);
+      } catch {
+        parts.push(`${tag}:!`);
+        continue;
+      }
+      for (const file of names.filter((n) => n.endsWith('.md')).sort()) {
+        try {
+          const st = await stat(join(dir, file));
+          parts.push(`${tag}:${file}:${st.mtimeMs}:${st.size}`);
+        } catch {
+          parts.push(`${tag}:${file}:!`);
+        }
+      }
+    }
+    return parts.join('|');
   }
 
   private async readDir(

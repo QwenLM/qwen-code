@@ -299,3 +299,49 @@ describe('CommandLoader', () => {
     ).toHaveLength(1);
   });
 });
+
+describe('CommandLoader mtime cache (cycle 78)', () => {
+  it('returns the same array reference while files are unchanged (cache hit)', async () => {
+    await writeFile(join(userDir, 'a.md'), VALID('a'));
+    const l = loader();
+    const r1 = await l.load();
+    const r2 = await l.load();
+    expect(r1.map((c) => c.name)).toEqual(['a']);
+    expect(r2).toBe(r1); // cache hit → no re-read/parse, same reference
+  });
+
+  it('invalidates when a command file is ADDED', async () => {
+    await writeFile(join(userDir, 'a.md'), VALID('a'));
+    const l = loader();
+    const r1 = await l.load();
+    expect(r1.map((c) => c.name)).toEqual(['a']);
+    await writeFile(join(userDir, 'b.md'), VALID('b'));
+    const r2 = await l.load();
+    expect(r2).not.toBe(r1);
+    expect(r2.map((c) => c.name)).toEqual(['a', 'b']);
+  });
+
+  it('invalidates when a command file is REMOVED', async () => {
+    await writeFile(join(userDir, 'a.md'), VALID('a'));
+    await writeFile(join(userDir, 'b.md'), VALID('b'));
+    const l = loader();
+    expect((await l.load()).map((c) => c.name)).toEqual(['a', 'b']);
+    await rm(join(userDir, 'b.md'));
+    expect((await l.load()).map((c) => c.name)).toEqual(['a']);
+  });
+
+  it("invalidates when a file's CONTENT changes (size differs)", async () => {
+    await writeFile(join(userDir, 'a.md'), VALID('a'));
+    const l = loader();
+    const r1 = await l.load();
+    expect(r1[0].description).toBe('does a');
+    // Rewrite with a longer description → size + mtime change → cache miss.
+    await writeFile(
+      join(userDir, 'a.md'),
+      '---\nname: a\ndescription: does a much more thoroughly\nscope: write\n---\nBody',
+    );
+    const r2 = await l.load();
+    expect(r2).not.toBe(r1);
+    expect(r2[0].description).toBe('does a much more thoroughly');
+  });
+});
