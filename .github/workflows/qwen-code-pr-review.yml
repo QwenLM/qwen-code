@@ -412,6 +412,29 @@ jobs:
             fail "Qwen review completed but produced no output."
           fi
 
+          # qwen can exit 0 even when the run aborted mid-review (e.g. the model
+          # connection dropped before the review was posted). In that case the
+          # final stream-json `result` event still renders the error inline and
+          # carries subtype=success / is_error=false, so the checks above all
+          # pass and the job goes green without ever posting a comment. Inspect
+          # the terminal `result` event explicitly and treat an errored or
+          # aborted run as a failure so the fallback-comment step runs.
+          RESULT_LINE="$(grep '"type":"result"' "$LOG_PATH" | tail -n1 || true)"
+          if [ -z "$RESULT_LINE" ]; then
+            fail "Qwen review produced no result event (run aborted before completion)."
+          fi
+          RESULT_IS_ERROR="$(printf '%s' "$RESULT_LINE" | jq -r '.is_error // false')"
+          RESULT_SUBTYPE="$(printf '%s' "$RESULT_LINE" | jq -r '.subtype // ""')"
+          RESULT_TEXT="$(printf '%s' "$RESULT_LINE" | jq -r '.result // ""')"
+          if [ "$RESULT_IS_ERROR" = "true" ] || [ "$RESULT_SUBTYPE" != "success" ]; then
+            fail "Qwen review ended in an error result (subtype=${RESULT_SUBTYPE}, is_error=${RESULT_IS_ERROR})."
+          fi
+          case "$RESULT_TEXT" in
+            *"[API Error"*)
+              fail "Qwen review aborted with an API error before posting comments."
+              ;;
+          esac
+
       - name: 'Post fallback comment on failure'
         if: |-
           failure() &&
