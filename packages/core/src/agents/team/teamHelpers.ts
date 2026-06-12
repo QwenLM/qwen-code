@@ -214,6 +214,30 @@ export function findMemberByName(
   return members.find((m) => m.name === sanitized);
 }
 
+/**
+ * Classify a teammate's free-text reply to a shutdown request.
+ *
+ * The leader asks the teammate to reply with `shutdown_approved` or
+ * `shutdown_rejected: <reason>`. A compliant reply leads with the
+ * token, so match only at the start (after leading whitespace) — never
+ * anywhere in the body. That anchoring is what stops a teammate that
+ * merely *mentions* the token mid-report (e.g. while reviewing
+ * shutdown-related code) from being read as an approval and aborted,
+ * while still accepting the verbose `shutdown_approved, work finished`
+ * form that an exact-string match would miss.
+ *
+ * Returns the structured response type, or undefined when the reply is
+ * not a shutdown response.
+ */
+export function classifyShutdownResponse(
+  message: string,
+): 'shutdown_approved' | 'shutdown_rejected' | undefined {
+  const trimmed = message.trimStart();
+  if (/^shutdown_approved\b/i.test(trimmed)) return 'shutdown_approved';
+  if (/^shutdown_rejected\b/i.test(trimmed)) return 'shutdown_rejected';
+  return undefined;
+}
+
 // ─── File I/O ───────────────────────────────────────────────
 
 /**

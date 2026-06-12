@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -20,6 +20,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspacePreflightStatus,
@@ -53,6 +54,7 @@ interface CapturedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 function recordingFetch(
@@ -74,7 +76,13 @@ function recordingFetch(
         h.forEach((v, k) => (headers[k.toLowerCase()] = v));
       }
       const body = typeof init?.body === 'string' ? init.body : null;
-      const captured: CapturedRequest = { url, method, headers, body };
+      const captured: CapturedRequest = {
+        url,
+        method,
+        headers,
+        body,
+        signal: init?.signal ?? null,
+      };
       calls.push(captured);
       return reply(captured);
     },
@@ -432,6 +440,44 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/tools with URL encoding', async () => {
+      const toolsStatus = {
+        v: 1,
+        serverName: 'my server',
+        tools: [{ name: 'tool-a', description: 'A tool' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpTools('my server')).resolves.toEqual(
+        toolsStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/tools'],
+      ]);
+    });
+
+    it('GETs /workspace/tools and returns the tools envelope', async () => {
+      const toolsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        tools: [{ name: 'Bash', enabled: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceTools()).resolves.toEqual(toolsStatus);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/tools'],
+      ]);
+    });
+
     it('GETs session status routes with encoded session ids', async () => {
       const context: DaemonSessionContextStatus = {
         v: 1,
@@ -451,12 +497,21 @@ describe('DaemonClient', () => {
         ],
         availableSkills: ['review'],
       };
+      const tasks: DaemonSessionTasksStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        now: 1_700_000_000_000,
+        tasks: [],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
         }
         if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
           return jsonResponse(200, supportedCommands);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/tasks')) {
+          return jsonResponse(200, tasks);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -468,11 +523,16 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionSupportedCommands('with/slash', 'client-1'),
       ).resolves.toEqual(supportedCommands);
+      await expect(
+        client.sessionTasks('with/slash', 'client-1'),
+      ).resolves.toEqual(tasks);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+        ['GET', 'http://daemon/session/with%2Fslash/tasks'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
       ]);
@@ -497,9 +557,82 @@ describe('DaemonClient', () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { status: 'ok' }),
       );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.health();
-      expect(calls[0]?.headers['authorization']).toBeUndefined();
+      // Defensive: an inherited test-runner export of QWEN_SERVER_TOKEN
+      // would otherwise activate the PR 27 env fallback and turn this
+      // assertion into a false positive ("got Bearer <leaked-value>"
+      // instead of the expected `undefined`). Snapshot + restore in a
+      // try/finally so the rest of the suite sees the same env state.
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['QWEN_SERVER_TOKEN'];
+      try {
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      } finally {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      }
+    });
+
+    describe('QWEN_SERVER_TOKEN env fallback (PR 27 / #4175 v0.16-alpha)', () => {
+      const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+      afterEach(() => {
+        if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+        else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+      });
+
+      it('uses QWEN_SERVER_TOKEN when no explicit token is passed', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-abc';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer env-token-abc');
+      });
+
+      it('explicit opts.token wins over env', async () => {
+        process.env['QWEN_SERVER_TOKEN'] = 'env-token-loses';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'explicit-wins',
+          fetch,
+        });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer explicit-wins');
+      });
+
+      it('treats empty / whitespace-only env var as unset', async () => {
+        // A stale `export QWEN_SERVER_TOKEN=""` would otherwise let the
+        // Authorization header through as `Bearer ` (no token), which
+        // the daemon rejects but is confusing to debug. PR 27 collapses
+        // empty / whitespace-only onto the same "unset" branch as
+        // truly-unset; verify both shapes here.
+        process.env['QWEN_SERVER_TOKEN'] = '   ';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBeUndefined();
+      });
+
+      it('strips leading/trailing whitespace from env var', async () => {
+        // Matches the daemon-side `--token` trim behavior — handy for
+        // `export QWEN_SERVER_TOKEN="$(cat token.txt)"` where `cat`
+        // produces a trailing newline that would otherwise corrupt
+        // the Authorization header value.
+        process.env['QWEN_SERVER_TOKEN'] = '  trimmed-value  \n';
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { status: 'ok' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.health();
+        expect(calls[0]?.headers['authorization']).toBe('Bearer trimmed-value');
+      });
     });
   });
 
@@ -1001,6 +1134,53 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('deleteSessionsData', () => {
+    it('POSTs to /sessions/delete with sessionIds in body and returns result', async () => {
+      const result = {
+        removed: ['s-1', 's-2'],
+        notFound: ['s-3'],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.deleteSessionsData(['s-1', 's-2', 's-3']);
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/delete');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2', 's-3'],
+      });
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: [], notFound: [], errors: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.deleteSessionsData(['s-1'], 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('sends Content-Type application/json', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: [], notFound: [], errors: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.deleteSessionsData(['s-1']);
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'boom' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.deleteSessionsData(['s-1'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+  });
+
   describe('updateSessionMetadata', () => {
     it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1270,6 +1450,77 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('recapSession (#4175 follow-up)', () => {
+    it('POSTs an empty body and returns the typed recap', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          recap:
+            'Debugging the auth retry race. Next: add deterministic timing.',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        recap: 'Debugging the auth retry race. Next: add deterministic timing.',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/recap');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('returns recap:null verbatim when the daemon reports best-effort failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: null }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result.recap).toBeNull();
+    });
+
+    it('URL-encodes the session id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's/1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s/1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/recap');
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s-1', { clientId: 'client-1' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('forwards the AbortSignal so callers can cancel mid-flight', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      await client.recapSession('s-1', { signal: ctrl.signal });
+      expect(calls[0]?.signal).toBe(ctrl.signal);
+    });
+
+    it('throws on 404 when session is unknown', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.recapSession('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1370,6 +1621,18 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('MCP restart timeout coupling (#4330)', () => {
+    it('SDK default timeout equals server deadline + client headroom', async () => {
+      const { MCP_RESTART_SERVER_DEADLINE_MS, MCP_RESTART_CLIENT_HEADROOM_MS } =
+        await import('@qwen-code/acp-bridge/mcpTimeouts');
+      const expected =
+        MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
+      expect(expected).toBe(330_000);
+      expect(MCP_RESTART_SERVER_DEADLINE_MS).toBe(300_000);
+      expect(MCP_RESTART_CLIENT_HEADROOM_MS).toBeGreaterThanOrEqual(10_000);
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1445,6 +1708,137 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.restartMcpServer('ghost')).rejects.toMatchObject({
         status: 404,
+      });
+    });
+
+    it('survives a slow daemon response longer than the client default timeout (#4282 fold-in 5 P2-3)', async () => {
+      // The daemon-side restart waits up to 300s for stdio MCP
+      // discovery. The client-wide `fetchTimeoutMs` defaults to 30s,
+      // so without the per-call override, a valid 60s+ restart would
+      // be aborted client-side while the daemon kept working.
+      // Simulate a 1.2s response with the default 1s `fetchTimeoutMs`
+      // — without the override the call would timeout; with it the
+      // call resolves successfully.
+      //
+      // #4297 fold-in 2 (copilot, wenshao C2): the stub must
+      // observe `init.signal` so a regression that removes the
+      // per-call override (and thus the 1s default fires) actually
+      // rejects the in-flight promise. The previous version resolved
+      // the response unconditionally and the test passed even when
+      // the abort signal had already fired — false-negative coverage.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      let rejectResponse: ((reason: unknown) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            rejectResponse = reject;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1_000,
+      });
+      const inflight = client.restartMcpServer('docs');
+      // Resolve the promise after the client default would have timed
+      // out — proving the per-call override extends the budget. The
+      // abort listener above guarantees that if the override is ever
+      // removed, this resolve never fires (the abort rejects first).
+      void rejectResponse;
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 1200,
+          }),
+        );
+      }, 1_200);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
+    });
+
+    it('honors a caller-provided `timeoutMs` override (#4282 fold-in 5 P2-3)', async () => {
+      // When the caller sets a tighter cap, the per-call override
+      // wins over the 5-minute default. Verify by passing a 50ms
+      // budget against a stub that rejects only when its
+      // `init.signal` aborts — proving the abort actually fired
+      // rather than relying on a sleep racing the timeout.
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+      });
+      await expect(
+        client.restartMcpServer('docs', { timeoutMs: 50 }),
+      ).rejects.toThrow();
+    });
+
+    it('honors `timeoutMs: 0` as "disable the timeout" (#4297 fold-in 2 C1)', async () => {
+      // The JSDoc on `restartMcpServer` documents `0` as "disable
+      // the timeout entirely". Use a 1ms client-wide default so a
+      // regression that ignores the 0 override would abort almost
+      // immediately. The slow stub resolves after 50ms — well past
+      // the 1ms default but only because 0 disables the timer.
+      //
+      // #4297 fold-in 4 (wenshao critical, addresses #3260810242):
+      // the stub must observe `init.signal` and reject on abort.
+      // Without the listener, a regression where the override is
+      // ignored fires the AbortController at 1ms but the stub never
+      // sees it — the promise stays pending until the 50ms
+      // `resolveResponse` wins, leaving the test green and the
+      // "0 disables timeout" contract unprotected. Mirrors the
+      // listener pattern in the two sibling tests above.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const inflight = client.restartMcpServer('docs', { timeoutMs: 0 });
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 50,
+          }),
+        );
+      }, 50);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
       });
     });
   });
@@ -1997,6 +2391,75 @@ describe('DaemonClient', () => {
           DaemonHttpError,
         );
       }
+    });
+  });
+
+  describe('addRuntimeMcpServer (T2.8 #4514)', () => {
+    it('POSTs /workspace/mcp/servers with JSON body and returns the typed result', async () => {
+      const result = {
+        name: 'my-server',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.addRuntimeMcpServer({
+        name: 'my-server',
+        config: { command: 'node', args: ['server.js'] },
+      });
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/mcp/servers');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'my-server',
+        config: { command: 'node', args: ['server.js'] },
+      });
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: 'invalid config' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.addRuntimeMcpServer({
+          name: 'bad',
+          config: { command: '' },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('removeRuntimeMcpServer (T2.8 #4514)', () => {
+    it('DELETEs /workspace/mcp/servers/:name with URL-encoded name', async () => {
+      const result = {
+        name: 'my server',
+        removed: true,
+        wasShadowingSettings: false,
+        originatorClientId: 'client-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.removeRuntimeMcpServer('my server');
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/servers/my%20server',
+      );
+      expect(calls[0]?.method).toBe('DELETE');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'internal' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.removeRuntimeMcpServer('ghost'),
+      ).rejects.toMatchObject({ status: 500 });
     });
   });
 

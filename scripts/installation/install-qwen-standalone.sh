@@ -93,6 +93,11 @@ finish_progress() {
 TEMP_DIRS=()
 ACTIVE_DOWNLOAD_PID=""
 PATH_UPDATE_APPLIED=0
+# PATH as inherited from the invoking shell. The script later prepends the
+# install dir to its own PATH, but that never propagates to the parent shell
+# (a piped `curl | bash` runs in a child process), so we keep the original
+# value to decide whether the user must reload their shell rc file.
+ORIGINAL_PATH="${PATH:-}"
 
 cleanup_temp_dirs() {
     local temp_dir
@@ -555,6 +560,7 @@ maybe_update_shell_path() {
         current_tail=$(tail -n 3 "${rc_file}" 2>/dev/null || true)
         if [[ "${current_tail}" == "${begin_marker}"$'\n'"${export_line}"$'\n'"${end_marker}" ]]; then
             PATH_UPDATE_APPLIED=1
+            PATH_UPDATE_RC_FILE="${rc_file}"
             return 0
         fi
     fi
@@ -571,6 +577,7 @@ maybe_update_shell_path() {
     }
 
     PATH_UPDATE_APPLIED=1
+    PATH_UPDATE_RC_FILE="${rc_file}"
 }
 
 github_base_url_for_version() {
@@ -1474,6 +1481,7 @@ print_final_instructions() {
 
     if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
         PATH_UPDATE_APPLIED=0
+        PATH_UPDATE_RC_FILE=""
         maybe_update_shell_path "${install_bin_dir}"
     fi
 
@@ -1484,19 +1492,53 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
-    local rc_name=""
-    case "${SHELL:-}" in
-        */zsh)  rc_name="~/.zshrc" ;;
-        */bash) rc_name="~/.bashrc" ;;
-        */fish) rc_name="~/.config/fish/config.fish" ;;
-    esac
+    # Display the rc file maybe_update_shell_path actually wrote to (e.g. bash
+    # may fall back to ~/.bash_profile), so the success message and the reload
+    # hint can never point at a different file than the one that was modified.
+    local rc_name="${PATH_UPDATE_RC_FILE:-}"
+    if [[ -n "${rc_name}" && -n "${HOME:-}" && "${rc_name}" == "${HOME}"/* ]]; then
+        rc_name="~${rc_name#"${HOME}"}"
+    fi
     if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" && -n "${rc_name}" ]]; then
         echo -e "${MUTED}Successfully added${NC} qwen ${MUTED}to \$PATH in${NC} ${rc_name}"
+    fi
+
+    # The invoking shell keeps its original PATH (and possibly an older qwen
+    # resolved from it) until the rc file is reloaded. Detect both cases and
+    # tell the user exactly what to run instead of letting `qwen` silently
+    # launch a stale version.
+    local shell_reload_needed=0
+    if [[ -n "${install_bin_dir}" ]]; then
+        case ":${ORIGINAL_PATH}:" in
+            *":${install_bin_dir}:"*) ;;
+            *) shell_reload_needed=1 ;;
+        esac
+    fi
+    if [[ -n "${other_qwens}" ]]; then
+        shell_reload_needed=1
+        log_warning "Other qwen executables were found and may shadow the new install in this shell:"
+        local shadow_path
+        while IFS= read -r shadow_path; do
+            [[ -z "${shadow_path}" ]] && continue
+            printf '  %s\n' "${shadow_path}"
+        done <<< "${other_qwens}"
+    fi
+
+    local reload_cmd=""
+    if [[ "${shell_reload_needed}" == "1" ]]; then
+        if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" && -n "${rc_name}" ]]; then
+            reload_cmd="source ${rc_name}"
+        elif [[ -n "${install_bin_dir}" ]]; then
+            log_warning "Make sure ${install_bin_dir} comes first on your PATH, then open a new terminal."
+        fi
     fi
 
     echo ""
     echo -e "${MUTED}Qwen Code ${installed_version} installed successfully, to start:${NC}"
     echo ""
+    if [[ -n "${reload_cmd}" ]]; then
+        echo -e "${reload_cmd}  ${MUTED}# Load new PATH (or open a new terminal)${NC}"
+    fi
     echo -e "cd <project>  ${MUTED}# Open directory${NC}"
     echo -e "qwen          ${MUTED}# Run command${NC}"
     echo ""

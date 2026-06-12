@@ -202,6 +202,8 @@ export default {
   'Clear conversation history and free up context': '清除對話歷史並釋放上下文',
   'Compresses the context by replacing it with a summary.':
     '通過摘要替換來壓縮上下文',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    '無需 AI 的快速上下文壓縮。清理舊工具輸出並剝離思考過程。',
   'open full Qwen Code documentation in your browser':
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
@@ -545,6 +547,7 @@ export default {
   'The name of the extension to update.': '要更新的擴展名稱。',
   'Either an extension name or --all must be provided':
     '必須提供擴展名稱或 --all',
+  'List installed extensions': '列出已安裝的擴展',
   'Lists installed extensions.': '列出已安裝的擴展。',
   'Path:': '路徑：',
   'Source:': '來源：',
@@ -1726,4 +1729,5 @@ export default {
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
   'start server': '啟動伺服器',
+  'No compression needed.': '無需壓縮。',
 };

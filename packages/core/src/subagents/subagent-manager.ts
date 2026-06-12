@@ -1138,7 +1138,15 @@ function parseSubagentContent(
     const description = String(descriptionRaw);
 
     // Extract optional fields
-    const tools = frontmatter['tools'] as string[] | undefined;
+    const toolsRaw = frontmatter['tools'];
+    const tools: string[] | undefined = Array.isArray(toolsRaw)
+      ? toolsRaw.filter((item): item is string => typeof item === 'string')
+      : typeof toolsRaw === 'string'
+        ? toolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined;
     const disallowedToolsRaw = frontmatter['disallowedTools'];
     const disallowedTools: string[] | undefined = Array.isArray(
       disallowedToolsRaw,
@@ -1147,7 +1155,10 @@ function parseSubagentContent(
           (item): item is string => typeof item === 'string',
         )
       : typeof disallowedToolsRaw === 'string'
-        ? [disallowedToolsRaw]
+        ? disallowedToolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
         : undefined;
     const modelRaw = frontmatter['model'];
     const legacyModelConfig = frontmatter['modelConfig'] as

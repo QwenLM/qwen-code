@@ -32,6 +32,11 @@ import {
 import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  truncateLlmContent,
+  truncateToolOutput,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+} from '../utils/truncation.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
@@ -685,6 +690,24 @@ function toParts(input: PartListUnion): Part[] {
     }
   }
   return parts;
+}
+
+/**
+ * Per-message offload: when a batch of tool results collectively exceeds the
+ * budget, the largest results are spilled to disk and replaced with a small
+ * preview + recoverable pointer. This is the preview size used for that spill.
+ */
+const BATCH_OFFLOAD_PREVIEW_CHARS = 2000;
+
+/** Total model-facing string output across a completed call's responseParts. */
+function batchResponseOutputSize(call: CompletedToolCall): number {
+  if (call.status !== 'success') return 0;
+  let size = 0;
+  for (const part of call.response.responseParts) {
+    const output = part.functionResponse?.response?.['output'];
+    if (typeof output === 'string') size += output.length;
+  }
+  return size;
 }
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
@@ -3088,8 +3111,13 @@ export class CoreToolScheduler {
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
-        const contentLength =
-          typeof content === 'string' ? content.length : undefined;
+
+        // Deferred metadata: PostToolUse hook context and skill/rule reminders
+        // are captured here and appended AFTER the model-facing truncation
+        // below, so the head/tail truncator never bisects a <system-reminder>
+        // envelope or hook-injected context.
+        let postToolUseAdditionalContext: string | undefined;
+        let reminderEnvelope: string | undefined;
 
         // PostToolUse Hook
         if (hooksEnabled && messageBus) {
@@ -3129,12 +3157,10 @@ export class CoreToolScheduler {
                   },
           );
 
-          // Append additional context from hook if provided
+          // Capture additional context from hook; appended after the
+          // model-facing truncation below.
           if (postHookResult.additionalContext) {
-            content = appendAdditionalContext(
-              content,
-              postHookResult.additionalContext,
-            );
+            postToolUseAdditionalContext = postHookResult.additionalContext;
           }
 
           // Check if hook requested to stop execution
@@ -3236,10 +3262,103 @@ export class CoreToolScheduler {
 
           if (reminderBlocks.length > 0) {
             const body = escapeSystemReminderTags(reminderBlocks.join('\n\n'));
-            content = appendAdditionalContext(
-              content,
-              `<system-reminder>\n${body}\n</system-reminder>`,
-            );
+            // Capture; appended after the model-facing truncation below.
+            reminderEnvelope = `<system-reminder>\n${body}\n</system-reminder>`;
+          }
+        }
+
+        // --- Model-facing output truncation ---
+        // 1) Truncate the raw tool output FIRST (per-tool budget if the tool
+        //    declares one, else the global threshold), so the head/tail
+        //    truncator never bisects the hook/skill metadata appended below.
+        // Read the per-tool budget from the already-resolved tool instance.
+        // schedule() resolved scheduledCall.tool from the CANONICAL name, so
+        // this also covers legacy aliases (e.g. 'task' → agent) that
+        // getTool(toolName) — keyed by the raw request name — would miss,
+        // silently dropping maxOutputChars / truncateKeep.
+        const limitsTool = scheduledCall.tool;
+        const perToolMax = limitsTool.maxOutputChars;
+        const perToolKeep = limitsTool.truncateKeep;
+        // Per-tool budgets are char-only (mirror CC's maxResultSizeChars): when
+        // a tool declares its own char budget, the global LINE cap must not
+        // undercut it — otherwise read-file's Infinity exemption (self-managed
+        // paging) and grep's char budget get silently capped at 1000 lines.
+        const perToolLines =
+          perToolMax !== undefined ? Number.POSITIVE_INFINITY : undefined;
+        const promptIdForTruncation = scheduledCall.request.prompt_id;
+        try {
+          const truncated = await truncateLlmContent(
+            this.config,
+            toolName,
+            content,
+            { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
+            promptIdForTruncation,
+          );
+          content = truncated.content;
+        } catch (truncErr) {
+          // A truncation/IO failure must never demote a successful tool call
+          // to an error — keep the content and warn.
+          debugLogger.warn(
+            `TRUNCATION failed for ${toolName}: ${
+              truncErr instanceof Error ? truncErr.message : String(truncErr)
+            }`,
+          );
+        }
+
+        // 2) Append the deferred metadata now that the body is bounded.
+        if (postToolUseAdditionalContext) {
+          content = appendAdditionalContext(
+            content,
+            postToolUseAdditionalContext,
+          );
+        }
+        if (reminderEnvelope) {
+          content = appendAdditionalContext(content, reminderEnvelope);
+        }
+
+        // 3) Combined second pass: if metadata was appended and the assembled
+        //    string blew past a doubled budget, bound it once more. Skip when
+        //    the body was already persisted (contains the sentinel) to avoid
+        //    nesting truncation headers. Only the string path is bounded here;
+        //    Part[] outputs (e.g. MCP) rely on the per-message batch budget as
+        //    their second-level bound — re-truncating a Part[] would mean
+        //    re-merging text parts, not worth it for the rare large-metadata case.
+        if (
+          (postToolUseAdditionalContext || reminderEnvelope) &&
+          typeof content === 'string' &&
+          !content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
+        ) {
+          const baseThreshold =
+            perToolMax ?? this.config.getTruncateToolOutputThreshold();
+          // Match the first pass's char-only semantics for per-tool budgets;
+          // only the global path keeps a (doubled) line cap.
+          const combinedLines =
+            perToolMax !== undefined
+              ? Number.POSITIVE_INFINITY
+              : this.config.getTruncateToolOutputLines() * 2;
+          if (content.length > baseThreshold * 2) {
+            try {
+              const recombined = await truncateToolOutput(
+                this.config,
+                toolName,
+                content,
+                {
+                  threshold: baseThreshold * 2,
+                  lines: combinedLines,
+                  keep: perToolKeep,
+                },
+                promptIdForTruncation,
+              );
+              content = recombined.content;
+            } catch (truncErr) {
+              debugLogger.warn(
+                `TRUNCATION (combined) failed for ${toolName}: ${
+                  truncErr instanceof Error
+                    ? truncErr.message
+                    : String(truncErr)
+                }`,
+              );
+            }
           }
         }
 
@@ -3256,6 +3375,11 @@ export class CoreToolScheduler {
               : (safeJsonStringify(content) ?? ''),
           );
         }
+
+        // Computed AFTER truncation so it reflects the model-facing length,
+        // consistent with the batch-offload path (which also updates it).
+        const contentLength =
+          typeof content === 'string' ? content.length : undefined;
 
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
@@ -3536,6 +3660,11 @@ export class CoreToolScheduler {
           );
         }
 
+        // Per-message budget: offload the largest results if the batch's
+        // combined model-facing output exceeds the budget, before recording
+        // and notifying so both consumers see the same (bounded) version.
+        completedCalls = await this.applyBatchOutputBudget(completedCalls);
+
         for (const call of completedCalls) {
           logToolCall(this.config, new ToolCallEvent(call));
         }
@@ -3585,6 +3714,105 @@ export class CoreToolScheduler {
         errorType: call.response.errorType,
       });
     }
+  }
+
+  /**
+   * Per-message tool-result budget. When the combined model-facing output of a
+   * completed batch exceeds `toolOutputBatchBudget`, the largest results are
+   * offloaded to disk (greedily, largest first) until the batch is back under
+   * budget. Idempotent: already-persisted / media-bearing results are skipped.
+   */
+  private async applyBatchOutputBudget(
+    completedCalls: CompletedToolCall[],
+  ): Promise<CompletedToolCall[]> {
+    const budget =
+      this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
+    if (!Number.isFinite(budget)) return completedCalls;
+
+    const sizes = completedCalls.map(batchResponseOutputSize);
+    let total = sizes.reduce((sum, size) => sum + size, 0);
+    if (total <= budget) return completedCalls;
+
+    // Offload the largest results first until back under budget.
+    const order = completedCalls
+      .map((_, i) => i)
+      .sort((a, b) => sizes[b] - sizes[a]);
+
+    const result = [...completedCalls];
+    let offloaded = 0;
+    for (const i of order) {
+      if (total <= budget) break;
+      const replaced = await this.offloadCallOutput(result[i]);
+      if (!replaced) continue;
+      total -= sizes[i] - batchResponseOutputSize(replaced);
+      result[i] = replaced;
+      offloaded++;
+    }
+    if (offloaded > 0) {
+      debugLogger.info(
+        `Batch output budget (${budget} chars): offloaded ${offloaded} largest result(s) to disk.`,
+      );
+    }
+    if (total > budget) {
+      // Could not get under budget — e.g. a single per-tool result whose
+      // ceiling (MCP's 500k) exceeds the 200k batch budget, or results already
+      // persisted (sentinel-bearing) and therefore skipped. Surface it instead
+      // of silently exceeding the per-message budget.
+      debugLogger.warn(
+        `Batch output budget (${budget} chars) still exceeded after offloading ${offloaded}: ${total} chars across ${completedCalls.length} result(s).`,
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Spill a single completed call's text output to disk, replacing it with a
+   * small preview + recoverable pointer. Returns null (skip) for non-success,
+   * multi-part, media-bearing, or already-persisted results.
+   */
+  private async offloadCallOutput(
+    call: CompletedToolCall,
+  ): Promise<CompletedToolCall | null> {
+    if (call.status !== 'success') return null;
+    const parts = call.response.responseParts;
+    if (parts.length !== 1) return null;
+    const fr = parts[0]?.functionResponse;
+    if (!fr) return null;
+    const output = fr.response?.['output'];
+    if (typeof output !== 'string') return null;
+    if (fr.parts && fr.parts.length > 0) return null; // media present
+    if (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return null; // already
+
+    let truncated: { content: string; outputFile?: string };
+    try {
+      truncated = await truncateToolOutput(
+        this.config,
+        call.request.name,
+        output,
+        { threshold: BATCH_OFFLOAD_PREVIEW_CHARS },
+        call.request.prompt_id,
+      );
+    } catch {
+      return null; // offload failure must not break the batch
+    }
+    if (!truncated.outputFile) return null;
+
+    return {
+      ...call,
+      response: {
+        ...call.response,
+        responseParts: [
+          {
+            functionResponse: {
+              id: fr.id,
+              name: fr.name,
+              response: { output: truncated.content },
+            },
+          },
+        ],
+        contentLength: truncated.content.length,
+      },
+    };
   }
 
   private notifyToolCallsUpdate(): void {

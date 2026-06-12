@@ -378,7 +378,10 @@ function fmtCategoryRow(
   contextWindowSize: number,
   indent = '  ',
 ): string {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const percentage =
+    contextWindowSize > 0
+      ? ((tokens / contextWindowSize) * 100).toFixed(1)
+      : '0.0';
   const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
   const leftPart = `${indent}${label}`;
   const totalWidth = 56;
@@ -536,9 +539,8 @@ export const contextCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
-    const showDetails =
-      args?.trim().toLowerCase() === 'detail' ||
-      args?.trim().toLowerCase() === '-d';
+    const normalizedArgs = args?.trim().toLowerCase();
+    const showDetails = normalizedArgs === 'detail' || normalizedArgs === '-d';
     const executionMode = context.executionMode ?? 'interactive';
     const { config } = context.services;
     if (!config) {
@@ -564,13 +566,12 @@ export const contextCommand: SlashCommand = {
     if (executionMode === 'interactive') {
       context.ui.addItem(contextUsageItem, Date.now());
       return;
-    } else {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: formatContextUsageText(contextUsageItem),
-      };
     }
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: formatContextUsageText(contextUsageItem),
+    };
   },
   subCommands: [
     {
