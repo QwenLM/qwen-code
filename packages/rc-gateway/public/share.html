@@ -259,8 +259,35 @@
               add('session', info.sessionId);
               add('scope', info.scope);
               if (info.label) add('label', info.label);
-              if (info.expiresAt)
+              if (info.expiresAt) {
                 add('expires', new Date(info.expiresAt).toISOString());
+                // Live countdown (cycle 82): a ticking "expires in Hh Mm Ss"
+                // so a guest sees how long the link has left; stops at "expired".
+                var countdown = document.createElement('div');
+                m.appendChild(countdown);
+                var until = new Date(info.expiresAt).getTime();
+                var tick = function () {
+                  var ms = until - Date.now();
+                  if (!(ms > 0)) {
+                    countdown.textContent = 'expires in: expired';
+                    clearInterval(timer);
+                    return;
+                  }
+                  var s = Math.floor(ms / 1000);
+                  var hh = Math.floor(s / 3600);
+                  var mm = Math.floor((s % 3600) / 60);
+                  var ss = s % 60;
+                  countdown.textContent =
+                    'expires in: ' +
+                    (hh ? hh + 'h ' : '') +
+                    mm +
+                    'm ' +
+                    ss +
+                    's';
+                };
+                var timer = setInterval(tick, 1000);
+                tick();
+              }
               if (info.usesRemaining !== null && info.usesRemaining !== undefined)
                 add('uses remaining', String(info.usesRemaining));
               // Gate voting on the share's scope; update the watermark so it

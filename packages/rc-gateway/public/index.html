@@ -1196,15 +1196,39 @@
           }
           const data = await res.json();
           out.textContent = '';
+          const fullUrl = location.origin + data.url;
           const link = document.createElement('div');
           link.style.userSelect = 'all';
-          link.textContent = location.origin + data.url; // server hex token
+          link.textContent = fullUrl; // server hex token
           const exp = document.createElement('div');
           exp.textContent = data.expiresAt
             ? 'expires ' + new Date(data.expiresAt).toISOString()
             : '';
+          // Copy-to-clipboard (cycle 82). Needs a secure context; falls back to
+          // a "select manually" hint. The URL is rendered (link div) regardless.
+          const copyBtn = document.createElement('button');
+          copyBtn.textContent = 'Copy link';
+          const copyNote = document.createElement('span');
+          copyNote.style.marginLeft = '0.5rem';
+          copyNote.style.fontSize = '0.85rem';
+          copyBtn.onclick = () => {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(fullUrl).then(
+                () => {
+                  copyNote.textContent = 'copied';
+                },
+                () => {
+                  copyNote.textContent = 'copy failed — select the link';
+                },
+              );
+            } else {
+              copyNote.textContent = 'clipboard unavailable — select the link';
+            }
+          };
           out.appendChild(link);
           out.appendChild(exp);
+          out.appendChild(copyBtn);
+          out.appendChild(copyNote);
         } catch (e) {
           out.textContent = 'create error: ' + e;
         }
