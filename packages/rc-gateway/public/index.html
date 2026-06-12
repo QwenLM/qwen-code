@@ -439,8 +439,12 @@
             signal: eventsController.signal,
           });
           if (!res.ok) {
+            // 503 = the owner-stream cap (too_many_streams); the caller IS
+            // authorized, just rejected for capacity — don't blame the scope.
             eventLog(
-              'not authorized (' + res.status + ') — needs an owner token',
+              res.status === 503
+                ? 'too many active event streams — close one and retry'
+                : 'not authorized (' + res.status + ') — needs an owner token',
             );
             return;
           }
