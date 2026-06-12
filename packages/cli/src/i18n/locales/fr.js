@@ -1491,6 +1491,28 @@ export default {
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
   'Current tasks': 'Tâches actuelles',
+  'Background tasks': 'Tâches en arrière-plan',
+  'No tasks currently running': 'Aucune tâche en cours',
+  'No entry to show.': 'Aucune entrée à afficher.',
+  'needs approval': 'nécessite une approbation',
+  'Background agent needs approval':
+    "L'agent en arrière-plan nécessite une approbation",
+  'Approve or deny the request above':
+    'Approuvez ou refusez la demande ci-dessus',
+  Running: 'En cours',
+  Paused: 'En pause',
+  Completed: 'Terminé',
+  Failed: 'Échec',
+  Stopped: 'Arrêté',
+  Shell: 'Shell',
+  Monitor: 'Moniteur',
+  Command: 'Commande',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidation de la mémoire',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} session)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} sessions)',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',

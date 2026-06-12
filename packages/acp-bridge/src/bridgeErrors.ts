@@ -195,6 +195,29 @@ export class InvalidClientIdError extends Error {
 }
 
 /**
+ * Thrown when a direct daemon shell command is attempted without the operator
+ * explicitly enabling the high-risk session shell surface.
+ */
+export class SessionShellDisabledError extends Error {
+  constructor() {
+    super('Direct session shell is disabled for this daemon');
+    this.name = 'SessionShellDisabledError';
+  }
+}
+
+/**
+ * Thrown when a direct daemon shell command has no client id bound to the
+ * addressed session. The bearer token authenticates the caller to the daemon;
+ * this error means the caller has not proven ownership of the session.
+ */
+export class SessionShellClientRequiredError extends Error {
+  constructor() {
+    super('Direct session shell requires a session-bound client id');
+    this.name = 'SessionShellClientRequiredError';
+  }
+}
+
+/**
  * Thrown by `bridge.respondToPermission` when the voter's
  * `optionId` isn't in the set of options the agent originally
  * offered. Server route catches this and returns 400 (distinct from

@@ -81,6 +81,7 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       [
         "ask_user_question",
         "cron_list",
+        "enter_plan_mode",
         "exit_plan_mode",
         "glob",
         "grep_search",
@@ -1348,6 +1349,12 @@ describe('shouldRunAutoModeForCall', () => {
   it('excludes EXIT_PLAN_MODE even under AUTO — plan exits are operator-driven', () => {
     expect(
       shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.EXIT_PLAN_MODE),
+    ).toBe(false);
+  });
+
+  it('excludes ENTER_PLAN_MODE even under AUTO — plan entries are always allowed without classification', () => {
+    expect(
+      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ENTER_PLAN_MODE),
     ).toBe(false);
   });
 

@@ -40,6 +40,7 @@ interface ServeArgs {
   'event-ring-size': number;
   workspace?: string;
   'require-auth': boolean;
+  'enable-session-shell': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -124,6 +125,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
+      })
+      .option('enable-session-shell', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -408,6 +415,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
+        enableSessionShell: argv['enable-session-shell'],
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,

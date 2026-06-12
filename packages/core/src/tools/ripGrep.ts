@@ -18,6 +18,7 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -366,6 +367,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           ),
         ),
       );
+      await recordGrepResultFileReads(this.config, resultFilePaths);
 
       return {
         llmContent: llmContent.trim(),

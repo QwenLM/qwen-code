@@ -9,8 +9,10 @@
  *
  * Each task is a separate JSON file at
  * `~/.qwen/tasks/{teamName}/{id}.json`.
- * Concurrency is handled via `proper-lockfile` (30 retries,
- * 5–100ms exponential backoff).
+ * Concurrency is handled in two layers (mirroring `mailbox.ts`): an
+ * in-process per-file `Mutex` serializes same-process writers so they
+ * don't stampede the OS lock, and `proper-lockfile` (30 retries,
+ * 5–100ms jittered backoff) guards against writers in other processes.
  *
  * Provides CRUD operations, task claiming, blocking, and
  * in-process pub/sub for UI updates.
@@ -20,6 +22,7 @@ import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -67,12 +70,102 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     minTimeout: 5,
     maxTimeout: 100,
     factor: 2,
+    // Jitter the backoff so in-process and cross-process contenders
+    // don't retry in lockstep (thundering herd) and starve each other
+    // out of the retry budget — mirrors mailbox.ts. The most acute case
+    // is scanIdleAgentsForTasks racing up to MAX_TEAMMATES claimants at
+    // the same first-pending task file.
+    randomize: true,
   },
   stale: 5000,
   onCompromised: (err) => {
     debug.warn('task lock compromised:', err?.message ?? err);
   },
 };
+
+// ─── In-process serialization ───────────────────────────────
+//
+// One `Mutex` per task-file path. Same-process writers to the same
+// file queue in memory so only one reaches for the `proper-lockfile`
+// file lock at a time (the file lock still guards other agent
+// processes). Mirrors mailbox.ts's `withInboxLock`. Entries are never
+// evicted, but the key space is bounded by the task board size.
+
+const taskFileLocks = new Map<string, Mutex>();
+
+function getTaskFileLock(taskPath: string): Mutex {
+  let lock = taskFileLocks.get(taskPath);
+  if (!lock) {
+    lock = new Mutex();
+    taskFileLocks.set(taskPath, lock);
+  }
+  return lock;
+}
+
+/**
+ * Run `fn` while holding both the in-process mutex and the
+ * cross-process file lock for `taskPath`. The mutex serializes writers
+ * in this process so they don't stampede the file lock (the cause of
+ * Windows `ELOCKED` flakiness); the file lock runs inside it to still
+ * guard writers in other agent processes.
+ *
+ * `fn` receives nothing and runs with the locks held; release of both
+ * is automatic. A missing file at lock time surfaces as the caller's
+ * `onMissing` result rather than a raw ENOENT (callers treat a vanished
+ * task as "not found").
+ */
+async function withTaskFileLock<T>(
+  taskPath: string,
+  fn: () => Promise<T>,
+  onMissing: () => T,
+): Promise<T> {
+  return getTaskFileLock(taskPath).runExclusive(async () => {
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await lockfile.lock(taskPath, LOCK_OPTIONS);
+    } catch (err) {
+      // The file can vanish before we lock it (resetTaskList /
+      // quarantine rename run without the lock).
+      if (isNodeError(err) && err.code === 'ENOENT') return onMissing();
+      throw err;
+    }
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  });
+}
+
+/**
+ * Sentinel `callerName` for internal reciprocal edge-mirror writes
+ * (task-update.ts mirrors `A.blocks=[B]` into `B.blockedBy=[A]`). These
+ * must bypass the ownership guard to keep the dependency graph
+ * consistent; passing this sentinel instead of an empty `callerName`
+ * makes the intentional bypass greppable in logs. It can never collide
+ * with a real teammate identity — agent names are sanitized to
+ * `[a-z0-9-]`, so the underscores can't appear in one.
+ */
+export const RECIPROCAL_CALLER = '__reciprocal__';
+
+// ─── Per-agent claim serialization ──────────────────────────
+//
+// One `Mutex` per agentId. Auto-claims for a given agent serialize so
+// the `isAgentBusy` check observes the agent's prior claim before the
+// next one runs — closing the TOCTOU where scanIdleAgentsForTasks and
+// a message flush both claim a different task for the same idle agent.
+// Distinct agents never block each other. Bounded by team size.
+
+const agentClaimLocks = new Map<string, Mutex>();
+
+function getAgentClaimLock(agentId: string): Mutex {
+  let lock = agentClaimLocks.get(agentId);
+  if (!lock) {
+    lock = new Mutex();
+    agentClaimLocks.set(agentId, lock);
+  }
+  return lock;
+}
 
 // ─── Path helpers ───────────────────────────────────────────
 
@@ -277,127 +370,129 @@ export async function updateTask(
 ): Promise<SwarmTask | undefined> {
   const taskPath = getTaskPath(teamName, taskId);
 
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-    throw err;
-  }
-  try {
-    let raw: string;
-    try {
-      raw = await fs.readFile(taskPath, 'utf-8');
-    } catch (err) {
-      // The file can vanish after lock acquisition: `resetTaskList`
-      // and the `listTasks` quarantine rename don't take per-task
-      // locks. Mirror deleteTask's in-lock guard and report
-      // "not found" instead of leaking a raw ENOENT.
-      if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-      throw err;
-    }
-    const task = JSON.parse(raw) as SwarmTask;
-
-    if (opts?.callerName !== undefined) {
-      // WARNING: any new mutating field added to `updates` MUST also be
-      // listed here, or non-owner teammates can silently mutate it.
-      // `metadata` and `activeForm` are intentionally NOT listed: they
-      // are advisory annotations that teammates may set on each other's
-      // tasks (e.g. cross-agent progress notes), not coordination state.
-      const restrictsOwnership =
-        updates.status !== undefined ||
-        updates.owner !== undefined ||
-        updates.subject !== undefined ||
-        updates.description !== undefined ||
-        (updates.addBlocks?.length ?? 0) > 0 ||
-        (updates.addBlockedBy?.length ?? 0) > 0;
-      if (restrictsOwnership && task.owner && task.owner !== opts.callerName) {
-        throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
+  return withTaskFileLock(
+    taskPath,
+    async () => {
+      let raw: string;
+      try {
+        raw = await fs.readFile(taskPath, 'utf-8');
+      } catch (err) {
+        // The file can vanish after lock acquisition: `resetTaskList`
+        // and the `listTasks` quarantine rename don't take per-task
+        // locks. Mirror deleteTask's in-lock guard and report
+        // "not found" instead of leaking a raw ENOENT.
+        if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+        throw err;
       }
-    }
+      const task = JSON.parse(raw) as SwarmTask;
 
-    // Merge dependency edges first so the completion-unblock below
-    // sees the post-update `task.blocks` and clears any dependent that
-    // was already recorded as blocked by this task. Note this does NOT
-    // cover the freshly-mirrored reciprocal edge for a combined
-    //   task_update({taskId:'1', status:'completed', addBlocks:['2']})
-    // call: the dependent's `blockedBy` doesn't contain this task yet
-    // when unblockDependents runs, so the reciprocal would re-block it.
-    // That case is handled in task-update.ts by skipping the addBlocks
-    // reciprocal when the same call completes the task.
-    if (updates.addBlocks?.length) {
-      const blockSet = new Set(task.blocks);
-      for (const id of updates.addBlocks) blockSet.add(id);
-      task.blocks = Array.from(blockSet);
-    }
-    if (updates.addBlockedBy?.length) {
-      const blockedBySet = new Set(task.blockedBy);
-      for (const id of updates.addBlockedBy) blockedBySet.add(id);
-      task.blockedBy = Array.from(blockedBySet);
-    }
-
-    if (updates.status !== undefined) {
-      task.status = updates.status;
-
-      // When a task completes, unblock any tasks that depend on it.
-      if (updates.status === 'completed' && task.blocks.length > 0) {
-        await unblockDependents(teamName, taskId, task.blocks);
-      }
-    }
-    if (updates.owner !== undefined) {
-      // Treat empty string as unassign (per the task_update
-      // schema: "Set to empty string to unassign"). The previous
-      // `?? undefined` only nullified actual null/undefined and
-      // stored "" verbatim, so the model following the schema
-      // ended up with `owner: ""` instead of unassigned.
-      task.owner = updates.owner ? updates.owner : undefined;
-    }
-    if (updates.subject !== undefined) {
-      task.subject = updates.subject;
-    }
-    if (updates.description !== undefined) {
-      task.description = updates.description;
-    }
-    if (updates.activeForm !== undefined) {
-      task.activeForm = updates.activeForm ?? undefined;
-    }
-    if (updates.metadata !== undefined) {
-      task.metadata = task.metadata ?? {};
-      for (const [key, value] of Object.entries(updates.metadata)) {
-        // Skip dangerous keys. JSON.parse exposes `__proto__` as
-        // an own property, so without this filter a teammate-
-        // controlled `metadata: { "__proto__": {x:1} }` would
-        // re-parent task.metadata via the __proto__ setter. Bounded
-        // (per-task, doesn't survive JSON.stringify) but blocked
-        // for hygiene since metadata is teammate-controlled.
+      if (
+        opts?.callerName !== undefined &&
+        opts.callerName !== RECIPROCAL_CALLER
+      ) {
+        // WARNING: any new mutating field added to `updates` MUST also be
+        // listed here, or non-owner teammates can silently mutate it.
+        // `metadata` and `activeForm` are intentionally NOT listed: they
+        // are advisory annotations that teammates may set on each other's
+        // tasks (e.g. cross-agent progress notes), not coordination state.
+        const restrictsOwnership =
+          updates.status !== undefined ||
+          updates.owner !== undefined ||
+          updates.subject !== undefined ||
+          updates.description !== undefined ||
+          (updates.addBlocks?.length ?? 0) > 0 ||
+          (updates.addBlockedBy?.length ?? 0) > 0;
         if (
-          key === '__proto__' ||
-          key === 'constructor' ||
-          key === 'prototype'
+          restrictsOwnership &&
+          task.owner &&
+          task.owner !== opts.callerName
         ) {
-          continue;
-        }
-        if (value === null) {
-          delete task.metadata[key];
-        } else {
-          task.metadata[key] = value;
+          throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
         }
       }
-      if (Object.keys(task.metadata).length === 0) {
-        task.metadata = undefined;
+
+      // Merge dependency edges first so the completion-unblock below
+      // sees the post-update `task.blocks` and clears any dependent that
+      // was already recorded as blocked by this task. Note this does NOT
+      // cover the freshly-mirrored reciprocal edge for a combined
+      //   task_update({taskId:'1', status:'completed', addBlocks:['2']})
+      // call: the dependent's `blockedBy` doesn't contain this task yet
+      // when unblockDependents runs, so the reciprocal would re-block it.
+      // That case is handled in task-update.ts by skipping the addBlocks
+      // reciprocal when the same call completes the task.
+      if (updates.addBlocks?.length) {
+        const blockSet = new Set(task.blocks);
+        for (const id of updates.addBlocks) blockSet.add(id);
+        task.blocks = Array.from(blockSet);
       }
-      // Enforce after the merge so the cap reflects the persisted
-      // size, not just the incoming delta.
-      assertMetadataWithinLimit(task.metadata);
-    }
+      if (updates.addBlockedBy?.length) {
+        const blockedBySet = new Set(task.blockedBy);
+        for (const id of updates.addBlockedBy) blockedBySet.add(id);
+        task.blockedBy = Array.from(blockedBySet);
+      }
 
-    await atomicWriteJSON(taskPath, task);
+      if (updates.status !== undefined) {
+        task.status = updates.status;
 
-    notifyTasksUpdated(teamName);
-    return task;
-  } finally {
-    await release?.();
-  }
+        // When a task completes, unblock any tasks that depend on it.
+        if (updates.status === 'completed' && task.blocks.length > 0) {
+          await unblockDependents(teamName, taskId, task.blocks);
+        }
+      }
+      if (updates.owner !== undefined) {
+        // Treat empty string as unassign (per the task_update
+        // schema: "Set to empty string to unassign"). The previous
+        // `?? undefined` only nullified actual null/undefined and
+        // stored "" verbatim, so the model following the schema
+        // ended up with `owner: ""` instead of unassigned.
+        task.owner = updates.owner ? updates.owner : undefined;
+      }
+      if (updates.subject !== undefined) {
+        task.subject = updates.subject;
+      }
+      if (updates.description !== undefined) {
+        task.description = updates.description;
+      }
+      if (updates.activeForm !== undefined) {
+        task.activeForm = updates.activeForm ?? undefined;
+      }
+      if (updates.metadata !== undefined) {
+        task.metadata = task.metadata ?? {};
+        for (const [key, value] of Object.entries(updates.metadata)) {
+          // Skip dangerous keys. JSON.parse exposes `__proto__` as
+          // an own property, so without this filter a teammate-
+          // controlled `metadata: { "__proto__": {x:1} }` would
+          // re-parent task.metadata via the __proto__ setter. Bounded
+          // (per-task, doesn't survive JSON.stringify) but blocked
+          // for hygiene since metadata is teammate-controlled.
+          if (
+            key === '__proto__' ||
+            key === 'constructor' ||
+            key === 'prototype'
+          ) {
+            continue;
+          }
+          if (value === null) {
+            delete task.metadata[key];
+          } else {
+            task.metadata[key] = value;
+          }
+        }
+        if (Object.keys(task.metadata).length === 0) {
+          task.metadata = undefined;
+        }
+        // Enforce after the merge so the cap reflects the persisted
+        // size, not just the incoming delta.
+        assertMetadataWithinLimit(task.metadata);
+      }
+
+      await atomicWriteJSON(taskPath, task);
+
+      notifyTasksUpdated(teamName);
+      return task;
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -432,57 +527,53 @@ export async function deleteTask(
 ): Promise<boolean> {
   const taskPath = getTaskPath(teamName, taskId);
 
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return false;
-    throw err;
-  }
+  // The locked section returns the dependent-id set to clean up after
+  // the unlink, or null when the task was already gone / not deletable.
+  // Edge cleanup runs *after* the lock is released (see below).
+  const dependentIds = await withTaskFileLock(
+    taskPath,
+    async (): Promise<Set<string> | null> => {
+      let task: SwarmTask;
+      try {
+        const raw = await fs.readFile(taskPath, 'utf-8');
+        task = JSON.parse(raw) as SwarmTask;
+      } catch (err) {
+        // Already gone (a concurrent delete won the lock first, or the
+        // file never existed) — nothing to unlink.
+        if (isNodeError(err) && err.code === 'ENOENT') return null;
+        throw err;
+      }
 
-  // Captured from the in-lock read so the post-unlink edge cleanup uses
-  // fresh data. Empty until the read succeeds; on any early return/throw
-  // below it is never consumed.
-  let dependentIds = new Set<string>();
-  try {
-    let task: SwarmTask;
-    try {
-      const raw = await fs.readFile(taskPath, 'utf-8');
-      task = JSON.parse(raw) as SwarmTask;
-    } catch (err) {
-      // Already gone (a concurrent delete won the lock first, or the
-      // file never existed) — nothing to unlink.
-      if (isNodeError(err) && err.code === 'ENOENT') return false;
-      throw err;
-    }
+      // Ownership guard for teammate callers, mirroring `updateTask`, and
+      // re-checked inside the lock against the just-read owner. A teammate
+      // (callerName set) may only delete its own tasks or unowned ones; the
+      // leader (callerName undefined) can delete anything. Without this,
+      // `task_update(status:'deleted')` is a hole in the ownership model —
+      // the most destructive operation would bypass the guard that every
+      // other mutation path enforces.
+      if (
+        opts?.callerName !== undefined &&
+        task.owner &&
+        task.owner !== opts.callerName
+      ) {
+        throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
+      }
 
-    // Ownership guard for teammate callers, mirroring `updateTask`, and
-    // re-checked inside the lock against the just-read owner. A teammate
-    // (callerName set) may only delete its own tasks or unowned ones; the
-    // leader (callerName undefined) can delete anything. Without this,
-    // `task_update(status:'deleted')` is a hole in the ownership model —
-    // the most destructive operation would bypass the guard that every
-    // other mutation path enforces.
-    if (
-      opts?.callerName !== undefined &&
-      task.owner &&
-      task.owner !== opts.callerName
-    ) {
-      throw new TaskOwnershipError(taskId, opts.callerName, task.owner);
-    }
+      const deps = new Set<string>([...task.blocks, ...task.blockedBy]);
+      deps.delete(taskId);
 
-    dependentIds = new Set<string>([...task.blocks, ...task.blockedBy]);
-    dependentIds.delete(taskId);
+      try {
+        await fs.unlink(taskPath);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') return null;
+        throw err;
+      }
+      return deps;
+    },
+    () => null,
+  );
 
-    try {
-      await fs.unlink(taskPath);
-    } catch (err) {
-      if (isNodeError(err) && err.code === 'ENOENT') return false;
-      throw err;
-    }
-  } finally {
-    await release();
-  }
+  if (dependentIds === null) return false;
 
   // Best-effort edge cleanup: a single dependent failing (corrupt JSON,
   // EACCES, lock exhaustion) must not skip `notifyTasksUpdated` for the
@@ -514,33 +605,30 @@ async function removeEdgesReferencing(
   referencedId: string,
 ): Promise<void> {
   const depPath = getTaskPath(teamName, targetId);
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(depPath, LOCK_OPTIONS);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return;
-    throw err;
-  }
-  try {
-    const raw = await fs.readFile(depPath, 'utf-8');
-    const task = JSON.parse(raw) as SwarmTask;
-    const beforeBlocks = task.blocks.length;
-    const beforeBlockedBy = task.blockedBy.length;
-    task.blocks = task.blocks.filter((id) => id !== referencedId);
-    task.blockedBy = task.blockedBy.filter((id) => id !== referencedId);
-    if (
-      task.blocks.length === beforeBlocks &&
-      task.blockedBy.length === beforeBlockedBy
-    ) {
-      return;
-    }
-    await atomicWriteJSON(depPath, task);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return;
-    throw err;
-  } finally {
-    await release?.();
-  }
+  await withTaskFileLock(
+    depPath,
+    async () => {
+      try {
+        const raw = await fs.readFile(depPath, 'utf-8');
+        const task = JSON.parse(raw) as SwarmTask;
+        const beforeBlocks = task.blocks.length;
+        const beforeBlockedBy = task.blockedBy.length;
+        task.blocks = task.blocks.filter((id) => id !== referencedId);
+        task.blockedBy = task.blockedBy.filter((id) => id !== referencedId);
+        if (
+          task.blocks.length === beforeBlocks &&
+          task.blockedBy.length === beforeBlockedBy
+        ) {
+          return;
+        }
+        await atomicWriteJSON(depPath, task);
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') return;
+        throw err;
+      }
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -685,23 +773,24 @@ async function unblockDependents(
   const results = await Promise.allSettled(
     dependentIds.map(async (depId) => {
       const depPath = getTaskPath(teamName, depId);
-      let release: (() => Promise<void>) | undefined;
-      try {
-        release = await lockfile.lock(depPath, LOCK_OPTIONS);
-      } catch (err) {
-        if (isNodeError(err) && err.code === 'ENOENT') return;
-        throw err;
-      }
-      try {
-        const raw = await fs.readFile(depPath, 'utf-8');
-        const task = JSON.parse(raw) as SwarmTask;
-        const before = task.blockedBy.length;
-        task.blockedBy = task.blockedBy.filter((id) => id !== completedId);
-        if (task.blockedBy.length === before) return;
-        await atomicWriteJSON(depPath, task);
-      } finally {
-        await release?.();
-      }
+      await withTaskFileLock(
+        depPath,
+        async () => {
+          let raw: string;
+          try {
+            raw = await fs.readFile(depPath, 'utf-8');
+          } catch (err) {
+            if (isNodeError(err) && err.code === 'ENOENT') return;
+            throw err;
+          }
+          const task = JSON.parse(raw) as SwarmTask;
+          const before = task.blockedBy.length;
+          task.blockedBy = task.blockedBy.filter((id) => id !== completedId);
+          if (task.blockedBy.length === before) return;
+          await atomicWriteJSON(depPath, task);
+        },
+        () => undefined,
+      );
     }),
   );
   for (const r of results) {
@@ -745,50 +834,67 @@ export async function claimTask(
   agentId: string,
   opts?: { checkAgentBusy?: boolean; ownerName?: string },
 ): Promise<SwarmTask | undefined> {
+  // When enforcing the one-task-per-agent invariant, serialize all of
+  // this agent's claims so the busy-check below observes any claim that
+  // a concurrent caller (scanIdleAgentsForTasks vs a message flush)
+  // already committed for the same agent. Without this, both pass the
+  // busy-check on different task files and the agent ends up owning two
+  // in_progress tasks. Non-busy-checked claims have no such invariant
+  // and skip the serialization.
   if (opts?.checkAgentBusy) {
+    return getAgentClaimLock(agentId).runExclusive(() =>
+      claimTaskLocked(teamName, taskId, agentId, opts, true),
+    );
+  }
+  return claimTaskLocked(teamName, taskId, agentId, opts, false);
+}
+
+async function claimTaskLocked(
+  teamName: string,
+  taskId: string,
+  agentId: string,
+  opts: { checkAgentBusy?: boolean; ownerName?: string } | undefined,
+  checkBusy: boolean,
+): Promise<SwarmTask | undefined> {
+  if (checkBusy) {
     const busy = await isAgentBusy(teamName, agentId);
     if (busy) return undefined;
   }
 
   const taskPath = getTaskPath(teamName, taskId);
 
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-    throw err;
-  }
-  try {
-    let raw: string;
-    try {
-      raw = await fs.readFile(taskPath, 'utf-8');
-    } catch (err) {
-      // See updateTask: the file can vanish after lock acquisition
-      // (resetTaskList / quarantine rename run without the lock).
-      if (isNodeError(err) && err.code === 'ENOENT') return undefined;
-      throw err;
-    }
-    const task = JSON.parse(raw) as SwarmTask;
+  return withTaskFileLock(
+    taskPath,
+    async () => {
+      let raw: string;
+      try {
+        raw = await fs.readFile(taskPath, 'utf-8');
+      } catch (err) {
+        // See updateTask: the file can vanish after lock acquisition
+        // (resetTaskList / quarantine rename run without the lock).
+        if (isNodeError(err) && err.code === 'ENOENT') return undefined;
+        throw err;
+      }
+      const task = JSON.parse(raw) as SwarmTask;
 
-    // Only claim pending tasks.
-    if (task.status !== 'pending') return undefined;
-    // Don't claim if already owned.
-    if (task.owner) return undefined;
+      // Only claim pending tasks.
+      if (task.status !== 'pending') return undefined;
+      // Don't claim if already owned.
+      if (task.owner) return undefined;
 
-    // Store the human-readable name as owner for consistency
-    // with manual assignment via task_update (which uses bare
-    // teammate names, not agentId "name@team" format).
-    task.owner = opts?.ownerName ?? agentId;
-    task.status = 'in_progress';
+      // Store the human-readable name as owner for consistency
+      // with manual assignment via task_update (which uses bare
+      // teammate names, not agentId "name@team" format).
+      task.owner = opts?.ownerName ?? agentId;
+      task.status = 'in_progress';
 
-    await atomicWriteJSON(taskPath, task);
+      await atomicWriteJSON(taskPath, task);
 
-    notifyTasksUpdated(teamName);
-    return task;
-  } finally {
-    await release?.();
-  }
+      notifyTasksUpdated(teamName);
+      return task;
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -826,34 +932,29 @@ export async function releaseOwnedTask(
   expectedOwner: string,
 ): Promise<boolean> {
   const taskPath = getTaskPath(teamName, taskId);
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(taskPath, LOCK_OPTIONS);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') return false;
-    throw err;
-  }
-  try {
-    let raw: string;
-    try {
-      raw = await fs.readFile(taskPath, 'utf-8');
-    } catch (err) {
-      // See updateTask: the file can vanish after lock acquisition
-      // (resetTaskList / quarantine rename run without the lock).
-      // Mirror deleteTask's in-lock guard.
-      if (isNodeError(err) && err.code === 'ENOENT') return false;
-      throw err;
-    }
-    const task = JSON.parse(raw) as SwarmTask;
-    if (task.status !== 'in_progress') return false;
-    if (task.owner !== expectedOwner) return false;
-    task.owner = undefined;
-    task.status = 'pending';
-    await atomicWriteJSON(taskPath, task);
-    return true;
-  } finally {
-    await release?.();
-  }
+  return withTaskFileLock(
+    taskPath,
+    async () => {
+      let raw: string;
+      try {
+        raw = await fs.readFile(taskPath, 'utf-8');
+      } catch (err) {
+        // See updateTask: the file can vanish after lock acquisition
+        // (resetTaskList / quarantine rename run without the lock).
+        // Mirror deleteTask's in-lock guard.
+        if (isNodeError(err) && err.code === 'ENOENT') return false;
+        throw err;
+      }
+      const task = JSON.parse(raw) as SwarmTask;
+      if (task.status !== 'in_progress') return false;
+      if (task.owner !== expectedOwner) return false;
+      task.owner = undefined;
+      task.status = 'pending';
+      await atomicWriteJSON(taskPath, task);
+      return true;
+    },
+    () => false,
+  );
 }
 
 /**

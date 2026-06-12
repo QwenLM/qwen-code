@@ -82,6 +82,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import { type PlanGateState, createPlanGateState } from '../plan-gate/state.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1143,6 +1144,8 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planGateState?: PlanGateState;
+  private planGateEntryCounter = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
@@ -1163,6 +1166,9 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private fileCheckpointingEnabled: boolean;
+  // Object (not primitive) so sub-agents via Object.create(parentConfig)
+  // share the same budget instance through prototype lookup.
+  private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private cwd: string;
@@ -2266,6 +2272,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
@@ -3398,6 +3405,15 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  /**
+   * Returns the Plan Approval Gate state for the current Plan Mode Entry, or
+   * undefined when not in plan mode. The returned object is mutable; callers
+   * may update its fields directly (e.g. review count, gate mode).
+   */
+  getPlanGateState(): PlanGateState | undefined {
+    return this.planGateState;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -3411,11 +3427,16 @@ export class Config {
     // Track the mode before entering plan mode so it can be restored later
     if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
       this.prePlanMode = this.approvalMode;
+      // Begin a fresh Plan Mode Entry for the Plan Approval Gate.
+      this.planGateState = createPlanGateState(++this.planGateEntryCounter);
     } else if (
       mode !== ApprovalMode.PLAN &&
       this.approvalMode === ApprovalMode.PLAN
     ) {
       this.prePlanMode = undefined;
+      // Successfully leaving PLAN clears all gate state (including any
+      // user_takeover marker, which only lives for the duration of PLAN).
+      this.planGateState = undefined;
     }
     // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
     // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
@@ -4228,6 +4249,14 @@ export class Config {
     return this.toolOutputBatchBudget;
   }
 
+  trackToolResultBytes(n: number): void {
+    this.toolResultBudget.bytesWritten += n;
+  }
+
+  getToolResultBytesWritten(): number {
+    return this.toolResultBudget.bytesWritten;
+  }
+
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
   }
@@ -4659,6 +4688,10 @@ export class Config {
       await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
+      });
+      await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
+        const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
+        return new EnterPlanModeTool(this);
       });
     }
     await registerLazy(ToolNames.ENTER_WORKTREE, async () => {

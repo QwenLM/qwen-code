@@ -69,6 +69,7 @@ export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Inverse tools — hand control back to the user
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ENTER_PLAN_MODE,
   // Background task coordination (peers' permission checks still apply)
   ToolNames.CRON_LIST,
   ToolNames.TASK_STOP,
@@ -119,6 +120,7 @@ export function shouldRunAutoModeForCall(
   if (approvalMode !== ApprovalMode.AUTO) return false;
   if (toolName === ToolNames.ASK_USER_QUESTION) return false;
   if (toolName === ToolNames.EXIT_PLAN_MODE) return false;
+  if (toolName === ToolNames.ENTER_PLAN_MODE) return false;
   return true;
 }
 

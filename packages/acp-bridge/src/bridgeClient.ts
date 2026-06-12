@@ -460,9 +460,10 @@ export class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * Handle child->bridge ACP `extNotification` calls. Five methods are
+   * Handle child->bridge ACP `extNotification` calls. Six methods are
    * recognized — `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
+   * `qwen/notify/session/title-update` (auto/in-process session titles),
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
@@ -479,6 +480,34 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/mode-update') {
       this.handleInSessionModeUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/title-update') {
+      // Child-side title updates (auto-generated titles land in the child's
+      // chat recording — the bridge never sees the write) are rebroadcast as
+      // the canonical `session_metadata_updated` envelope, the same event
+      // manual HTTP renames publish, so clients have ONE signal for
+      // "this session's name changed".
+      const sessionId = params['sessionId'];
+      const title = params['title'];
+      if (typeof sessionId !== 'string' || typeof title !== 'string' || !title)
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      try {
+        entry.events.publish({
+          type: 'session_metadata_updated',
+          data: {
+            sessionId,
+            displayName: title,
+            ...(typeof params['titleSource'] === 'string'
+              ? { titleSource: params['titleSource'] }
+              : {}),
+          },
+        });
+      } catch {
+        /* bus already closed */
+      }
       return;
     }
     if (method === 'qwen/notify/session/prompt-suggestion') {

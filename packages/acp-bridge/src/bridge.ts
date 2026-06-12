@@ -54,6 +54,8 @@ import {
   PromptQueueFullError,
   WorkspaceMismatchError,
   InvalidClientIdError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   // Mediator's `vote()` validates `optionId in allowedOptionIds`,
   // but the bridge ALSO throws `InvalidPermissionOptionError`
   // pre-mediator when a wire client tries to inject the cancel
@@ -4044,11 +4046,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         `qwen serve: bridge executeShellCommand for session=${sessionId}`,
         'info',
       );
+      if (opts.sessionShellCommandEnabled !== true) {
+        throw new SessionShellDisabledError();
+      }
+      if (context?.clientId === undefined) {
+        throw new SessionShellClientRequiredError();
+      }
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const originatorClientId = resolveTrustedClientId(
         entry,
-        context?.clientId,
+        context.clientId,
       );
 
       if (signal?.aborted) {

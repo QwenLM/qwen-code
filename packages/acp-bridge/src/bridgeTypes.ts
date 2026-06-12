@@ -482,7 +482,10 @@ export interface AcpSessionBridge {
    * Execute a shell command directly on the daemon (no LLM involvement).
    * Streams output through the session's SSE bus and injects the
    * command+result into the LLM's chat history via extMethod.
-   * Throws `SessionNotFoundError` for unknown ids.
+   * Throws `SessionShellDisabledError` when direct shell is not enabled,
+   * `SessionShellClientRequiredError` when no session-bound client id is
+   * provided, `InvalidClientIdError` when the client id is not bound to the
+   * session, and `SessionNotFoundError` for unknown ids.
    */
   executeShellCommand(
     sessionId: string,

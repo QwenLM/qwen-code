@@ -32,6 +32,8 @@ import {
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   SessionNotFoundError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
@@ -41,7 +43,7 @@ import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, ShellExecutionService } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
   type ChannelHandle,
@@ -90,19 +92,32 @@ describe('createAcpSessionBridge', () => {
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];
+    const events: string[] = [];
     const spanAttributes = new Map<string, Record<string, unknown>>();
     const telemetry: BridgeTelemetry = {
-      captureContext: () => ({ captured: true }),
-      async runWithContext(_captured, fn) {
+      captureContext: () => {
+        events.push('capture');
+        return { captured: true };
+      },
+      async runWithContext(captured, fn) {
+        events.push(
+          `run:${(captured as { captured?: boolean } | undefined)?.captured === true}`,
+        );
         return await fn();
       },
       async withSpan(operation, attributes, fn) {
         operations.push(operation);
         spanAttributes.set(operation, attributes);
-        return await fn();
+        events.push(`span:${operation}:start`);
+        try {
+          return await fn();
+        } finally {
+          events.push(`span:${operation}:end`);
+        }
       },
       event() {},
       injectPromptContext(request) {
+        events.push('inject');
         const meta =
           (request as { _meta?: Record<string, unknown> })._meta ?? {};
         return {
@@ -142,6 +157,12 @@ describe('createAcpSessionBridge', () => {
         'prompt.dispatch',
       ]),
     );
+    expect(events.slice(-4)).toEqual([
+      'run:true',
+      'span:prompt.dispatch:start',
+      'inject',
+      'span:prompt.dispatch:end',
+    ]);
     expect(handle.agent.promptCalls[0]!._meta).toMatchObject({
       keep: 'value',
       'qwen.telemetry.traceparent': 'daemon-traceparent',
@@ -4942,6 +4963,117 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('executeShellCommand permission policy', () => {
+    function mockShellExecute(output = 'ok') {
+      return vi.spyOn(ShellExecutionService, 'execute').mockResolvedValue({
+        pid: 123,
+        result: Promise.resolve({
+          rawOutput: Buffer.from(output),
+          output,
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 123,
+          executionMethod: 'none',
+        }),
+      });
+    }
+
+    async function setupShellSession() {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      return { bridge, session, handle };
+    }
+
+    it('rejects direct shell by default before executing the command', async () => {
+      const shellSpy = mockShellExecute();
+      const { bridge, session } = await setupShellSession();
+      const disabledBridge = makeBridge({
+        channelFactory: async () => {
+          throw new Error('disabled shell should not spawn a channel');
+        },
+      });
+
+      await expect(
+        disabledBridge.executeShellCommand(session.sessionId, 'echo hi'),
+      ).rejects.toBeInstanceOf(SessionShellDisabledError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      await disabledBridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('requires a client id before checking whether the session exists', async () => {
+      const shellSpy = mockShellExecute();
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => {
+          throw new Error('missing client id should not spawn a channel');
+        },
+      });
+
+      await expect(
+        bridge.executeShellCommand('unknown-session', 'echo hi'),
+      ).rejects.toBeInstanceOf(SessionShellClientRequiredError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('rejects unregistered client ids when direct shell is enabled', async () => {
+      const shellSpy = mockShellExecute();
+      const { bridge, session } = await setupShellSession();
+
+      await expect(
+        bridge.executeShellCommand(session.sessionId, 'echo hi', undefined, {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('executes and stamps events when the client id belongs to the session', async () => {
+      const shellSpy = mockShellExecute('hello\n');
+      const { bridge, session } = await setupShellSession();
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      const result = await bridge.executeShellCommand(
+        session.sessionId,
+        'echo hello',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      expect(result).toEqual({
+        exitCode: 0,
+        output: 'hello\n',
+        aborted: false,
+      });
+      expect(shellSpy).toHaveBeenCalledTimes(1);
+      const it = events[Symbol.asyncIterator]();
+      const first = await it.next();
+      expect(first.value?.type).toBe('user_shell_command');
+      expect(first.value?.originatorClientId).toBe(session.clientId);
+
+      abort.abort();
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+  });
+
   describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
     /**
      * #4282 fold-in 4 (qwen-latest C1). Build a channel factory whose
@@ -6771,6 +6903,99 @@ describe('createAcpSessionBridge', () => {
         },
       );
       // No throw — silently dropped.
+      await bridge.shutdown();
+    });
+  });
+
+  describe('extNotification — session title update', () => {
+    const titleFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('rebroadcasts a child title-update as session_metadata_updated', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: titleFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 'Fix login button on mobile',
+        titleSource: 'auto',
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('session_metadata_updated');
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        displayName: 'Fix login button on mobile',
+        titleSource: 'auto',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed title-update payloads', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: titleFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      // Missing title / empty title / non-string title / missing sessionId.
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: '',
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 123 as unknown as string,
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        title: 'orphan',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'session_metadata_updated')).toEqual([]);
       await bridge.shutdown();
     });
   });
