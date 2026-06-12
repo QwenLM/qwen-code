@@ -199,6 +199,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    setTitleRecordedCallback: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
@@ -265,6 +266,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       rewindRecording: vi.fn(),
+      setTitleRecordedCallback: vi.fn(),
     };
 
     mockToolRegistry = {

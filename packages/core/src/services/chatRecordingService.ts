@@ -1234,6 +1234,26 @@ export class ChatRecordingService {
   }
 
   /**
+   * Observer invoked after a custom title record lands (manual or auto).
+   * The ACP session layer registers here to push a live title notification
+   * to connected daemon clients — without it, auto-generated titles are
+   * only discoverable via the next session-list poll (generation runs in
+   * this child process; the daemon bridge never sees it happen).
+   */
+  private titleRecordedCallback?: (
+    customTitle: string,
+    titleSource: TitleSource,
+  ) => void;
+
+  setTitleRecordedCallback(
+    callback:
+      | ((customTitle: string, titleSource: TitleSource) => void)
+      | undefined,
+  ): void {
+    this.titleRecordedCallback = callback;
+  }
+
+  /**
    * Records a custom title for the session.
    * Appended as a system record so it persists with the session data.
    * Also caches the title in memory for re-append on shutdown.
@@ -1258,6 +1278,11 @@ export class ChatRecordingService {
       this.appendRecord(record);
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
+      try {
+        this.titleRecordedCallback?.(customTitle, titleSource);
+      } catch {
+        // Observer errors must never break title recording.
+      }
       return true;
     } catch (error) {
       debugLogger.error('Error saving custom title record:', error);

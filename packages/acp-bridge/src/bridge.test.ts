@@ -6600,6 +6600,99 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('extNotification — session title update', () => {
+    const titleFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('rebroadcasts a child title-update as session_metadata_updated', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: titleFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 'Fix login button on mobile',
+        titleSource: 'auto',
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('session_metadata_updated');
+      expect(collected[0]?.data).toMatchObject({
+        sessionId: session.sessionId,
+        displayName: 'Fix login button on mobile',
+        titleSource: 'auto',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed title-update payloads', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: titleFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      // Missing title / empty title / non-string title / missing sessionId.
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: '',
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 123 as unknown as string,
+      });
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        title: 'orphan',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'session_metadata_updated')).toEqual([]);
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;
