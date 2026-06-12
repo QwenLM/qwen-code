@@ -73,6 +73,8 @@ import {
   InvalidRewindTargetError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
@@ -276,9 +278,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -943,12 +943,17 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  const sessionShellCommandEnabled =
+    opts.enableSessionShell === true && tokenConfigured;
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
       eventRingSize: opts.eventRingSize,
       boundWorkspace,
+      sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider: createDaemonStatusProvider(),
@@ -1327,7 +1332,7 @@ export function createServeApp(
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.
   const mutate = createMutationGate({
-    tokenConfigured: opts.token !== undefined,
+    tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
 
@@ -1367,6 +1372,7 @@ export function createServeApp(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
+        sessionShellCommandEnabled,
         rateLimit: opts.rateLimit === true,
         reloadAvailable: deps.workspace !== undefined,
       }),
@@ -2626,8 +2632,26 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/shell', mutate(), async (req, res) => {
+  app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
+    if (!sessionShellCommandEnabled) {
+      sendBridgeError(res, new SessionShellDisabledError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      return;
+    }
+    if (clientId === undefined) {
+      sendBridgeError(res, new SessionShellClientRequiredError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
     const body = safeBody(req);
     const command = body['command'];
     if (typeof command !== 'string' || command.trim().length === 0) {
@@ -2641,17 +2665,12 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      res.off('close', onResClose);
-      return;
-    }
     try {
       const result = await bridge.executeShellCommand(
         sessionId,
         command.trim(),
         abort.signal,
-        clientId !== undefined ? { clientId } : undefined,
+        { clientId },
       );
       if (daemonLog) {
         daemonLog.info('shell command completed', {
@@ -3595,6 +3614,7 @@ export function createServeApp(
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
   });
   if (acpHandle) {
@@ -4330,6 +4350,22 @@ function sendBridgeErrorImpl(
       code: 'invalid_client_id',
       sessionId: err.sessionId,
       clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof SessionShellDisabledError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_shell_disabled',
+      errorKind: 'session_shell_disabled',
+    });
+    return;
+  }
+  if (err instanceof SessionShellClientRequiredError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'client_id_required',
+      errorKind: 'client_id_required',
     });
     return;
   }
