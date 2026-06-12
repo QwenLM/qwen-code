@@ -69,6 +69,7 @@ export {
   PushCoalescer,
   DEFAULT_COALESCE_WINDOW_MS,
 } from './webpush/coalescer.js';
+export { PushDigest, type DigestSummary } from './webpush/digest.js';
 export {
   SessionEventPump,
   type SessionEventPumpOptions,
