@@ -619,6 +619,46 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('owner fires a durable one-shot via tick and removes it from disk', async () => {
+      // Minute 15 never lands on :00/:30, so the one-shot gets zero
+      // jitter and the load can't classify it as missed regardless of
+      // when the test runs.
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('once1'), cron: '15 * * * *', recurring: false },
+      ]);
+      await scheduler.enableDurable('session-1');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 15, 59));
+
+      // Fired raw through the live tick path, not the missed wrapper.
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('task once1');
+      expect(fired[0]!.recurring).toBe(false);
+      // One-shots leave the job map with the fire...
+      expect(scheduler.list()).toHaveLength(0);
+      // ...and the disk write from tick() is fire-and-forget — wait for it.
+      await vi.waitFor(async () => {
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      });
+    });
+
+    it('excludes durable jobs from the exit summary', async () => {
+      scheduler.create('*/5 * * * *', 'session job', true);
+      await scheduler.createDurable('*/30 * * * *', 'durable job', true);
+
+      const summary = scheduler.getExitSummary()!;
+      expect(summary).toContain('1 active loop cancelled:');
+      expect(summary).toContain('session job');
+      expect(summary).not.toContain('durable job');
+    });
+
+    it('returns null from the exit summary when only durable jobs exist', async () => {
+      await scheduler.createDurable('*/30 * * * *', 'durable only', true);
+      expect(scheduler.getExitSummary()).toBeNull();
+    });
+
     it('does not fire durable jobs when durable mode was never enabled', async () => {
       // Headless path: cron_create with durable:true persists the task,
       // but without enableDurable there is no lock ownership — firing
