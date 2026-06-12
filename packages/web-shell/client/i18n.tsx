@@ -518,7 +518,7 @@ const EN: Messages = {
   'mcp.restartSkipped': (v) => `Skipped ${v?.name ?? ''}: ${v?.reason ?? ''}`,
   'mcp.restarted': (v) => `Restarted ${v?.name ?? ''} in ${v?.duration ?? 0}ms`,
   'mcp.restartEntries': (v) =>
-    `Restarted ${v?.restarted ?? 0}/${v?.total ?? 0} ${v?.name ?? ''} entries`,
+    `Restarted ${v?.restarted ?? 0}/${v?.total ?? 0} ${v?.name ?? ''} entries${v?.failedReasons ? ` (failed: ${v.failedReasons})` : ''}`,
   'mcp.source': 'Source',
   'mcp.source.extension': 'Extension',
   'mcp.source.project': 'Workspace Settings',
@@ -1311,7 +1311,7 @@ const ZH: Messages = {
   'mcp.restartSkipped': (v) => `已跳过 ${v?.name ?? ''}：${v?.reason ?? ''}`,
   'mcp.restarted': (v) => `已重启 ${v?.name ?? ''}，耗时 ${v?.duration ?? 0}ms`,
   'mcp.restartEntries': (v) =>
-    `已重启 ${v?.name ?? ''} 的 ${v?.restarted ?? 0}/${v?.total ?? 0} 个条目`,
+    `已重启 ${v?.name ?? ''} 的 ${v?.restarted ?? 0}/${v?.total ?? 0} 个条目${v?.failedReasons ? `（失败：${v.failedReasons}）` : ''}`,
   'mcp.source': '来源',
   'mcp.source.extension': '扩展',
   'mcp.source.project': '工作区设置',
