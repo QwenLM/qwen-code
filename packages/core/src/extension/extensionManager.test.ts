@@ -470,6 +470,19 @@ describe('extension tests', () => {
         expect(ext?.commands).toEqual(['foo_bar']);
       });
 
+      it('should return empty commands when commands directory does not exist', async () => {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'no-cmd-dir-ext',
+          version: '1.0.0',
+        });
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'no-cmd-dir-ext');
+        expect(ext?.commands).toEqual([]);
+      });
+
       it('should return empty commands when no .md or .toml files exist', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
