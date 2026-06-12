@@ -50,6 +50,7 @@ export {
   minimaxProvider,
   modelscopeProvider,
   openRouterProvider,
+  trustedRouterProvider,
   THIRD_PARTY_PROVIDERS,
   tokenPlanProvider,
   zaiProvider,
@@ -69,6 +70,10 @@ export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,
 } from './presets/openrouter.js';
+export {
+  TRUSTEDROUTER_BASE_URL,
+  TRUSTEDROUTER_ENV_KEY,
+} from './presets/trustedrouter.js';
 
 // Install logic
 export {
