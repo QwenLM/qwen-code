@@ -380,6 +380,14 @@ export class ReadFileTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.READ_FILE;
 
+  // Self-managed: ReadFile controls its own size via line-based paging
+  // (offset/limit, default 2000 lines), so it is exempt from the scheduler's
+  // char-based truncation. Oversized reads are bounded by the per-message
+  // batch budget instead.
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,

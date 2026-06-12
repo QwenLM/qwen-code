@@ -14,6 +14,7 @@ import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import { formatFetchErrorForUser } from '../utils/fetch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { combineAbortSignals } from '../utils/abortController.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -34,6 +35,7 @@ const QWEN_OAUTH_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
 
 const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 const QWEN_OAUTH_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
+const QWEN_OAUTH_REFRESH_TIMEOUT_MS = 30_000;
 
 // File System Configuration
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
@@ -84,6 +86,19 @@ function objectToUrlEncoded(data: Record<string, string>): string {
   return Object.keys(data)
     .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(data[key])}`)
     .join('&');
+}
+
+function createTokenRefreshNetworkError(
+  error: unknown,
+  timedOut: boolean,
+): Error {
+  const prefix = timedOut ? 'Token refresh timeout' : 'Token refresh failed';
+  return new Error(
+    `${prefix}: ${formatFetchErrorForUser(error, {
+      url: QWEN_OAUTH_TOKEN_ENDPOINT,
+    })}`,
+    { cause: error },
+  );
 }
 
 /**
@@ -494,71 +509,92 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
       client_id: QWEN_OAUTH_CLIENT_ID,
     };
 
-    const response = await fetch(QWEN_OAUTH_TOKEN_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: objectToUrlEncoded(bodyData),
+    const { signal, cleanup } = combineAbortSignals([], {
+      timeoutMs: QWEN_OAUTH_REFRESH_TIMEOUT_MS,
     });
+    debugLogger.debug('Refreshing access token...');
 
-    if (!response.ok) {
-      const errorData = await response.text();
-      // Handle 400/401 errors which indicate refresh token expiry or invalidity
-      if (response.status === 400 || response.status === 401) {
-        await clearQwenCredentials();
-        throw new CredentialsClearRequiredError(
-          "Refresh token expired or invalid. Please use '/auth' to re-authenticate.",
-          { status: response.status, response: errorData },
+    try {
+      let response: Response;
+      try {
+        response = await fetch(QWEN_OAUTH_TOKEN_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+          body: objectToUrlEncoded(bodyData),
+          signal,
+        });
+      } catch (error) {
+        throw createTokenRefreshNetworkError(error, signal.aborted);
+      }
+
+      if (!response.ok) {
+        let errorData: string;
+        try {
+          errorData = await response.text();
+        } catch (error) {
+          throw createTokenRefreshNetworkError(error, signal.aborted);
+        }
+        // Handle 400/401 errors which indicate refresh token expiry or invalidity
+        if (response.status === 400 || response.status === 401) {
+          await clearQwenCredentials();
+          throw new CredentialsClearRequiredError(
+            "Refresh token expired or invalid. Please use '/auth' to re-authenticate.",
+            { status: response.status, response: errorData },
+          );
+        }
+        throw new Error(
+          `Token refresh failed: ${response.status} ${response.statusText}. Response: ${errorData}`,
         );
       }
-      throw new Error(
-        `Token refresh failed: ${response.status} ${response.statusText}. Response: ${errorData}`,
-      );
+
+      let responseText: string;
+      try {
+        responseText = await response.text();
+      } catch (error) {
+        throw createTokenRefreshNetworkError(error, signal.aborted);
+      }
+
+      let responseData: TokenRefreshResponse;
+      try {
+        responseData = JSON.parse(responseText) as TokenRefreshResponse;
+      } catch {
+        throw new Error(
+          `Qwen OAuth refresh returned invalid JSON: ${responseText || '(empty response body)'}`,
+        );
+      }
+
+      // Check if the response indicates success
+      if (isErrorResponse(responseData)) {
+        const errorData = responseData as ErrorData;
+        throw new Error(
+          `Token refresh failed: ${errorData?.error || 'Unknown error'} - ${errorData?.error_description || 'No details provided'}`,
+        );
+      }
+
+      // Handle successful response
+      const tokenData = responseData as TokenRefreshData;
+      const tokens: QwenCredentials = {
+        access_token: tokenData.access_token,
+        token_type: tokenData.token_type,
+        // Use new refresh token if provided, otherwise preserve existing one
+        refresh_token:
+          tokenData.refresh_token || this.credentials.refresh_token,
+        resource_url: tokenData.resource_url, // Include resource_url if provided
+        expiry_date: Date.now() + tokenData.expires_in * 1000,
+      };
+
+      this.setCredentials(tokens);
+
+      // Note: File caching is now handled by SharedTokenManager
+      // to prevent cross-session token invalidation issues
+
+      return responseData;
+    } finally {
+      cleanup();
     }
-
-    let responseText: string;
-    try {
-      responseText = await response.text();
-    } catch {
-      responseText = '';
-    }
-
-    let responseData: TokenRefreshResponse;
-    try {
-      responseData = JSON.parse(responseText) as TokenRefreshResponse;
-    } catch {
-      throw new Error(
-        `Qwen OAuth refresh returned invalid JSON: ${responseText || '(empty response body)'}`,
-      );
-    }
-
-    // Check if the response indicates success
-    if (isErrorResponse(responseData)) {
-      const errorData = responseData as ErrorData;
-      throw new Error(
-        `Token refresh failed: ${errorData?.error || 'Unknown error'} - ${errorData?.error_description || 'No details provided'}`,
-      );
-    }
-
-    // Handle successful response
-    const tokenData = responseData as TokenRefreshData;
-    const tokens: QwenCredentials = {
-      access_token: tokenData.access_token,
-      token_type: tokenData.token_type,
-      // Use new refresh token if provided, otherwise preserve existing one
-      refresh_token: tokenData.refresh_token || this.credentials.refresh_token,
-      resource_url: tokenData.resource_url, // Include resource_url if provided
-      expiry_date: Date.now() + tokenData.expires_in * 1000,
-    };
-
-    this.setCredentials(tokens);
-
-    // Note: File caching is now handled by SharedTokenManager
-    // to prevent cross-session token invalidation issues
-
-    return responseData;
   }
 }
 

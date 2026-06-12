@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import os from 'node:os';
 import {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
@@ -82,7 +83,7 @@ describe('buildEnvStatusFromProcess', () => {
     const status = buildEnvStatusFromProcess('/ws', true);
     const platform = status.cells.find((c) => c.kind === 'platform');
     expect(platform!.name).toBe(process.platform);
-    expect(platform!.value).toBe(process.arch);
+    expect(platform!.value).toBe(`${process.arch} (${os.release()})`);
   });
 
   it('marks SANDBOX disabled when unset and ok with the profile name when set', () => {

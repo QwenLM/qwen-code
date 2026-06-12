@@ -98,8 +98,70 @@ export interface TurnDiff {
   };
 }
 
-const MAX_SNAPSHOTS = 100;
+export const MAX_SNAPSHOTS = 100;
 export const FILE_HISTORY_DIR = 'file-history';
+
+// ---------------------------------------------------------------------------
+// Serialization types for JSONL persistence
+// ---------------------------------------------------------------------------
+
+export interface SerializedFileHistorySnapshot {
+  promptId: string;
+  trackedFileBackups: Record<string, SerializedFileHistoryBackup>;
+  timestamp: string;
+}
+
+export interface SerializedFileHistoryBackup {
+  backupFileName: string | null;
+  version: number;
+  backupTime: string;
+  failed?: boolean;
+}
+
+export function serializeSnapshot(
+  s: FileHistorySnapshot,
+): SerializedFileHistorySnapshot {
+  return {
+    promptId: s.promptId,
+    timestamp: s.timestamp.toISOString(),
+    trackedFileBackups: Object.fromEntries(
+      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
+        path,
+        {
+          backupFileName: backup.backupFileName,
+          version: backup.version,
+          backupTime: backup.backupTime.toISOString(),
+          failed: backup.failed || undefined,
+        },
+      ]),
+    ),
+  };
+}
+
+function safeParseDate(iso: string): Date {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? new Date(0) : d;
+}
+
+export function deserializeSnapshots(
+  arr: SerializedFileHistorySnapshot[],
+): FileHistorySnapshot[] {
+  return arr.map((s) => ({
+    promptId: s.promptId,
+    timestamp: safeParseDate(s.timestamp),
+    trackedFileBackups: Object.fromEntries(
+      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
+        path,
+        {
+          backupFileName: backup.backupFileName,
+          version: backup.version,
+          backupTime: safeParseDate(backup.backupTime),
+          failed: backup.failed,
+        },
+      ]),
+    ),
+  }));
+}
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
  *  so 500 files ≈ 1000 concurrent opens — safely under the typical 4096 fd
  *  ceiling and well below `ulimit -n` defaults on Linux/macOS. */
@@ -519,6 +581,52 @@ export class FileHistoryService {
       snapshots: migrated,
       trackedFiles,
     };
+  }
+
+  async validateRestoredSnapshots(): Promise<void> {
+    // Collect unique backup file names to stat (dedup: many snapshots share
+    // the same backup file via the inheritance optimization in makeSnapshot).
+    const uniqueNames = new Set<string>();
+    for (const snapshot of this.state.snapshots) {
+      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+        if (backup.backupFileName !== null && !backup.failed) {
+          uniqueNames.add(backup.backupFileName);
+        }
+      }
+    }
+    if (uniqueNames.size === 0) return;
+
+    // Parallel stat with bounded concurrency to avoid fd exhaustion.
+    const BATCH_SIZE = 200;
+    const missing = new Set<string>();
+    const names = [...uniqueNames];
+    for (let i = 0; i < names.length; i += BATCH_SIZE) {
+      const batch = names.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map((name) =>
+          pathExists(resolveBackupPath(name, this.sessionId)),
+        ),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        if (!results[j]) missing.add(batch[j]);
+      }
+    }
+
+    if (missing.size === 0) return;
+
+    // Single synchronous pass to mark failures — minimizes the mutation
+    // window so concurrent makeSnapshot/trackEdit see a consistent state.
+    for (const snapshot of this.state.snapshots) {
+      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+        if (backup.backupFileName && missing.has(backup.backupFileName)) {
+          backup.failed = true;
+        }
+      }
+    }
+
+    debugLogger.warn(
+      `FileHistory: ${missing.size} restored backup file(s) missing on disk`,
+    );
   }
 
   async trackEdit(filePath: string): Promise<void> {

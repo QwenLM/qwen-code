@@ -150,17 +150,15 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
     export CSC_NAME="$CSC_NAME_CLEAN"
 fi
 
-# Add notarization if all credentials are available
+# Add notarization if all credentials are available.
+# electron-builder (>=24) auto-notarizes via notarytool whenever APPLE_ID,
+# APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID are present in the env.
+# No `notarize:` config block or NOTARIZE flag is required (or read).
 if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
     echo "Notarization enabled"
     export APPLE_ID="$APPLE_ID"
     export APPLE_TEAM_ID="$APPLE_TEAM_ID"
     export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
-
-    # Enable notarization in electron-builder by setting env vars
-    # The electron-builder.yml has notarize section commented out,
-    # but we can enable it via environment
-    export NOTARIZE=true
 fi
 
 # Run electron-builder

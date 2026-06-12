@@ -13,6 +13,7 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  TrustGateError,
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
@@ -50,6 +51,7 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
@@ -1413,6 +1415,349 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
   });
 
+  it('relocateWorkingDirectory should update the session working roots', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const workspaceContext = config.getWorkspaceContext();
+    const directoriesChanged = vi.fn();
+    workspaceContext.onDirectoriesChanged(directoriesChanged);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(config.getProjectRoot()).toBe(newDir);
+    expect(config.getCwd()).toBe(newDir);
+    expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getWorkspaceContext()).toBe(workspaceContext);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
+    expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(directoriesChanged).toHaveBeenCalled();
+    expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+      newDir,
+      expect.any(Array),
+      expect.any(Object),
+      expect.any(Array),
+      expect.any(Boolean),
+      expect.any(String),
+      expect.any(Array),
+      expect.any(Object),
+    );
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const fileServiceBefore = config.getFileService();
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getFileService()).not.toBe(fileServiceBefore);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+    const config = new Config(baseParams);
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const oldWorktreeSessionPath = path.join(
+      oldChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newWorktreeSessionPath = path.join(
+      newChatsDir,
+      `${sessionId}.worktree.json`,
+    );
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const existingArtifacts = [
+      oldTranscriptPath,
+      oldRuntimeStatusPath,
+      oldWorktreeSessionPath,
+    ];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.mkdirSync).toHaveBeenCalledWith(newChatsDir, {
+      recursive: true,
+    });
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldWorktreeSessionPath,
+      newWorktreeSessionPath,
+    );
+    expect(config.getTranscriptPath()).toBe(newTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue(newRuntimeStatusPath);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+      sessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+
+    writeRuntimeStatusSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    const oldTranscriptPath = path.join(oldChatsDir, `${sessionId}.jsonl`);
+    const oldRuntimeStatusPath = path.join(
+      oldChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
+    const newRuntimeStatusPath = path.join(
+      newChatsDir,
+      `${sessionId}.runtime.json`,
+    );
+    const moveError = new Error('move failed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    const existingArtifacts = [oldTranscriptPath, oldRuntimeStatusPath];
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return existingArtifacts.includes(checked) || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw moveError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      moveError,
+    );
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldTranscriptPath,
+      newTranscriptPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      newTranscriptPath,
+      oldTranscriptPath,
+    );
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should remove a partial EXDEV copy when source cleanup fails', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(oldDir);
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const cleanupError = new Error('cleanup failed');
+    const exdevError = Object.assign(new Error('cross device'), {
+      code: 'EXDEV',
+    });
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+    vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+      if (from === oldRuntimeStatusPath && to === newRuntimeStatusPath) {
+        throw exdevError;
+      }
+    });
+    vi.mocked(fs.unlinkSync).mockImplementation((pathToUnlink) => {
+      if (pathToUnlink === oldRuntimeStatusPath) {
+        throw cleanupError;
+      }
+    });
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      cleanupError,
+    );
+
+    expect(fs.copyFileSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+    expect(fs.unlinkSync).toHaveBeenCalledWith(newRuntimeStatusPath);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject and roll back when the final cwd differs from the expected path', async () => {
+    const config = new Config(baseParams);
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const expectedDir = path.resolve('/path/to/confirmed');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, expectedDir),
+    ).rejects.toThrow(
+      `Changed directory to ${newDir}, expected ${expectedDir}.`,
+    );
+
+    expect(chdirSpy).toHaveBeenCalledWith(newDir);
+    expect(chdirSpy).toHaveBeenCalledWith(oldDir);
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should reject before mutating config when include directories are stale', async () => {
+    const staleIncludeDir = path.resolve('/path/to/stale-include');
+    const config = new Config({
+      ...baseParams,
+      includeDirectories: [staleIncludeDir],
+    });
+    const oldDir = config.getTargetDir();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(oldDir);
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck !== staleIncludeDir,
+    );
+
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toThrow(
+      `Directory does not exist: ${staleIncludeDir}`,
+    );
+
+    expect(chdirSpy).not.toHaveBeenCalled();
+    expect(config.getTargetDir()).toBe(oldDir);
+    expect(config.storage.getProjectRoot()).toBe(oldDir);
+    expect(config.getWorkspaceContext().getDirectories()[0]).toBe(oldDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should return memory refresh failures after moving', async () => {
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
     const config = new Config(baseParams);
 
@@ -2514,17 +2859,28 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
+    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
+    // not just message text. The 403 mapping in `serve/server.ts`
+    // matches `err instanceof TrustGateError`; an accidental revert
+    // to `throw new Error(...)` would silently downgrade to 500
+    // while the message text test kept passing.
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
+      TrustGateError,
+    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -3254,6 +3610,68 @@ describe('setApprovalMode with folder trust', () => {
   });
 });
 
+describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
+  it('initializes from `disabledTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['Foo', 'Bar'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `disabledTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+
+  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
+    // The daemon's `acpAgent` MCP-restart handler calls
+    // `setDisabledTools(new Set(disabledList))` after re-reading
+    // workspace settings, so a `tools.disabled` toggle applied
+    // since this Config was constructed takes effect on the next
+    // `ToolRegistry.registerTool` call. Pin that contract so a
+    // future regression that drops the setter (or re-freezes the
+    // field) fails this test instead of silently re-enabling
+    // tools the user just disabled.
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
+    config.setDisabledTools(new Set(['B', 'C']));
+    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
+  });
+
+  it('setDisabledTools copies the input — caller mutations do not leak', () => {
+    // The setter constructs a fresh `new Set(disabled)` from the
+    // input, so a caller that holds a reference to the input set
+    // and later mutates it cannot retroactively change the live
+    // Config snapshot. Locks this defensive-copy contract.
+    const config = new Config(baseParams);
+    const liveInput = new Set(['X']);
+    config.setDisabledTools(liveInput);
+    liveInput.add('Y');
+    expect(config.getDisabledTools()).toEqual(new Set(['X']));
+    expect(config.getDisabledTools().has('Y')).toBe(false);
+  });
+
+  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
+    const config = new Config({
+      ...baseParams,
+      disabledTools: ['A', 'B'],
+    });
+    config.setDisabledTools(new Set());
+    expect(config.getDisabledTools()).toEqual(new Set());
+  });
+});
+
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -3628,6 +4046,90 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
+    });
+  });
+
+  describe('Config runtime MCP overlay', () => {
+    it('addRuntimeMcpServer does not mutate this.mcpServers', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          'settings-server': new MCPServerConfig('cmd-a'),
+        },
+      });
+      // Simulate post-init state
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer(
+        'runtime-server',
+        new MCPServerConfig('cmd-b'),
+      );
+      const settingsLayer = (
+        config as unknown as {
+          mcpServers: Record<string, MCPServerConfig>;
+        }
+      ).mcpServers;
+      expect(Object.keys(settingsLayer)).toEqual(['settings-server']);
+      expect(settingsLayer['runtime-server']).toBeUndefined();
+    });
+
+    it('removeRuntimeMcpServer returns false when name not present', () => {
+      const config = new Config(baseParams);
+      expect(config.removeRuntimeMcpServer('does-not-exist')).toBe(false);
+    });
+
+    it('removeRuntimeMcpServer returns true and drops the entry', () => {
+      const config = new Config(baseParams);
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('x', new MCPServerConfig('cmd'));
+      expect(config.removeRuntimeMcpServer('x')).toBe(true);
+      expect(config.removeRuntimeMcpServer('x')).toBe(false);
+    });
+  });
+
+  describe('getMcpServers cascade with runtime overlay', () => {
+    it('runtime layer overlays settings layer (last write wins)', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['shared'].command).toBe('runtime-cmd');
+    });
+
+    it('runtime-only entries appear in cascade', () => {
+      const config = new Config({ ...baseParams, mcpServers: {} });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('only-runtime', new MCPServerConfig('cmd'));
+      const merged = config.getMcpServers();
+      expect(merged!['only-runtime']).toBeDefined();
+    });
+
+    it('removing runtime entry restores settings entry', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          shared: new MCPServerConfig('settings-cmd'),
+        },
+      });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('shared', new MCPServerConfig('runtime-cmd'));
+      expect(config.getMcpServers()!['shared'].command).toBe('runtime-cmd');
+      config.removeRuntimeMcpServer('shared');
+      expect(config.getMcpServers()!['shared'].command).toBe('settings-cmd');
+    });
+
+    it('isMcpServerDisabled still flags runtime entries when excluded', () => {
+      const config = new Config({ ...baseParams });
+      (config as unknown as { initialized: boolean }).initialized = true;
+      config.addRuntimeMcpServer('blocked', new MCPServerConfig('cmd'));
+      config.setExcludedMcpServers(['blocked']);
+      // The entry appears in getMcpServers (UI layer filters via isMcpServerDisabled)
+      expect(config.getMcpServers()!['blocked']).toBeDefined();
+      expect(config.isMcpServerDisabled('blocked')).toBe(true);
     });
   });
 

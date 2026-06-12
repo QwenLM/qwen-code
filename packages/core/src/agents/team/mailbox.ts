@@ -92,8 +92,9 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 // One `Mutex` per inbox path, keyed by absolute path. Distinct
 // inboxes never block each other; concurrent operations on the same
 // inbox queue in memory so only one of them ever reaches for the
-// `proper-lockfile` file lock at a time. Entries are never evicted,
-// but the key space is bounded by team size (one per agent inbox).
+// `proper-lockfile` file lock at a time. Entries are evicted on team
+// teardown (`disposeInboxLocks`) so a long-running process doesn't
+// accumulate a dead `Mutex` per inbox across team create/delete cycles.
 
 const inboxLocks = new Map<string, Mutex>();
 
@@ -104,6 +105,31 @@ function getInboxLock(inboxPath: string): Mutex {
     inboxLocks.set(inboxPath, lock);
   }
   return lock;
+}
+
+/**
+ * Evict the in-process inbox locks for a team. The lock map keys on
+ * absolute inbox path and would otherwise retain a `Mutex` for every
+ * inbox the process ever touched — a slow leak across many team
+ * create/delete cycles in a long-lived daemon. All of a team's inbox
+ * paths sit directly under its inboxes dir, so match on the parent.
+ *
+ * Best-effort: a teammate's late `writeMessage` racing team teardown
+ * can re-create an entry afterwards, but the next same-name
+ * `team_create` resets inboxes and evicts it again.
+ *
+ * Returns the number of locks evicted.
+ */
+export function disposeInboxLocks(teamName: string): number {
+  const dir = getInboxesDir(teamName);
+  let evicted = 0;
+  for (const key of inboxLocks.keys()) {
+    if (path.dirname(key) === dir) {
+      inboxLocks.delete(key);
+      evicted++;
+    }
+  }
+  return evicted;
 }
 
 /**
@@ -252,6 +278,7 @@ export async function clearInbox(
 export async function clearAllInboxes(teamName: string): Promise<void> {
   const dir = getInboxesDir(teamName);
   await fs.rm(dir, { recursive: true, force: true });
+  disposeInboxLocks(teamName);
 }
 
 // ─── Convenience: send structured message ───────────────────
