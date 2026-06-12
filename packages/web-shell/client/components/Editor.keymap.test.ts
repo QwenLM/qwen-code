@@ -92,11 +92,17 @@ describe('Editor newline keymap (runtime)', () => {
   });
 
   it('Mod+Enter (Cmd on mac / Ctrl elsewhere) inserts a newline', () => {
-    // Cover both modifier mappings so the test is platform-agnostic.
-    press(h.view, { key: 'Enter', code: 'Enter', metaKey: true });
-    press(h.view, { key: 'Enter', code: 'Enter', ctrlKey: true });
+    // CodeMirror's `Mod-` prefix resolves to exactly one modifier per platform
+    // (Meta on mac, Ctrl elsewhere). Dispatch the platform-correct one so the
+    // assertion fails if Ctrl+Enter is ever broken on non-mac (and vice versa).
+    const isMac = /Mac/i.test(navigator.platform ?? '');
+    press(h.view, {
+      key: 'Enter',
+      code: 'Enter',
+      metaKey: isMac,
+      ctrlKey: !isMac,
+    });
     expect(h.getSubmitted()).toBe(false);
-    expect(h.view.state.doc.toString().length).toBeGreaterThan(0);
-    expect(h.view.state.doc.toString()).toMatch(/^\n+$/);
+    expect(h.view.state.doc.toString()).toBe('\n');
   });
 });

@@ -25,8 +25,8 @@ function getNewlineShortcut(): string {
   // Alt+Enter is labeled Option (⌥) on macOS; Mod+Enter resolves to
   // Cmd+Enter on macOS and Ctrl+Enter elsewhere.
   return isMacPlatform()
-    ? 'shift+enter / ctrl+j / opt+enter'
-    : 'shift+enter / ctrl+j / alt+enter';
+    ? 'shift+enter / ctrl+j / opt+enter / cmd+enter'
+    : 'shift+enter / ctrl+j / alt+enter / ctrl+enter';
 }
 
 const SHORTCUTS: Shortcut[] = [
