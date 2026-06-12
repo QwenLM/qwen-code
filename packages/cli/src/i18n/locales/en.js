@@ -12,6 +12,8 @@ export default {
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
     'Cleared authentication for "{{name}}".',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" disabled for all projects.',
   'Enable extension "{{name}}" to manage this MCP server.':
     'Enable extension "{{name}}" to manage this MCP server.',
   'Extension-provided MCP servers cannot be favorited.':
@@ -1173,6 +1175,7 @@ export default {
   connected: 'connected',
   connecting: 'connecting',
   disconnected: 'disconnected',
+  'needs authentication': 'needs authentication',
 
   // MCP Server List
   'User MCPs': 'User MCPs',

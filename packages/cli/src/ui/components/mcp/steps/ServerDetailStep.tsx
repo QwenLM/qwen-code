@@ -10,6 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
+import { MCPServerStatus } from '@qwen-code/qwen-code-core';
 import type { ServerDetailStepProps } from '../types.js';
 import {
   getStatusColor,
@@ -37,8 +38,15 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   onBack,
   isActive = true,
 }) => {
+  // 未连接且需要认证时，状态以"需要认证"展示，避免误导用户去排查连接问题。
+  // requiresAuth 是加载时的快照，状态被实时推到 connected 后不再适用。
+  const needsAuth =
+    !!server &&
+    !server.isDisabled &&
+    !!server.requiresAuth &&
+    server.status !== MCPServerStatus.CONNECTED;
   const statusColor = server
-    ? server.isDisabled
+    ? server.isDisabled || needsAuth
       ? 'yellow'
       : getStatusColor(server.status)
     : 'gray';
@@ -73,14 +81,12 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       });
     }
 
-    // 扩展提供的服务器随扩展启停，不提供"禁用"操作（重新启用仍允许）
-    if (server.source !== 'extension' || server.isDisabled) {
-      result.push({
-        key: 'toggle-disable',
-        label: server.isDisabled ? t('Enable') : t('Disable'),
-        value: 'toggle-disable',
-      });
-    }
+    // 始终显示启用/禁用选项（扩展提供的服务器走扩展级禁用记录）
+    result.push({
+      key: 'toggle-disable',
+      label: server.isDisabled ? t('Enable') : t('Disable'),
+      value: 'toggle-disable',
+    });
 
     // 已认证的服务器显示"重新认证"，未认证的显示"认证"
     if (!server.isDisabled) {
@@ -139,7 +145,11 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               }
             >
               {getStatusIcon(server.status)}{' '}
-              {server.isDisabled ? t('disabled') : t(server.status)}
+              {server.isDisabled
+                ? t('disabled')
+                : needsAuth
+                  ? t('needs authentication')
+                  : t(server.status)}
             </Text>
           </Box>
         </Box>

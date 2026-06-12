@@ -72,14 +72,50 @@ describe('ExtensionPreferencesStore', () => {
   it('clears all preference state for an extension', () => {
     store.toggleFavorite('alpha');
     store.setScope('alpha', 'user');
+    store.setMcpServerDisabled('alpha', 'srv', true);
     store.toggleFavorite('beta');
 
     store.clear('alpha');
 
     expect(store.isFavorite('alpha')).toBe(false);
     expect(store.getScope('alpha')).toBeUndefined();
+    expect(store.getDisabledMcpServers('alpha')).toEqual([]);
     // Unrelated entries are untouched.
     expect(store.isFavorite('beta')).toBe(true);
+  });
+
+  it('records per-extension disabled MCP servers and persists them', () => {
+    store.setMcpServerDisabled('alpha', 'srv-a', true);
+    store.setMcpServerDisabled('alpha', 'srv-b', true);
+    store.setMcpServerDisabled('beta', 'srv-a', true);
+
+    expect(store.getDisabledMcpServers('alpha')).toEqual(['srv-a', 'srv-b']);
+    // Namespaced: beta's same-named entry is independent of alpha's.
+    expect(store.getDisabledMcpServers('beta')).toEqual(['srv-a']);
+
+    const reopened = new ExtensionPreferencesStore(filePath);
+    expect(reopened.getDisabledMcpServers('alpha')).toEqual(['srv-a', 'srv-b']);
+
+    store.setMcpServerDisabled('alpha', 'srv-a', false);
+    expect(store.getDisabledMcpServers('alpha')).toEqual(['srv-b']);
+    // Removing the last entry drops the extension key entirely.
+    store.setMcpServerDisabled('alpha', 'srv-b', false);
+    expect(store.getDisabledMcpServers('alpha')).toEqual([]);
+    expect(store.read().disabledMcpServers['alpha']).toBeUndefined();
+  });
+
+  it('drops malformed disabledMcpServers values when reading', () => {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        favorites: [],
+        scopes: {},
+        disabledMcpServers: { alpha: ['ok', 42], beta: 'oops' },
+      }),
+    );
+    expect(store.getDisabledMcpServers('alpha')).toEqual(['ok']);
+    expect(store.getDisabledMcpServers('beta')).toEqual([]);
   });
 
   it('does not leak favorites between fresh stores via a shared default array', () => {

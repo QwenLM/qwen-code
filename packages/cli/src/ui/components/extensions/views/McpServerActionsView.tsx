@@ -11,6 +11,11 @@ import { t } from '../../../../i18n/index.js';
 import {
   type Config,
   getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  mcpServerRequiresOAuth,
+  MCPServerStatus,
   DiscoveredMCPTool,
   MCPOAuthTokenStorage,
   createDebugLogger,
@@ -119,34 +124,85 @@ export const McpServerActionsView = ({
         promptCount: serverPrompts.length,
         isDisabled: config.isMcpServerDisabled(serverName),
         hasOAuthTokens,
+        // Needs (re-)authentication: a 401 during connect, or OAuth declared
+        // with no stored token. Only meaningful while not connected.
+        requiresAuth:
+          status !== MCPServerStatus.CONNECTED &&
+          (mcpServerRequiresOAuth.get(serverName) === true ||
+            (Boolean(serverConfig.oauth?.enabled) && !hasOAuthTokens)),
       };
     }, [config, serverName]);
+
+  // Re-stamp status (and the status-derived needs-auth flag) synchronously
+  // right before setState: a status change landing during buildServer's
+  // awaits would fire the listener against the old state and then be
+  // overwritten by the stale snapshot.
+  const freshen = useCallback(
+    (info: MCPServerDisplayInfo | null): MCPServerDisplayInfo | null => {
+      if (!info) return info;
+      const status = getMCPServerStatus(info.name);
+      return {
+        ...info,
+        status,
+        requiresAuth:
+          status === MCPServerStatus.CONNECTED
+            ? false
+            : mcpServerRequiresOAuth.get(info.name) === true ||
+              info.requiresAuth,
+      };
+    },
+    [],
+  );
 
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      setServer(await buildServer());
+      setServer(freshen(await buildServer()));
     } catch (error) {
       debugLogger.error('Failed to load MCP server:', error);
     } finally {
       setLoading(false);
     }
     onReload();
-  }, [buildServer, onReload]);
+  }, [buildServer, freshen, onReload]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const info = await buildServer();
       if (!cancelled) {
-        setServer(info);
+        setServer(freshen(info));
         setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [buildServer]);
+  }, [buildServer, freshen]);
+
+  // Live-update the connection status shown in the detail view.
+  useEffect(() => {
+    const listener = (name: string, status?: MCPServerStatus) => {
+      if (name !== serverName || status === undefined) return;
+      setServer((prev) =>
+        prev
+          ? {
+              ...prev,
+              status,
+              // Keep needs-auth in step with the live status (the 401 marker
+              // is written before the DISCONNECTED event fires).
+              requiresAuth:
+                status === MCPServerStatus.CONNECTED
+                  ? false
+                  : mcpServerRequiresOAuth.get(name) === true ||
+                    prev.requiresAuth,
+            }
+          : prev,
+      );
+    };
+    addMCPStatusChangeListener(listener);
+    return () => removeMCPStatusChangeListener(listener);
+  }, [serverName]);
 
   const getServerTools = useCallback((): MCPToolDisplayInfo[] => {
     const toolRegistry = config.getToolRegistry();
@@ -188,7 +244,14 @@ export const McpServerActionsView = ({
     const toolRegistry = config.getToolRegistry();
     try {
       if (server.isDisabled) {
-        // Enable: drop from both exclusion lists + runtime, then rediscover.
+        // Enable: clear the extension-scoped disable flag (if any), drop from
+        // both exclusion lists + runtime, then rediscover.
+        const extensionName = server.config.extensionName;
+        if (extensionName) {
+          config
+            .getExtensionManager()
+            ?.setMcpServerDisabled(extensionName, serverName, false);
+        }
         const settings = loadSettings();
         for (const scope of [SettingScope.User, SettingScope.Workspace]) {
           const excluded =
@@ -206,14 +269,24 @@ export const McpServerActionsView = ({
           runtimeExcluded.filter((n) => n !== serverName),
         );
         await toolRegistry?.discoverToolsForServer(serverName);
-      } else {
-        if (server.source === 'extension') {
+      } else if (server.source === 'extension') {
+        // Disable via the extension-scoped preference so the global
+        // mcp.excluded list (and same-named servers elsewhere) are untouched.
+        const extensionName = server.config.extensionName;
+        const manager = config.getExtensionManager();
+        if (!extensionName || !manager) {
           onStatus({
             type: 'info',
             text: t('Cannot disable an extension-provided MCP server here.'),
           });
           return;
         }
+        manager.setMcpServerDisabled(extensionName, serverName, true);
+        await toolRegistry?.disconnectServer(serverName);
+        // Drop the status entry so the footer health pill doesn't keep
+        // counting an intentionally disabled server as offline.
+        removeMCPServerStatus(serverName);
+      } else {
         const scope =
           server.source === 'project'
             ? SettingScope.Workspace

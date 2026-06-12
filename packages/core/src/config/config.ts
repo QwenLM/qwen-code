@@ -2729,7 +2729,25 @@ export class Config {
   }
 
   isMcpServerDisabled(serverName: string): boolean {
-    return this.excludedMcpServers?.includes(serverName) ?? false;
+    if (this.excludedMcpServers?.includes(serverName)) return true;
+    // Extension-bundled servers can be disabled individually via extension
+    // preferences. Only the extension that actually contributed the server is
+    // consulted, so a same-named server from another source (e.g. a shadowing
+    // user config) is never affected. The owner lookup mirrors the
+    // getMcpServers() merge (user/project config wins, then first active
+    // extension) without rebuilding the merged map — this predicate runs per
+    // server in discovery loops and on every resource read.
+    if (this.mcpServers?.[serverName]) return false;
+    for (const extension of this.getActiveExtensions()) {
+      if (extension.config.mcpServers?.[serverName]) {
+        return (
+          this.extensionManager
+            ?.getDisabledMcpServers(extension.config.name)
+            .includes(serverName) ?? false
+        );
+      }
+    }
+    return false;
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {

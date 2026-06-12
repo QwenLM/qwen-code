@@ -10,6 +10,8 @@ export default {
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP "{{name}}" 已在所有项目中禁用。',
   'Enable extension "{{name}}" to manage this MCP server.':
     '启用扩展 "{{name}}" 后才能管理此 MCP 服务器。',
   'Extension-provided MCP servers cannot be favorited.':
@@ -1111,6 +1113,7 @@ export default {
   connected: '已连接',
   connecting: '连接中',
   disconnected: '已断开',
+  'needs authentication': '需要认证',
 
   // MCP Server List
   'User MCPs': '用户 MCP',

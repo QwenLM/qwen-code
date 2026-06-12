@@ -24,6 +24,11 @@ import { AuthenticateStep } from './steps/AuthenticateStep.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  mcpServerRequiresOAuth,
+  MCPServerStatus,
   DiscoveredMCPTool,
   MCPOAuthTokenStorage,
   type MCPServerConfig,
@@ -120,6 +125,13 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         // Ignore errors when checking token existence
       }
 
+      // Needs (re-)authentication: a 401 during connect, or OAuth declared
+      // with no stored token. Only meaningful while not connected.
+      const requiresAuth =
+        status !== MCPServerStatus.CONNECTED &&
+        (mcpServerRequiresOAuth.get(name) === true ||
+          (Boolean(serverConfig.oauth?.enabled) && !hasOAuthTokens));
+
       serverInfos.push({
         name,
         status,
@@ -130,11 +142,25 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         promptCount: serverPrompts.length,
         isDisabled,
         hasOAuthTokens,
+        requiresAuth,
       });
     }
 
     return serverInfos;
   }, [config]);
+
+  // Synchronously refresh status + needs-auth on a fetched snapshot.
+  const restampStatus = useCallback((s: MCPServerDisplayInfo) => {
+    const status = getMCPServerStatus(s.name);
+    return {
+      ...s,
+      status,
+      requiresAuth:
+        status === MCPServerStatus.CONNECTED
+          ? false
+          : mcpServerRequiresOAuth.get(s.name) === true || s.requiresAuth,
+    };
+  }, []);
 
   // Load MCP server data on initial render
   useEffect(() => {
@@ -142,7 +168,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       setIsLoading(true);
       try {
         const serverInfos = await fetchServerData();
-        setServers(serverInfos);
+        // Re-stamp statuses (and the status-derived needs-auth flag)
+        // synchronously right before setState: a status change landing
+        // during fetch's awaits would fire the listener against the OLD
+        // state and then be overwritten by this snapshot.
+        setServers(serverInfos.map(restampStatus));
       } catch (error) {
         debugLogger.error('Error loading MCP servers:', error);
       } finally {
@@ -151,7 +181,35 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     };
 
     loadServers();
-  }, [fetchServerData]);
+  }, [fetchServerData, restampStatus]);
+
+  // Live-update server rows (and the derived detail view) when a connection
+  // status changes, e.g. a "connecting" server finishing.
+  useEffect(() => {
+    const listener = (serverName: string, status?: MCPServerStatus) => {
+      if (status === undefined) return; // removals are handled by reloads
+      setServers((prev) =>
+        prev.map((s) =>
+          s.name === serverName
+            ? {
+                ...s,
+                status,
+                // Keep needs-auth in step with the live status: a connect
+                // proves auth works; a failure may have just set the 401
+                // marker (it is written before the DISCONNECTED event).
+                requiresAuth:
+                  status === MCPServerStatus.CONNECTED
+                    ? false
+                    : mcpServerRequiresOAuth.get(serverName) === true ||
+                      s.requiresAuth,
+              }
+            : s,
+        ),
+      );
+    };
+    addMCPStatusChangeListener(listener);
+    return () => removeMCPStatusChangeListener(listener);
+  }, []);
 
   // Selected server
   const selectedServer = useMemo(() => {
@@ -253,13 +311,14 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     setIsLoading(true);
     try {
       const serverInfos = await fetchServerData();
-      setServers(serverInfos);
+      // Same synchronous re-stamp as the initial load (see comment there).
+      setServers(serverInfos.map(restampStatus));
     } catch (error) {
       debugLogger.error('Error reloading MCP servers:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [fetchServerData]);
+  }, [fetchServerData, restampStatus]);
 
   // Clear OAuth authentication tokens and disconnect the server
   const handleClearAuth = useCallback(async () => {
@@ -323,6 +382,14 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const server = selectedServer;
       const settings = loadSettings();
 
+      // Clear the extension-scoped disable flag, if any.
+      const extensionName = server.config.extensionName;
+      if (extensionName) {
+        config
+          .getExtensionManager()
+          ?.setMcpServerDisabled(extensionName, server.name, false);
+      }
+
       // Remove from user and workspace exclusion lists
       for (const scope of [SettingScope.User, SettingScope.Workspace]) {
         const scopeSettings = settings.forScope(scope).settings;
@@ -376,17 +443,31 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         const server = selectedServer;
         const settings = loadSettings();
 
-        // Determine the scope based on server configuration location
-        let targetScope: 'user' | 'workspace' = 'user';
+        // Extension servers are disabled via the extension-scoped preference
+        // instead of user/workspace mcp.excluded settings.
         if (server.source === 'extension') {
-          // Extension servers should not be disabled through user/workspace settings
-          // Show error message and return
-          debugLogger.warn(
-            `Cannot disable extension MCP server '${server.name}'`,
-          );
+          const extensionName = server.config.extensionName;
+          const manager = config.getExtensionManager();
+          if (!extensionName || !manager) {
+            debugLogger.warn(
+              `Cannot disable extension MCP server '${server.name}'`,
+            );
+            setIsLoading(false);
+            return;
+          }
+          manager.setMcpServerDisabled(extensionName, server.name, true);
+          await config.getToolRegistry()?.disconnectServer(server.name);
+          // Drop the status entry so the footer health pill doesn't keep
+          // counting an intentionally disabled server as offline.
+          removeMCPServerStatus(server.name);
+          await reloadServers();
           setIsLoading(false);
           return;
-        } else if (server.source === 'project') {
+        }
+
+        // Determine the scope based on server configuration location
+        let targetScope: 'user' | 'workspace' = 'user';
+        if (server.source === 'project') {
           targetScope = 'workspace';
         }
 

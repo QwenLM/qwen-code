@@ -21,6 +21,7 @@ import type {
   DiscoveredPlugin,
   ExtensionSource,
 } from '@qwen-code/qwen-code-core';
+import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core';
 import type { ExtensionUpdateState } from '../../state/extensions.js';
 
 // The Installed tab reads real user/workspace settings from disk when MCP
@@ -75,6 +76,8 @@ const createManager = (o: ManagerOverrides = {}) => {
     discoverPlugins: vi.fn().mockResolvedValue(o.discovered ?? []),
     toggleFavorite: vi.fn(() => true),
     setExtensionScope: vi.fn(),
+    getDisabledMcpServers: vi.fn(() => []),
+    setMcpServerDisabled: vi.fn(),
     enableExtension: vi.fn().mockResolvedValue(undefined),
     disableExtension: vi.fn().mockResolvedValue(undefined),
     uninstallExtension: vi.fn().mockResolvedValue(undefined),
@@ -336,6 +339,8 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('└ alpha-mcp');
     // The group count only includes top-level items (the two extensions).
     expect(frame).toContain('User level (2)');
+    // MCP rows show the live connection state, not a bare enabled flag.
+    expect(frame).toContain('disconnected');
     // Enter on the nested row opens the MCP detail view with Extension source.
     stdin.write('\x1B[B'); // down: alpha -> alpha-mcp
     await waitFor(() => {
@@ -346,6 +351,57 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       expect(lastFrame()).toContain('Source:');
     });
     expect(lastFrame()).toContain('Extension');
+  });
+
+  it('shows needs-authentication for an MCP that failed auth instead of a bare active state', async () => {
+    mcpServerRequiresOAuth.set('oauth-mcp', true);
+    try {
+      const config = createConfig(createManager(), {
+        mcpServers: { 'oauth-mcp': { command: 'node' } },
+      });
+      const { lastFrame } = renderDialog(config, {
+        initialTab: EXTENSIONS_TABS.INSTALLED,
+      });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('oauth-mcp');
+      });
+      expect(lastFrame()).toContain('needs authentication');
+      expect(lastFrame()).not.toContain('(active)');
+    } finally {
+      mcpServerRequiresOAuth.delete('oauth-mcp');
+    }
+  });
+
+  it('disables an extension-bundled MCP server individually with Space', async () => {
+    const ext = mockExtension('alpha', true);
+    (ext as unknown as { mcpServers: Record<string, unknown> }).mcpServers = {
+      'alpha-mcp': { command: 'node' },
+    };
+    const manager = createManager({ extensions: [ext] });
+    const config = createConfig(manager, {
+      mcpServers: {
+        'alpha-mcp': { command: 'node', extensionName: 'alpha' },
+      },
+    });
+    const { stdin, lastFrame } = renderDialog(config, {
+      initialTab: EXTENSIONS_TABS.INSTALLED,
+    });
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha-mcp');
+    });
+    stdin.write('\x1B[B'); // down: alpha -> alpha-mcp
+    await waitFor(() => {
+      expect(lastFrame()).toMatch(/●\s+└ alpha-mcp/);
+    });
+    stdin.write(' '); // Space -> disable just this server
+    await waitFor(() => {
+      // The disable is recorded against the extension, not mcp.excluded.
+      expect(manager.setMcpServerDisabled).toHaveBeenCalledWith(
+        'alpha',
+        'alpha-mcp',
+        true,
+      );
+    });
   });
 
   it('toggles favorite when pressing f on the Installed tab', async () => {

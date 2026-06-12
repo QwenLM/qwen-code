@@ -548,6 +548,23 @@ export class ExtensionManager {
     this.preferencesStore.setScope(name, scope);
   }
 
+  /** MCP servers individually disabled inside the given extension. */
+  getDisabledMcpServers(extensionName: string): string[] {
+    return this.preferencesStore.getDisabledMcpServers(extensionName);
+  }
+
+  setMcpServerDisabled(
+    extensionName: string,
+    serverName: string,
+    disabled: boolean,
+  ): void {
+    this.preferencesStore.setMcpServerDisabled(
+      extensionName,
+      serverName,
+      disabled,
+    );
+  }
+
   // ==========================================================================
   // Marketplace registry & discovery
   // ==========================================================================

@@ -32,11 +32,18 @@ export interface ExtensionPreferences {
   favorites: string[];
   /** Per-extension scope intent, keyed by extension name. */
   scopes: Record<string, ExtensionScope>;
+  /**
+   * MCP servers the user disabled individually inside an extension, keyed by
+   * extension name. Namespaced per extension (instead of the global
+   * `mcp.excluded` list) so a disable can never affect a same-named server
+   * from another source, and uninstalling the extension cleans it up.
+   */
+  disabledMcpServers: Record<string, string[]>;
 }
 
 /** Always returns fresh containers so callers can safely mutate the result. */
 function emptyPreferences(): ExtensionPreferences {
-  return { favorites: [], scopes: {} };
+  return { favorites: [], scopes: {}, disabledMcpServers: {} };
 }
 
 /**
@@ -45,10 +52,21 @@ function emptyPreferences(): ExtensionPreferences {
  * file so it is cheap to read/write and easy to reason about.
  */
 export class ExtensionPreferencesStore {
+  // Parsed-file cache keyed by mtime. `read()` sits on hot paths now
+  // (Config.isMcpServerDisabled is consulted per server during discovery and
+  // resource reads), so avoid re-reading/re-parsing when the file hasn't
+  // changed; the mtime check keeps cross-process writes visible.
+  private cache: { prefs: ExtensionPreferences; mtimeMs: number } | null = null;
+
   constructor(private readonly filePath: string) {}
 
   read(): ExtensionPreferences {
     try {
+      const { mtimeMs } = fs.statSync(this.filePath);
+      if (this.cache?.mtimeMs === mtimeMs) {
+        // Clone so callers can mutate the result without corrupting the cache.
+        return structuredClone(this.cache.prefs);
+      }
       const content = fs.readFileSync(this.filePath, 'utf-8');
       const parsed = JSON.parse(content) as Partial<ExtensionPreferences>;
       const rawScopes =
@@ -57,10 +75,27 @@ export class ExtensionPreferencesStore {
       for (const [name, value] of Object.entries(rawScopes)) {
         if (isExtensionScope(value)) scopes[name] = value;
       }
-      return {
+      const rawDisabled =
+        parsed.disabledMcpServers &&
+        typeof parsed.disabledMcpServers === 'object'
+          ? parsed.disabledMcpServers
+          : {};
+      const disabledMcpServers: Record<string, string[]> = {};
+      for (const [name, value] of Object.entries(rawDisabled)) {
+        if (Array.isArray(value)) {
+          const servers = value.filter(
+            (v): v is string => typeof v === 'string',
+          );
+          if (servers.length) disabledMcpServers[name] = servers;
+        }
+      }
+      const prefs: ExtensionPreferences = {
         favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
         scopes,
+        disabledMcpServers,
       };
+      this.cache = { prefs: structuredClone(prefs), mtimeMs };
+      return prefs;
     } catch (error) {
       if (
         error instanceof Error &&
@@ -77,6 +112,8 @@ export class ExtensionPreferencesStore {
   private write(prefs: ExtensionPreferences): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     atomicWriteFileSync(this.filePath, JSON.stringify(prefs, null, 2));
+    // Drop the cache; the next read re-stats and re-parses the new file.
+    this.cache = null;
   }
 
   isFavorite(name: string): boolean {
@@ -119,6 +156,33 @@ export class ExtensionPreferencesStore {
     this.write(prefs);
   }
 
+  /** MCP servers individually disabled inside the given extension. */
+  getDisabledMcpServers(extensionName: string): string[] {
+    return this.read().disabledMcpServers[extensionName] ?? [];
+  }
+
+  setMcpServerDisabled(
+    extensionName: string,
+    serverName: string,
+    disabled: boolean,
+  ): void {
+    const prefs = this.read();
+    const current = prefs.disabledMcpServers[extensionName] ?? [];
+    if (disabled) {
+      if (current.includes(serverName)) return;
+      prefs.disabledMcpServers[extensionName] = [...current, serverName];
+    } else {
+      if (!current.includes(serverName)) return;
+      const next = current.filter((n) => n !== serverName);
+      if (next.length) {
+        prefs.disabledMcpServers[extensionName] = next;
+      } else {
+        delete prefs.disabledMcpServers[extensionName];
+      }
+    }
+    this.write(prefs);
+  }
+
   /** Removes all preference state for an extension (used on uninstall). */
   clear(name: string): void {
     const prefs = this.read();
@@ -130,6 +194,10 @@ export class ExtensionPreferencesStore {
     }
     if (prefs.scopes[name]) {
       delete prefs.scopes[name];
+      changed = true;
+    }
+    if (prefs.disabledMcpServers[name]) {
+      delete prefs.disabledMcpServers[name];
       changed = true;
     }
     if (changed) {

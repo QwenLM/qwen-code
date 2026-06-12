@@ -17,7 +17,13 @@ import {
   type ExtensionScope,
   type MCPServerConfig,
   SettingScope,
+  MCPServerStatus,
   getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  mcpServerRequiresOAuth,
+  MCPOAuthTokenStorage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -143,30 +149,61 @@ export const InstalledTab = ({
         : undefined;
       const toolRegistry = hasAnyMcp ? config.getToolRegistry() : undefined;
 
+      // Servers that need (re-)authentication: either the connect attempt hit
+      // a 401 (runtime signal), or OAuth is declared but no token is stored.
+      // Connected servers are skipped — they are evidently authenticated.
+      const needsAuthNames = new Set<string>();
+      for (const [name, sc] of Object.entries(mcpServers)) {
+        if (getMCPServerStatus(name) === MCPServerStatus.CONNECTED) continue;
+        if (mcpServerRequiresOAuth.get(name)) {
+          needsAuthNames.add(name);
+          continue;
+        }
+        if (sc.oauth?.enabled) {
+          try {
+            const creds = await new MCPOAuthTokenStorage().getCredentials(name);
+            if (!creds) needsAuthNames.add(name);
+          } catch {
+            needsAuthNames.add(name);
+          }
+        }
+      }
+
       const buildMcpInfo = (
         name: string,
         serverConfig: MCPServerConfig,
         scope: InstalledMcpInfo['scope'],
         isDisabled: boolean,
-      ): InstalledMcpInfo => ({
-        name,
-        status: getMCPServerStatus(name),
-        scope,
-        isDisabled,
-        transport: serverConfig.command
-          ? 'stdio'
-          : serverConfig.httpUrl
-            ? 'http'
-            : serverConfig.url
-              ? 'sse'
-              : 'unknown',
-        toolCount:
-          toolRegistry
-            ?.getAllTools()
-            .filter(
-              (tool) => (tool as { serverName?: string }).serverName === name,
-            ).length ?? 0,
-      });
+      ): InstalledMcpInfo => {
+        // Status (and the status-derived needs-auth flag) are read here, in
+        // the same synchronous tick as setItems, so a transition during the
+        // earlier token-check awaits can't leave a stale combination.
+        const status = getMCPServerStatus(name);
+        return {
+          name,
+          status,
+          scope,
+          isDisabled,
+          requiresAuth:
+            status === MCPServerStatus.CONNECTED
+              ? false
+              : mcpServerRequiresOAuth.get(name) === true ||
+                needsAuthNames.has(name),
+          transport: serverConfig.command
+            ? 'stdio'
+            : serverConfig.httpUrl
+              ? 'http'
+              : serverConfig.url
+                ? 'sse'
+                : 'unknown',
+          toolCount:
+            toolRegistry
+              ?.getAllTools()
+              .filter(
+                (tool) => (tool as { serverName?: string }).serverName === name,
+              ).length ?? 0,
+        };
+      };
 
       const mcpItems: InstalledItem[] = [];
       for (const [name, serverConfig] of Object.entries(mcpServers)) {
@@ -266,6 +303,34 @@ export const InstalledTab = ({
   useEffect(() => {
     selectedKeyRef.current = selectedItem?.key ?? null;
   }, [selectedItem]);
+
+  // Live-update MCP rows when a server's connection status changes (e.g. a
+  // "connecting" server finishing) without re-running the full load().
+  useEffect(() => {
+    const listener = (serverName: string, status?: MCPServerStatus) => {
+      if (status === undefined) return; // removals are handled by reloads
+      setItems((prev) =>
+        prev.map((it) =>
+          it.kind === 'mcp' && it.mcp.name === serverName
+            ? {
+                ...it,
+                mcp: {
+                  ...it.mcp,
+                  status,
+                  requiresAuth:
+                    status === MCPServerStatus.CONNECTED
+                      ? false
+                      : mcpServerRequiresOAuth.get(serverName) === true ||
+                        it.mcp.requiresAuth,
+                },
+              }
+            : it,
+        ),
+      );
+    };
+    addMCPStatusChangeListener(listener);
+    return () => removeMCPStatusChangeListener(listener);
+  }, []);
 
   const { rows: terminalRows } = useTerminalSize();
   // One line per display row; reserve space for the dialog border, tab bar,
@@ -415,15 +480,48 @@ export const InstalledTab = ({
           return;
         }
         if (item.isActive) {
-          // Disabling a bundled server is done by disabling its extension.
+          // Disable via the extension-scoped preference (not the global
+          // mcp.excluded list) so same-named servers from other sources are
+          // unaffected and uninstalling the extension cleans it up.
+          if (!extensionManager) return;
+          mutatingRef.current = true;
           onStatus({
             type: 'info',
-            text: t('Cannot disable an extension-provided MCP server here.'),
+            text: t('Disabling MCP "{{name}}"...', { name: item.name }),
           });
+          try {
+            extensionManager.setMcpServerDisabled(
+              item.parentExtension,
+              item.name,
+              true,
+            );
+            await config.getToolRegistry()?.disconnectServer(item.name);
+            // Drop the status entry so the footer health pill doesn't keep
+            // counting an intentionally disabled server as offline.
+            removeMCPServerStatus(item.name);
+            // The per-extension disable record is user-global, unlike the
+            // scope-aware standalone toggle — say so.
+            onStatus({
+              type: 'success',
+              text: t('MCP "{{name}}" disabled for all projects.', {
+                name: item.name,
+              }),
+            });
+            await load();
+          } catch (error) {
+            onStatus({ type: 'error', text: getErrorMessage(error) });
+          } finally {
+            mutatingRef.current = false;
+          }
           return;
         }
-        // An individually-excluded server under an active extension may be
-        // re-enabled; fall through to the normal enable path.
+        // Enable: clear the extension-scoped flag, then fall through to the
+        // shared enable path (which also clears any manual exclusions).
+        extensionManager?.setMcpServerDisabled(
+          item.parentExtension,
+          item.name,
+          false,
+        );
       }
       const toolRegistry = config.getToolRegistry();
       mutatingRef.current = true;
@@ -487,7 +585,7 @@ export const InstalledTab = ({
         mutatingRef.current = false;
       }
     },
-    [config, load, onStatus, isParentExtensionActive],
+    [config, extensionManager, load, onStatus, isParentExtensionActive],
   );
 
   const toggleFavorite = useCallback(
@@ -620,9 +718,34 @@ export const InstalledTab = ({
             : t('Extension v{{version}}', {
                 version: item.extension.version,
               });
-        const statusColor = item.isActive
-          ? theme.status.success
-          : theme.text.secondary;
+        // MCP rows surface the live connection state — "enabled" alone would
+        // read as usable even when the server failed to connect or still
+        // needs authentication.
+        let statusLabel: string;
+        let statusColor: string;
+        if (item.kind === 'mcp') {
+          if (!item.isActive) {
+            statusLabel = t('disabled');
+            statusColor = theme.text.secondary;
+          } else if (item.mcp.status === MCPServerStatus.CONNECTED) {
+            statusLabel = t('connected');
+            statusColor = theme.status.success;
+          } else if (item.mcp.requiresAuth) {
+            statusLabel = t('needs authentication');
+            statusColor = theme.status.warning;
+          } else if (item.mcp.status === MCPServerStatus.CONNECTING) {
+            statusLabel = t('connecting');
+            statusColor = theme.status.warning;
+          } else {
+            statusLabel = t('disconnected');
+            statusColor = theme.status.error;
+          }
+        } else {
+          statusLabel = item.isActive ? t('active') : t('disabled');
+          statusColor = item.isActive
+            ? theme.status.success
+            : theme.text.secondary;
+        }
         return (
           <Box key={item.key}>
             <Box minWidth={2} flexShrink={0}>
@@ -639,9 +762,11 @@ export const InstalledTab = ({
                 <Text color={theme.status.warning}> ★</Text>
               ) : null}
             </Box>
-            <Text color={theme.text.secondary}>{kindBadge} </Text>
-            <Text color={statusColor}>
-              ({item.isActive ? t('active') : t('disabled')})
+            <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
+              {kindBadge}{' '}
+            </Text>
+            <Text color={isSelected ? theme.text.accent : statusColor}>
+              ({statusLabel})
             </Text>
           </Box>
         );

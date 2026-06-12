@@ -41,6 +41,8 @@ export interface InstalledMcpInfo {
   isDisabled: boolean;
   transport: string;
   toolCount: number;
+  /** The server failed to connect because it needs (re-)authentication. */
+  requiresAuth: boolean;
 }
 
 /** A single row in the Installed tab — either a plugin/extension or an MCP. */

@@ -463,6 +463,11 @@ export function updateMCPServerStatus(
   status: MCPServerStatus,
 ): void {
   serverStatuses.set(serverName, status);
+  // A successful connect proves authentication works now — clear the sticky
+  // 401 marker so later unrelated outages aren't mislabeled as auth failures.
+  if (status === MCPServerStatus.CONNECTED) {
+    mcpServerRequiresOAuth.delete(serverName);
+  }
   // Snapshot the listener list so a listener that detaches itself (or
   // attaches a new one) during dispatch doesn't mutate the array we're
   // iterating.
