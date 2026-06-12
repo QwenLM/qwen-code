@@ -17,6 +17,7 @@ import {
   SessionService,
   shouldShowStep,
   TrustGateError,
+  addDaemonRequestAttribute,
   emitDaemonLog,
   hashDaemonWorkspace,
   recordDaemonBridgeError,
@@ -2196,6 +2197,7 @@ export function createServeApp(
       });
       return;
     }
+    addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
     const abort = new AbortController();
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
