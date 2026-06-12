@@ -112,4 +112,15 @@ describe('CronListTool', () => {
     expect(lines).toHaveLength(1);
     expect(result.llmContent).toContain('[durable]: persisted');
   });
+
+  it('surfaces a corrupted tasks file as an error instead of an empty list', async () => {
+    const tasksFile = path.join(tmpDir, '.qwen', 'scheduled_tasks.json');
+    await fs.mkdir(path.dirname(tasksFile), { recursive: true });
+    await fs.writeFile(tasksFile, '{broken json!!');
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error?.message).toContain('Malformed JSON');
+    expect(result.llmContent).not.toContain('No active cron jobs');
+  });
 });

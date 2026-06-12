@@ -7,6 +7,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
+import type { DurableCronTask } from '../services/cronTasksFile.js';
 import {
   CRON_TASKS_DISPLAY_PATH,
   readCronTasks,
@@ -35,9 +36,20 @@ class CronListInvocation extends BaseToolInvocation<
     // of what the scheduler has loaded.
     // The scheduler contributes only this process's session-only jobs.
     const scheduler = this.config.getCronScheduler();
-    const fileTasks = await readCronTasks(this.config.getProjectRoot()).catch(
-      () => [],
-    );
+    // readCronTasks maps a missing file to [] internally, so anything
+    // thrown here is a real failure (corrupted file, permissions).
+    // Surface it instead of presenting durable jobs as absent.
+    let fileTasks: DurableCronTask[];
+    try {
+      fileTasks = await readCronTasks(this.config.getProjectRoot());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        llmContent: `Error listing cron jobs: ${message}`,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
     const jobs = [
       ...fileTasks.map((task) => ({
         id: task.id,
