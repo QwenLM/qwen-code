@@ -161,14 +161,6 @@ const EN: Messages = {
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
   'insight.ready': 'Insight report generated successfully!',
-  'activeAgents.collapseHint': 'Enter/Space collapse',
-  'activeAgents.footer':
-    'From input: ↓ focus agents · ↑/↓ move · Enter/Space details · Esc back to input · Home/End jump',
-  'activeAgents.moreAbove': (v) => `^ ${v?.count ?? 0} more above`,
-  'activeAgents.openHint': 'Enter/Space for details',
-  'activeAgents.title': (v) =>
-    `Active agents (${v?.visible ?? 0}/${v?.total ?? 0})`,
-  'activeAgents.tools': (v) => `${v?.count ?? 0} tools`,
   'request.cancelled': 'Request cancelled.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
@@ -976,14 +968,6 @@ const ZH: Messages = {
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
   'insight.ready': 'Insight 报告已生成！',
-  'activeAgents.collapseHint': 'Enter/Space 收起',
-  'activeAgents.footer':
-    '输入框按 ↓ 聚焦智能体 · ↑/↓ 切换 · Enter/Space 查看详情 · Esc 返回输入框 · Home/End 跳转',
-  'activeAgents.moreAbove': (v) => `^ 上方还有 ${v?.count ?? 0} 个`,
-  'activeAgents.openHint': 'Enter/Space 查看详情',
-  'activeAgents.title': (v) =>
-    `活跃智能体 (${v?.visible ?? 0}/${v?.total ?? 0})`,
-  'activeAgents.tools': (v) => `${v?.count ?? 0} 个工具`,
   'request.cancelled': '请求已取消。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',

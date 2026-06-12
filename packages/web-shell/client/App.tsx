@@ -32,7 +32,6 @@ import {
   type WebShellToast,
 } from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
-import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
 import {
   APPROVAL_MODE_ACTIVE_EVENT,
@@ -93,10 +92,7 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
-import {
-  isBackgroundSubAgentToolCall,
-  isSubAgentToolCall,
-} from './adapters/toolClassification';
+import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -434,14 +430,6 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
-function isAgentTool(tool: ACPToolCall): boolean {
-  return isSubAgentToolCall(tool);
-}
-
-function isActiveTool(tool: ACPToolCall): boolean {
-  return tool.status === 'pending' || tool.status === 'in_progress';
-}
-
 function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
   if (tool.args?.is_background !== true) return false;
   const name = tool.toolName.toLowerCase();
@@ -469,14 +457,8 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
   return parts.join('|');
 }
 
-interface FloatingPanels {
-  todos: TodoItem[];
-  agents: ACPToolCall[];
-}
-
-function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
+function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
   let todos: TodoItem[] | undefined;
-  const agents: ACPToolCall[] = [];
 
   for (const message of messages) {
     if (message.role === 'plan') {
@@ -494,42 +476,10 @@ function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
       if (nextTodos) {
         todos = hasActiveTodos(nextTodos) ? nextTodos : [];
       }
-      if (
-        isAgentTool(tool) &&
-        isActiveTool(tool) &&
-        !isBackgroundSubAgentToolCall(tool)
-      ) {
-        agents.push(tool);
-      }
     }
   }
 
-  return { todos: todos ?? [], agents };
-}
-
-function getAgentPanelVersion(agent: ACPToolCall): string {
-  const raw = agent.rawOutput;
-  const taskExec =
-    raw && typeof raw === 'object' && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : undefined;
-  const summary = taskExec?.executionSummary;
-  const summaryRecord =
-    summary && typeof summary === 'object' && !Array.isArray(summary)
-      ? (summary as Record<string, unknown>)
-      : undefined;
-  return [
-    agent.subTools?.length ?? 0,
-    agent.subContent?.length ?? 0,
-    agent.title ?? '',
-    agent.args?.description ?? '',
-    agent.args?.prompt ?? '',
-    taskExec?.tokenCount ?? '',
-    summaryRecord?.totalTokens ?? '',
-    summaryRecord?.totalToolCalls ?? '',
-    summaryRecord?.failedToolCalls ?? '',
-    taskExec?.terminateReason ?? '',
-  ].join(':');
+  return todos ?? [];
 }
 
 function translateCopyMessage(
@@ -721,24 +671,18 @@ export function App({
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = pendingApproval;
   const shouldHideComposer = pendingApproval !== null;
-  const rawFloatingPanels = useMemo(
-    () => getFloatingPanels(messages),
+  const rawFloatingTodos = useMemo(
+    () => getFloatingTodos(messages),
     [messages],
   );
   const floatingTodos = useStableArray(
-    rawFloatingPanels.todos,
+    rawFloatingTodos,
     (t) => `${t.id}:${t.status}:${t.content}`,
-  );
-  const floatingAgents = useStableArray(
-    rawFloatingPanels.agents,
-    (a) =>
-      `${a.callId}:${a.status}:${a.subTools?.length ?? 0}:${getAgentPanelVersion(a)}`,
   );
   const backgroundTaskActivityKey = useMemo(
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
-  const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
   const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
@@ -2076,24 +2020,10 @@ export function App({
     });
   }, [sessionActions, reportError]);
 
-  const handleFocusActiveAgents = useCallback((): boolean => {
-    if (floatingAgents.length === 0) return false;
-    editorRef.current?.blur();
-    window.setTimeout(() => {
-      activeAgentsPanelRef.current?.focus({ preventScroll: true });
-    }, 0);
-    return true;
-  }, [floatingAgents.length]);
-
   const handleFocusTaskPill = useCallback((): boolean => {
     if (bottomHidden) return false;
     return statusBarRef.current?.focusTaskPill() ?? false;
   }, [bottomHidden]);
-
-  const handleFocusFooterFromEditor = useCallback((): boolean => {
-    if (handleFocusActiveAgents()) return true;
-    return handleFocusTaskPill();
-  }, [handleFocusActiveAgents, handleFocusTaskPill]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
     if (text) {
@@ -2383,7 +2313,7 @@ export function App({
             <CompactModeContext.Provider value={compactMode}>
               <div
                 className={
-                  floatingTodos.length > 0 || floatingAgents.length > 0
+                  floatingTodos.length > 0
                     ? `${styles.content} ${styles.contentHasMessages}`
                     : styles.content
                 }
@@ -2535,7 +2465,7 @@ export function App({
                   skills={loadedSkills}
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
-                  onFocusActiveAgents={handleFocusFooterFromEditor}
+                  onFocusFooter={handleFocusTaskPill}
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
@@ -2586,17 +2516,6 @@ export function App({
                   activeGoal={activeGoal}
                 />
               ))}
-
-            {floatingAgents.length > 0 && !tasksPanelMessage && (
-              <div className={styles.bottomPanels}>
-                <ActiveAgentsPanel
-                  ref={activeAgentsPanelRef}
-                  agents={floatingAgents}
-                  onFocusTaskPill={handleFocusTaskPill}
-                  onReturnToInput={handleReturnToEditor}
-                />
-              </div>
-            )}
           </div>
         </div>
       </I18nProvider>

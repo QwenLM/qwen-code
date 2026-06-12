@@ -562,7 +562,7 @@ function areSubToolsEqual(
   return true;
 }
 
-const ToolLine = memo(function ToolLine({
+export const ToolLine = memo(function ToolLine({
   tool,
   approval,
   onConfirm,
