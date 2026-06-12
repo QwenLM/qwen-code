@@ -114,6 +114,27 @@ export function createSearchRoute(
       ? Math.min(Math.max(1, Math.trunc(parsedLimit)), 200)
       : 50;
 
+    // Optional inclusive ISO-8601 time bounds (cycle 79). A present-but-
+    // unparseable value is a 400 (mirrors invalid_kind); absent → no bound.
+    const parseBound = (
+      v: unknown,
+    ): { ok: true; ms: number | undefined } | { ok: false } => {
+      if (typeof v !== 'string' || v.length === 0)
+        return { ok: true, ms: undefined };
+      const ms = Date.parse(v);
+      return Number.isNaN(ms) ? { ok: false } : { ok: true, ms };
+    };
+    const since = parseBound(req.query.since);
+    if (!since.ok) {
+      res.status(400).json({ error: 'Invalid since', code: 'invalid_since' });
+      return;
+    }
+    const until = parseBound(req.query.until);
+    if (!until.ok) {
+      res.status(400).json({ error: 'Invalid until', code: 'invalid_until' });
+      return;
+    }
+
     const dir = await resolveDir();
     if (!dir) {
       // No workspace → empty result, but keep the 200 body shape uniform with
@@ -138,6 +159,8 @@ export function createSearchRoute(
         kind,
         sessionId,
         limit,
+        since: since.ms,
+        until: until.ms,
         timeoutMs: opts?.timeoutMs ?? SEARCH_TIMEOUT_MS,
         now: opts?.now,
       });

@@ -218,6 +218,45 @@ describe('search route', () => {
     expect(body.truncated).toBe(true);
   });
 
+  // --- cycle 79: since/until time filter ---
+
+  it('?since narrows results to records at/after the bound', async () => {
+    // A second, older record that also matches the query.
+    writeFileSync(
+      join(dir, 'old.jsonl'),
+      JSON.stringify({
+        uuid: 'evt-old',
+        sessionId: 'sess-1',
+        timestamp: '2026-05-01T00:00:00.000Z',
+        type: 'assistant',
+        cwd: '/w',
+        message: { role: 'assistant', parts: [{ text: 'the oauth flow old' }] },
+      }) + '\n',
+    );
+    // No bound → both match (evt-1 is dated 2026-06-01 in the fixture).
+    const all = await fetch(
+      `${await mount(async () => dir)}/rc/search?q=oauth`,
+    );
+    expect(((await all.json()) as { hits: unknown[] }).hits).toHaveLength(2);
+    // since 2026-05-15 → only the newer fixture record.
+    const res = await fetch(
+      `${await mount(async () => dir)}/rc/search?q=oauth&since=2026-05-15T00:00:00.000Z`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hits: Array<{ eventId: string }> };
+    expect(body.hits.map((h) => h.eventId)).toEqual(['evt-1']);
+  });
+
+  it('400 invalid_since / invalid_until for an unparseable bound', async () => {
+    const url = await mount(async () => dir);
+    const a = await fetch(`${url}/rc/search?q=oauth&since=not-a-date`);
+    expect(a.status).toBe(400);
+    expect(((await a.json()) as { code: string }).code).toBe('invalid_since');
+    const b = await fetch(`${url}/rc/search?q=oauth&until=nope`);
+    expect(b.status).toBe(400);
+    expect(((await b.json()) as { code: string }).code).toBe('invalid_until');
+  });
+
   // --- cycle 76: session-scoped search authorization ---
 
   it('SECURITY: a session-locked share forces sessionId=lock and ignores ?sessionId', async () => {
