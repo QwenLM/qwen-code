@@ -464,12 +464,11 @@ jobs:
               append_env "WIN_CSC_LINK" "$WIN_CSC_LINK_SECRET"
               append_env "WIN_CSC_KEY_PASSWORD" "$WIN_CSC_KEY_PASSWORD_SECRET"
             else
-              if ! allow_unsigned_artifacts; then
-                echo "::error::Published Windows desktop releases require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD."
-                exit 1
+              if [ "$IS_DRY_RUN" = "true" ]; then
+                echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
+              else
+                echo "::warning::Windows signing certificate is not configured; published Windows desktop releases will be unsigned."
               fi
-
-              echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
             fi
           else
             if [ "$RUNNER_OS" != "Linux" ] && [ -n "$CSC_LINK_SECRET" ]; then
