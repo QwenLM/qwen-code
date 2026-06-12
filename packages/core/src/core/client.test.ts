@@ -49,6 +49,7 @@ import {
   Turn,
   type ServerGeminiStreamEvent,
 } from './turn.js';
+import { LoopType } from '../telemetry/types.js';
 
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
@@ -270,6 +271,8 @@ vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
+  logLoopDetected: vi.fn(),
+  logLoopDetectionDisabled: vi.fn(),
 }));
 
 const { mockClientDebugLogger } = vi.hoisted(() => ({
@@ -4096,7 +4099,7 @@ hello
 
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
-      vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
       vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
 
       mockTurnRunFn.mockReturnValue(
@@ -6012,14 +6015,15 @@ Other open files:
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
     });
 
-    it('does not run loop checks when skipLoopDetection is true', async () => {
+    it('keeps deterministic tool-call checks when skipLoopDetection is true', async () => {
       // Arrange
       // Ensure config returns true for skipLoopDetection
       vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
 
       // Replace loop detector with spies
       const ldMock = {
-        addAndCheck: vi.fn().mockReturnValue(false),
+        addAndCheckDeterministicToolCallLoop: vi.fn().mockReturnValue(false),
+        addAndCheckHeuristicLoops: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
       // @ts-expect-error override private for testing
@@ -6047,8 +6051,49 @@ Other open files:
         // consume stream
       }
 
-      // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.addAndCheck).not.toHaveBeenCalled();
+      expect(ldMock.addAndCheckDeterministicToolCallLoop).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(ldMock.addAndCheckHeuristicLoops).not.toHaveBeenCalled();
+    });
+
+    it('hard-stops identical tool calls even when skipLoopDetection is true', async () => {
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          for (let i = 0; i < 5; i++) {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `repeat-${i}`,
+                name: 'run_shell_command',
+                args: { command: 'echo repeated' },
+              },
+            };
+          }
+        })(),
+      );
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'repeat a tool' }],
+          new AbortController().signal,
+          'prompt-id-skip-loop-identical',
+        ),
+      );
+
+      expect(events.at(-1)).toEqual({
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+      });
+      expect(events).toHaveLength(5);
     });
 
     describe('retry sendMessageType', () => {
