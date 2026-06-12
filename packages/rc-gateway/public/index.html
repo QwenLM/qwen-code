@@ -205,6 +205,14 @@
       <div><button id="list-commands">List commands</button></div>
       <div id="commands-list">(not listed)</div>
     </section>
+    <section id="fork-session">
+      <strong>Fork session</strong> (full copy; requires write scope)
+      <div>
+        <input id="fork-id" placeholder="parent session id" />
+        <button id="fork-btn">Fork</button>
+      </div>
+      <div id="fork-result"></div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -1313,6 +1321,59 @@
           }
         } catch (e) {
           out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Fork session (cycle 69): POST /rc/session/:id/fork (WRITE) full-copy
+      // include mode -> a new daemon-hosted session inheriting the transcript.
+      // textContent-only (returned ids are server hex/uuid).
+      $('fork-id').value = '';
+      $('fork-btn').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('fork-result');
+        const id = ($('fork-id').value || watchedSessionId || '').trim();
+        if (!id) {
+          out.textContent = 'enter a parent session id';
+          return;
+        }
+        out.textContent = 'forking…';
+        try {
+          const res = await fetch(
+            '/rc/session/' + encodeURIComponent(id) + '/fork',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ transcript: 'include' }),
+            },
+          );
+          if (!res.ok) {
+            let code = res.status;
+            try {
+              const b = await res.json();
+              if (b && b.code) code = b.code;
+            } catch {
+              /* non-JSON */
+            }
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs write scope'
+                : 'fork failed: ' + code;
+            return;
+          }
+          const data = await res.json();
+          out.textContent = '';
+          const a = document.createElement('div');
+          a.textContent = 'forked -> ' + data.sessionId;
+          const b = document.createElement('div');
+          b.textContent =
+            'parent ' + data.parentSessionId + '  at ' + data.forkedAt;
+          out.appendChild(a);
+          out.appendChild(b);
+        } catch (e) {
+          out.textContent = 'fork error: ' + e;
         }
       };
 
