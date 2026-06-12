@@ -39,6 +39,14 @@ export interface SearchOptions {
   /** Max hits (default 50, clamped to 1..200). */
   limit?: number;
   /**
+   * Inclusive lower/upper time bounds (epoch ms) on a record's `timestamp`.
+   * When either is set, a record whose `timestamp` is missing/unparseable or
+   * falls outside the bound is skipped. Absent → no time filter (byte-identical
+   * to before). The route parses ISO-8601 `?since`/`?until` into these.
+   */
+  since?: number;
+  until?: number;
+  /**
    * Per-query scan-time budget in ms. When set (finite and > 0), the scan
    * throws {@link SearchTimeoutError} once the wall clock passes the deadline.
    * Absent / non-finite / ≤ 0 → NO deadline (the scan never throws on time —
@@ -207,6 +215,15 @@ export async function searchTranscriptsDetailed(
       }
       if (opts.sessionId && rec.sessionId !== opts.sessionId) continue;
       if (wantType !== undefined && rec.type !== wantType) continue;
+      // Inclusive time-range filter (cycle 79). A record without a usable
+      // timestamp cannot be placed in the range, so it is excluded when a bound
+      // is active. With no bound this block is skipped (byte-identical to before).
+      if (opts.since !== undefined || opts.until !== undefined) {
+        const t = Date.parse(rec.timestamp ?? '');
+        if (Number.isNaN(t)) continue;
+        if (opts.since !== undefined && t < opts.since) continue;
+        if (opts.until !== undefined && t > opts.until) continue;
+      }
 
       const recText = recordText(rec);
       const hay = recText.toLowerCase();

@@ -411,3 +411,91 @@ describe('searchTranscriptsDetailed — truncated (cycle 37)', () => {
     expect(delegated).toEqual(detailed.hits);
   });
 });
+
+describe('searchTranscripts since/until time filter (cycle 79)', () => {
+  const T = (iso: string) => Date.parse(iso);
+  beforeEach(() => {
+    writeJsonl('s.jsonl', [
+      textRec(
+        {
+          uuid: 'old',
+          sessionId: 's',
+          type: 'assistant',
+          timestamp: '2026-06-01T00:00:00.000Z',
+        },
+        'oauth one',
+      ),
+      textRec(
+        {
+          uuid: 'mid',
+          sessionId: 's',
+          type: 'assistant',
+          timestamp: '2026-06-05T00:00:00.000Z',
+        },
+        'oauth two',
+      ),
+      textRec(
+        {
+          uuid: 'new',
+          sessionId: 's',
+          type: 'assistant',
+          timestamp: '2026-06-10T00:00:00.000Z',
+        },
+        'oauth three',
+      ),
+    ]);
+  });
+
+  it('since excludes records older than the bound (inclusive)', async () => {
+    const ids = (
+      await searchTranscripts(dir, 'oauth', {
+        since: T('2026-06-05T00:00:00.000Z'),
+      })
+    ).map((h) => h.eventId);
+    expect(ids.sort()).toEqual(['mid', 'new']); // 'old' excluded; 'mid' inclusive
+  });
+
+  it('until excludes records newer than the bound (inclusive)', async () => {
+    const ids = (
+      await searchTranscripts(dir, 'oauth', {
+        until: T('2026-06-05T00:00:00.000Z'),
+      })
+    ).map((h) => h.eventId);
+    expect(ids.sort()).toEqual(['mid', 'old']);
+  });
+
+  it('since+until windows to the middle record', async () => {
+    const ids = (
+      await searchTranscripts(dir, 'oauth', {
+        since: T('2026-06-03T00:00:00.000Z'),
+        until: T('2026-06-07T00:00:00.000Z'),
+      })
+    ).map((h) => h.eventId);
+    expect(ids).toEqual(['mid']);
+  });
+
+  it('excludes a record with an unparseable timestamp when filtering', async () => {
+    writeJsonl('bad.jsonl', [
+      textRec(
+        {
+          uuid: 'notime',
+          sessionId: 's2',
+          type: 'assistant',
+          timestamp: 'not-a-date',
+        },
+        'oauth four',
+      ),
+    ]);
+    const filtered = (
+      await searchTranscripts(dir, 'oauth', {
+        since: T('2026-06-01T00:00:00.000Z'),
+      })
+    ).map((h) => h.eventId);
+    expect(filtered).not.toContain('notime');
+    // With NO filter, the same record IS returned (byte-identical to before).
+    const unfiltered = (await searchTranscripts(dir, 'oauth')).map(
+      (h) => h.eventId,
+    );
+    expect(unfiltered).toContain('notime');
+  });
+});
