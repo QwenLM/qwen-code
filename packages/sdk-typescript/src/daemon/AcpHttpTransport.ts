@@ -137,7 +137,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/model$/,
     mapping: {
-      method: 'session/set_config_option',
+      method: '_qwen/session/set_config_option',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -183,7 +183,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'PATCH',
     pattern: /^\/session\/([^/]+)\/metadata$/,
     mapping: {
-      method: 'session/metadata',
+      method: '_qwen/session/metadata',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -194,7 +194,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/heartbeat$/,
     mapping: {
-      method: 'session/heartbeat',
+      method: '_qwen/session/heartbeat',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -205,7 +205,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/recap$/,
     mapping: {
-      method: 'session/recap',
+      method: '_qwen/session/recap',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -216,7 +216,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/btw$/,
     mapping: {
-      method: 'session/btw',
+      method: '_qwen/session/btw',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -227,7 +227,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/shell$/,
     mapping: {
-      method: 'session/shell',
+      method: '_qwen/session/shell',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -238,7 +238,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/approval-mode$/,
     mapping: {
-      method: 'session/approval_mode',
+      method: '_qwen/session/approval_mode',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -249,7 +249,7 @@ const ROUTE_TABLE: ReadonlyArray<{
     httpMethod: 'POST',
     pattern: /^\/session\/([^/]+)\/branch$/,
     mapping: {
-      method: 'session/branch',
+      method: '_qwen/session/branch',
       extractParams: (segs, body) => ({
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
@@ -283,6 +283,8 @@ export class AcpHttpTransport implements DaemonTransport {
   private initPromise: Promise<void> | null = null;
   private nextId = 1;
   private initResult: unknown = undefined;
+  /** Connection id returned by the ACP initialize handshake. */
+  private connectionId: string | undefined;
 
   /**
    * Connection-scoped SSE stream. Receives JSON-RPC responses
@@ -358,11 +360,22 @@ export class AcpHttpTransport implements DaemonTransport {
 
     // Normal request: POST /acp with the JSON-RPC request body.
     const params = mapping.extractParams(segments, body, httpMethod);
-    const response = await this.sendRequest(mapping.method, params);
+    const response = await this.sendRequest(
+      mapping.method,
+      params,
+      init.signal ?? undefined,
+    );
 
     if (response.error) {
-      const status = jsonRpcErrorToHttpStatus(response.error.code);
-      return synthesizeResponse(status, {
+      // Recover the original HTTP status when available (set by our
+      // sendRequest wrapper), otherwise fall back to the JSON-RPC
+      // error-code → HTTP-status mapping.
+      const errorData = response.error.data;
+      const httpStatus =
+        isRecord(errorData) && typeof errorData['httpStatus'] === 'number'
+          ? errorData['httpStatus']
+          : jsonRpcErrorToHttpStatus(response.error.code);
+      return synthesizeResponse(httpStatus, {
         error: response.error.message,
         ...(response.error.data != null ? { data: response.error.data } : {}),
       });
@@ -533,8 +546,37 @@ export class AcpHttpTransport implements DaemonTransport {
       throw new Error(`ACP initialize error: ${response.error.message}`);
     }
 
-    this.initResult = response.result;
+    // Extract connectionId from the initialize result (_meta.qwen.connectionId).
+    const result = response.result;
+    if (isRecord(result)) {
+      const meta = result['_meta'];
+      if (isRecord(meta)) {
+        const qwen = meta['qwen'];
+        if (isRecord(qwen) && typeof qwen['connectionId'] === 'string') {
+          this.connectionId = qwen['connectionId'];
+        }
+      }
+    }
+
+    this.initResult = result;
     this._initialized = true;
+
+    // Fetch REST /capabilities separately so capabilities() returns the
+    // right shape (the ACP initialize result has a different schema).
+    try {
+      const capHeaders: Record<string, string> = {};
+      if (this.token) {
+        capHeaders['Authorization'] = `Bearer ${this.token}`;
+      }
+      const capRes = await this._fetch(`${this.baseUrl}/capabilities`, {
+        headers: capHeaders,
+      });
+      if (capRes.ok) {
+        this.initResult = await capRes.json();
+      }
+    } catch {
+      // Non-fatal — initResult stays as the ACP initialize result.
+    }
   }
 
   private async sendNotification(
@@ -553,6 +595,9 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    if (this.connectionId) {
+      headers['Acp-Connection-Id'] = this.connectionId;
+    }
 
     await this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
@@ -564,6 +609,7 @@ export class AcpHttpTransport implements DaemonTransport {
   private async sendRequest(
     method: string,
     params: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<JsonRpcResponse> {
     const req: JsonRpcRequest = {
       jsonrpc: '2.0',
@@ -578,21 +624,28 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    if (this.connectionId) {
+      headers['Acp-Connection-Id'] = this.connectionId;
+    }
 
     const res = await this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
       headers,
       body: JSON.stringify(req),
+      signal,
     });
 
     if (!res.ok) {
+      // Preserve the real HTTP status so the caller sees the
+      // correct error code instead of everything becoming 500.
       const text = await res.text().catch(() => '');
       return {
         jsonrpc: '2.0',
         id: req.id,
         error: {
-          code: -32603,
+          code: -res.status,
           message: `HTTP ${res.status}: ${text}`,
+          data: { httpStatus: res.status },
         },
       };
     }

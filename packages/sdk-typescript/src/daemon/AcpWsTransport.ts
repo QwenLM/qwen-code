@@ -333,6 +333,12 @@ export class AcpWsTransport implements DaemonTransport {
     (event: DaemonEvent) => void
   >();
 
+  /**
+   * Active async generators. Aborted when the WS closes so parked
+   * generators throw `DaemonTransportClosedError` instead of hanging.
+   */
+  private readonly _activeGenerators = new Set<AbortController>();
+
   /** Cached `initialize` result for `GET /capabilities`. */
   private initResult: unknown = undefined;
   private initPromise: Promise<void> | null = null;
@@ -429,6 +435,10 @@ export class AcpWsTransport implements DaemonTransport {
 
     await this.ensureConnected();
 
+    // Track this generator so we can abort it when the WS closes.
+    const genAbort = new AbortController();
+    this._activeGenerators.add(genAbort);
+
     // Create a queue that the notification listener pushes into.
     const queue: DaemonEvent[] = [];
     let resolve: (() => void) | null = null;
@@ -469,13 +479,22 @@ export class AcpWsTransport implements DaemonTransport {
     if (opts.signal) {
       if (opts.signal.aborted) {
         onAbort();
+        this._activeGenerators.delete(genAbort);
         return;
       }
       opts.signal.addEventListener('abort', onAbort, { once: true });
     }
+    // Also wire the generator-level abort (fired on WS close).
+    genAbort.signal.addEventListener('abort', onAbort, { once: true });
 
     try {
       while (!done && !this._disposed) {
+        // Check if the generator was aborted (WS close).
+        if (genAbort.signal.aborted) {
+          throw new DaemonTransportClosedError(
+            'WebSocket closed while generator was active',
+          );
+        }
         if (queue.length > 0) {
           yield queue.shift()!;
           continue;
@@ -484,12 +503,20 @@ export class AcpWsTransport implements DaemonTransport {
         await new Promise<void>((r) => {
           resolve = r;
         });
+        // Re-check abort after waking up.
+        if (genAbort.signal.aborted) {
+          throw new DaemonTransportClosedError(
+            'WebSocket closed while generator was active',
+          );
+        }
       }
     } finally {
+      this._activeGenerators.delete(genAbort);
       this.notificationListeners.delete(listener);
       if (opts.signal) {
         opts.signal.removeEventListener('abort', onAbort);
       }
+      genAbort.signal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -503,6 +530,11 @@ export class AcpWsTransport implements DaemonTransport {
       pending.reject(new DaemonTransportClosedError());
     }
     this.pending.clear();
+
+    // Abort all active generators.
+    for (const ac of this._activeGenerators) {
+      ac.abort();
+    }
 
     // Close the WebSocket.
     if (this.ws) {
@@ -600,7 +632,14 @@ export class AcpWsTransport implements DaemonTransport {
       };
 
       ws.onerror = () => {
-        // Errors are also followed by onclose, so we handle cleanup there.
+        // Node WebSocket may only fire 'error' without 'close' on
+        // connection refused / unreachable. Reject the connect
+        // promise so the caller doesn't hang forever.
+        if (!this._connected) {
+          rejectConnect(
+            new DaemonTransportClosedError('WebSocket connection failed'),
+          );
+        }
       };
 
       ws.onclose = (event) => {
@@ -617,6 +656,11 @@ export class AcpWsTransport implements DaemonTransport {
           pending.reject(closeError);
         }
         this.pending.clear();
+
+        // Abort all active generators so they throw instead of parking.
+        for (const ac of this._activeGenerators) {
+          ac.abort();
+        }
 
         // If we never connected, reject the connect promise.
         if (!this._disposed) {

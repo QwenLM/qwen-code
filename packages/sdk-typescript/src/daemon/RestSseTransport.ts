@@ -11,6 +11,7 @@ import type {
   DaemonTransportSubscribeOptions,
 } from './DaemonTransport.js';
 import { DaemonTransportClosedError } from './DaemonTransport.js';
+import { DaemonHttpError } from './DaemonClient.js';
 import { parseSseStream } from './sse.js';
 
 /**
@@ -136,10 +137,11 @@ export class RestSseTransport implements DaemonTransport {
         body && typeof body === 'object' && 'error' in body
           ? String((body as { error: unknown }).error)
           : `HTTP ${res.status}`;
-      throw Object.assign(new Error(`GET /session/:id/events: ${detail}`), {
-        status: res.status,
+      throw new DaemonHttpError(
+        res.status,
         body,
-      });
+        `GET /session/:id/events: ${detail}`,
+      );
     }
 
     // Content-type validation — a misconfigured proxy that swallows
@@ -151,11 +153,10 @@ export class RestSseTransport implements DaemonTransport {
       } catch {
         /* body already consumed or no body */
       }
-      throw Object.assign(
-        new Error(
-          `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
-        ),
-        { status: res.status, body: ct },
+      throw new DaemonHttpError(
+        res.status,
+        ct,
+        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
       );
     }
 

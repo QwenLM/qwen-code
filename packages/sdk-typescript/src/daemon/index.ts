@@ -32,14 +32,12 @@ export type {
   NegotiateTransportOptions,
 } from './DaemonTransport.js';
 export { RestSseTransport } from './RestSseTransport.js';
-export { AcpWsTransport } from './AcpWsTransport.js';
-export { AcpHttpTransport } from './AcpHttpTransport.js';
-export {
-  denormalizeAcpNotification,
-  filterEventsBySession,
-} from './AcpEventDenormalizer.js';
+// ACP transports: import directly from their modules to avoid browser bundle bloat.
+//   import { AcpWsTransport } from '@anthropic-ai/sdk/daemon/AcpWsTransport';
+//   import { AcpHttpTransport } from '@anthropic-ai/sdk/daemon/AcpHttpTransport';
+//   import { AutoReconnectTransport } from '@anthropic-ai/sdk/daemon/AutoReconnectTransport';
+//   import { denormalizeAcpNotification, filterEventsBySession } from '@anthropic-ai/sdk/daemon/AcpEventDenormalizer';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
-export { AutoReconnectTransport } from './AutoReconnectTransport.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
   DaemonAuthFlow,
