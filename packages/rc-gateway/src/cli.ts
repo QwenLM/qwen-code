@@ -253,9 +253,26 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     console.log('push pump: started');
   }
 
+  // End-of-quiet-window digest flush (webpush D4, cycle 75): poll on an unref'd
+  // interval so a "while you were away" digest fires the moment each
+  // subscription leaves its quiet window. flushQuietDigests is sync and never
+  // throws (best-effort send); the only behaviour it can add is an extra digest
+  // push, never a suppressed prompt. Re-reads the live subscription list each
+  // tick, so PATCH-quietHours / unsubscribe need no per-sub timer plumbing.
+  let quietDigestTimer: NodeJS.Timeout | undefined;
+  if (notifier) {
+    const intervalMs = Number(process.env.QWEN_RC_QUIET_DIGEST_MS) || 60000;
+    quietDigestTimer = setInterval(
+      () => notifier.flushQuietDigests(),
+      intervalMs,
+    );
+    quietDigestTimer.unref();
+  }
+
   const shutdown = async () => {
     for (const w of watchers) w.close();
     reloader?.stop();
+    if (quietDigestTimer) clearInterval(quietDigestTimer);
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
