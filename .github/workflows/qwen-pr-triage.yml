@@ -679,6 +679,11 @@ jobs:
 
       - name: 'Run approval-decision'
         id: 'run'
+        # The qwen exit code is not the source of truth here — the verdict
+        # file is (read in the next step). qwen exits non-zero when it hits
+        # the session-turn limit even after posting the review and writing the
+        # verdict, so let the job continue and let the verdict step arbitrate.
+        continue-on-error: true
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -703,19 +708,29 @@ jobs:
                 "read_file"
               ],
               "sandbox": false,
-              "maxSessionTurns": 15
+              "maxSessionTurns": 30
             }
           prompt: '/approval-decision ${{ needs.resolve.outputs.pr_number }} --repo ${{ github.repository }}'
 
       - name: 'Read verdict from skill output'
         if: 'always()'
+        env:
+          RUN_OUTCOME: '${{ steps.run.outcome }}'
         run: |
+          # The verdict file is the source of truth, not the action's exit
+          # code (see continue-on-error above). Succeed when the skill wrote a
+          # verdict — even if qwen then exited non-zero on the turn limit;
+          # fail only when no verdict was produced, so fallback-comment fires.
           VERDICT_FILE="/tmp/triage-results/approval-decision.json"
           if [ -f "$VERDICT_FILE" ]; then
             VERDICT=$(jq -r '.verdict // "approve"' "$VERDICT_FILE")
             echo "::notice::Approval decision verdict: $VERDICT"
+            if [ "$RUN_OUTCOME" != "success" ]; then
+              echo "::warning::approval-decision action exited non-zero (likely the session-turn limit) but the verdict file is present — treating the stage as complete."
+            fi
           else
-            echo "::warning::Approval skill did not write verdict file"
+            echo "::error::Approval skill wrote no verdict file (action outcome: ${RUN_OUTCOME}); failing the stage so fallback-comment runs."
+            exit 1
           fi
 
   # ─── Fallback: post comment if pipeline fails unexpectedly ─────────
