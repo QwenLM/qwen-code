@@ -344,8 +344,8 @@ export class CronScheduler {
         // Probe periodically to take over if the owner dies.
         // unref() so this timer doesn't prevent process exit in headless mode.
         this.lockProbeTimer = setInterval(() => {
-          void tryAcquireLock(projectRoot, sessionId, this.lockId).then(
-            (acquired) => {
+          void tryAcquireLock(projectRoot, sessionId, this.lockId)
+            .then((acquired) => {
               if (generation !== this.durableGeneration) {
                 // stop() ran while this probe was in flight.
                 this.releaseLateAcquisition(acquired, projectRoot, sessionId);
@@ -361,8 +361,14 @@ export class CronScheduler {
                 // handling for one-shots that went stale while no owner ran.
                 void this.loadFileTasks(true);
               }
-            },
-          );
+            })
+            .catch((err) => {
+              // tryAcquireLock rethrows non-EEXIST errors (EACCES/EIO on
+              // the lock path); without this handler a transient blip
+              // becomes an unhandled rejection and crashes the process.
+              // The next probe interval retries.
+              debugLogger.warn(`Cron lock probe failed: ${err}`);
+            });
         }, LOCK_PROBE_INTERVAL_MS);
         this.lockProbeTimer.unref();
       }
