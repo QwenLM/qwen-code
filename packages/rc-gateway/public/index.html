@@ -973,7 +973,18 @@
         // snippet sits BENEATH the header and a long unbroken snippet wraps.
         row.className = 'search-row';
         const head = document.createElement('div');
-        head.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
+        const label = document.createElement('span');
+        label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
+        // Open (cycle 65): reuse the existing watch panel — set #session and
+        // invoke the existing #watch handler so the hit's session streams.
+        const open = document.createElement('button');
+        open.textContent = 'Open';
+        open.onclick = () => {
+          $('session').value = h.sessionId;
+          $('watch').onclick();
+        };
+        head.appendChild(label);
+        head.appendChild(open);
         const snip = document.createElement('div');
         snip.textContent = h.snippet; // transcript text -> textContent (XSS-safe)
         row.appendChild(head);
