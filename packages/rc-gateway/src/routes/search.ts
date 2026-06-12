@@ -6,6 +6,7 @@
 
 import type { RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
+import { OWNER } from '../scopes.js';
 import {
   searchTranscriptsDetailed,
   SearchTimeoutError,
@@ -18,9 +19,14 @@ const VALID_KINDS = ['user', 'assistant', 'tool', 'all'] as const;
 const SEARCH_TIMEOUT_MS = 2000;
 
 /**
- * GET /rc/search — owner-only full-text search over the workspace's on-disk
- * JSONL session transcripts. Owner-gating is applied at the mount site
- * (requireScope(OWNER)), so no in-handler scope check is needed.
+ * GET /rc/search — full-text search over the workspace's on-disk JSONL session
+ * transcripts. Mounted under requireScope(SESSION_READ); the per-caller
+ * authorization is in-handler (cycle 76):
+ *   - a session-locked SHARE token searches ONLY its locked session — sessionId
+ *     is FORCED from req.rcClient.sessionLockId, NEVER read from ?sessionId (the
+ *     cycle-18 cross-session leak class);
+ *   - any other caller needs OWNER (in-handler) for an unrestricted search;
+ *     a plain session:read token without a lock → 403.
  *
  * `resolveDir` yields the chats dir for the current workspace (or undefined
  * when there is no workspace / the daemon errored → 200 {hits:[]}). The audit
@@ -34,6 +40,34 @@ export function createSearchRoute(
   opts?: { timeoutMs?: number; now?: () => number },
 ): RequestHandler {
   return async (req, res) => {
+    // Authorization FIRST, before any query processing, so an unauthorized
+    // caller learns nothing. A session-locked share is confined to its own
+    // session (sessionId forced from the lock, server-side); everyone else
+    // needs OWNER for an unrestricted search.
+    const lock = req.rcClient?.sessionLockId;
+    let sessionId: string | undefined;
+    if (lock !== undefined) {
+      sessionId = lock;
+    } else {
+      if (!req.rcClient?.scopes.includes(OWNER)) {
+        void audit?.record({
+          action: 'scope_denied',
+          actorTokenId: req.rcClient?.id,
+          shareId: req.rcClient?.shareId,
+          shareLabel: req.rcClient?.shareLabel,
+          detail: { required: OWNER },
+        });
+        res
+          .status(403)
+          .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+        return;
+      }
+      sessionId =
+        typeof req.query.sessionId === 'string' && req.query.sessionId
+          ? req.query.sessionId
+          : undefined;
+    }
+
     const rawQ = req.query.q;
     const q = typeof rawQ === 'string' ? rawQ.trim() : '';
     if (!q) {
@@ -57,11 +91,6 @@ export function createSearchRoute(
       res.status(400).json({ error: 'Invalid kind', code: 'invalid_kind' });
       return;
     }
-
-    const sessionId =
-      typeof req.query.sessionId === 'string' && req.query.sessionId
-        ? req.query.sessionId
-        : undefined;
 
     const parsedLimit = Number(req.query.limit);
     const limit = Number.isFinite(parsedLimit)
@@ -100,8 +129,14 @@ export function createSearchRoute(
         void audit?.record({
           action: 'search_performed',
           actorTokenId: req.rcClient?.id,
+          shareId: req.rcClient?.shareId,
+          shareLabel: req.rcClient?.shareLabel,
           // Privacy: kind + timeout flag only — never the query text or a count.
-          detail: { kind, timedOut: true },
+          detail: {
+            kind,
+            timedOut: true,
+            ...(lock !== undefined ? { sessionScoped: true } : {}),
+          },
         });
         res
           .status(503)
@@ -119,8 +154,14 @@ export function createSearchRoute(
     void audit?.record({
       action: 'search_performed',
       actorTokenId: req.rcClient?.id,
+      shareId: req.rcClient?.shareId,
+      shareLabel: req.rcClient?.shareLabel,
       // Privacy: count + kind only — never the query text. timing is not audited.
-      detail: { kind, resultCount: result.hits.length },
+      detail: {
+        kind,
+        resultCount: result.hits.length,
+        ...(lock !== undefined ? { sessionScoped: true } : {}),
+      },
     });
 
     res

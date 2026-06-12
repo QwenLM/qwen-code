@@ -12,14 +12,20 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { RcScope } from '../scopes.js';
-import { OWNER } from '../scopes.js';
+import { OWNER, SESSION_READ, SHARE } from '../scopes.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { createSearchRoute } from './search.js';
 
 let server: Server | undefined;
 let dir: string;
 let audit: AuditRecorder & { calls: AuditEntry[] };
-let client: { id: string; scopes: RcScope[] };
+let client: {
+  id: string;
+  scopes: RcScope[];
+  sessionLockId?: string;
+  shareId?: string;
+  shareLabel?: string;
+};
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   const calls: AuditEntry[] = [];
@@ -210,5 +216,71 @@ describe('search route', () => {
     };
     expect(body.hits).toHaveLength(2);
     expect(body.truncated).toBe(true);
+  });
+
+  // --- cycle 76: session-scoped search authorization ---
+
+  it('SECURITY: a session-locked share forces sessionId=lock and ignores ?sessionId', async () => {
+    // A second session whose transcript also matches the query.
+    writeFileSync(
+      join(dir, 'sess-2.jsonl'),
+      JSON.stringify({
+        uuid: 'evt-2',
+        sessionId: 'sess-2',
+        timestamp: '2026-06-02T00:00:00.000Z',
+        type: 'assistant',
+        cwd: '/w',
+        message: { role: 'assistant', parts: [{ text: 'oauth secret two' }] },
+      }) + '\n',
+    );
+    client = {
+      id: 'share1',
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 'sess-1',
+      shareId: 'share1',
+      shareLabel: 'guest',
+    };
+    const url = await mount(async () => dir);
+    // Attempt to read the OTHER session via ?sessionId — must be ignored.
+    const res = await fetch(`${url}/rc/search?q=oauth&sessionId=sess-2`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hits: Array<{ eventId: string }> };
+    // Only the locked session's hit comes back; sess-2 is never surfaced.
+    expect(body.hits).toHaveLength(1);
+    expect(body.hits[0].eventId).toBe('evt-1');
+    // The guest search row is share-attributable + flagged session-scoped.
+    const a = audit.calls.find((c) => c.action === 'search_performed');
+    expect(a!.shareId).toBe('share1');
+    expect(a!.shareLabel).toBe('guest');
+    expect(a!.detail).toEqual({
+      kind: 'all',
+      resultCount: 1,
+      sessionScoped: true,
+    });
+  });
+
+  it('a non-owner, non-locked token is denied (403 scope_denied)', async () => {
+    client = { id: 'reader', scopes: [SESSION_READ] };
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth`);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'insufficient_scope',
+    );
+    const a = audit.calls.find((c) => c.action === 'scope_denied');
+    expect(a).toBeDefined();
+    expect(a!.detail).toEqual({ required: OWNER });
+  });
+
+  it('an owner still honours ?sessionId (unrestricted search)', async () => {
+    // Owner scoping to a session with no records → empty, proving the query
+    // sessionId is honoured (not ignored) for an owner.
+    const url = await mount(async () => dir);
+    const res = await fetch(
+      `${url}/rc/search?q=oauth&sessionId=does-not-exist`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hits: unknown[] };
+    expect(body.hits).toHaveLength(0);
   });
 });
