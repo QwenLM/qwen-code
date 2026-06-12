@@ -856,6 +856,7 @@ export function resolvePromptDeadlineMs(
   return Math.min(serverMs, requestMs);
 }
 
+// Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 
 function advertisedMaxPendingPromptsPerSession(

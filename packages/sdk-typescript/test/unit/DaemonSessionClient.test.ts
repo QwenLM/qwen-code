@@ -931,9 +931,7 @@ describe('DaemonSessionClient', () => {
     });
 
     const second = session.events();
-    await expect(second.next()).rejects.toThrow(
-      'Another event subscription is already active',
-    );
+    await expect(second.next()).rejects.toThrow('subscription active');
 
     await first.return(undefined);
 

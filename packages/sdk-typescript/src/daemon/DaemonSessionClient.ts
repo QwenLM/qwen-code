@@ -487,7 +487,7 @@ export class DaemonSessionClient {
     const acquire = () => {
       if (started) return;
       if (this.subscriptionActive) {
-        throw new Error('Another event subscription is already active');
+        throw new Error('subscription active');
       }
       this.subscriptionActive = true;
       started = true;
@@ -587,7 +587,7 @@ function validateLastEventId(
 ): number | undefined {
   if (lastEventId === undefined) return undefined;
   if (!Number.isInteger(lastEventId) || lastEventId < 0) {
-    throw new TypeError('lastEventId must be a finite non-negative integer');
+    throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
 }

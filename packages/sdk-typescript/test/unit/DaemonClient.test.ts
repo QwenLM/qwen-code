@@ -906,6 +906,7 @@ describe('DaemonClient', () => {
           new Promise((resolve) => setTimeout(() => resolve('timed-out'), 50)),
         ]);
         expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
+        expect((secondResult as Error).message).toContain('"s-1"');
         expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
       } finally {
         ctrl.abort();
@@ -913,6 +914,69 @@ describe('DaemonClient', () => {
         await first;
         await second;
       }
+    });
+
+    it('maps server prompt queue full responses to the pending prompt limit error', async () => {
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(503, {
+            code: 'prompt_queue_full',
+            error: 'queue full',
+            sessionId: 's-1',
+            limit: 5,
+            pendingCount: 5,
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        maxPendingPromptsPerSession: 0,
+      });
+
+      const result = await client
+        .prompt('s-1', { prompt: [{ type: 'text', text: 'hi' }] })
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(result).toMatchObject({
+        sessionId: 's-1',
+        limit: 5,
+        pendingCount: 5,
+      });
+    });
+
+    it('maps server prompt queue full responses on non-blocking prompts', async () => {
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(503, {
+            code: 'prompt_queue_full',
+            error: 'queue full',
+            sessionId: 's-1',
+            limit: 7,
+            pendingCount: 7,
+          });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      });
+
+      const result = await client
+        .promptNonBlocking('s-1', {
+          prompt: [{ type: 'text', text: 'hi' }],
+        })
+        .catch((err: unknown) => err);
+
+      expect(result).toBeInstanceOf(DaemonPendingPromptLimitError);
+      expect(result).toMatchObject({
+        sessionId: 's-1',
+        limit: 7,
+        pendingCount: 7,
+      });
     });
 
     it('does not reserve a local prompt slot for a pre-aborted signal', async () => {
@@ -2155,7 +2219,7 @@ describe('DaemonClient', () => {
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const iter = client.subscribeEvents('s-1');
-      await expect(iter.next()).rejects.toThrow(/SSE response has no body/);
+      await expect(iter.next()).rejects.toThrow(/No SSE body/);
     });
 
     it('throws DaemonHttpError when content-type is not text/event-stream', async () => {

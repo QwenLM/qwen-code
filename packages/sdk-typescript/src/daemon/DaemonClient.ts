@@ -132,6 +132,7 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 // Server deadline + headroom so the client never races the daemon's own budget.
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
@@ -146,9 +147,7 @@ export function normalizePendingPromptLimit(
     return Infinity;
   }
   if (!Number.isInteger(value) || value < 0) {
-    throw new TypeError(
-      'maxPendingPromptsPerSession must be a non-negative integer',
-    );
+    throw new TypeError('bad maxPendingPromptsPerSession');
   }
   return value;
 }
@@ -228,7 +227,7 @@ export class DaemonPendingPromptLimitError extends Error {
   declare readonly pendingCount: number;
 
   constructor(sessionId: string, limit: number, pendingCount: number) {
-    super(`Pending prompt limit reached (${pendingCount}/${limit})`);
+    super(`Pending prompts full: "${sessionId}" (${pendingCount}/${limit})`);
     this.name = 'DaemonPendingPromptLimitError';
     this.sessionId = sessionId;
     this.limit = limit;
@@ -466,7 +465,7 @@ export class DaemonClient {
     // body consume callback, if any) settles.
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
+      ctrl.abort(new DOMException('timeout', 'TimeoutError'));
     }, effectiveTimeoutMs);
     if (typeof timer === 'object' && timer && 'unref' in timer) {
       (timer as { unref: () => void }).unref();
@@ -499,7 +498,17 @@ export class DaemonClient {
   private async failOnError(
     res: Response,
     label: string,
-  ): Promise<DaemonHttpError> {
+  ): Promise<DaemonHttpError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError>;
+  private async failOnError(
+    res: Response,
+    label: string,
+    sessionId?: string,
+  ): Promise<DaemonHttpError | DaemonPendingPromptLimitError> {
     // Read the body exactly once. `res.json()` consumes the stream even on
     // parse-failure, leaving a subsequent `res.text()` empty — so go via
     // text() and attempt JSON parsing ourselves; raw text is a useful
@@ -521,6 +530,21 @@ export class DaemonClient {
       body && typeof body === 'object' && 'error' in body
         ? String((body as { error: unknown }).error)
         : `HTTP ${res.status}`;
+    if (sessionId && res.status === 503 && body && typeof body === 'object') {
+      const data = body as {
+        code?: unknown;
+        limit?: unknown;
+        pendingCount?: unknown;
+        sessionId?: unknown;
+      };
+      if (data.code === 'prompt_queue_full') {
+        return new DaemonPendingPromptLimitError(
+          typeof data.sessionId === 'string' ? data.sessionId : sessionId,
+          typeof data.limit === 'number' ? data.limit : 0,
+          typeof data.pendingCount === 'number' ? data.pendingCount : 0,
+        );
+      }
+    }
     return new DaemonHttpError(res.status, body, `${label}: ${detail}`);
   }
 
@@ -1846,7 +1870,11 @@ export class DaemonClient {
       }
 
       if (!res.ok) {
-        throw await this.failOnError(res, 'POST /session/:id/prompt');
+        throw await this.failOnError(
+          res,
+          'POST /session/:id/prompt',
+          sessionId,
+        );
       }
       return (await res.json()) as PromptResult;
     } finally {
@@ -1888,7 +1916,9 @@ export class DaemonClient {
       return (await res.json()) as NonBlockingPromptAccepted;
     }
 
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
+    if (!res.ok) {
+      throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
+    }
     return (await res.json()) as PromptResult;
   }
 
@@ -1913,7 +1943,7 @@ export class DaemonClient {
         const result = matchTurnEvent(event, promptId);
         if (result !== undefined) return result;
       }
-      throw new Error('SSE stream ended without turn completion');
+      throw new Error('SSE stream ended');
     } catch (err) {
       if (
         signal?.aborted &&
@@ -2002,7 +2032,7 @@ export class DaemonClient {
       connectTimer = setTimeout(
         () =>
           connectCtrl.abort(
-            new DOMException('Initial connect timed out', 'TimeoutError'),
+            new DOMException('connect timeout', 'TimeoutError'),
           ),
         this.fetchTimeoutMs,
       );
@@ -2057,11 +2087,11 @@ export class DaemonClient {
       throw new DaemonHttpError(
         res.status,
         ct,
-        `GET /session/:id/events: expected content-type text/event-stream, got "${ct}"`,
+        `Bad SSE content-type: "${ct}"`,
       );
     }
     if (!res.body) {
-      throw new Error('SSE response has no body');
+      throw new Error('No SSE body');
     }
     // Forward the abort signal so post-200 aborts stop the iteration.
     // Without this, callers who `controller.abort()` after the response
@@ -2420,8 +2450,7 @@ export function abortTimeout(ms: number): AbortSignal {
   // `if (err.name === 'TimeoutError')` would see the polyfill
   // differently from the native runtime.
   const handle = setTimeout(
-    () =>
-      ctrl.abort(new DOMException('The operation timed out', 'TimeoutError')),
+    () => ctrl.abort(new DOMException('timeout', 'TimeoutError')),
     ms,
   );
   if (typeof handle === 'object' && handle && 'unref' in handle) {

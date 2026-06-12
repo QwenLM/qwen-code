@@ -646,6 +646,7 @@ const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+// Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
