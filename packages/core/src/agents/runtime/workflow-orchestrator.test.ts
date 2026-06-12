@@ -452,33 +452,65 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
     });
 
     // TST-2 (P2 self-review): pipeline is parallel-of-chains — STAGGERED, with
-    // NO inter-stage barrier. Item 0's chain (fast) must reach stage 2 long
-    // before item 1's slow stage 1 finishes. A barrier impl (all items clear
-    // stage 1 before any enters stage 2) would delay s2-0 until ~120ms; the
-    // staggered impl reaches it in ~a few ms. The 50ms threshold cleanly
-    // separates the two regardless of machine speed.
-    it('is staggered with no inter-stage barrier (item A reaches stage 2 before item B finishes stage 1)', async () => {
-      const log: Array<{ p: string; t: number }> = [];
-      const t0 = Date.now();
-      const orchestrator = new WorkflowOrchestrator(async (prompt) => {
-        log.push({ p: prompt, t: Date.now() - t0 });
-        // Only item 1's first stage is slow.
-        await new Promise((r) => setTimeout(r, prompt === 's1-1' ? 120 : 2));
-        return 'ok';
-      });
-      // Stage 2's first arg is the PREVIOUS stage's result; use the `item`
-      // arg (2nd) to label by the original item.
-      await orchestrator.run({
-        script: `return await pipeline([0, 1],
-          (prev, item) => agent("s1-" + item),
-          (prev, item) => agent("s2-" + item),
-        );`,
-        args: undefined,
-      });
-      const s2of0 = log.find((e) => e.p === 's2-0');
-      expect(s2of0).toBeDefined();
-      // Item 0 entered stage 2 well before item 1's 120ms stage 1 completed.
-      expect(s2of0!.t).toBeLessThan(50);
+    // NO inter-stage barrier. Item 0's stage-2 dispatch must be able to fire
+    // WHILE item 1's stage-1 dispatch is still pending. We assert this
+    // deterministically via a release gate: item 1's stage 1 blocks until
+    // item 0 reaches stage 2 and releases the gate. A barrier impl
+    // (all items must clear stage N before any enters stage N+1) cannot
+    // satisfy this — it would wait for item 1's stage 1 to finish first,
+    // creating a circular wait that the vitest timeout would catch.
+    //
+    // PR #4947 R2 T6 (DragonnZhang): the previous version of this test used
+    // an elapsed-time threshold (50ms vs 120ms) which fails deterministically
+    // on a 3-core macOS-14 CI runner because the cpu-derived concurrency
+    // limit becomes 1 — FIFO then forces all stage-1 dispatches to settle
+    // before any stage-2 starts, breaking the timing assumption. Force the
+    // limit to 2 AND use a release gate so the assertion is timing-free.
+    it('is staggered with no inter-stage barrier (item A reaches stage 2 while item B is still in stage 1)', async () => {
+      const envPrev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '2';
+      try {
+        let releaseItem1Stage1: () => void = () => {};
+        const item1Stage1Gate = new Promise<void>((resolve) => {
+          releaseItem1Stage1 = resolve;
+        });
+        let item0ReachedStage2 = false;
+
+        const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+          if (prompt === 's1-0') return 'ok'; // item 0's stage 1: fast
+          if (prompt === 's1-1') {
+            // item 1's stage 1: BLOCKS until item 0 reaches stage 2.
+            // A staggered impl lets item 0 advance to stage 2 while this is
+            // still in flight. A barrier impl would hang here waiting for
+            // item 0's stage 2 — but item 0's stage 2 cannot start because
+            // the barrier is waiting for THIS to finish. Mutual wait =
+            // vitest timeout = test fails for a barrier impl.
+            await item1Stage1Gate;
+            return 'ok';
+          }
+          if (prompt === 's2-0') {
+            item0ReachedStage2 = true;
+            releaseItem1Stage1();
+            return 'ok';
+          }
+          if (prompt === 's2-1') return 'ok';
+          throw new Error(`unexpected prompt ${prompt}`);
+        });
+
+        await orchestrator.run({
+          script: `return await pipeline([0, 1],
+            (prev, item) => agent("s1-" + item),
+            (prev, item) => agent("s2-" + item),
+          );`,
+          args: undefined,
+        });
+
+        expect(item0ReachedStage2).toBe(true);
+      } finally {
+        if (envPrev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = envPrev;
+      }
     }, 10_000);
   });
 

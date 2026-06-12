@@ -80,6 +80,25 @@ describe('WorkflowTool', () => {
     expect(JSON.parse(llmText)).toEqual(['T:a', 'T:b']);
   });
 
+  // PR #4947 R2 T8 (qwen-code-ci-bot): pipeline() through WorkflowTool
+  // exercises a vm wrapper path that is structurally distinct from parallel's
+  // single-argument call — pipeline uses `callPipeline.apply(null, arguments)`
+  // and `[items].concat(stages)` to spread the variadic stage list
+  // (workflow-sandbox.ts pipeline wrapper). A regression in the vm-to-host
+  // stage forwarding would not be caught by the parallel E2E test above.
+  it('execute() runs pipeline() end-to-end and returns the revived array', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: `return await pipeline([1, 2], (x) => x * 10, (x) => x + 1);`,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
+    expect(JSON.parse(llmText)).toEqual([11, 21]);
+  });
+
   // TST-C3: execute() should return an error result (not throw) when the script throws.
   it('execute() returns an error result when the script throws', async () => {
     const tool = new WorkflowTool(fakeConfig(), {

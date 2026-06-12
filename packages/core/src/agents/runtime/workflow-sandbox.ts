@@ -120,6 +120,9 @@ function isRegexContext(source: string, i: number): boolean {
 }
 
 import * as vm from 'node:vm';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKFLOW');
 
 // Cap log + phase lines to prevent unbounded memory growth from runaway
 // model-authored loops.
@@ -346,6 +349,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
     hostAgent: opts.dispatch,
+    // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
+    // catch path. Mirrors the rejection-logging in settleToNullArray so an
+    // operator running with debug logging can distinguish "thunk rejected"
+    // (settleToNullArray.warn) from "thunk resolved to a non-JSON-serializable
+    // value" (this warn). Receives only primitive strings/numbers — the bridge
+    // contract forbids host objects crossing back to the script.
+    logRevivalFailure: (idx: number, reason: string): void => {
+      debugLogger.warn(
+        `Workflow result revival failed at index ${idx}: ${reason}; ` +
+          `slot set to null (non-JSON-serializable thunk return).`,
+      );
+    },
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -545,7 +560,14 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         for (let i = 0; i < hostArr.length; i++) {
           try {
             out[i] = JSON.parse(JSON.stringify(hostArr[i]));
-          } catch (_e) {
+          } catch (e) {
+            // Cross to host realm for debug logging. The bridge function
+            // accepts only primitive strings/numbers; the error message is
+            // coerced to a String here so no vm-realm Error object crosses.
+            __b.logRevivalFailure(
+              i,
+              String((e && e.message != null) ? e.message : e),
+            );
             out[i] = null;
           }
         }
