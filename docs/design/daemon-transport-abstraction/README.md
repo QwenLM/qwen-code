@@ -1,6 +1,6 @@
 # DaemonTransport Abstraction Layer
 
-> Target branch: `main`. Author: arnoo.gao. Date: 2026-06-12. Status: **Design v2 — review**.
+> Target branch: `main`. Author: arnoo.gao. Date: 2026-06-12. Status: **Design v4 — review**.
 > Design-first per repo workflow: this doc lands before the implementation PR.
 
 ---
@@ -10,10 +10,11 @@
 `DaemonClient` hardcodes REST+SSE. Third-party integrations wanting ACP
 WebSocket must fork the provider stack (~8 files). This proposal adds a
 **`DaemonTransport` interface** with `fetch` + `subscribeEvents` methods,
-enabling pluggable transports with **zero breaking changes**.
+plus auto-detection and runtime fallback, enabling pluggable transports
+with **zero breaking changes**.
 
-**Total change: ~178 lines of production code** across 3 files (new interface +
-`RestSseTransport` extraction + DaemonClient wiring). Existing consumers untouched.
+**Total change: ~1300 lines** in a single implementation PR. Existing
+consumers untouched — `new DaemonClient({ baseUrl, token })` = current behavior.
 
 ---
 
@@ -88,6 +89,9 @@ interface DaemonTransport {
    * - Callable without prior setup; transport handles init internally
    *   (lazy-init / init-once deferred pattern)
    * - Throws DaemonTransportClosedError when connection is dead
+   * - When init.signal aborts, transport MUST propagate cancellation
+   *   to the wire (WS: send session/cancel RPC; HTTP: abort fetch).
+   *   Pending response rejects with AbortError.
    */
   fetch(
     url: string,
@@ -99,10 +103,15 @@ interface DaemonTransport {
    * Subscribe to session events.
    *
    * Contract:
-   * - MUST yield DaemonEvent with monotonic integer id
+   * - Events with id MUST have monotonic integer ids; synthetic/terminal
+   *   frames (e.g., stream_error) MAY omit id (DaemonEvent.id is optional)
    * - MUST deliver ALL event types (session + workspace) in one stream
    * - Aborting signal MUST stop only this generator, NOT the connection
+   * - When the connection dies, all pending generators MUST throw
+   *   DaemonTransportClosedError (transport maintains generator refs)
    * - MUST apply connectTimeoutMs to connect phase only
+   * - Transport MUST declare whether lastEventId replay is supported;
+   *   if not, consumer MUST use session/load for full resync on reconnect
    */
   subscribeEvents(
     sessionId: string,
@@ -171,6 +180,32 @@ Internal changes:
   - `'rest'`: delegate to `this.transport.subscribeEvents(sessionId, opts)`
   - default: same delegation (each transport handles its own wire format)
 - Remove `private _fetch` field (replaced by transport)
+
+### 2.5 Provider injection point
+
+`DaemonWorkspaceProvider` and `DaemonSessionProvider` both construct
+`DaemonClient` internally. To let third parties inject a transport without
+bypassing the provider:
+
+```typescript
+// DaemonWorkspaceProvider — add optional transport prop
+interface DaemonWorkspaceProviderProps {
+  baseUrl: string;
+  token?: string;
+  transport?: DaemonTransport;  // NEW — forwarded to DaemonClient
+  // ...existing props
+}
+
+// DaemonSessionProvider — inherit from workspace context
+// No transport prop needed; reads from workspace context
+```
+
+When `transport` is provided, the provider passes it to `DaemonClient`:
+```typescript
+new DaemonClient({ baseUrl, token, transport: props.transport })
+```
+
+When omitted: current behavior (REST+SSE). ~5 lines of provider change.
 
 ### 2.5 RestSseTransport (~80 lines)
 
@@ -333,7 +368,7 @@ code is additive and opt-in. `new DaemonClient({ baseUrl, token })` without
 | Lazy-init (not explicit `connect()`) | Keeps DaemonClient construction synchronous; default `new RestSseTransport()` needs no init |
 | Auto-detection is one-shot, not mid-session | `negotiate()` probes once at startup; runtime fallback is consumer-driven via `DaemonTransportClosedError`, not silent internal switch |
 | No error taxonomy prerequisite | ACP transports map errors to HTTP-equivalent status codes internally; `DaemonHttpError` works as-is |
-| No provider changes needed | Third parties construct `DaemonClient` with `transport` directly; provider creates `DaemonClient` from workspace context which can carry a transport |
+| Provider gets `transport` prop | `DaemonWorkspaceProvider` gains optional `transport` prop (~5 lines), forwarded to `DaemonClient` constructor. Third parties set this prop; omitting it = current REST behavior |
 
 ---
 
@@ -380,6 +415,8 @@ All changes land in one PR. Estimated ~1300 lines total.
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Constructor + 6 `_fetch` sites + subscribeEvents rewrite | ~40 net |
 | `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~10 |
 | `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` | ~5 |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | Add `transports` to `DaemonCapabilities` type | ~3 |
+| `packages/webui/src/daemon/workspace/DaemonWorkspaceProvider.tsx` | Add optional `transport` prop, forward to `DaemonClient` | ~5 |
 | Tests | Transport unit + integration tests | ~200 |
 
 **Backward compatibility**: `new DaemonClient({ baseUrl, token })` without
