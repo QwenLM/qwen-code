@@ -5,8 +5,9 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
-import { createWorkflowSandbox } from './workflow-sandbox.js';
+import { createWorkflowSandbox, debugLogger } from './workflow-sandbox.js';
 import type {
   WorkflowAgentOpts,
   WorkflowAgentResult,
@@ -14,6 +15,99 @@ import type {
 import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { createConcurrencyLimiter } from '../../utils/concurrencyLimiter.js';
+
+/**
+ * Default ceiling on total `agent()` calls per workflow run (matches upstream
+ * `hOK = 1000`). Counts EVERY dispatch — sequential, `parallel()`, and
+ * `pipeline()` all funnel through the one wrapped dispatch — so a fan-out
+ * cannot bypass it. The 1001st call throws. Override via env (see below).
+ */
+export const DEFAULT_MAX_AGENTS_PER_RUN = 1000;
+export const MAX_WORKFLOW_AGENTS_ENV = 'QWEN_CODE_MAX_WORKFLOW_AGENTS';
+/**
+ * Absolute upper bound on the env-override agent cap. Even an operator who
+ * sets `QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999` cannot exceed this — the
+ * intent is to catch fat-finger / misconfig that would silently uncap a
+ * runaway workflow (1000-agent default × per-agent token cost). 10000 is
+ * 10× the default, generous for legitimate large fan-outs.
+ */
+export const HARD_MAX_AGENTS_PER_RUN_CEILING = 10_000;
+
+/**
+ * Resolve the per-run agent cap, honoring `QWEN_CODE_MAX_WORKFLOW_AGENTS`.
+ * Mirrors `resolveMaxConcurrentBackgroundAgents` (background-tasks.ts): a
+ * non-integer / <1 override is rejected with a debug warning and the default
+ * is used. An override above `HARD_MAX_AGENTS_PER_RUN_CEILING` is clamped
+ * (with a debug warning) — the env knob is operator-facing, not security-
+ * critical, but a misconfigured ceiling shouldn't silently uncap the run.
+ */
+export function resolveMaxAgentsPerRun(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env[MAX_WORKFLOW_AGENTS_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_MAX_AGENTS_PER_RUN;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${MAX_WORKFLOW_AGENTS_ENV}=${JSON.stringify(raw)}, ` +
+        `using default (${DEFAULT_MAX_AGENTS_PER_RUN})`,
+    );
+    return DEFAULT_MAX_AGENTS_PER_RUN;
+  }
+  if (parsed > HARD_MAX_AGENTS_PER_RUN_CEILING) {
+    debugLogger.warn(
+      `${MAX_WORKFLOW_AGENTS_ENV}=${parsed} exceeds hard ceiling ` +
+        `(${HARD_MAX_AGENTS_PER_RUN_CEILING}); clamping.`,
+    );
+    return HARD_MAX_AGENTS_PER_RUN_CEILING;
+  }
+  return parsed;
+}
+
+export const MAX_WORKFLOW_CONCURRENCY_ENV =
+  'QWEN_CODE_MAX_WORKFLOW_CONCURRENCY';
+/**
+ * Absolute upper bound on the env-override concurrency window. Above this,
+ * a single Node process running N concurrent LLM calls is past the point a
+ * distributed worker is the better tool. 64 ≈ 4× the 16-default ceiling.
+ */
+export const HARD_MAX_CONCURRENCY_CEILING = 64;
+
+/**
+ * Maximum agents in flight at once within a single run, shared across all
+ * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
+ * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
+ * produce a deadlocking limit. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides
+ * the computed value with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`;
+ * an invalid override falls back to the cpu-derived default with a debug
+ * warning, and an over-ceiling override is clamped.
+ */
+export function resolveConcurrencyLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env[MAX_WORKFLOW_CONCURRENCY_ENV];
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      if (parsed > HARD_MAX_CONCURRENCY_CEILING) {
+        debugLogger.warn(
+          `${MAX_WORKFLOW_CONCURRENCY_ENV}=${parsed} exceeds hard ceiling ` +
+            `(${HARD_MAX_CONCURRENCY_CEILING}); clamping.`,
+        );
+        return HARD_MAX_CONCURRENCY_CEILING;
+      }
+      return parsed;
+    }
+    debugLogger.warn(
+      `Invalid ${MAX_WORKFLOW_CONCURRENCY_ENV}=${JSON.stringify(raw)}, ` +
+        `using cpu-derived default`,
+    );
+  }
+  return Math.max(1, Math.min(16, os.cpus().length - 2));
+}
 
 /**
  * Bound the resource ceiling for workflow subagents so a single `agent()`
@@ -160,15 +254,53 @@ export class WorkflowOrchestrator {
   constructor(private readonly dispatch: WorkflowAgentDispatch) {}
 
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
-    // Signal threading lives in createProductionDispatch (closure-captured)
-    // rather than per-run state. Sandbox-level signal is intentionally not
-    // exposed in P1 — sync-loop protection is provided by the 30s vm
-    // timeout in workflow-sandbox.ts; async-loop cancellation flows
-    // through dispatch's subagent.execute path.
+    // Signal threading: createProductionDispatch closure-captures a signal
+    // for subagent.execute cancellation. P2 additionally derives a per-run
+    // limiter from req.abortOnTimeout?.signal so wall-clock abort drains
+    // queued dispatches promptly. Sync-loop protection is the 30s vm
+    // timeout in workflow-sandbox.ts; async-loop cancellation flows through
+    // dispatch's subagent.execute path.
     const runId = generateRunId();
+
+    const maxAgents = resolveMaxAgentsPerRun();
+    const signal = req.abortOnTimeout?.signal;
+
+    // P2: the concurrency window throttles AGENT DISPATCHES, not orchestration
+    // thunks. parallel()/pipeline() compose promises freely; only the leaf
+    // agent() calls acquire a slot. This gives the correct "N agents in flight
+    // per run" semantics AND avoids a re-entrancy deadlock (F1, P2 review): if
+    // the window sat at the thunk level, a nested parallel()/pipeline() — e.g.
+    // a pipeline stage that fans out, the canonical /deep-research shape —
+    // would hold every slot while awaiting inner work that can never acquire
+    // one. One shared limiter per run keeps total in-flight agents under the
+    // cap across all fan-out calls.
+    const limiter = createConcurrencyLimiter(resolveConcurrencyLimit(), signal);
+
+    // Every agent() call — sequential, parallel(), or pipeline() — funnels
+    // through this one wrapped dispatch: the counter enforces the per-run agent
+    // cap regardless of launch path (increment-then-check: calls 1..max pass,
+    // the (max+1)th throws), and limiter.run enforces the concurrency window.
+    let agentCount = 0;
+    const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      agentCount += 1;
+      if (agentCount > maxAgents) {
+        return Promise.reject(
+          new Error(
+            `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
+          ),
+        );
+      }
+      return limiter.run(() => this.dispatch(prompt, opts));
+    };
+
+    const parallelImpl = makeParallelImpl(signal);
+    const pipelineImpl = makePipelineImpl(signal);
+
     const sandbox = createWorkflowSandbox({
       args: req.args,
-      dispatch: this.dispatch,
+      dispatch: countedDispatch,
+      parallel: parallelImpl,
+      pipeline: pipelineImpl,
       abortOnTimeout: req.abortOnTimeout,
     });
     try {
@@ -195,6 +327,162 @@ export class WorkflowOrchestrator {
       );
     }
   }
+}
+
+/**
+ * Settle a batch of thunks into a position-aligned `Array<T|null>` —
+ * errors-as-data: a thunk that rejects (including an over-cap dispatch or a
+ * stage error) becomes `null` at its index, never collapsing the batch.
+ * `Promise.resolve().then(t)` funnels a synchronously-throwing thunk into the
+ * rejection path. The ONE thing that rejects the whole batch is an abort, so
+ * an aborted run surfaces a rejection rather than a silent array of nulls.
+ * Concurrency is bounded at the dispatch layer (limiter.run in countedDispatch),
+ * not here — so nesting a parallel()/pipeline() inside a thunk cannot deadlock.
+ *
+ * Abort responsiveness: this function awaits `Promise.allSettled` which only
+ * settles after every thunk settles. That is NOT a long wait in practice
+ * because the dispatch signal (workflow-orchestrator.ts countedDispatch +
+ * createProductionDispatch) is threaded through to `subagent.execute(ctx,
+ * signal)`, so each in-flight thunk reacts to abort and rejects promptly. The
+ * limiter's separate `addEventListener('abort')` listener drains the
+ * not-yet-started queued thunks instantly. So the apparent "wait for all to
+ * complete" is in reality "wait for all to reach an abort-aware rejection",
+ * which fires immediately after the signal — not after each subagent's full
+ * 10-min internal timeout.
+ */
+async function settleToNullArray(
+  thunks: Array<() => Promise<unknown>>,
+  signal?: AbortSignal,
+): Promise<unknown[]> {
+  const settled = await Promise.allSettled(
+    thunks.map((t) => Promise.resolve().then(t)),
+  );
+  // Use DOMException('AbortError') for consistency with the limiter's
+  // abort path so HOST-side callers seeing this rejection directly can
+  // classify it via isAbortError() (utils/errors.ts). NOTE: this name is
+  // NOT preserved across the vm boundary — vmAsync (workflow-sandbox.ts)
+  // re-throws the script-visible rejection as a fresh vm-realm `new
+  // Error(msg)`, and the orchestrator's outer catch then wraps it as
+  // WorkflowExecutionError. So isAbortError() at the WorkflowTool layer
+  // returns false either way; the DOMException is purely a host-internal
+  // consistency choice, not a script-observable one.
+  if (signal?.aborted)
+    throw new DOMException('Workflow run aborted.', 'AbortError');
+  // Errors-as-data: a rejected thunk becomes null at its index. Log the
+  // discarded rejection reason at debug level so operators investigating a
+  // workflow that returned unexpected nulls can disambiguate between (a) a
+  // dispatch failure (rate limit / model outage), (b) the 1000-agent cap,
+  // (c) a pipeline stage exception, and (d) a non-JSON-serializable thunk
+  // return — all of which surface as the same `null` to the script by
+  // design. The log line is the only operator-side signal of which path
+  // fired; the contract to the script stays opaque.
+  return settled.map((r, i) => {
+    if (r.status === 'fulfilled') return r.value;
+    debugLogger.warn(
+      `Workflow thunk at index ${i} rejected: ${String((r.reason as { message?: unknown })?.message ?? r.reason)}`,
+    );
+    return null;
+  });
+}
+
+/**
+ * Build the host-side `parallel(thunks)` impl. Each thunk is a vm-realm
+ * function whose agent() calls throttle through the per-run concurrency window
+ * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
+ * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
+ * itself rejects only when given invalid arguments (non-array / non-function
+ * element) or when the run is aborted. The result array is revived into the
+ * vm realm by the sandbox wrapper (per-element JSON round-trip) — this host
+ * array never reaches the script directly.
+ */
+function makeParallelImpl(
+  signal?: AbortSignal,
+): (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]> {
+  return (thunks) => {
+    if (!Array.isArray(thunks)) {
+      return Promise.reject(
+        new Error(
+          'parallel() expects an array of thunks (functions returning promises).',
+        ),
+      );
+    }
+    for (const t of thunks) {
+      if (typeof t !== 'function') {
+        return Promise.reject(
+          new Error(
+            'parallel() expects an array of functions, not values — wrap each ' +
+              'call: parallel([() => agent(...), () => agent(...)]).',
+          ),
+        );
+      }
+    }
+    return settleToNullArray(thunks, signal);
+  };
+}
+
+/**
+ * Build the host-side `pipeline(items, ...stages)` impl as parallel-of-chains.
+ *
+ * Each item becomes one chain that runs the stages in sequence — staggered,
+ * with NO barrier between stages, so item A can be in stage 3 while item B is
+ * still in stage 1. Stage callbacks receive `(prev, item, idx)`; the first
+ * stage's `prev` is the item itself. A stage that throws, returns `null`, or
+ * returns a non-JSON-serializable value drops that item to `null` and skips
+ * its remaining stages, leaving other items unaffected. Concurrency is
+ * bounded at the dispatch layer, and the result array shares parallel()'s
+ * per-element vm-realm revival.
+ */
+function makePipelineImpl(
+  signal?: AbortSignal,
+): (
+  items: unknown[],
+  ...stages: Array<
+    (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+  >
+) => Promise<unknown[]> {
+  return (items, ...stages) => {
+    if (!Array.isArray(items)) {
+      return Promise.reject(
+        new Error(
+          'pipeline() expects an array of items as its first argument.',
+        ),
+      );
+    }
+    for (const s of stages) {
+      if (typeof s !== 'function') {
+        return Promise.reject(
+          new Error(
+            'pipeline() stages must be functions: ' +
+              'pipeline(items, item => ..., result => ...).',
+          ),
+        );
+      }
+    }
+    const chains = items.map(
+      (item, idx) => () => runPipelineChain(item, idx, stages),
+    );
+    return settleToNullArray(chains, signal);
+  };
+}
+
+/**
+ * Run one item through every stage in order. `null` is the universal drop
+ * sentinel: a stage that returns `null` (or throws — surfaced as a rejection
+ * that the batch maps to `null`) short-circuits the rest of the chain.
+ */
+async function runPipelineChain(
+  item: unknown,
+  idx: number,
+  stages: Array<
+    (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+  >,
+): Promise<unknown> {
+  let prev: unknown = item;
+  for (const stage of stages) {
+    if (prev === null) break;
+    prev = await stage(prev, item, idx);
+  }
+  return prev;
 }
 
 /**
