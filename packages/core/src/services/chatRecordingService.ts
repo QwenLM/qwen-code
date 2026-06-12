@@ -1006,7 +1006,7 @@ export class ChatRecordingService {
         if (controller.signal.aborted) return;
         // Re-check in case a /rename landed while the LLM call was in flight —
         // manual wins. In-process is the common path.
-        if ((this.currentTitleSource ?? 'manual') === 'manual') return;
+        if (this.currentTitleSource === 'manual') return;
         // Cross-process guard: another CLI tab writing to the same JSONL
         // could have renamed (manually) since we started. Re-read the file's
         // latest title record before we append so we don't clobber it.
