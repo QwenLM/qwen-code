@@ -92,6 +92,7 @@ describe('BackgroundAgentResumeService', () => {
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
+      getSkillManager: () => undefined,
       getSkipStartupContext: () => true,
       getTranscriptPath: () => path.join(tempDir, 'session.jsonl'),
       getToolRegistry: () => stubToolRegistry,
