@@ -17,6 +17,7 @@ import type { PushSender } from './sender.js';
 import { buildPayload, type PushPayload } from './payload.js';
 import { type PushRateLimiter, DEFAULT_MAX_PER_HOUR } from './rateLimiter.js';
 import type { PushCoalescer } from './coalescer.js';
+import type { PushDigest, DigestSummary } from './digest.js';
 
 /**
  * Per-kind required scope. A subscription only receives a kind if its owning
@@ -44,7 +45,13 @@ export class PushNotifier {
     private readonly routing?: RoutingMatcher,
     private readonly rateLimiter?: PushRateLimiter,
     private readonly coalescer?: PushCoalescer,
+    private readonly digest?: PushDigest,
   ) {}
+
+  /** Per-subscription summary of pushes suppressed during quiet hours (D4 read). */
+  digestSummary(): DigestSummary[] {
+    return this.digest?.summary() ?? [];
+  }
 
   /**
    * Forget a subscription's rolling-hour rate-limit window — called when the
@@ -56,6 +63,7 @@ export class PushNotifier {
   forgetRateLimit(subId: string): void {
     this.rateLimiter?.forget(subId);
     this.coalescer?.forget(subId);
+    this.digest?.forget(subId);
   }
 
   /**
@@ -179,6 +187,9 @@ export class PushNotifier {
                 subscriptionId: r.id,
               },
             });
+            // Track what quiet hours suppressed for the D4 "while you were away"
+            // digest (record-only; never affects delivery).
+            this.digest?.record(r.id, payload.kind);
             return;
           }
         }

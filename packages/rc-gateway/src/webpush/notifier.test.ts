@@ -1075,3 +1075,53 @@ describe('PushNotifier same-kind coalescing (cycle 63)', () => {
     expect(sent).toHaveLength(2);
   });
 });
+
+describe('PushNotifier quiet-hours digest tracking (cycle 71)', () => {
+  it('records a quiet-hours suppression in the digest and exposes it via digestSummary', async () => {
+    const { PushDigest } = await import('./digest.js');
+    // APPROVE so permission.required passes the scope gate and reaches the
+    // quiet-hours gate (where it is suppressed + recorded).
+    const reader = await tokens.issue([SESSION_READ, APPROVE], 'reader');
+    const sub = await store.add(reader.id, {
+      endpoint: 'https://push.example.com/r',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    // A quiet window covering all day in UTC so `now` is always inside it.
+    await store.setQuietHours(sub.id, {
+      from: '00:00',
+      to: '23:59',
+      timezone: 'UTC',
+    });
+    const digest = new PushDigest();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      audit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      digest,
+    );
+    await notifier.notify(
+      { type: 'permission_request', data: { requestId: 'r1' } },
+      { sessionId: 's1' },
+      new Date('2026-06-12T12:00:00Z'),
+    );
+    expect(sent).toHaveLength(0); // suppressed by quiet hours
+    expect(notifier.digestSummary()).toEqual([
+      {
+        subscriptionId: sub.id,
+        total: 1,
+        byKind: { 'permission.required': 1 },
+      },
+    ]);
+  });
+
+  it('digestSummary is empty when no digest is wired', async () => {
+    const notifier = new PushNotifier(tokens, store, sender);
+    expect(notifier.digestSummary()).toEqual([]);
+  });
+});
