@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SnoozeStore } from './snooze.js';
@@ -80,5 +80,90 @@ describe('SnoozeStore', () => {
     await a.clear();
     const b = await SnoozeStore.open(path, nowFn);
     expect(b.active()).toBeNull();
+  });
+});
+
+describe('SnoozeStore multi-snooze (cycle 77)', () => {
+  it('holds independent windows per scope simultaneously', async () => {
+    const s = await SnoozeStore.open(path, nowFn);
+    await s.snooze(60, 'permission.required');
+    await s.snooze(120, 'task.completed');
+    expect(s.isSnoozed('permission.required')).toBe(true);
+    expect(s.isSnoozed('task.completed')).toBe(true);
+    // permission expires first; task is still snoozed.
+    clock.now += 61_000;
+    expect(s.isSnoozed('permission.required')).toBe(false);
+    expect(s.isSnoozed('task.completed')).toBe(true);
+  });
+
+  it('snoozing one scope does not clobber another', async () => {
+    const s = await SnoozeStore.open(path, nowFn);
+    await s.snooze(60, 'all');
+    await s.snooze(60, 'task.completed');
+    // 'all' is still active → suppresses every kind.
+    expect(s.isSnoozed('permission.required')).toBe(true);
+    expect(
+      s
+        .activeList()
+        .map((e) => e.scope)
+        .sort(),
+    ).toEqual(['all', 'task.completed']);
+  });
+
+  it('clear(scope) drops one entry and leaves the others', async () => {
+    const s = await SnoozeStore.open(path, nowFn);
+    await s.snooze(60, 'all');
+    await s.snooze(60, 'task.completed');
+    await s.clear('all');
+    expect(s.isSnoozed('permission.required')).toBe(false); // 'all' gone
+    expect(s.isSnoozed('task.completed')).toBe(true); // kept
+  });
+
+  it('clear() with no scope drops every entry', async () => {
+    const s = await SnoozeStore.open(path, nowFn);
+    await s.snooze(60, 'all');
+    await s.snooze(60, 'task.completed');
+    await s.clear();
+    expect(s.activeList()).toEqual([]);
+    expect(s.active()).toBeNull();
+  });
+
+  it('active() prefers the all entry, else the latest-ending', async () => {
+    const s = await SnoozeStore.open(path, nowFn);
+    await s.snooze(60, 'permission.required');
+    await s.snooze(120, 'task.completed');
+    // No 'all' → representative is the latest-ending (task.completed).
+    expect(s.active()!.scope).toBe('task.completed');
+    await s.snooze(30, 'all');
+    // 'all' present → representative is 'all' even though it ends soonest.
+    expect(s.active()!.scope).toBe('all');
+  });
+
+  it('round-trips multiple entries across reopen', async () => {
+    const a = await SnoozeStore.open(path, nowFn);
+    await a.snooze(60, 'all');
+    await a.snooze(120, 'task.completed');
+    const b = await SnoozeStore.open(path, nowFn);
+    expect(
+      b
+        .activeList()
+        .map((e) => e.scope)
+        .sort(),
+    ).toEqual(['all', 'task.completed']);
+  });
+
+  it('migrates a legacy single-state file to one entry', async () => {
+    // Cycle-15 on-disk shape: { until, scope }.
+    writeFileSync(
+      path,
+      JSON.stringify({
+        until: clock.now + 60_000,
+        scope: 'permission.required',
+      }),
+    );
+    const s = await SnoozeStore.open(path, nowFn);
+    expect(s.isSnoozed('permission.required')).toBe(true);
+    expect(s.isSnoozed('task.completed')).toBe(false);
+    expect(s.active()!.scope).toBe('permission.required');
   });
 });

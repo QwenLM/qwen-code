@@ -126,7 +126,11 @@ export {
   PolicyReloader,
   type PolicyReloaderOptions,
 } from './policy/reloader.js';
-export { SnoozeStore, type SnoozeState } from './routing/snooze.js';
+export {
+  SnoozeStore,
+  type SnoozeState,
+  type SnoozeEntry,
+} from './routing/snooze.js';
 export {
   WorkingDeviceTracker,
   recordActivity,
