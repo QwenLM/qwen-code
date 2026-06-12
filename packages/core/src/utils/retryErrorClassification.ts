@@ -265,8 +265,16 @@ function getProviderFields(error: unknown): ProviderFields {
     typeof source.code === 'string' || typeof source.code === 'number'
       ? String(source.code)
       : undefined;
+  // A numeric `code` in the HTTP status range is just the HTTP status echoed
+  // back (e.g. `{ status: 429, code: 429 }`); reporting it as a provider code
+  // would be redundant and misleading, so drop it — `statusCode` already
+  // carries that information.
+  const isHttpStatusEcho =
+    typeof source.code === 'number' && source.code >= 100 && source.code < 600;
   const providerCode =
-    error instanceof Error && rawCode?.startsWith('ERR_') ? undefined : rawCode;
+    (error instanceof Error && rawCode?.startsWith('ERR_')) || isHttpStatusEcho
+      ? undefined
+      : rawCode;
   const requestId =
     typeof source.request_id === 'string'
       ? source.request_id

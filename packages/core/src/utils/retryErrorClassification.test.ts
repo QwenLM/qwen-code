@@ -351,6 +351,19 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('does not echo a numeric HTTP-status code as providerCode', () => {
+    // `{ status: 429, code: 429 }` is just the HTTP status repeated; it must not
+    // surface as a provider-specific code.
+    const classification = classifyRetryError({
+      status: 429,
+      code: 429,
+      message: 'Too Many Requests',
+    });
+
+    expect(classification.statusCode).toBe(429);
+    expect(classification).not.toHaveProperty('providerCode');
+  });
+
   it('does not treat generic SDK error codes as transport retry errors', () => {
     const classification = classifyRetryError(
       Object.assign(new Error('invalid request'), {

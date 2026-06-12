@@ -300,6 +300,10 @@ export async function retryWithBackoff<T>(
           maxDelayMs,
           jitterRatio: 0.3,
         });
+        debugLogger.warn(
+          `Attempt ${iterationCount}: response rejected by content check. ` +
+            `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`,
+        );
         await delay(delayMs, signal);
         // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
         // reports — content-retry delays are invisible in the api_retry telemetry
@@ -451,19 +455,19 @@ export async function retryWithBackoff<T>(
 
         let actualDelayMs: number;
         if (retryAfterMs !== null && retryAfterMs > 0) {
-          debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
-            retryDiagnostics,
-            error,
-          );
           // Normal HTTP retries intentionally preserve provider-directed
           // Retry-After waits instead of clamping to the exponential
           // maxDelayMs. The wait remains abort-aware so cancelled requests do
           // not stay parked for the full provider delay.
           actualDelayMs = retryAfterMs;
           currentDelay = initialDelayMs;
+          logRetryAtStatusLevel(
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+            retryDiagnostics,
+            error,
+            errorStatus,
+          );
         } else {
-          logRetryAttempt(attempt, error, retryDiagnostics, errorStatus);
           actualDelayMs = getRetryDelayMs({
             // attempt: 1 — currentDelay already tracks exponential growth;
             // getRetryDelayMs is called here only for jitter calculation.
@@ -473,6 +477,13 @@ export async function retryWithBackoff<T>(
             jitterRatio: 0.3,
           });
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+          logRetryAttempt(
+            attempt,
+            error,
+            retryDiagnostics,
+            errorStatus,
+            actualDelayMs,
+          );
         }
 
         // Phase 4b — fire onRetry telemetry callback BEFORE sleep. Guard
@@ -524,14 +535,31 @@ function logRetryAttempt(
   error: unknown,
   retryDiagnostics: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
+  delayMs?: number,
 ): void {
+  const backoff =
+    delayMs !== undefined
+      ? `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`
+      : 'Retrying with backoff...';
   const message = errorStatus
-    ? `Attempt ${attempt} failed with status ${errorStatus}. Retrying with backoff...`
-    : `Attempt ${attempt} failed. Retrying with backoff...`;
+    ? `Attempt ${attempt} failed with status ${errorStatus}. ${backoff}`
+    : `Attempt ${attempt} failed. ${backoff}`;
 
-  if (errorStatus === 429) {
-    debugLogger.warn(message, retryDiagnostics, error);
-  } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
+  logRetryAtStatusLevel(message, retryDiagnostics, error, errorStatus);
+}
+
+/**
+ * Logs a retry message at a severity that matches the HTTP status: 5xx server
+ * errors log at `error` (so error-level alerting fires), everything else
+ * (including 429/503 throttling) at `warn`.
+ */
+function logRetryAtStatusLevel(
+  message: string,
+  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  error: unknown,
+  errorStatus?: number,
+): void {
+  if (errorStatus !== undefined && errorStatus >= 500 && errorStatus < 600) {
     debugLogger.error(message, retryDiagnostics, error);
   } else {
     debugLogger.warn(message, retryDiagnostics, error);

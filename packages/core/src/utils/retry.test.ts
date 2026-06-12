@@ -1223,6 +1223,48 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
+  it('logs a 503 Retry-After retry at error level, 429 at warn level', async () => {
+    debugLoggerMock.error.mockClear();
+    debugLoggerMock.warn.mockClear();
+
+    const e503 = Object.assign(new Error('Service unavailable'), {
+      status: 503,
+      headers: { 'retry-after': '1' },
+    });
+    const p503 = retryWithBackoff(
+      vi.fn().mockRejectedValueOnce(e503).mockResolvedValue('ok'),
+      { maxAttempts: 2, initialDelayMs: 10, maxDelayMs: 100 },
+    );
+    await vi.runAllTimersAsync();
+    await p503;
+
+    expect(debugLoggerMock.error).toHaveBeenCalledWith(
+      expect.stringContaining('Retrying after explicit delay'),
+      expect.anything(),
+      e503,
+    );
+
+    debugLoggerMock.error.mockClear();
+    const e429 = Object.assign(new Error('Rate limited'), {
+      status: 429,
+      headers: { 'retry-after': '1' },
+    });
+    const p429 = retryWithBackoff(
+      vi.fn().mockRejectedValueOnce(e429).mockResolvedValue('ok'),
+      { maxAttempts: 2, initialDelayMs: 10, maxDelayMs: 100 },
+    );
+    await vi.runAllTimersAsync();
+    await p429;
+
+    // 429 throttling stays at warn, never error.
+    expect(debugLoggerMock.error).not.toHaveBeenCalled();
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Retrying after explicit delay'),
+      expect.anything(),
+      e429,
+    );
+  });
+
   it('should abort normal Retry-After waits when signal is aborted', async () => {
     const controller = new AbortController();
     const error = Object.assign(new Error('Rate limited'), {
