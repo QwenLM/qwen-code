@@ -1049,6 +1049,239 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete ??= onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-dup',
+              providerCallId: 'tool-dup',
+              name: 'shell',
+              args: { command: 'echo first' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-dup',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-dup',
+              providerCallId: 'tool-dup',
+              name: 'shell',
+              args: { command: 'echo second' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-dup',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'done',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        callId: 'tool-dup',
+        providerCallId: 'tool-dup',
+        args: { command: 'echo first' },
+      }),
+    ]);
+
+    const completedToolCall = {
+      request: {
+        callId: 'tool-dup',
+        providerCallId: 'tool-dup',
+        name: 'shell',
+        args: { command: 'echo first' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-tui-dup',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'tool-dup',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-dup',
+              name: 'shell',
+              response: { output: 'first' },
+            },
+          },
+        ],
+        resultDisplay: 'first',
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'shell',
+        displayName: 'Shell',
+        description: 'Run a command',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'echo first',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([completedToolCall]);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts).toHaveLength(2);
+    expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
+      'first',
+    );
+    expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-dup"',
+    );
+    expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits a synthetic response for history-paired duplicate provider ids without scheduling', async () => {
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['tool-history']));
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'shell',
+              args: { command: 'echo duplicate' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history',
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
+  it('does not deduplicate tool calls without provider ids in the TUI stream', async () => {
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'generated-1',
+            name: 'shell',
+            args: { command: 'pwd' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-tui-no-provider',
+          },
+        };
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'generated-2',
+            name: 'shell',
+            args: { command: 'pwd' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-tui-no-provider',
+          },
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('run shell twice');
+    });
+
+    expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+    expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ callId: 'generated-1' }),
+      expect.objectContaining({ callId: 'generated-2' }),
+    ]);
+  });
+
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
     // Race A repro: the chat-internal repair pass already synthesized a
     // functionResponse for this callId on the Retry push (because the

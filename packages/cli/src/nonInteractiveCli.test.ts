@@ -494,6 +494,75 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
+  it('should ignore duplicate provider tool-call ids in the same batch', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+    const firstToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        providerCallId: 'tool-1',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-same-batch-dup',
+      },
+    };
+    const duplicateToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        providerCallId: 'tool-1',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-same-batch-dup',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Tool response' }],
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([firstToolCall, duplicateToolCall]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-same-batch-dup',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+
+    const toolResultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    expect(toolResultParts).toHaveLength(2);
+    expect(toolResultParts).toContainEqual({ text: 'Tool response' });
+    const duplicatePart = toolResultParts.find(
+      (part: Part) => part.functionResponse?.id === 'tool-1',
+    );
+    expect(duplicatePart?.functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-1"',
+    );
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {
@@ -3154,6 +3223,142 @@ describe('runNonInteractive', () => {
       expect(
         JSON.stringify(failedStructured?.functionResponse?.response),
       ).not.toMatch(/Skipped:/);
+    });
+
+    it('keeps duplicate provider responses when structured_output fails validation', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+
+      const firstSideEffectCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-side',
+          providerCallId: 'tool-side',
+          name: 'side_effect_tool',
+          args: { path: '/tmp/first' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-dup-structured',
+        },
+      };
+      const duplicateSideEffectCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-side',
+          providerCallId: 'tool-side',
+          name: 'side_effect_tool',
+          args: { path: '/tmp/second' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-dup-structured',
+        },
+      };
+      const badStructuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-bad',
+          name: 'structured_output',
+          args: { wrong: 'shape' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-dup-structured',
+        },
+      };
+      const goodStructuredCall: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-structured-good',
+          name: 'structured_output',
+          args: { summary: 'retry ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-dup-structured',
+        },
+      };
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([firstSideEffectCall]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([duplicateSideEffectCall, badStructuredCall]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents([goodStructuredCall]));
+
+      mockCoreExecuteToolCall
+        .mockResolvedValueOnce({
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-side',
+                name: 'side_effect_tool',
+                response: { output: 'first side effect' },
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          error: new Error('args invalid'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-structured-bad',
+                name: 'structured_output',
+                response: { error: 'args invalid' },
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          responseParts: [{ text: 'ok' }],
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'prompt-id-dup-structured',
+      );
+
+      const executedNames = mockCoreExecuteToolCall.mock.calls.map(
+        (call) => (call[1] as { name: string }).name,
+      );
+      expect(executedNames).toEqual([
+        'side_effect_tool',
+        'structured_output',
+        'structured_output',
+      ]);
+
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      const retryParts = mockGeminiClient.sendMessageStream.mock.calls[2][0] as
+        | Array<{
+            functionResponse?: {
+              id?: string;
+              name?: string;
+              response?: unknown;
+            };
+          }>
+        | undefined;
+      const retryPartsTyped = retryParts || [];
+      const duplicateResponse = retryPartsTyped.find((part) =>
+        String(
+          (part.functionResponse?.response as { error?: unknown } | undefined)
+            ?.error,
+        ).includes('Duplicate provider tool call id "tool-side"'),
+      );
+      const failedStructured = retryPartsTyped.find(
+        (part) => part.functionResponse?.id === 'tool-structured-bad',
+      );
+      expect(duplicateResponse?.functionResponse?.id).toBe('tool-side');
+      expect(duplicateResponse?.functionResponse?.name).toBe(
+        'side_effect_tool',
+      );
+      expect(failedStructured?.functionResponse?.name).toBe(
+        'structured_output',
+      );
+      expect(
+        JSON.stringify(failedStructured?.functionResponse?.response),
+      ).toContain('args invalid');
     });
 
     it('captures structured_output emitted from a drain-turn (queued notification)', async () => {

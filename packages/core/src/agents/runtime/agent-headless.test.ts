@@ -1133,6 +1133,222 @@ describe('subagent.ts', () => {
         );
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
+
+      it('should ignore duplicate provider tool-call ids in the same batch', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_same_batch',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+              {
+                id: 'call_same_batch',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+              {
+                id: 'call_same_batch',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(toolCallEvents).toHaveLength(3);
+        expect(toolResultEvents).toHaveLength(3);
+        const duplicateCallIds = toolCallEvents
+          .filter((event) => event.callId !== 'call_same_batch')
+          .map((event) => event.callId);
+        expect(
+          toolCallEvents.some((event) => event.callId === 'call_same_batch'),
+        ).toBe(true);
+        expect(duplicateCallIds[0]).toMatch(/^call_same_batch:duplicate:/);
+        expect(duplicateCallIds[1]).toMatch(/^call_same_batch:duplicate:/);
+        expect(duplicateCallIds[0]).not.toBe(duplicateCallIds[1]);
+        expect(
+          toolResultEvents.some((event) => event.callId === 'call_same_batch'),
+        ).toBe(true);
+        expect(
+          toolResultEvents.some(
+            (event) => event.callId === duplicateCallIds[0],
+          ),
+        ).toBe(true);
+        expect(
+          toolResultEvents.some(
+            (event) => event.callId === duplicateCallIds[1],
+          ),
+        ).toBe(true);
+
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(parts).toHaveLength(3);
+        const realToolResponse = parts.find(
+          (part) => part.functionResponse?.response?.['output'] !== undefined,
+        );
+        const duplicateResponses = parts.filter((part) =>
+          String(part.functionResponse?.response?.['error']).includes(
+            'Duplicate provider tool call id "call_same_batch"',
+          ),
+        );
+        expect(realToolResponse?.functionResponse?.response?.['output']).toBe(
+          'file1.txt\nfile2.ts',
+        );
+        expect(duplicateResponses).toHaveLength(2);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should report unauthorized tool names before duplicate provider ids', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_reused',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [
+              {
+                id: 'call_reused',
+                name: 'write_file',
+                args: { path: 'x.txt', content: 'x' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_reused');
+        expect(parts[0].functionResponse?.name).toBe('write_file');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Tool "write_file" not found',
+        );
+        expect(parts[0].functionResponse?.response?.['error']).not.toContain(
+          'Duplicate provider tool call id',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
     });
 
     describe('execute - Termination and Recovery', () => {

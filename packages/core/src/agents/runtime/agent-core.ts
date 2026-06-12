@@ -1079,6 +1079,48 @@ export class AgentCore {
 
   // ─── Tool Execution ───────────────────────────────────────
 
+  private emitSyntheticToolError(params: {
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    errorMessage: string | undefined;
+    responseParts: Part[];
+    resultDisplay: ToolResultDisplay | undefined;
+    currentRound: number;
+    durationMs?: number;
+  }): void {
+    this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      args: params.args,
+      description: params.errorMessage,
+      isOutputMarkdown: false,
+      timestamp: Date.now(),
+    } as AgentToolCallEvent);
+
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      success: false,
+      error: params.errorMessage,
+      responseParts: params.responseParts,
+      resultDisplay: params.resultDisplay,
+      durationMs: params.durationMs ?? 0,
+      timestamp: Date.now(),
+    } as AgentToolResultEvent);
+
+    this.recordToolCallStats(
+      params.name,
+      false,
+      params.durationMs ?? 0,
+      params.errorMessage,
+    );
+  }
+
   /**
    * Processes a list of function calls via CoreToolScheduler.
    *
@@ -1104,14 +1146,39 @@ export class AgentCore {
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
+    let duplicateEventIndex = 0;
     for (const fc of functionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
       const providerCallId = fc.id;
       const toolName = String(fc.name);
+      const args = (fc.args ?? {}) as Record<string, unknown>;
+
+      if (!allowedToolNames.has(fc.name)) {
+        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+        const functionResponsePart = {
+          functionResponse: {
+            id: callId,
+            name: toolName,
+            response: { error: errorMessage },
+          },
+        };
+
+        this.emitSyntheticToolError({
+          callId,
+          name: toolName,
+          args,
+          errorMessage,
+          responseParts: [functionResponsePart],
+          resultDisplay: errorMessage,
+          currentRound,
+        });
+
+        toolResponseParts.push(functionResponsePart);
+        continue;
+      }
 
       if (providerCallId) {
         if (handledProviderToolCallIds.has(providerCallId)) {
-          const args = (fc.args ?? {}) as Record<string, unknown>;
           const request: ToolCallRequestInfo = {
             callId,
             providerCallId,
@@ -1124,83 +1191,28 @@ export class AgentCore {
           };
           const response = createDuplicateProviderToolCallResponse(request);
           const errorMessage = response.error?.message;
-          const eventCallId = `${callId}:duplicate:${currentRound}:${toolResponseParts.length}`;
+          const eventCallId = `${callId}:duplicate:${currentRound}:${duplicateEventIndex++}`;
 
-          this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-            subagentId: this.subagentId,
-            round: currentRound,
+          this.runtimeContext
+            .getDebugLogger()
+            ?.debug(
+              `[processFunctionCalls] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${toolName}, round: ${currentRound})`,
+            );
+
+          this.emitSyntheticToolError({
             callId: eventCallId,
             name: toolName,
             args,
-            description: errorMessage,
-            isOutputMarkdown: false,
-            timestamp: Date.now(),
-          } as AgentToolCallEvent);
-
-          this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
-            subagentId: this.subagentId,
-            round: currentRound,
-            callId: eventCallId,
-            name: toolName,
-            success: false,
-            error: errorMessage,
+            errorMessage,
             responseParts: response.responseParts,
             resultDisplay: response.resultDisplay,
-            durationMs: 0,
-            timestamp: Date.now(),
-          } as AgentToolResultEvent);
+            currentRound,
+          });
 
           toolResponseParts.push(...response.responseParts);
-          this.recordToolCallStats(toolName, false, 0, errorMessage);
           continue;
         }
         handledProviderToolCallIds.add(providerCallId);
-      }
-
-      if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
-
-        // Emit TOOL_CALL event for visibility
-        this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-          subagentId: this.subagentId,
-          round: currentRound,
-          callId,
-          name: toolName,
-          args: fc.args ?? {},
-          description: `Tool "${toolName}" not found`,
-          isOutputMarkdown: false,
-          timestamp: Date.now(),
-        } as AgentToolCallEvent);
-
-        // Build function response part (used for both event and LLM)
-        const functionResponsePart = {
-          functionResponse: {
-            id: callId,
-            name: toolName,
-            response: { error: errorMessage },
-          },
-        };
-
-        // Emit TOOL_RESULT event with error
-        this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
-          subagentId: this.subagentId,
-          round: currentRound,
-          callId,
-          name: toolName,
-          success: false,
-          error: errorMessage,
-          responseParts: [functionResponsePart],
-          resultDisplay: errorMessage,
-          durationMs: 0,
-          timestamp: Date.now(),
-        } as AgentToolResultEvent);
-
-        // Record blocked tool call in stats
-        this.recordToolCallStats(toolName, false, 0, errorMessage);
-
-        // Add function response for LLM
-        toolResponseParts.push(functionResponsePart);
-        continue;
       }
       authorizedCalls.push(fc);
     }

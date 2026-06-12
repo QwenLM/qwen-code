@@ -763,10 +763,18 @@ export async function runNonInteractive(
 
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
+          debugLogger.debug(
+            `[runNonInteractive] Suppressing duplicate provider tool-call id: ${requestInfo.providerCallId} (tool: ${requestInfo.name})`,
+          );
           respondedCallIds.add(requestInfo.callId);
           adapter.emitToolResult(requestInfo, toolResponse);
           duplicatePendingResponses.push(...toolResponse.responseParts);
         }
+
+        // Duplicate responses must always reach the model. They pair with a
+        // tool call the provider already emitted, even when structured_output
+        // is the only executable sibling in this batch.
+        toolResponseParts.push(...duplicatePendingResponses);
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -785,8 +793,6 @@ export async function runNonInteractive(
           requestsToExecute = executableBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
-        } else {
-          toolResponseParts.push(...duplicatePendingResponses);
         }
         const executedCallIds = new Set(respondedCallIds);
 
