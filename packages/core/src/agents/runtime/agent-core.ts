@@ -1153,7 +1153,6 @@ export class AgentCore {
           toolResponseParts.push(...response.responseParts);
           this.recordToolCallStats(toolName, false, 0, errorMessage);
           continue;
-          continue;
         }
         handledProviderToolCallIds.add(providerCallId);
       }

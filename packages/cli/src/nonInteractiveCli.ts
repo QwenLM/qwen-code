@@ -747,6 +747,7 @@ export async function runNonInteractive(
         const toolResponseParts: Part[] = [];
         const respondedCallIds = new Set<string>();
         const executableBatchRequests: ToolCallRequestInfo[] = [];
+        const duplicatePendingResponses: Part[] = [];
 
         for (const requestInfo of batchRequests) {
           if (!requestInfo.providerCallId) {
@@ -760,10 +761,6 @@ export async function runNonInteractive(
             continue;
           }
 
-          const toolResponse =
-            createDuplicateProviderToolCallResponse(requestInfo);
-          respondedCallIds.add(requestInfo.callId);
-          adapter.emitToolResult(requestInfo, toolResponse);
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
           respondedCallIds.add(requestInfo.callId);
@@ -790,26 +787,6 @@ export async function runNonInteractive(
           );
         } else {
           toolResponseParts.push(...duplicatePendingResponses);
-        }
-        }
-
-        // Pre-scan: when --json-schema is active and the model emitted
-        // a `structured_output` call alongside other tools in the same
-        // turn, the structured call is the terminal contract. Execute
-        // every structured_output in original order until one succeeds,
-        // suppress every non-structured sibling. See the multi-shape
-        // examples in the main loop's prior comment for the
-        // [bad/good/side-effect] permutations.
-        let requestsToExecute = executableBatchRequests;
-        if (
-          config.getJsonSchema() &&
-          executableBatchRequests.some(
-            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-          )
-        ) {
-          requestsToExecute = executableBatchRequests.filter(
-            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
-          );
         }
         const executedCallIds = new Set(respondedCallIds);
 
