@@ -619,6 +619,32 @@ describe('CronScheduler', () => {
       });
     });
 
+    it('rolls back the in-memory job when the durable persist fails', async () => {
+      // A corrupted tasks file makes updateCronTasks throw inside
+      // addCronTask, after the job was provisionally installed in memory.
+      const tasksFile = getCronFilePath(tmpDir);
+      await fs.mkdir(path.dirname(tasksFile), { recursive: true });
+      await fs.writeFile(tasksFile, '{broken json!!');
+
+      await expect(
+        scheduler.createDurable('* * * * *', 'doomed', true),
+      ).rejects.toThrow(/Malformed JSON/);
+      expect(scheduler.list()).toHaveLength(0);
+    });
+
+    it('reloads durable tasks when the file changes on disk', async () => {
+      await scheduler.enableDurable('session-1');
+      expect(scheduler.list()).toHaveLength(0);
+
+      // External change — another session adding a task. Nothing here
+      // triggers a reload directly; only the file watcher can surface it.
+      await writeCronTasks(tmpDir, [diskTask('external1')]);
+      await vi.waitFor(
+        () => expect(scheduler.list().map((j) => j.id)).toContain('external1'),
+        { timeout: 3000 },
+      );
+    });
+
     it('owner fires a durable one-shot via tick and removes it from disk', async () => {
       // Minute 15 never lands on :00/:30, so the one-shot gets zero
       // jitter and the load can't classify it as missed regardless of

@@ -50,6 +50,34 @@ describe('cronTasksLock', () => {
     });
   });
 
+  describe('lockId fencing', () => {
+    it('does not treat a different lockId as an idempotent re-acquire', async () => {
+      expect(await tryAcquireLock(tmpDir, 'session-1', 'lock-a')).toBe(true);
+      // Session-reload scenario from the file header: a fresh scheduler
+      // shares our pid and sessionId but carries a new lockId. The old
+      // holder's pid is alive (it is ours), so this must not adopt.
+      expect(await tryAcquireLock(tmpDir, 'session-1', 'lock-b')).toBe(false);
+      const content = JSON.parse(
+        await fs.readFile(getLockFilePath(tmpDir), 'utf-8'),
+      );
+      expect(content.lockId).toBe('lock-a');
+    });
+
+    it('re-acquires idempotently when the lockId matches', async () => {
+      expect(await tryAcquireLock(tmpDir, 'session-1', 'lock-a')).toBe(true);
+      expect(await tryAcquireLock(tmpDir, 'session-1', 'lock-a')).toBe(true);
+    });
+
+    it('releaseLock with a different lockId leaves the lock in place', async () => {
+      expect(await tryAcquireLock(tmpDir, 'session-1', 'lock-a')).toBe(true);
+      await releaseLock(tmpDir, 'session-1', 'lock-b');
+      await expect(fs.access(getLockFilePath(tmpDir))).resolves.toBeUndefined();
+      // The matching lockId still releases it.
+      await releaseLock(tmpDir, 'session-1', 'lock-a');
+      await expect(fs.access(getLockFilePath(tmpDir))).rejects.toThrow();
+    });
+  });
+
   describe('tryAcquireLock', () => {
     it('acquires when no lock file exists', async () => {
       expect(await tryAcquireLock(tmpDir, 'session-1')).toBe(true);
