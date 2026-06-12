@@ -247,24 +247,8 @@ jobs:
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
-      # Cross-border git transfers from the ECS runners can stall: abort
-      # transfers slower than 1 KB/s for 60s (instead of hanging until the
-      # job timeout) and retry once — the runner workspace persists, so
-      # after the first successful clone subsequent fetches are incremental.
       - name: 'Checkout repo'
-        id: 'checkout'
-        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
-
-      - name: 'Checkout repo (retry)'
-        if: "steps.checkout.outcome == 'failure'"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run product-decision'
         id: 'run'
@@ -405,31 +389,12 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # fetch-depth 0 is the heaviest cross-border transfer in the pipeline;
-      # the stall abort + retry matter most here. Only the first run per
-      # runner pays full price — the persistent workspace makes later
-      # fetches incremental.
       - name: 'Checkout base branch'
         if: "steps.pr_state.outputs.should_review == 'true'"
-        id: 'checkout_base'
-        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
-        env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
-
-      - name: 'Checkout base branch (retry)'
-        if: "steps.checkout_base.outcome == 'failure'"
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: '${{ github.event.repository.default_branch }}'
-          fetch-depth: 0
-        env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run review'
         if: "steps.pr_state.outputs.should_review == 'true'"
@@ -560,28 +525,34 @@ jobs:
     outputs:
       verdict: '${{ steps.run.outputs.verdict }}'
     steps:
-      - name: 'Checkout PR code'
-        id: 'checkout_pr'
-        continue-on-error: true
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
-          fetch-depth: 1
+      # Guard: the PR may have been merged or closed while review was running.
+      # refs/pull/N/merge disappears when the PR is not open or has conflicts,
+      # so check before attempting checkout.
+      - name: 'Check PR state before testing'
+        id: 'pr_state'
         env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.resolve.outputs.pr_number }}'
+        run: |
+          set -euo pipefail
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping tmux testing: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "should_test=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_test=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: 'Checkout PR code (retry)'
-        if: "steps.checkout_pr.outcome == 'failure'"
+      - name: 'Checkout PR code'
+        if: "steps.pr_state.outputs.should_test == 'true'"
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
           fetch-depth: 1
-        env:
-          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
-          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run tmux testing'
+        if: "steps.pr_state.outputs.should_test == 'true'"
         id: 'run'
         env:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
@@ -602,13 +573,9 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
-          # Readable log formatter; fall back to raw passthrough if jq is absent.
           FMT_CMD=(jq --unbuffered -Rr "$STREAM_JSON_FMT")
           command -v jq >/dev/null 2>&1 || FMT_CMD=(cat)
 
-          # Run tmux testing — output goes to a file for artifact upload.
-          # runner.temp (not /tmp): per-job and per-instance, so concurrent
-          # jobs on a shared host can't cross-contaminate the artifact.
           mkdir -p "$RUNNER_TEMP/tmux-results"
           set +e
           timeout --kill-after=10s 15m qwen \
@@ -633,7 +600,7 @@ jobs:
           fi
 
       - name: 'Upload tmux results'
-        if: 'always()'
+        if: "always() && steps.pr_state.outputs.should_test == 'true'"
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'tmux-testing-results-${{ needs.resolve.outputs.pr_number }}'
