@@ -200,6 +200,11 @@
       <div><button id="list-shares">List shares</button></div>
       <div id="shares-list">(not listed)</div>
     </section>
+    <section id="commands">
+      <strong>Commands</strong> (invoke targets the watched session)
+      <div><button id="list-commands">List commands</button></div>
+      <div id="commands-list">(not listed)</div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -1202,6 +1207,104 @@
             btn.onclick = () => revokeShare(s.id, row, btn);
             row.appendChild(info);
             row.appendChild(btn);
+            out.appendChild(row);
+          }
+        } catch (e) {
+          out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Slash-commands palette (cycle 67): GET /rc/commands list + POST
+      // /rc/session/:id/command/:name invoke (targets the watched #session).
+      // Commands above the caller's scope are LISTED with invocableByYou:false
+      // (grayed + disabled) per the backend's list-don't-hide design.
+      // textContent/createElement only (name/description are command-file text).
+      async function invokeCommand(name, btn, note) {
+        const id = $('session').value.trim();
+        if (!id) {
+          note.textContent = ' watch/enter a session first';
+          return;
+        }
+        btn.disabled = true;
+        note.textContent = ' invoking…';
+        try {
+          const res = await fetch(
+            '/rc/session/' +
+              encodeURIComponent(id) +
+              '/command/' +
+              encodeURIComponent(name),
+            { method: 'POST', headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (res.ok) {
+            let stop = '';
+            try {
+              const b = await res.json();
+              stop = b && b.stopReason ? ' (' + b.stopReason + ')' : '';
+            } catch {
+              /* no body */
+            }
+            note.textContent = ' invoked' + stop;
+          } else {
+            let code = res.status;
+            try {
+              const b = await res.json();
+              if (b && b.code) code = b.code;
+            } catch {
+              /* non-JSON */
+            }
+            note.textContent = ' failed: ' + code;
+          }
+        } catch (e) {
+          note.textContent = ' error: ' + e;
+        } finally {
+          btn.disabled = false;
+        }
+      }
+      $('list-commands').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('commands-list');
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/commands', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized'
+                : 'list failed (' + res.status + ')';
+            return;
+          }
+          const body = await res.json();
+          const cmds = Array.isArray(body.commands) ? body.commands : [];
+          out.textContent = '';
+          if (cmds.length === 0) {
+            out.textContent = '(no commands)';
+            return;
+          }
+          for (const c of cmds) {
+            const row = document.createElement('div');
+            row.className = 'token-row';
+            const info = document.createElement('span');
+            if (!c.invocableByYou) info.style.color = '#999';
+            info.textContent =
+              '/' +
+              c.name +
+              '  —  ' +
+              (c.description || '') +
+              '  [' +
+              c.scope +
+              ']  (' +
+              c.source +
+              ')';
+            const note = document.createElement('span');
+            const btn = document.createElement('button');
+            btn.textContent = 'Invoke';
+            btn.disabled = !c.invocableByYou;
+            btn.onclick = () => invokeCommand(c.name, btn, note);
+            row.appendChild(info);
+            row.appendChild(btn);
+            row.appendChild(note);
             out.appendChild(row);
           }
         } catch (e) {
