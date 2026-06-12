@@ -275,7 +275,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   );
   app.get(
     '/rc/search',
-    requireScope(OWNER, audit),
+    // SESSION_READ at the mount admits both owners and session-locked share
+    // tokens; createSearchRoute does the per-caller authorization in-handler
+    // (cycle 76): a share is confined to its locked session, everyone else
+    // needs OWNER.
+    requireScope(SESSION_READ, audit),
     createSearchRoute(async () => {
       try {
         const caps = await deps.daemon.capabilities();

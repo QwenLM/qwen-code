@@ -25,7 +25,7 @@ import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import type { PushNotifier } from './webpush/notifier.js';
-import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
+import { OWNER, SESSION_READ, APPROVE, WRITE, SHARE } from './scopes.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -275,6 +275,33 @@ describe('gateway app', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
+  });
+
+  it('a session-locked share token can GET /rc/search (200, confined to its session)', async () => {
+    const { url, store, auditPath } = await boot();
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest',
+      sessionLockId: 'locked-sess',
+      ttlSec: 3600,
+      parentId: 'owner',
+    });
+    // The mount (SESSION_READ) admits the share; the in-handler authz confines
+    // it to its locked session (no transcripts → empty hits, but 200 not 403).
+    const res = await fetch(`${url}/rc/search?q=x&sessionId=someone-else`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hits: unknown[] };
+    expect(Array.isArray(body.hits)).toBe(true);
+    // The guest search row is share-attributable (cycle 31 / L4).
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'search_performed'),
+    );
+    const a = rows.find((x) => x.action === 'search_performed');
+    expect(a).toBeDefined();
+    expect(a!.shareId).toBe(share.id);
+    expect(a!.shareLabel).toBe('guest');
   });
 
   it('400s GET /rc/search with a missing q for an owner token', async () => {
