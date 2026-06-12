@@ -1202,6 +1202,104 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
     });
 
+    it('restores an orphaned trailing user prompt when the continuation send is skipped', async () => {
+      const orphanedPrompt = [{ text: 'do the thing' }];
+      setHistoryTail([{ role: 'user', parts: orphanedPrompt }]);
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: orphanedPrompt }]);
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+        originalTokenCount: 101,
+        newTokenCount: 101,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      await expect(session.continueTurn()).resolves.toEqual({
+        stopReason: 'max_tokens',
+        resumed: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: orphanedPrompt,
+      });
+    });
+
+    it('writes a tool_result orphan exactly once when the continuation send is skipped', async () => {
+      // A trailing user entry made of functionResponse parts is also an
+      // `interrupted_prompt`. The unsent-message preservation inside the turn
+      // loop re-adds functionResponse parts on its own, so the restore must
+      // not add the same entry a second time.
+      const orphanedToolResult = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      setHistoryTail([{ role: 'user', parts: orphanedToolResult }]);
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: orphanedToolResult }]);
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+        originalTokenCount: 101,
+        newTokenCount: 101,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      await expect(session.continueTurn()).resolves.toEqual({
+        stopReason: 'max_tokens',
+        resumed: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      const toolResultWrites = (
+        mockChat.addHistory as ReturnType<typeof vi.fn>
+      ).mock.calls.filter(([entry]) =>
+        (entry?.parts ?? []).some(
+          (part: { functionResponse?: unknown }) => part.functionResponse,
+        ),
+      );
+      expect(toolResultWrites).toHaveLength(1);
+      expect(toolResultWrites[0][0]).toEqual({
+        role: 'user',
+        parts: orphanedToolResult,
+      });
+    });
+
+    it('runs ACP continuation under the session id async context', async () => {
+      setHistoryTail([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]);
+      let observedSessionId: string | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observedSessionId = core.sessionIdContext.getStore();
+        return Promise.resolve(createEmptyStream());
+      });
+
+      await session.continueTurn();
+
+      expect(observedSessionId).toBe('test-session-id');
+    });
+
     it('closes dangling tool calls with synthesized error responses as the opening message', async () => {
       setHistoryTail([
         {

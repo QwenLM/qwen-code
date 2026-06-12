@@ -1043,63 +1043,96 @@ export class Session implements SessionContext {
   async #executeContinue(
     pendingSend: AbortController,
   ): Promise<ContinueTurnResponse> {
-    return Storage.runWithRuntimeBaseDir(
-      this.runtimeBaseDir,
-      this.config.getWorkingDir(),
-      async () => {
-        const detection = detectTurnInterruption(
-          this.#getCurrentChat().getHistoryTail(1),
-        );
-        if (detection.kind === 'none') {
-          return {
-            stopReason: 'end_turn' as const,
-            resumed: false,
-            interruption: 'none' as const,
+    return sessionIdContext.run(this.config.getSessionId(), () =>
+      Storage.runWithRuntimeBaseDir(
+        this.runtimeBaseDir,
+        this.config.getWorkingDir(),
+        async () => {
+          const detection = detectTurnInterruption(
+            this.#getCurrentChat().getHistoryTail(1),
+          );
+          if (detection.kind === 'none') {
+            return {
+              stopReason: 'end_turn' as const,
+              resumed: false,
+              interruption: 'none' as const,
+            };
+          }
+
+          const promptId = this.config.getSessionId() + '########' + this.turn;
+
+          let parts: Part[];
+          let strippedPromptEntries: Content[] = [];
+          if (detection.kind === 'interrupted_prompt') {
+            // The send below re-pushes this content; strip the orphaned
+            // original first so history doesn't carry it twice.
+            strippedPromptEntries =
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory() ?? [];
+            parts = detection.parts;
+          } else {
+            parts = buildSyntheticToolResponseParts(
+              detection.danglingCalls,
+              ORPHAN_TOOL_USE_REPAIR_REASON,
+            );
+          }
+
+          let turnCount = 0;
+          let continueSendStarted = false;
+          let continuationWasCancelled = false;
+          // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
+          // below is the single source of truth for re-adding the unsent initial
+          // message. Tell the turn loop to skip its own functionResponse-only
+          // preservation of that message so a tool_result orphan isn't written
+          // to history twice (once by preserve, once by restore).
+          const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
+          const restoreStrippedPromptEntries = () => {
+            if (
+              continueSendStarted ||
+              continuationWasCancelled ||
+              strippedPromptEntries.length === 0
+            ) {
+              return;
+            }
+            for (const entry of strippedPromptEntries) {
+              this.#getCurrentChat().addHistory(entry);
+            }
+            strippedPromptEntries = [];
           };
-        }
-
-        const promptId = this.config.getSessionId() + '########' + this.turn;
-
-        let parts: Part[];
-        if (detection.kind === 'interrupted_prompt') {
-          // The send below re-pushes this content; strip the orphaned
-          // original first so history doesn't carry it twice.
-          this.config.getGeminiClient()!.stripOrphanedUserEntriesFromHistory();
-          parts = detection.parts;
-        } else {
-          parts = buildSyntheticToolResponseParts(
-            detection.danglingCalls,
-            ORPHAN_TOOL_USE_REPAIR_REASON,
-          );
-        }
-
-        let turnCount = 0;
-        try {
-          const earlyExit = await this.#runModelTurnLoop(
-            promptId,
-            { role: 'user', parts },
-            pendingSend,
-            () => {
-              turnCount++;
-            },
-          );
-          const result =
-            earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
-          return {
-            ...result,
-            resumed: true,
-            interruption: detection.kind,
-          };
-        } finally {
-          logConversationFinishedEvent(
-            this.config,
-            new ConversationFinishedEvent(
-              this.config.getApprovalMode(),
-              turnCount,
-            ),
-          );
-        }
-      },
+          try {
+            const earlyExit = await this.#runModelTurnLoop(
+              promptId,
+              { role: 'user', parts },
+              pendingSend,
+              () => {
+                turnCount++;
+              },
+              () => {
+                continueSendStarted = true;
+              },
+              ownsInitialUnsentMessage,
+            );
+            const result =
+              earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
+            continuationWasCancelled = result.stopReason === 'cancelled';
+            return {
+              ...result,
+              resumed: true,
+              interruption: detection.kind,
+            };
+          } finally {
+            restoreStrippedPromptEntries();
+            logConversationFinishedEvent(
+              this.config,
+              new ConversationFinishedEvent(
+                this.config.getApprovalMode(),
+                turnCount,
+              ),
+            );
+          }
+        },
+      ),
     );
   }
 
@@ -1331,8 +1364,14 @@ export class Session implements SessionContext {
     initialMessage: Content,
     pendingSend: AbortController,
     onIteration?: () => void,
+    onSendStarted?: () => void,
+    ownsInitialUnsentMessage = false,
   ): Promise<{ stopReason: PromptResponse['stopReason'] } | null> {
     let nextMessage: Content | null = initialMessage;
+    // Tracks the first loop iteration so a caller that restores the initial
+    // message itself (continue-interrupted) can suppress the duplicate
+    // functionResponse-only preservation for that one message.
+    let isInitialMessage = true;
 
     while (nextMessage !== null) {
       onIteration?.();
@@ -1352,14 +1391,20 @@ export class Session implements SessionContext {
           pendingSend.signal,
         );
         if (!sendResult.responseStream) {
-          this.#preserveUnsentMessageHistory(
-            nextMessage,
-            sendResult.stopReason === 'cancelled',
-          );
+          const wasCancelled = sendResult.stopReason === 'cancelled';
+          // Skip preservation only when the caller owns restoring this exact
+          // message AND the skip wasn't a cancellation. The cancelled branch
+          // re-adds the full message here and the caller's restore stays out
+          // (it guards on cancelled), so it must still run for cancellations.
+          if (!(ownsInitialUnsentMessage && isInitialMessage && !wasCancelled)) {
+            this.#preserveUnsentMessageHistory(nextMessage, wasCancelled);
+          }
           return { stopReason: sendResult.stopReason };
         }
         const responseStream = sendResult.responseStream;
+        onSendStarted?.();
         nextMessage = null;
+        isInitialMessage = false;
 
         for await (const resp of responseStream) {
           if (pendingSend.signal.aborted) {

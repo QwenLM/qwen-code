@@ -1877,6 +1877,44 @@ describe('Gemini Client (client.ts)', () => {
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
       expect(cacheClear).toHaveBeenCalled();
     });
+
+    it('restores stripped retry entries when session token limit skips send', async () => {
+      const retryEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'retry me' }],
+      };
+      const addHistory = vi.fn();
+      const getHistoryLength = vi
+        .fn()
+        .mockReturnValueOnce(2)
+        .mockReturnValue(1);
+      client['chat'] = {
+        addHistory,
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength,
+        stripOrphanedUserEntriesFromHistory: vi
+          .fn()
+          .mockReturnValue([retryEntry]),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        101,
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'retry me' }],
+          new AbortController().signal,
+          'prompt-retry-limit',
+          { type: SendMessageType.Retry },
+        ),
+      );
+
+      expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(addHistory).toHaveBeenCalledWith(retryEntry);
+    });
   });
 
   /**

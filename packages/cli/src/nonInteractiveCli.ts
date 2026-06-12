@@ -473,6 +473,21 @@ export async function runNonInteractive(
       // means the regular options.sendMessageType / UserQuery selection
       // applies.
       let continueSendType: SendMessageType | null = null;
+      let strippedContinuationEntries: Content[] = [];
+      let continuationSendStarted = false;
+      const restoreStrippedContinuationEntries = () => {
+        if (
+          continuationSendStarted ||
+          strippedContinuationEntries.length === 0
+        ) {
+          return;
+        }
+        const chat = geminiClient.getChat();
+        for (const entry of strippedContinuationEntries) {
+          chat.addHistory(entry);
+        }
+        strippedContinuationEntries = [];
+      };
 
       if (options.continueInterrupted) {
         const detection = detectTurnInterruption(
@@ -491,7 +506,8 @@ export async function runNonInteractive(
         if (detection.kind === 'interrupted_prompt') {
           // The send below re-pushes this content; strip the orphaned
           // original first so history doesn't carry it twice.
-          geminiClient.stripOrphanedUserEntriesFromHistory();
+          strippedContinuationEntries =
+            geminiClient.stripOrphanedUserEntriesFromHistory() ?? [];
           initialPartList = detection.parts;
           continueSendType = SendMessageType.Retry;
         } else {
@@ -1043,8 +1059,18 @@ export async function runNonInteractive(
 
         // Start assistant message for this turn
         adapter.startAssistantMessage();
+        let eventSeen = false;
 
         for await (const event of responseStream) {
+          if (event.type === GeminiEventType.SessionTokenLimitExceeded) {
+            restoreStrippedContinuationEntries();
+          }
+          if (!eventSeen) {
+            if (event.type !== GeminiEventType.SessionTokenLimitExceeded) {
+              continuationSendStarted = true;
+            }
+            eventSeen = true;
+          }
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
             // doesn't leave an unterminated message_start when a budget /

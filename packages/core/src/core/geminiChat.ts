@@ -2685,7 +2685,8 @@ export class GeminiChat {
    * In a valid conversation the last entry is always a model response;
    * any trailing user entries are leftovers from a request that failed.
    */
-  stripOrphanedUserEntriesFromHistory(): void {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
+    const strippedEntries: Content[] = [];
     while (
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
@@ -2707,7 +2708,7 @@ export class GeminiChat {
       if (lastEntry && isSystemReminderContent(lastEntry)) {
         break;
       }
-      this.history.pop();
+      strippedEntries.unshift(this.history.pop()!);
     }
     // Today this is safe even without the reset — only trailing user
     // entries are popped, which can't shift the index of an earlier
@@ -2721,6 +2722,7 @@ export class GeminiChat {
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
     this.clearPendingPartialState();
+    return strippedEntries;
   }
 
   /**

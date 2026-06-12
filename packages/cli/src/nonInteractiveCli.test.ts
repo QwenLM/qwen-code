@@ -374,6 +374,43 @@ describe('runNonInteractive', () => {
       );
     });
 
+    it('restores an orphaned trailing user prompt when Retry exits before sending', async () => {
+      setupMetricsMock();
+      const orphanedPrompt = [{ text: 'do the thing' }];
+      const addHistorySpy = vi.fn();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        addHistory: addHistorySpy,
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryTail: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: orphanedPrompt }]),
+      }));
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn(() => [
+        { role: 'user', parts: orphanedPrompt },
+      ]);
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.SessionTokenLimitExceeded,
+            value: {
+              currentTokens: 101,
+              limit: 100,
+              message: 'Session token limit exceeded',
+            },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-limit', {
+        continueInterrupted: true,
+      });
+
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: orphanedPrompt,
+      });
+    });
+
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
       mockGeminiClient.getChat = vi.fn(() => ({

@@ -4928,11 +4928,14 @@ describe('GeminiChat', async () => {
         { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'first message' }] },
         { role: 'model', parts: [{ text: 'first response' }] },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
     });
 
@@ -4957,13 +4960,27 @@ describe('GeminiChat', async () => {
         },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'query' }] },
         {
           role: 'model',
           parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'IDE context' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
         },
       ]);
     });

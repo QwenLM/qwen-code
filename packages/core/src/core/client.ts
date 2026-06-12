@@ -447,14 +447,14 @@ export class GeminiClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory() {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
-    chat.stripOrphanedUserEntriesFromHistory();
+    const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
     const after = chat.getHistoryLength();
     if (after >= before) {
       // Nothing to strip — leave caches and IDE context alone.
-      return;
+      return strippedEntries;
     }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
@@ -471,6 +471,7 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
+    return strippedEntries;
   }
 
   /**
@@ -1607,9 +1608,21 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let strippedRetryEntries: Content[] = [];
+    let retrySendStarted = false;
+
+    const restoreStrippedRetryEntries = () => {
+      if (retrySendStarted || strippedRetryEntries.length === 0) {
+        return;
+      }
+      for (const entry of strippedRetryEntries) {
+        this.getChat().addHistory(entry);
+      }
+      strippedRetryEntries = [];
+    };
 
     if (messageType === SendMessageType.Retry) {
-      this.stripOrphanedUserEntriesFromHistory();
+      strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -2089,6 +2102,7 @@ export class GeminiClient {
       };
 
       const resultStream = turn.run(model, requestToSend, signal);
+      retrySendStarted = true;
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
         if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
@@ -2439,6 +2453,7 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      restoreStrippedRetryEntries();
       // Belt-and-suspenders: abort the prefetch on any exit other than the
       // bottom-of-try `return turn`. Catches uncaught exceptions and guards
       // against future early-return sites that forget to call cancel.
