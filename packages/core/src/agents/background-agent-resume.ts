@@ -618,21 +618,32 @@ export class BackgroundAgentResumeService {
       }
 
       const bgEventEmitter = new AgentEventEmitter();
-      const subagent = target.isFork
-        ? await this.createResumedForkSubagent(
-            bgConfig as Config,
-            bgEventEmitter,
-            resumeHistory ?? [],
-            recovery.forkBootstrap!,
-          )
-        : await this.config
-            .getSubagentManager()
-            .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
-              eventEmitter: bgEventEmitter,
-              promptConfigOverrides: {
-                initialMessages: resumeHistory,
-              },
-            });
+      // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
+      // the resume `finally` invokes this so per-agent hook entries and
+      // the force-rebuilt ToolRegistry don't leak across the resume
+      // boundary. Stays undefined on the fork-resume path (forks share
+      // the parent's registry + hook lifecycle).
+      let subagentDispose: (() => Promise<void>) | undefined;
+      let subagent: AgentHeadless;
+      if (target.isFork) {
+        subagent = await this.createResumedForkSubagent(
+          bgConfig as Config,
+          bgEventEmitter,
+          resumeHistory ?? [],
+          recovery.forkBootstrap!,
+        );
+      } else {
+        const result = await this.config
+          .getSubagentManager()
+          .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
+            eventEmitter: bgEventEmitter,
+            promptConfigOverrides: {
+              initialMessages: resumeHistory,
+            },
+          });
+        subagent = result.subagent;
+        subagentDispose = result.dispose;
+      }
 
       const projectRoot = this.config.getProjectRoot();
       cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
@@ -840,6 +851,11 @@ export class BackgroundAgentResumeService {
             .getToolRegistry()
             .stop()
             .catch(() => {});
+          // Per-spawn cleanup from `createAgentHeadless`: releases agent-
+          // scope hook entries and stops the per-agent ToolRegistry that
+          // the force rebuild created for `mcpServers`. Distinct from the
+          // parent registry above (no-op when target.isFork).
+          void subagentDispose?.().catch(() => {});
           // Restore parent PermissionManager's dangerous allow rules if
           // this override stripped them. See createApprovalModeOverride
           // strip-lifecycle comment in agent.ts.
