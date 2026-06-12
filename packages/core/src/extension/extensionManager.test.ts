@@ -452,6 +452,24 @@ describe('extension tests', () => {
         expect(ext?.commands).toEqual(['caveman:intensity']);
       });
 
+      it('should replace colons in path segments with underscores', async () => {
+        if (process.platform !== 'linux') return; // colons forbidden in filenames on macOS/Windows
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: 'colon-name-ext',
+          version: '1.0.0',
+        });
+        const commandsDir = path.join(extDir, 'commands');
+        fs.mkdirSync(commandsDir, { recursive: true });
+        fs.writeFileSync(path.join(commandsDir, 'foo:bar.md'), 'content');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+        const ext = extensions.find((e) => e.config.name === 'colon-name-ext');
+        expect(ext?.commands).toEqual(['foo_bar']);
+      });
+
       it('should return empty commands when no .md or .toml files exist', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
