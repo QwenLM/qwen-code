@@ -52,7 +52,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
           c: SubagentConfig,
         ) => Promise<{
           context: Config;
-          disposeRegistry?: () => Promise<void>;
+          cleanup?: () => Promise<void>;
         }>;
       }
     ).buildSubagentContextOverride.bind(manager);

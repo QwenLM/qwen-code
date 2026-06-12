@@ -2073,6 +2073,41 @@ System prompt 3`);
         // even for agents that triggered no cleanup-bearing setup.
         await expect(result.dispose()).resolves.toBeUndefined();
       });
+
+      it('runs cleanup when AgentHeadless.create throws — caller never gets dispose', async () => {
+        // Constructor-failure path inside createAgentHeadless: the caller
+        // never receives `{ subagent, dispose }`, so the inner catch must
+        // run the same cleanup itself. Without that, a transient
+        // AgentHeadless.create failure (e.g. ContentGenerator init blows
+        // up) would orphan the hook entries we just registered.
+        const unregisterSpy = vi.fn();
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({
+            addAgentHooks: vi.fn().mockReturnValue(unregisterSpy),
+          }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockRejectedValueOnce(
+          new Error('synthetic constructor failure'),
+        );
+
+        await expect(
+          manager.createAgentHeadless(
+            {
+              ...baseConfig,
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: '*',
+                    hooks: [{ type: 'command', command: 'echo' }],
+                  },
+                ],
+              },
+            },
+            mockConfig,
+          ),
+        ).rejects.toThrow(/synthetic constructor failure/);
+        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

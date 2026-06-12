@@ -694,7 +694,11 @@ export class SubagentManager {
     // Track per-spawn cleanup callbacks declared outside the inner
     // `try/catch` so the catch can fire them on a constructor failure
     // before the caller ever receives the return value. The successful
-    // path puts the same callbacks behind `dispose`.
+    // path puts the same callbacks behind `dispose`. Both inner callbacks
+    // are idempotent at the source (`HookRegistry.addAgentHooks` filters
+    // by `agentScope`; `ToolRegistry.stop` is documented idempotent), so
+    // `runCleanup` doesn't need its own null-out guards — a duplicate
+    // invocation is at worst wasted work, never a re-fire of side effects.
     let unregisterAgentHooks: (() => void) | undefined;
     let disposeSubagentRegistry: (() => Promise<void>) | undefined;
     const runCleanup = async (): Promise<void> => {
@@ -705,8 +709,6 @@ export class SubagentManager {
           debugLogger.warn(
             `Subagent "${config.name}": failed to unregister per-agent hooks: ${error instanceof Error ? error.message : String(error)}`,
           );
-        } finally {
-          unregisterAgentHooks = undefined;
         }
       }
       if (disposeSubagentRegistry) {
@@ -716,8 +718,6 @@ export class SubagentManager {
           debugLogger.warn(
             `Subagent "${config.name}": failed to stop per-agent ToolRegistry: ${error instanceof Error ? error.message : String(error)}`,
           );
-        } finally {
-          disposeSubagentRegistry = undefined;
         }
       }
     };
@@ -751,9 +751,9 @@ export class SubagentManager {
         runtimeContext,
       );
 
-      const { context: subagentContext, disposeRegistry } =
+      const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(runtimeContext, config);
-      disposeSubagentRegistry = disposeRegistry;
+      disposeSubagentRegistry = cleanup;
 
       // Register per-agent frontmatter hooks. The returned unregister callback
       // is invoked from `dispose` (and from the catch block below on a
@@ -846,8 +846,12 @@ export class SubagentManager {
      * processes / sockets that the parent's `Config.shutdown` cannot reach,
      * so the caller (`createAgentHeadless`) carries this callback through
      * to its `dispose` closure and runs it when the subagent terminates.
+     *
+     * Field name matches the `cleanup` field on
+     * `ApprovalModeOverrideHandle` (the sibling override-builder return
+     * shape) for cross-API consistency.
      */
-    disposeRegistry?: () => Promise<void>;
+    cleanup?: () => Promise<void>;
   }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const subagentContext = Object.create(runtimeContext) as any as Config;
@@ -920,7 +924,7 @@ export class SubagentManager {
       }
       return {
         context: subagentContext,
-        disposeRegistry: () => subagentRegistry.stop(),
+        cleanup: () => subagentRegistry.stop(),
       };
     }
     return { context: subagentContext };
