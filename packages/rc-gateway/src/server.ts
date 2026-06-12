@@ -127,6 +127,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   const webRoot =
     deps.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
+
+  // Guest share landing page. Served for BOTH /ui/share/<token> (first visit)
+  // and /ui/share (after the page scrubs the token from the URL, so a reload
+  // still resolves the page; the page then reads the token from sessionStorage).
+  // Registered BEFORE the fallthrough:false static mount (which would otherwise
+  // 404 these paths). It is a DUMB sendFile: the `:token` is never read/logged/
+  // validated server-side — GET /rc/share/whoami is the sole auth gate. The
+  // error callback is required (no global error middleware → a sendFile error
+  // must not hang/throw the request).
+  const sharePage = join(webRoot, 'share.html');
+  const serveSharePage: express.RequestHandler = (_req, res) => {
+    res.sendFile(sharePage, (err) => {
+      if (err && !res.headersSent) res.status(404).end();
+    });
+  };
+  app.get('/ui/share', serveSharePage);
+  app.get('/ui/share/:token', serveSharePage);
+
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit));

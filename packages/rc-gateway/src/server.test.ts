@@ -358,6 +358,28 @@ describe('gateway app', () => {
     expect(res.status).toBe(404);
   });
 
+  it('serves the share bootstrap page at /ui/share/<token> (dumb sendFile)', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/share/any-token-value`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain('qwen-rc shared session');
+  });
+
+  it('serves the share page at /ui/share too (reload after URL scrub)', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/share`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('qwen-rc shared session');
+  });
+
+  it('the share route does not shadow other /ui static assets', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/sw.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/javascript/);
+  });
+
   it('routes an approve-scoped permission vote to the daemon', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, OWNER, APPROVE]);
