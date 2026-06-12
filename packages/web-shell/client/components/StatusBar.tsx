@@ -58,6 +58,8 @@ interface StatusBarProps {
     condition: string;
     setAt: number;
   } | null;
+  /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
+  hideSettings?: boolean;
 }
 
 // Feather "settings" gear, stroke-based like PromptChevron so it inherits
@@ -171,6 +173,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onReturnToInput,
       taskActivityKey,
       activeGoal,
+      hideSettings,
     },
     ref,
   ) {
@@ -332,7 +335,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     return (
       <div className={styles.bar}>
         <div className={styles.left}>
-          {connected && (
+          {connected && !hideSettings && (
             <button
               type="button"
               className={styles.settingsButton}

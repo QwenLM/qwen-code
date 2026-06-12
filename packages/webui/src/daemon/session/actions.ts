@@ -153,10 +153,14 @@ export function createDaemonSessionActions({
         if (options?.optimisticUserMessage !== false) {
           store.appendLocalUserMessage(text, normalizedImages);
         }
+        const promptRequest: Record<string, unknown> = {
+          prompt: toDaemonPromptContent(text, normalizedImages),
+        };
+        if (options?.retry) {
+          promptRequest['retry'] = true;
+        }
         const result = await session.prompt(
-          {
-            prompt: toDaemonPromptContent(text, normalizedImages),
-          },
+          promptRequest as Parameters<typeof session.prompt>[0],
           ctrl.signal,
         );
         if (isNonBlockingAccepted(result)) {

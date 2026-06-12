@@ -39,12 +39,15 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
+  shellOutputMaxLines: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
    * panels don't yank the reader to the bottom. Defaults to false.
    */
   autoScrollTailIntoView?: boolean;
+  showRetryHint?: boolean;
+  onRetryClick?: () => void;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -289,7 +292,10 @@ export function MessageList({
   tailContent,
   tailKey = 'tail',
   virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
+  shellOutputMaxLines,
   autoScrollTailIntoView = false,
+  showRetryHint = false,
+  onRetryClick,
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
   const mergedMessages = useMemo(
@@ -588,6 +594,9 @@ export function MessageList({
           onShowContextDetail={onShowContextDetail}
           workspaceCwd={workspaceCwd}
           isLatest={itemIndex === displayItems.length - 1}
+          showRetryHint={showRetryHint}
+          onRetryClick={onRetryClick}
+          shellOutputMaxLines={shellOutputMaxLines}
         />
       );
     },
@@ -605,6 +614,9 @@ export function MessageList({
       headerOffset,
       displayItems,
       workspaceCwd,
+      showRetryHint,
+      onRetryClick,
+      shellOutputMaxLines,
     ],
   );
 

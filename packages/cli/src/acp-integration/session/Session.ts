@@ -979,10 +979,19 @@ export class Session implements SessionContext {
               ),
             );
 
-            // record user message for session management
-            this.config
-              .getChatRecordingService()
-              ?.recordUserMessage(promptText);
+            // Retry: strip orphaned user entries so the model sees a clean
+            // history (no dangling user message from the failed attempt).
+            // Also skip recordUserMessage to avoid duplicating the user
+            // turn in the JSONL transcript.
+            const isRetry = (params as { retry?: boolean }).retry === true;
+            if (isRetry) {
+              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+            } else {
+              // record user message for session management
+              this.config
+                .getChatRecordingService()
+                ?.recordUserMessage(promptText);
+            }
 
             // Check if the input contains a slash command
             // Extract text from the first text block if present
@@ -1191,6 +1200,16 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Cancel-triggered abort: the LLM fetch was interrupted by
+                  // cancelSession or a new prompt arriving. Treat as a normal
+                  // cancellation rather than an error — this prevents the
+                  // AbortError from propagating through ACP serialization
+                  // where it would lose its DOMException type and surface
+                  // as a spurious turn_error ("Request was aborted.").
+                  if (pendingSend.signal.aborted) {
+                    return { stopReason: 'cancelled' };
+                  }
+
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
                   // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);

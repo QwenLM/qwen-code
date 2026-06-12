@@ -8,6 +8,7 @@
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
   overflow: hidden;
+  margin: 24px;
 }
 
 .resume-picker-header {

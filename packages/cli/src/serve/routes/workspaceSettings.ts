@@ -27,11 +27,13 @@ const TUI_ONLY_SETTINGS = new Set([
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.renderMode',
-  'ui.compactMode',
   'ui.useTerminalBuffer',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
+  'ui.enableWelcomeBack',
 ]);
+
+const WEB_SHELL_SETTINGS = new Set(['ui.compactMode']);
 
 const VALID_WRITE_SCOPES = new Set(['workspace']);
 
@@ -65,11 +67,15 @@ interface SettingsResponse {
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
 function getAllowedKeys(): Set<string> {
-  return new Set(
+  const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
     ),
   );
+  for (const key of WEB_SHELL_SETTINGS) {
+    keys.add(key);
+  }
+  return keys;
 }
 
 function buildSettingsResponse(

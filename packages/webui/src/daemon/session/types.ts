@@ -48,6 +48,9 @@ export interface DaemonConnectionState {
   currentModel?: string;
   currentMode?: string;
   displayName?: string;
+  /** Latest main-conversation model usage event. */
+  tokenUsage?: DaemonTokenUsage;
+  /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
   providers?: DaemonWorkspaceProvidersStatus;
@@ -59,30 +62,59 @@ export interface DaemonConnectionState {
   error?: string;
 }
 
+export interface DaemonTokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  thoughtTokens?: number;
+  cachedReadTokens?: number;
+}
+
 export interface DaemonSessionProviderProps {
   /** Daemon base URL. Optional when nested inside DaemonWorkspaceProvider (inherited). */
   baseUrl?: string;
   /** Bearer token. Optional when nested inside DaemonWorkspaceProvider (inherited). */
   token?: string;
+  /** Workspace cwd used when creating, loading, or resuming daemon sessions. */
   workspaceCwd?: string;
+  /** Session id to load on mount instead of creating or attaching automatically. */
   initialSessionId?: string;
+  /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
+  /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
   createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
+  /** Maximum queued SSE events requested from the daemon per subscription. */
   maxQueued?: number;
+  /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /** Hide this client's own user prompt echo when the daemon replays events. */
   suppressOwnUserEcho?: boolean;
+  /** Attach raw daemon events to normalized transcript blocks for debugging. */
   includeRawEvent?: boolean;
+  /** Connect to the daemon automatically on mount. */
   autoConnect?: boolean;
+  /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
+  /** Behavior when the active session is missing (404/410). Defaults to create. */
+  missingSessionBehavior?: 'create' | 'disconnect';
+  /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
+  /** Maximum reconnect delay in milliseconds after backoff. */
   maxReconnectDelayMs?: number;
+  /** Interval in milliseconds for client heartbeat checks. */
   heartbeatIntervalMs?: number;
+  /** Consecutive heartbeat failures before marking the session disconnected. */
   heartbeatFailureThreshold?: number;
+  /** Optional user-facing fallback warnings for partial session load failures. */
   loadWarnings?: {
+    /** Warning shown when model/provider status cannot be loaded. */
     models?: string;
+    /** Warning shown when supported command metadata cannot be loaded. */
     commands?: string;
+    /** Warning shown when session context metadata cannot be loaded. */
     context?: string;
   };
+  /** React children rendered inside the daemon session contexts. */
   children: ReactNode;
 }
 
@@ -175,6 +207,12 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  /**
+   * When true, the daemon strips orphaned user entries from the chat
+   * history before re-sending, and skips recording a duplicate user
+   * message in the JSONL transcript. Used by Ctrl+Y retry.
+   */
+  retry?: boolean;
 }
 
 export interface DaemonPromptImage {

@@ -410,15 +410,18 @@ export function transcriptBlocksToDaemonMessages(
         break;
       }
 
-      case 'error':
+      case 'error': {
+        const errorBlock = block as DaemonStatusTranscriptBlock;
         messages.push({
           id: block.id,
           role: 'system',
-          content: (block as DaemonStatusTranscriptBlock).text,
+          content: errorBlock.text,
           variant: 'error',
+          retryable: errorBlock.source === 'turn_error',
         });
         needsNewContentMessage = true;
         break;
+      }
 
       case 'prompt_cancelled':
         messages.push({

@@ -1875,6 +1875,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Connection lost',
         variant: 'error',
+        retryable: false,
       },
     ]);
   });

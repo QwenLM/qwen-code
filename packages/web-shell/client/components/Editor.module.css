@@ -285,3 +285,9 @@
   line-height: 1.35;
   max-height: 2.7em;
 }
+
+@media (max-width: 700px) {
+  .borderTopLabel {
+    display: none;
+  }
+}

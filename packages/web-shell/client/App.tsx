@@ -10,6 +10,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useSettings,
   useSessionNotices,
   useStreamingState,
   useTranscriptBlocks,
@@ -61,11 +62,9 @@ import {
   SETTINGS_ACTIVE_EVENT,
   SettingsMessage,
 } from './components/messages/SettingsMessage';
+import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
 import { HelpDialog } from './components/dialogs/HelpDialog';
-import {
-  ThemeDialog,
-  type WebShellTheme,
-} from './components/dialogs/ThemeDialog';
+import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { getLocalCommands } from './constants/localCommands';
@@ -77,6 +76,7 @@ import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
   getTranslator,
+  languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
   type WebShellLanguage,
@@ -126,6 +126,13 @@ import type {
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import {
+  WebShellThemeId,
+  THEME_SETTING_KEY,
+  LANGUAGE_SETTING_KEY,
+  themeSettingToWebShellTheme,
+  type WebShellTheme,
+} from './themeContext';
+import {
   WebShellCustomizationProvider,
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
@@ -140,26 +147,8 @@ const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
-const COMPACT_MODE_STORAGE_KEY = 'web-shell:compact-mode';
-
-function loadCompactMode(): boolean {
-  try {
-    return window.localStorage.getItem(COMPACT_MODE_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
-
-function saveCompactMode(enabled: boolean) {
-  try {
-    window.localStorage.setItem(
-      COMPACT_MODE_STORAGE_KEY,
-      enabled ? 'true' : 'false',
-    );
-  } catch {
-    // Ignore storage failures in private browsing or restricted contexts.
-  }
-}
+const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
+const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
@@ -187,6 +176,7 @@ interface QueuedPrompt {
   id: number;
   text: string;
   images?: PromptImage[];
+  onComplete?: () => void;
 }
 
 interface ActiveGoalStatus {
@@ -217,7 +207,7 @@ export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
   /** Visual theme for the embedded shell. Defaults to the dark terminal skin. */
-  theme?: 'dark' | 'light';
+  theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
   onThemeChange?: (theme: WebShellTheme) => void;
   /** UI language for the Web terminal. Defaults to `?language=` or browser language. */
@@ -548,7 +538,7 @@ function QueuedPromptDisplay({
 
 export function App({
   onSessionIdChange,
-  theme: providedTheme = 'dark',
+  theme: providedTheme,
   onThemeChange,
   language: providedLanguage,
   onLanguageChange,
@@ -702,18 +692,29 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      opts?: { optimisticUserMessage?: boolean },
+      opts?: { optimisticUserMessage?: boolean; retry?: boolean },
     ) => {
       clearFollowup();
+      if (!opts?.retry) {
+        lastSubmittedPromptRef.current = text;
+        lastSubmittedImagesRef.current = images;
+      }
+      setShowRetryHint(false);
       return sessionActions.sendPrompt(text, {
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        retry: opts?.retry,
       });
     },
     [clearFollowup, sessionActions],
   );
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  const lastSubmittedPromptRef = useRef<string>('');
+  const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const [showRetryHint, setShowRetryHint] = useState(false);
+  const showRetryHintRef = useRef(showRetryHint);
+  showRetryHintRef.current = showRetryHint;
   const connected = connection.status === 'connected';
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   useEffect(() => {
@@ -765,8 +766,9 @@ export function App({
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
   const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
   const authPanelActive = usePanelActive(AUTH_ACTIVE_EVENT);
-  const [selectedTheme, setSelectedTheme] =
-    useState<WebShellTheme>(providedTheme);
+  const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
+    providedTheme ?? WebShellThemeId.Dark,
+  );
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
@@ -785,8 +787,16 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog;
+  const inlinePanelOpen =
+    approvalModeInlineOpen ||
+    authInlineOpen ||
+    agentsInlineMode !== null ||
+    memoryInlineOpen ||
+    modelInlineMode !== null ||
+    settingsInlineOpen;
   const bottomHidden =
     dialogOpen ||
+    inlinePanelOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
     tasksPanelActive ||
@@ -986,18 +996,22 @@ export function App({
     queuedPromptsRef.current = queuedPrompts;
   }, [queuedPrompts]);
 
-  const enqueuePrompt = useCallback((text: string, images?: PromptImage[]) => {
-    const trimmed = text.trim();
-    if (!trimmed) return true;
-    const nextPrompt: QueuedPrompt = {
-      id: nextQueuedPromptIdRef.current++,
-      text: trimmed,
-      images: images ? [...images] : undefined,
-    };
-    queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-    setQueuedPrompts(queuedPromptsRef.current);
-    return true;
-  }, []);
+  const enqueuePrompt = useCallback(
+    (text: string, images?: PromptImage[], onComplete?: () => void) => {
+      const trimmed = text.trim();
+      if (!trimmed) return true;
+      const nextPrompt: QueuedPrompt = {
+        id: nextQueuedPromptIdRef.current++,
+        text: trimmed,
+        images: images ? [...images] : undefined,
+        onComplete,
+      };
+      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
+      setQueuedPrompts(queuedPromptsRef.current);
+      return true;
+    },
+    [],
+  );
 
   const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
     const [nextPrompt, ...rest] = queuedPromptsRef.current;
@@ -1023,10 +1037,6 @@ export function App({
     return true;
   }, [store, t]);
 
-  useEffect(() => {
-    setSelectedTheme(providedTheme);
-  }, [providedTheme]);
-
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
       setSelectedTheme(nextTheme);
@@ -1035,19 +1045,103 @@ export function App({
     [onThemeChange],
   );
 
-  useEffect(() => {
-    if (providedLanguage !== undefined) {
-      setSelectedLanguage(normalizeLanguage(providedLanguage));
-    }
-  }, [providedLanguage]);
+  const handleLanguageChange = useCallback(
+    (nextLanguage: WebShellLanguage) => {
+      setSelectedLanguage(nextLanguage);
+      onLanguageChange?.(nextLanguage);
+    },
+    [onLanguageChange],
+  );
 
   const handleToggleShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
   }, []);
 
-  const [compactMode, setCompactMode] = useState(loadCompactMode);
+  const workspaceSettingsState = useSettings({
+    autoLoad: true,
+  });
+  const {
+    settings: workspaceSettings,
+    setValue: setWorkspaceSetting,
+    reload: reloadWorkspaceSettings,
+  } = workspaceSettingsState;
+  const compactModeSetting = workspaceSettings.find(
+    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
+  );
+  const themeSetting = workspaceSettings.find(
+    (setting) => setting.key === THEME_SETTING_KEY,
+  );
+  const hideTipsSetting = workspaceSettings.find(
+    (setting) => setting.key === HIDE_TIPS_SETTING_KEY,
+  );
+  const languageSetting = workspaceSettings.find(
+    (setting) => setting.key === LANGUAGE_SETTING_KEY,
+  );
+  const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
+  const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
+
+  useEffect(() => {
+    const value = compactModeSetting?.values.effective;
+    if (typeof value === 'boolean') {
+      setCompactMode(value);
+    }
+  }, [compactModeSetting?.values.effective]);
+
+  useEffect(() => {
+    if (providedTheme) {
+      setSelectedTheme(providedTheme);
+      return;
+    }
+    const settingTheme = themeSettingToWebShellTheme(
+      themeSetting?.values.effective,
+    );
+    if (settingTheme) {
+      setSelectedTheme(settingTheme);
+    }
+  }, [providedTheme, themeSetting?.values.effective]);
+
+  useEffect(() => {
+    if (providedLanguage !== undefined) {
+      setSelectedLanguage(normalizeLanguage(providedLanguage));
+      return;
+    }
+    const settingLanguage = languageSettingToWebShellLanguage(
+      languageSetting?.values.effective,
+    );
+    if (settingLanguage) {
+      setSelectedLanguage(settingLanguage);
+    }
+  }, [providedLanguage, languageSetting?.values.effective]);
+
+  const handleSettingsLanguageChange = useCallback(
+    (nextLanguage: WebShellLanguage) => {
+      const command = `/language ui ${nextLanguage}`;
+      handleLanguageChange(nextLanguage);
+      const refreshSettings = () => {
+        sessionActions.refreshCommands();
+        reloadWorkspaceSettings();
+      };
+      if (streamingStateRef.current !== 'idle') {
+        enqueuePrompt(command, undefined, refreshSettings);
+        return;
+      }
+      sendPrompt(command)
+        .then(() => Promise.all([refreshSettings()]))
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to sync /language command');
+        });
+    },
+    [
+      enqueuePrompt,
+      handleLanguageChange,
+      reloadWorkspaceSettings,
+      reportError,
+      sendPrompt,
+      sessionActions,
+    ],
+  );
 
   const handleClearScreen = useCallback(() => {
     if (streamingStateRef.current !== 'idle') {
@@ -1058,10 +1152,16 @@ export function App({
   }, [store, t]);
 
   const handleToggleCompact = useCallback(() => {
+    const previous = compactModeRef.current;
     const next = !compactModeRef.current;
     setCompactMode(next);
-    saveCompactMode(next);
-  }, []);
+    setWorkspaceSetting('workspace', COMPACT_MODE_SETTING_KEY, next).catch(
+      (error: unknown) => {
+        setCompactMode(previous);
+        reportError(error, t('compact.saveFailed'));
+      },
+    );
+  }, [reportError, setWorkspaceSetting, t]);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -1120,6 +1220,19 @@ export function App({
   useEffect(() => {
     streamingStateRef.current = streamingState;
   }, [streamingState]);
+
+  useEffect(() => {
+    let hasTurnError = false;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const block = blocks[i];
+      if (block?.kind === 'user') break;
+      if (block?.kind === 'error' && block.source === 'turn_error') {
+        hasTurnError = true;
+        break;
+      }
+    }
+    setShowRetryHint(hasTurnError);
+  }, [blocks]);
 
   useEffect(() => {
     onStreamingStateChange?.(streamingState);
@@ -1376,6 +1489,15 @@ export function App({
     ],
   );
 
+  const hiddenCommands = useMemo(
+    () =>
+      new Set(
+        (hiddenSlashCommands ?? []).map(normalizeHiddenCommand).filter(Boolean),
+      ),
+    [hiddenSlashCommands],
+  );
+  const hideSettings = hiddenCommands.has('settings');
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1468,8 +1590,7 @@ export function App({
                 return true;
               }
               const nextLanguage = normalizeLanguage(languageArg);
-              setSelectedLanguage(nextLanguage);
-              onLanguageChange?.(nextLanguage);
+              handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
                 sendPrompt(`/language ui ${nextLanguage}`)
                   .then(() => sessionActions.refreshCommands())
@@ -1674,6 +1795,11 @@ export function App({
             return true;
           }
           if (cmd === 'settings') {
+            if (hideSettings) {
+              store.appendLocalUserMessage(text);
+              store.dispatch([{ type: 'status', text: t('command.hidden') }]);
+              return true;
+            }
             store.appendLocalUserMessage(text);
             setSettingsInlineOpen(true);
             return true;
@@ -1958,7 +2084,8 @@ export function App({
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
-      onLanguageChange,
+      handleLanguageChange,
+      hideSettings,
       pushToast,
       reportError,
       runVisibleRecap,
@@ -1982,14 +2109,25 @@ export function App({
     if (!nextPrompt) return;
 
     drainingQueueRef.current = true;
+    let sent = false;
     const timer = window.setTimeout(() => {
+      sent = true;
       try {
         handleSubmit(nextPrompt.text, nextPrompt.images);
+        nextPrompt.onComplete?.();
       } finally {
         drainingQueueRef.current = false;
       }
     }, 0);
     return () => {
+      if (!sent) {
+        // Cleanup ran before timeout fired — put the prompt back at the
+        // front of the queue so it's not lost. This can happen when any
+        // dependency (e.g. handleSubmit, streamingState) changes between
+        // popNextQueuedPrompt() and the setTimeout firing.
+        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
+        setQueuedPrompts(queuedPromptsRef.current);
+      }
       window.clearTimeout(timer);
       drainingQueueRef.current = false;
     };
@@ -2032,6 +2170,27 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
+
+  const handleRetry = useCallback(() => {
+    if (
+      showRetryHintRef.current &&
+      streamingStateRef.current === 'idle' &&
+      lastSubmittedPromptRef.current
+    ) {
+      setShowRetryHint(false);
+      sendPrompt(
+        lastSubmittedPromptRef.current,
+        lastSubmittedImagesRef.current,
+        {
+          optimisticUserMessage: false,
+          retry: true,
+        },
+      ).catch((error: unknown) => reportError(error, 'Failed to retry prompt'));
+    } else {
+      store.dispatch([{ type: 'status', text: t('retry.none') }]);
+    }
+  }, [sendPrompt, reportError, store, t]);
+
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
       if (bottomHidden) return;
@@ -2048,14 +2207,21 @@ export function App({
         }
         if (e.key === 'y') {
           e.preventDefault();
-          editorRef.current?.retryLast();
+          handleRetry();
           return;
         }
       }
     };
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
-  }, [bottomHidden, handleClearScreen, handleToggleCompact]);
+  }, [
+    bottomHidden,
+    handleClearScreen,
+    handleToggleCompact,
+    handleRetry,
+    store,
+    t,
+  ]);
 
   useEffect(() => {
     const resetEscapeState = () => {
@@ -2180,11 +2346,10 @@ export function App({
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    const hidden = new Set(
-      (hiddenSlashCommands ?? []).map(normalizeHiddenCommand).filter(Boolean),
-    );
     return mergeCommands(connection.commands ?? [], getLocalCommands(t))
-      .filter((command) => !hidden.has(normalizeHiddenCommand(command.name)))
+      .filter(
+        (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
+      )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
         return {
@@ -2193,7 +2358,7 @@ export function App({
           description: command.description || t('skills.run'),
         };
       });
-  }, [connection.commands, connection.skills, hiddenSlashCommands, t]);
+  }, [connection.commands, connection.skills, hiddenCommands, t]);
 
   const welcomeHeaderProps = useMemo(
     () => ({
@@ -2201,12 +2366,14 @@ export function App({
       cwd: connection.workspaceCwd || '',
       currentModel,
       currentMode,
+      hideTips: hideTipsSetting?.values.effective === true,
     }),
     [
       connection.capabilities?.qwenCodeVersion,
       connection.workspaceCwd,
       currentModel,
       currentMode,
+      hideTipsSetting?.values.effective,
     ],
   );
 
@@ -2222,7 +2389,9 @@ export function App({
 
   const appClassName = [
     styles.app,
-    selectedTheme === 'light' ? styles.themeLight : styles.themeDark,
+    selectedTheme === WebShellThemeId.Light
+      ? styles.themeLight
+      : styles.themeDark,
     externalClassName,
   ]
     .filter(Boolean)
@@ -2326,6 +2495,9 @@ export function App({
                   onShowContextDetail={handleShowContextDetail}
                   catchingUp={connection.catchingUp}
                   workspaceCwd={connection.workspaceCwd || ''}
+                  shellOutputMaxLines={shellOutputMaxLines}
+                  showRetryHint={showRetryHint}
+                  onRetryClick={handleRetry}
                   welcomeHeader={welcomeHeader}
                   tailContent={
                     agentsInlineMode ||
@@ -2388,11 +2560,13 @@ export function App({
                         )}
                         {settingsInlineOpen && (
                           <SettingsMessage
+                            settingsState={workspaceSettingsState}
                             onClose={() => setSettingsInlineOpen(false)}
+                            onLanguageChange={handleSettingsLanguageChange}
+                            onThemeChange={handleThemeChange}
                             onSubDialog={(key) => {
                               setSettingsInlineOpen(false);
-                              if (key === 'ui.theme') setShowThemeDialog(true);
-                              else if (key === 'fastModel')
+                              if (key === 'fastModel')
                                 setModelInlineMode('fast');
                               else if (key === 'tools.approvalMode')
                                 setApprovalModeInlineOpen(true);
@@ -2514,6 +2688,7 @@ export function App({
                   onReturnToInput={handleReturnToEditor}
                   taskActivityKey={backgroundTaskActivityKey}
                   activeGoal={activeGoal}
+                  hideSettings={hideSettings}
                 />
               ))}
           </div>

@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { useI18n } from '../../i18n';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
@@ -20,6 +21,8 @@ interface SystemMessageProps {
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   isLatest?: boolean;
+  showRetryHint?: boolean;
+  onRetryClick?: () => void;
 }
 
 export const SystemMessage = memo(function SystemMessage({
@@ -27,7 +30,10 @@ export const SystemMessage = memo(function SystemMessage({
   variant,
   onShowContextDetail,
   isLatest = false,
+  showRetryHint = false,
+  onRetryClick,
 }: SystemMessageProps) {
+  const { t } = useI18n();
   const contextUsage =
     variant === 'info' ? parseContextUsageMessage(content) : null;
   if (contextUsage) {
@@ -103,6 +109,17 @@ export const SystemMessage = memo(function SystemMessage({
         <Markdown content={content} />
       ) : (
         <pre>{content}</pre>
+      )}
+      {showRetryHint && onRetryClick && (
+        <div className={styles.retryHint}>
+          <button
+            type="button"
+            className={styles.retryButton}
+            onClick={onRetryClick}
+          >
+            {t('retry.hint')}
+          </button>
+        </div>
       )}
     </div>
   );

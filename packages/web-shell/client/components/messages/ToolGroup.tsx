@@ -1,4 +1,5 @@
 import { memo, useContext, useEffect, useMemo, useState } from 'react';
+import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -53,7 +54,10 @@ interface ToolGroupProps {
     answers?: Record<string, string>,
   ) => void;
   workspaceCwd?: string;
+  shellOutputMaxLines: number;
 }
+
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
@@ -147,22 +151,37 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
   return result.reverse().join('\n');
 }
 
-const MAX_BASH_LINES = 5;
 const MAX_BASH_LINE_CHARS = 150;
 const MAX_READ_LINES = 25;
+
+export function resolveShellOutputMaxLines(
+  settings: readonly DaemonSettingDescriptor[],
+): number {
+  const setting = settings.find((s) => s.key === 'ui.shellOutputMaxLines');
+  const value = setting?.values.effective;
+  const raw =
+    typeof value === 'number' ? value : DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  return Math.max(0, Math.floor(raw || 0));
+}
 
 function truncateLine(line: string, max: number): string {
   if (line.length <= max) return line;
   return line.slice(0, max) + ' …';
 }
 
-function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
+function ExpandedBashOutput({
+  tool,
+  maxLines,
+}: {
+  tool: ACPToolCall;
+  maxLines: number;
+}) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
-  const isLong = lines.length > MAX_BASH_LINES;
-  const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
+  const isLong = maxLines > 0 && lines.length > maxLines;
+  const hiddenLinesCount = Math.max(0, lines.length - maxLines);
   const hasTruncatedLine = useMemo(
     () => lines.some((l) => l.length > MAX_BASH_LINE_CHARS),
     [lines],
@@ -171,16 +190,15 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const displayText = useMemo(() => {
     if (showAll) return output;
     if (isLong) {
-      // Match CLI behavior: long shell output shows a fixed tail preview.
       return [
         `... first ${hiddenLinesCount} lines hidden ...`,
         ...lines
-          .slice(-MAX_BASH_LINES)
+          .slice(-maxLines)
           .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
       ].join('\n');
     }
     return lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n');
-  }, [hiddenLinesCount, isLong, lines, output, showAll]);
+  }, [hiddenLinesCount, isLong, lines, maxLines, output, showAll]);
   const ansiSegments = useMemo(
     () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
     [displayText],
@@ -342,6 +360,7 @@ interface ToolLineProps {
   approval?: PermissionRequest | null;
   onConfirm?: (id: string, selectedOption: string) => void;
   workspaceCwd?: string;
+  shellOutputMaxLines?: number;
 }
 
 function getAgentDisplayInfo(
@@ -522,6 +541,7 @@ function areToolLinePropsEqual(
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -570,6 +590,7 @@ export const ToolLine = memo(function ToolLine({
   approval,
   onConfirm,
   workspaceCwd,
+  shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
 }: ToolLineProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
@@ -740,7 +761,9 @@ export const ToolLine = memo(function ToolLine({
       )}
       {!isTodo && expanded && (
         <div className={styles.lineDetail}>
-          {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
+          {isShellToolName(name) && (
+            <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
+          )}
           {(name === 'write_file' || name === 'writefile') && (
             <ExpandedEditDiff tool={tool} />
           )}
@@ -764,6 +787,7 @@ export const ToolGroup = memo(function ToolGroup({
   pendingApproval,
   onConfirm,
   workspaceCwd,
+  shellOutputMaxLines,
 }: ToolGroupProps) {
   const compactMode = useContext(CompactModeContext);
   const directApprovalTool =
@@ -791,6 +815,7 @@ export const ToolGroup = memo(function ToolGroup({
           approval={pendingApproval}
           onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
+          shellOutputMaxLines={shellOutputMaxLines}
         />
       ))}
     </div>
