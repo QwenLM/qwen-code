@@ -243,10 +243,34 @@ jobs:
       cancel-in-progress: true
     # Self-hosted: product-decision reads local Claude Code source on the
     # runner for product-direction reasoning (not available on GitHub-hosted).
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: ['self-hosted', 'ecs-qwen']
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
+      - name: 'Clean stale review worktrees'
+        # The bundled /review skill creates git worktrees under .qwen/tmp/ in
+        # the persistent self-hosted workspace. A leftover one pins its branch,
+        # so actions/checkout cannot clean the repo ("cannot delete branch ...
+        # used by worktree") and falls back to a recreate that then fails with
+        # "not our ref". Prune them before checkout. No-op on a fresh runner
+        # whose workspace has no .git yet.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
 
@@ -348,7 +372,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: ['self-hosted', 'ecs-qwen']
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -388,6 +412,26 @@ jobs:
           else
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: 'Clean stale review worktrees'
+        # See product-decision: prune leftover /review worktrees that would
+        # otherwise break the checkout below on persistent self-hosted runners.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
 
       - name: 'Checkout base branch'
         if: "steps.pr_state.outputs.should_review == 'true'"
@@ -518,7 +562,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-triage-pipeline-${{ needs.resolve.outputs.pr_number }}'
       cancel-in-progress: true
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: ['self-hosted', 'ecs-qwen']
     # Minimal permissions — NO write access to repo/PRs
     permissions:
       contents: 'read'
@@ -548,6 +592,26 @@ jobs:
         if: "steps.pr_state.outputs.should_test != 'true'"
         id: 'skip_verdict'
         run: 'echo "verdict=skipped" >> "$GITHUB_OUTPUT"'
+
+      - name: 'Clean stale review worktrees'
+        # See product-decision: prune leftover /review worktrees that would
+        # otherwise break the checkout below on persistent self-hosted runners.
+        run: |
+          set -uo pipefail
+          WS="${GITHUB_WORKSPACE}"
+          [ -d "$WS/.git" ] || exit 0
+          git -C "$WS" worktree prune 2>/dev/null || true
+          git -C "$WS" worktree list --porcelain 2>/dev/null \
+            | awk '/^worktree /{print $2}' \
+            | while IFS= read -r wt; do
+                case "$wt" in
+                  *"/.qwen/tmp/"*)
+                    git -C "$WS" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+                esac
+              done
+          git -C "$WS" for-each-ref --format='%(refname:short)' refs/heads/qwen-review/ 2>/dev/null \
+            | while IFS= read -r br; do git -C "$WS" branch -D "$br" 2>/dev/null || true; done
+          rm -rf "$WS/.qwen/tmp" 2>/dev/null || true
 
       - name: 'Checkout PR code'
         if: "steps.pr_state.outputs.should_test == 'true'"
