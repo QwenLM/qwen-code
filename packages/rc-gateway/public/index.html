@@ -753,16 +753,45 @@
         const date = Number.isNaN(d.getTime())
           ? '?'
           : d.toISOString().slice(0, 16);
-        head.textContent =
-          s.id +
-          '  created ' +
-          date +
-          '  prefs: ' +
-          (Array.isArray(s.prefs)
-            ? s.prefs.length
-              ? s.prefs.join(',')
-              : '(muted)'
-            : 'all');
+        head.textContent = s.id + '  created ' + date;
+        // Prefs kind-allowlist editor (cycle 60). KNOWN_PUSH_KINDS mirrors the
+        // notifier's KIND_SCOPES (src/webpush/notifier.ts) as a UI constant.
+        // The explicit all-vs-custom toggle resolves the prefs:[] (mute all)
+        // vs prefs:null (receive all) footgun: a mute is ONLY ever an explicit
+        // Custom + nothing-checked choice, never a silent deselect side effect.
+        const prefsBox = document.createElement('div');
+        const mode = document.createElement('select');
+        for (const [val, lbl] of [
+          ['all', 'Receive all'],
+          ['custom', 'Custom'],
+        ]) {
+          const o = document.createElement('option');
+          o.value = val;
+          o.textContent = lbl;
+          mode.appendChild(o);
+        }
+        const kinds = document.createElement('span');
+        const boxes = {};
+        for (const k of ['permission.required', 'task.completed']) {
+          const lbl = document.createElement('label');
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          boxes[k] = cb;
+          lbl.appendChild(cb);
+          lbl.appendChild(document.createTextNode(' ' + k + ' '));
+          kinds.appendChild(lbl);
+        }
+        const isCustom = Array.isArray(s.prefs);
+        mode.value = isCustom ? 'custom' : 'all';
+        if (isCustom)
+          for (const k of Object.keys(boxes))
+            boxes[k].checked = s.prefs.includes(k);
+        kinds.style.display = isCustom ? '' : 'none';
+        mode.onchange = () => {
+          kinds.style.display = mode.value === 'custom' ? '' : 'none';
+        };
+        prefsBox.appendChild(mode);
+        prefsBox.appendChild(kinds);
         const qh = s.quietHours || {};
         const from = document.createElement('input');
         from.placeholder = 'from HH:MM';
@@ -781,11 +810,11 @@
         const save = document.createElement('button');
         save.textContent = 'Save';
         save.onclick = () =>
-          saveSub(s.id, { from, to, tz, max }, save, note);
+          saveSub(s.id, { from, to, tz, max, mode, boxes }, save, note);
         const unsub = document.createElement('button');
         unsub.textContent = 'Unsubscribe';
         unsub.onclick = () => unsubscribeSub(s.id, row, unsub);
-        for (const el of [head, from, to, tz, max, save, unsub, note])
+        for (const el of [head, prefsBox, from, to, tz, max, save, unsub, note])
           row.appendChild(el);
         return row;
       }
@@ -825,6 +854,13 @@
         const quietHours =
           !f && !t && !z ? null : { from: f, to: t, timezone: z };
         const maxPerHour = m === '' ? null : Number(m);
+        // prefs (cycle 60): mode 'all' -> null (clear = receive all); 'custom'
+        // -> the checked kinds (possibly [] = an EXPLICIT mute, never a silent
+        // one). Sent alongside quietHours/maxPerHour; backend applies each.
+        const prefs =
+          fields.mode.value === 'all'
+            ? null
+            : Object.keys(fields.boxes).filter((k) => fields.boxes[k].checked);
         btn.disabled = true;
         note.textContent = ' saving…';
         try {
@@ -836,7 +872,7 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify({ quietHours, maxPerHour }),
+              body: JSON.stringify({ prefs, quietHours, maxPerHour }),
             },
           );
           if (res.ok) {
