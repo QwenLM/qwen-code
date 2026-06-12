@@ -991,6 +991,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         // an object spread.
         ({
           ...selectedApproval.confirmationDetails,
+          hideAlwaysAllow: true,
           onConfirm: async (
             outcome: Parameters<BackgroundApproval['respond']>[0],
             payload?: Parameters<BackgroundApproval['respond']>[1],

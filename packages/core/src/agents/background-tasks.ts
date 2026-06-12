@@ -42,6 +42,19 @@ export const DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS = 10;
 export const BACKGROUND_AGENT_CONCURRENCY_ENV =
   'QWEN_CODE_MAX_BACKGROUND_AGENTS';
 
+function normalizeBackgroundApprovalOutcome(
+  outcome: Parameters<BackgroundApproval['respond']>[0],
+): Parameters<BackgroundApproval['respond']>[0] {
+  if (
+    outcome === ToolConfirmationOutcome.ProceedAlways ||
+    outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+    outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+  ) {
+    return ToolConfirmationOutcome.ProceedOnce;
+  }
+  return outcome;
+}
+
 export function resolveMaxConcurrentBackgroundAgents(
   env: Record<string, string | undefined> = process.env,
 ): number {
@@ -684,7 +697,10 @@ export class BackgroundTaskRegistry {
     );
     this.emitApprovalChange(entry);
     try {
-      await approval.respond(outcome, payload);
+      await approval.respond(
+        normalizeBackgroundApprovalOutcome(outcome),
+        payload,
+      );
     } catch (error) {
       debugLogger.error(
         `Failed to resolve background approval for ${agentId}/${callId}:`,

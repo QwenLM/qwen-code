@@ -1635,6 +1635,27 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.getPendingApprovals('bg-appr-4')).toHaveLength(0);
     });
 
+    it('downgrades persistent approvals to one-time approval', async () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-appr-persistent'));
+      registry.addPendingApproval(
+        'bg-appr-persistent',
+        makeApproval('c1', respond),
+      );
+
+      const resolved = await registry.resolvePendingApproval(
+        'bg-appr-persistent',
+        'c1',
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+      );
+
+      expect(resolved).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+    });
+
     it('returns false when resolving a non-parked call', async () => {
       registry.register(makeRegistration('bg-appr-5'));
       expect(
