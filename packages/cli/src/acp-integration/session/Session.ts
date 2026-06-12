@@ -2065,11 +2065,14 @@ export class Session implements SessionContext {
                   }
                   // The turn produced no response (cancelled / token-limited).
                   // A cancelled stream is a cancellation; anything else (e.g.
-                  // token limit) is recorded failed.
+                  // token limit) is recorded failed. Mark cronHadError too so the
+                  // interaction span status matches the recorded run outcome
+                  // instead of reporting 'ok' for a run that was recorded failed.
                   if (sendResult.stopReason === 'cancelled') {
                     slashOnCompleteCancelled = true;
                   } else {
                     slashOnCompleteErrored = true;
+                    cronHadError = true;
                   }
                   return;
                 }
