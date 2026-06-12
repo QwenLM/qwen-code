@@ -515,7 +515,7 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(report.sessionCount).toBe(1);
   });
 
-  it('write-side: rebuildFromSessionJsonl skips the in-progress session when currentSessionId is passed', async () => {
+  it('write-side: rebuildFromSessionJsonl skips the in-progress session when skipSessionInRebuild is passed', async () => {
     const sessionId = 'sess-in-progress';
     plantChatJsonl(sessionId, 1600);
     const usagePath = path.join(

@@ -174,7 +174,7 @@ export function metricsToUsageRecord(
 }
 
 async function rebuildFromSessionJsonl(
-  currentSessionId?: string,
+  skipSessionInRebuild?: string,
 ): Promise<UsageSummaryRecord[]> {
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
@@ -266,7 +266,8 @@ async function rebuildFromSessionJsonl(
       // Skip the in-progress current session: persistSessionUsage() will write
       // its authoritative record on /clear or exit. Writing here would create
       // a permanent duplicate in usage_record.jsonl (issue #4994).
-      if (currentSessionId && record.sessionId === currentSessionId) continue;
+      if (skipSessionInRebuild && record.sessionId === skipSessionInRebuild)
+        continue;
       jsonl.writeLineSync(usagePath, record);
     }
   }
@@ -280,11 +281,16 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
   // (issue #4994) — without this, every aggregate stays inflated forever.
   const map = new Map<string, UsageSummaryRecord>();
   for (const r of records) map.set(r.sessionId, r);
+  if (map.size < records.length) {
+    debugLogger.debug(
+      `dedupBySessionId: removed ${records.length - map.size} duplicate record(s)`,
+    );
+  }
   return [...map.values()];
 }
 
 export async function loadUsageHistory(
-  currentSessionId?: string,
+  skipSessionInRebuild?: string,
 ): Promise<UsageSummaryRecord[]> {
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
@@ -294,7 +300,7 @@ export async function loadUsageHistory(
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
-  return dedupBySessionId(await rebuildFromSessionJsonl(currentSessionId));
+  return dedupBySessionId(await rebuildFromSessionJsonl(skipSessionInRebuild));
 }
 
 export function getTimeRangeBounds(range: TimeRange): {
