@@ -172,9 +172,11 @@ const TAIL_READ_SIZE = 64 * 1024;
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
+  private readonly projectRoot: string;
 
   constructor(cwd: string) {
     this.storage = new Storage(cwd);
+    this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
   }
 
@@ -903,9 +905,10 @@ export class SessionService {
    * Forks a session to a new sessionId.
    *
    * Reads the source JSONL into memory, rewrites every record's `sessionId`
-   * to `newSessionId`, rebuilds the `parentUuid` chain in write order so the
-   * fork is a linear continuation, stamps `forkedFrom: { sessionId, messageUuid }`
-   * on every copied record for audit, and writes the result to `<newId>.jsonl`.
+   * to `newSessionId`, stamps `cwd` to this service's project root, rebuilds
+   * the `parentUuid` chain in write order so the fork is a linear
+   * continuation, stamps `forkedFrom: { sessionId, messageUuid }` on every
+   * copied record for audit, and writes the result to `<newId>.jsonl`.
    *
    * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
    * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
@@ -954,6 +957,7 @@ export class SessionService {
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
+        cwd: this.projectRoot,
         parentUuid: prevUuid,
         forkedFrom: {
           sessionId: sourceSessionId,

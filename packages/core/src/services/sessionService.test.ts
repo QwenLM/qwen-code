@@ -1738,6 +1738,13 @@ describe('SessionService', () => {
 
       expect(result.copiedCount).toBe(2);
       expect(fs.existsSync(result.filePath)).toBe(true);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(written.every((r) => r.cwd === cwd)).toBe(true);
+      await expect(service.loadSession(newId)).resolves.toBeDefined();
     });
 
     it('rejects invalid sessionId patterns before touching disk', async () => {

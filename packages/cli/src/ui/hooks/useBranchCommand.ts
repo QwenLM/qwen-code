@@ -134,6 +134,7 @@ export function useBranchCommand(
 
       let coreSwapped = false;
       let uiSwapped = false;
+      let forkCreated = false;
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
@@ -161,6 +162,7 @@ export function useBranchCommand(
 
         // 3. Fork the JSONL on disk.
         await sessionService.forkSession(oldSessionId, newSessionId);
+        forkCreated = true;
 
         // 4. Load the new file.
         const resumed = await sessionService.loadSession(newSessionId);
@@ -273,6 +275,15 @@ export function useBranchCommand(
               .warn(
                 `Rollback after failed /branch init failed: ${rollbackErr}`,
               );
+          }
+        }
+        if (forkCreated && !uiSwapped) {
+          try {
+            await sessionService.removeSession(newSessionId);
+          } catch (cleanupErr) {
+            config
+              .getDebugLogger()
+              .warn(`Failed to clean up failed branch session: ${cleanupErr}`);
           }
         }
         historyManager.addItem(
