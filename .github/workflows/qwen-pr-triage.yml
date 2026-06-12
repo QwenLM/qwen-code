@@ -607,7 +607,7 @@ jobs:
           # Fallback to the skill's in-workspace default path if the agent did
           # not honor QWEN_REVIEW_OUTPUT_FILE.
           if [ ! -f "$RESULT" ]; then
-            RESULT="$(ls "$GITHUB_WORKSPACE"/.qwen/tmp/qwen-review-*-review.json 2>/dev/null | head -1 || true)"
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
           if [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; then
             echo "::error::Review agent produced no review JSON; nothing to publish"
@@ -646,7 +646,7 @@ jobs:
           # explicit APPROVE/COMMENT blocks tmux + approval.
           RESULT="$REVIEW_FILE"
           if [ ! -f "$RESULT" ]; then
-            RESULT="$(ls "$GITHUB_WORKSPACE"/.qwen/tmp/qwen-review-*-review.json 2>/dev/null | head -1 || true)"
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
           fi
           EVENT=""
           if [ -n "${RESULT:-}" ] && [ -f "$RESULT" ]; then
