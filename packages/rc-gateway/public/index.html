@@ -84,6 +84,15 @@
         font-family: ui-monospace, monospace;
         overflow-wrap: anywhere;
       }
+      .search-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        border-bottom: 1px solid #eee;
+        padding: 0.3rem 0;
+        font-size: 0.85rem;
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body id="rc-app">
@@ -946,7 +955,9 @@
       // textContent ONLY (never innerHTML), like every other server field.
       function searchHitRow(h) {
         const row = document.createElement('div');
-        row.className = 'token-row';
+        // Dedicated column layout (not .token-row's space-between flex) so the
+        // snippet sits BENEATH the header and a long unbroken snippet wraps.
+        row.className = 'search-row';
         const head = document.createElement('div');
         head.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
         const snip = document.createElement('div');
@@ -955,6 +966,9 @@
         row.appendChild(snip);
         return row;
       }
+      // Monotonic guard: a slow earlier search must not clobber a newer one's
+      // results (last-issued wins, not last-to-resolve).
+      let searchSeq = 0;
       async function runSearch() {
         if (!token()) return setStatus('pair first');
         const q = $('search-q').value.trim();
@@ -964,12 +978,14 @@
           return;
         }
         const kind = $('search-kind').value;
+        const seq = ++searchSeq;
         out.textContent = 'searching…';
         try {
           const params = new URLSearchParams({ q, kind, limit: '50' });
           const res = await fetch('/rc/search?' + params.toString(), {
             headers: { Authorization: 'Bearer ' + token() },
           });
+          if (seq !== searchSeq) return; // a newer search superseded this one
           if (!res.ok) {
             if (res.status === 401 || res.status === 403) {
               out.textContent = 'not authorized — needs an owner token';
@@ -988,6 +1004,7 @@
             return;
           }
           const body = await res.json();
+          if (seq !== searchSeq) return; // superseded during body parse
           const hits = Array.isArray(body.hits) ? body.hits : [];
           out.textContent = '';
           const footer = document.createElement('div');
