@@ -1030,6 +1030,109 @@ describe('subagent.ts', () => {
 
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
+
+      it('should ignore duplicate provider tool-call ids across rounds', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(toolCallEvents).toHaveLength(2);
+        expect(toolResultEvents).toHaveLength(2);
+        expect(toolCallEvents[0].callId).toBe('call_1');
+        expect(toolResultEvents[0].callId).toBe('call_1');
+        expect(toolCallEvents[1].callId).toMatch(/^call_1:duplicate:/);
+        expect(toolResultEvents[1].callId).toBe(toolCallEvents[1].callId);
+        expect(toolResultEvents[1].error).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+
+        const thirdCallArgs = mockSendMessageStream.mock.calls[2][1];
+        const parts = thirdCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
     });
 
     describe('execute - Termination and Recovery', () => {

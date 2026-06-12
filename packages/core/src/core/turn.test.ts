@@ -392,6 +392,49 @@ describe('Turn', () => {
       });
     });
 
+    it('should preserve provider tool-call ids separately from generated call ids', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [],
+            functionCalls: [
+              { id: 'fc1', name: 'tool1', args: { arg1: 'val1' } },
+              { name: 'tool2', args: { arg2: 'val2' } },
+            ],
+          },
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Test provider ids' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events.length).toBe(2);
+
+      const event1 = events[0] as ServerGeminiToolCallRequestEvent;
+      expect(event1.value).toMatchObject({
+        callId: 'fc1',
+        providerCallId: 'fc1',
+        name: 'tool1',
+        args: { arg1: 'val1' },
+      });
+
+      const event2 = events[1] as ServerGeminiToolCallRequestEvent;
+      expect(event2.value.callId).toMatch(/^tool2-/);
+      expect(event2.value.providerCallId).toBeUndefined();
+      expect(event2.value).toMatchObject({
+        name: 'tool2',
+        args: { arg2: 'val2' },
+      });
+    });
+
     it('should yield finished event when response has finish reason', async () => {
       const mockResponseStream = (async function* () {
         yield {

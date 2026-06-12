@@ -443,6 +443,57 @@ describe('runNonInteractive', () => {
     ).toHaveBeenCalled();
   });
 
+  it('should ignore duplicate provider tool-call ids across rounds', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        providerCallId: 'tool-1',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-dup',
+      },
+    };
+    const toolResponse: Part[] = [{ text: 'Tool response' }];
+    mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-dup',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+
+    const duplicateParts = mockGeminiClient.sendMessageStream.mock.calls[2][0];
+    expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-1"',
+    );
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {

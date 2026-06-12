@@ -30,6 +30,7 @@ import {
   TeamEventType,
   ApprovalMode,
   ToolConfirmationOutcome,
+  createDuplicateProviderToolCallResponse,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -737,11 +738,34 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
+      const handledProviderToolCallIds = new Set<string>();
+
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
       ): Promise<Part[]> => {
         const toolResponseParts: Part[] = [];
+        const respondedCallIds = new Set<string>();
+        const executableBatchRequests: ToolCallRequestInfo[] = [];
+
+        for (const requestInfo of batchRequests) {
+          if (!requestInfo.providerCallId) {
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          if (!handledProviderToolCallIds.has(requestInfo.providerCallId)) {
+            handledProviderToolCallIds.add(requestInfo.providerCallId);
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          respondedCallIds.add(requestInfo.callId);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          toolResponseParts.push(...toolResponse.responseParts);
+        }
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -750,16 +774,18 @@ export async function runNonInteractive(
         // suppress every non-structured sibling. See the multi-shape
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
-        let requestsToExecute = batchRequests;
+        let requestsToExecute = executableBatchRequests;
         if (
           config.getJsonSchema() &&
-          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
+          executableBatchRequests.some(
+            (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+          )
         ) {
-          requestsToExecute = batchRequests.filter(
+          requestsToExecute = executableBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
-        const executedCallIds = new Set<string>();
+        const executedCallIds = new Set(respondedCallIds);
 
         for (const requestInfo of requestsToExecute) {
           executedCallIds.add(requestInfo.callId);
@@ -886,7 +912,7 @@ export async function runNonInteractive(
         // emitted event log pairs every tool_use with a tool_result
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
-        const unexecutedCalls = batchRequests.filter(
+        const unexecutedCalls = executableBatchRequests.filter(
           (r) => !executedCallIds.has(r.callId),
         );
         if (unexecutedCalls.length > 0) {
