@@ -164,7 +164,11 @@
     <section id="push-prefs">
       <strong>Push preferences</strong> (quiet hours + rate cap; requires
       owner scope)
-      <div><button id="list-subs">List subscriptions</button></div>
+      <div>
+        <button id="list-subs">List subscriptions</button>
+        <button id="test-push-btn">Send test push</button>
+        <span id="test-push-result"></span>
+      </div>
       <div id="subs">(not listed)</div>
     </section>
     <section id="search">
@@ -811,6 +815,39 @@
           );
         } catch (e) {
           out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic
+      // task.completed to the caller's OWN subscriptions. `sent` is the count
+      // ATTEMPTED (delivery is best-effort). textContent-only.
+      $('test-push-btn').onclick = async () => {
+        const out = $('test-push-result');
+        if (!token()) {
+          out.textContent = ' pair first';
+          return;
+        }
+        out.textContent = ' sending…';
+        try {
+          const res = await fetch('/rc/push/test', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({}),
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? ' not authorized — needs an owner token'
+                : ' test failed (' + res.status + ')';
+            return;
+          }
+          const b = await res.json();
+          out.textContent = ' test push sent to ' + b.sent + ' subscription(s)';
+        } catch (e) {
+          out.textContent = ' test error: ' + e;
         }
       };
 
