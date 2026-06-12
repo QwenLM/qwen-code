@@ -110,8 +110,8 @@ function sortedEntries(
  * distinct entry.
  *
  * Hashed fields (transport-defining):
- *   transport, command, args, cwd, env, url, httpUrl, headers,
- *   timeout, oauth
+ *   transport, command, args, cwd, env, url, httpUrl, tcp, headers,
+ *   timeout, oauth, authProviderType, targetAudience, targetServiceAccount
  *
  * Excluded fields (per-session filter / metadata; do NOT change the
  * underlying transport):
