@@ -16,6 +16,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionService } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -90,6 +91,7 @@ class FakeBridge {
   lastSetModel: unknown;
   lastSpawnScope: string | undefined;
   closeShouldThrow = false;
+  closeError: Error | undefined;
   killed: string[] = [];
   cancelled: string[] = [];
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
@@ -213,6 +215,7 @@ class FakeBridge {
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
     if (this.closeGate) await this.closeGate;
+    if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
   async detachClient(sessionId: string, clientId?: string) {
@@ -2203,6 +2206,92 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr close errors', async () => {
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      bridge.closeError = new Error(
+        `close\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`,
+      );
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 67,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: [`sess${lineSep}FAKE\r\x1b[31m`] },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { removed: [], notFound: [] },
+      });
+      const deleteLog = stdioMocks.writeStderrLine.mock.calls
+        .map(([line]) => line)
+        .find((line) => line.includes('sessions/delete'));
+      expect(deleteLog).toContain(
+        'closeSession(sess FAK) failed: close FAILED  [31m',
+      );
+      expect(deleteLog).not.toContain('\n');
+      expect(deleteLog).not.toContain('\r');
+      expect(deleteLog).not.toContain('\x1b');
+      expect(deleteLog).not.toContain(lineSep);
+      expect(deleteLog).not.toContain(bidiOverride);
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
+      const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
+      const removeSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'removeSessions')
+        .mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            {
+              sessionId,
+              error: removeError as unknown as Error,
+            },
+          ],
+        });
+
+      try {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 68,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          result: {
+            removed: [],
+            notFound: [],
+            errors: [{ sessionId, error: removeError }],
+          },
+        });
+        expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
+
+        const deleteLog = stdioMocks.writeStderrLine.mock.calls
+          .map(([line]) => line)
+          .find((line) => line.includes('sessions/delete'));
+        expect(deleteLog).toContain(
+          'removeSessions(sess FAK) failed: remove FAILED  [31m',
+        );
+        expect(deleteLog).not.toContain('\n');
+        expect(deleteLog).not.toContain('\r');
+        expect(deleteLog).not.toContain('\x1b');
+        expect(deleteLog).not.toContain(lineSep);
+        expect(deleteLog).not.toContain(bidiOverride);
+      } finally {
+        removeSessionsSpy.mockRestore();
+      }
     });
   });
 
