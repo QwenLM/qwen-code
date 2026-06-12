@@ -3264,6 +3264,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               displayName: nextDisplayName ?? '',
               titleSource: 'manual',
             })
+            .then((res: unknown) => {
+              const r = res as { persisted?: boolean } | undefined;
+              if (r && r.persisted === false) {
+                writeStderrLine(
+                  `qwen serve: displayName for ${sessionId} was not persisted (recording service unavailable)`,
+                );
+              }
+            })
             .catch((err: unknown) => {
               writeStderrLine(
                 `qwen serve: failed to persist displayName for ${sessionId}: ${
