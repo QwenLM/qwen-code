@@ -985,6 +985,10 @@
         const open = document.createElement('button');
         open.textContent = 'Open';
         open.onclick = () => {
+          // Calling onclick() bypasses #watch's disabled guard, so if a stream
+          // is already active, abort it first (else the new watch overwrites the
+          // module-level controller and orphans the old stream).
+          if ($('watch').disabled) $('stop').onclick();
           $('session').value = h.sessionId;
           $('watch').onclick();
         };
