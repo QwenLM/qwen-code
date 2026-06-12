@@ -23,6 +23,7 @@ import {
   onTasksUpdated,
   notifyTasksUpdated,
   TaskOwnershipError,
+  RECIPROCAL_CALLER,
 } from './tasks.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -383,6 +384,40 @@ describe('tasks', () => {
       );
       expect(updated?.status).toBe('completed');
     });
+
+    it('lets the reciprocal sentinel bypass the ownership guard', async () => {
+      // The reciprocal edge-mirror must touch a neighbor task the caller
+      // may not own; it passes RECIPROCAL_CALLER, which bypasses the guard
+      // just like the leader's undefined callerName — but is greppable.
+      const task = await createTask('team', {
+        subject: 'Owned',
+        description: '',
+        owner: 'alice',
+      });
+      const other = await createTask('team', {
+        subject: 'Neighbor',
+        description: '',
+      });
+
+      // A non-owner edge mirror onto alice's task succeeds via the sentinel.
+      const updated = await updateTask(
+        'team',
+        task.id,
+        { addBlockedBy: [other.id] },
+        { callerName: RECIPROCAL_CALLER },
+      );
+      expect(updated?.blockedBy).toContain(other.id);
+
+      // A real non-owner caller is still blocked.
+      await expect(
+        updateTask(
+          'team',
+          task.id,
+          { addBlockedBy: [other.id] },
+          { callerName: 'bob' },
+        ),
+      ).rejects.toBeInstanceOf(TaskOwnershipError);
+    });
   });
 
   // ─── deleteTask ────────────────────────────────────────────
@@ -703,6 +738,61 @@ describe('tasks', () => {
       // Without check — should succeed
       const result2 = await claimTask('team', t2.id, 'worker');
       expect(result2).toBeDefined();
+    });
+
+    it('serializes concurrent busy-checked claims for the same agent (no double-ownership)', async () => {
+      // Regression for the claimTask busy-check TOCTOU: two concurrent
+      // auto-claim paths (scanIdleAgentsForTasks vs a message flush) for
+      // the SAME idle agent, each targeting a DIFFERENT task. Before the
+      // per-agent serialization both passed the stale isAgentBusy read on
+      // their own task locks and the agent ended up owning two in_progress
+      // tasks. The per-agent claim mutex makes the second observe the
+      // first's committed claim and bail.
+      const t1 = await createTask('team', { subject: 'A', description: 'A' });
+      const t2 = await createTask('team', { subject: 'B', description: 'B' });
+
+      const [r1, r2] = await Promise.all([
+        claimTask('team', t1.id, 'worker@team', {
+          checkAgentBusy: true,
+          ownerName: 'worker',
+        }),
+        claimTask('team', t2.id, 'worker@team', {
+          checkAgentBusy: true,
+          ownerName: 'worker',
+        }),
+      ]);
+
+      // Exactly one claim succeeds; the other is refused.
+      const succeeded = [r1, r2].filter((r) => r !== undefined);
+      expect(succeeded).toHaveLength(1);
+
+      // And on disk the agent owns exactly one in_progress task.
+      const inProgress = await listTasks('team', { status: 'in_progress' });
+      expect(inProgress).toHaveLength(1);
+      expect(inProgress[0]!.owner).toBe('worker');
+    });
+
+    it('different agents claiming the same task: exactly one wins', async () => {
+      // The per-agent mutex must not serialize across agents — distinct
+      // agents racing the SAME task contend only on the per-file lock, and
+      // exactly one claims it.
+      const task = await createTask('team', { subject: 'X', description: 'X' });
+
+      const [r1, r2] = await Promise.all([
+        claimTask('team', task.id, 'alice@team', {
+          checkAgentBusy: true,
+          ownerName: 'alice',
+        }),
+        claimTask('team', task.id, 'bob@team', {
+          checkAgentBusy: true,
+          ownerName: 'bob',
+        }),
+      ]);
+
+      const winners = [r1, r2].filter((r) => r !== undefined);
+      expect(winners).toHaveLength(1);
+      const inProgress = await listTasks('team', { status: 'in_progress' });
+      expect(inProgress).toHaveLength(1);
     });
   });
 
