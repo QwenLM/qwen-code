@@ -1327,7 +1327,6 @@
       // Fork session (cycle 69): POST /rc/session/:id/fork (WRITE) full-copy
       // include mode -> a new daemon-hosted session inheriting the transcript.
       // textContent-only (returned ids are server hex/uuid).
-      $('fork-id').value = '';
       $('fork-btn').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('fork-result');
