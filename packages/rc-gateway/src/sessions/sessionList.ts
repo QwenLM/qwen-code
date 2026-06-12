@@ -53,9 +53,13 @@ const DEFAULT_MAX_FIRST_LINE_BYTES = 1024 * 1024;
 export async function readFirstRecord(
   chatsDir: string,
   id: string,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; chunkSize?: number } = {},
 ): Promise<ForkRecord | null> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_FIRST_LINE_BYTES;
+  // Per-read buffer size. Injectable ONLY so a test can force a tiny window
+  // and exercise the cross-read decode path (a multibyte char straddling two
+  // reads); production always uses the 64 KiB default.
+  const chunkSize = opts.chunkSize ?? 64 * 1024;
   let handle;
   try {
     handle = await open(join(chatsDir, `${id}.jsonl`), 'r');
@@ -66,7 +70,7 @@ export async function readFirstRecord(
   try {
     const chunks: Buffer[] = [];
     let total = 0;
-    const buf = Buffer.allocUnsafe(64 * 1024);
+    const buf = Buffer.allocUnsafe(chunkSize);
     while (total < maxBytes) {
       const { bytesRead } = await handle.read(
         buf,

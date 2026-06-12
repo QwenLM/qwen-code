@@ -86,17 +86,17 @@ describe('readFirstRecord', () => {
   });
 
   it('decodes a multibyte char split across the read boundary', async () => {
-    // Pad so a 3-byte char (✓ = e2 9c 93) straddles a tiny read window.
-    const pad = 'x'.repeat(10);
-    const value = `${pad}✓${pad}`;
+    // A 3-byte char (✓ = e2 9c 93) is positioned so a 12-byte per-read window
+    // slices it in half. The JSON prefix `{"v":"` is 6 bytes; with a 5-char
+    // lead the ✓ lands at bytes 11-13, straddling the boundary at byte 12, so
+    // its bytes genuinely span two reads -> exercises decode-once on concat.
+    const value = `${'x'.repeat(5)}✓${'x'.repeat(10)}`;
     await writeFile(
       join(dir, `${ID(1)}.jsonl`),
       JSON.stringify({ v: value }) + '\n',
     );
-    // 12-byte window forces the multibyte char to span two reads.
-    const rec = await readFirstRecord(dir, ID(1), { maxBytes: 1024 });
+    const rec = await readFirstRecord(dir, ID(1), { chunkSize: 12 });
     expect(rec).toEqual({ v: value });
-    // Sanity: with a real undersized read buffer the byte path still decodes.
     expect((rec as { v: string }).v).toContain('✓');
   });
 
