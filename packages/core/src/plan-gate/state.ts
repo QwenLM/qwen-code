@@ -39,6 +39,8 @@ export interface PlanGateState {
   lastResolutionSummary?: string;
   /** True once the cap is hit with remaining P1/P2 and the user must decide. */
   capEscalationPending: boolean;
+  /** True once the gate returns needs_user and the user must answer. */
+  needsUserPending: boolean;
 }
 
 export function createPlanGateState(entryId: number): PlanGateState {
@@ -48,6 +50,7 @@ export function createPlanGateState(entryId: number): PlanGateState {
     gateMode: 'capped',
     lastFindings: [],
     capEscalationPending: false,
+    needsUserPending: false,
   };
 }
 

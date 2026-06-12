@@ -306,6 +306,7 @@ describe('AskUserQuestionTool', () => {
       gateMode: 'capped' as const,
       lastFindings: [],
       capEscalationPending: true,
+      needsUserPending: false,
     };
 
     beforeEach(() => {
@@ -315,6 +316,7 @@ describe('AskUserQuestionTool', () => {
       gateState.gateMode = 'capped';
       gateState.reviewCount = 3;
       gateState.capEscalationPending = true;
+      gateState.needsUserPending = false;
     });
 
     it('should set gateMode to uncapped on CONTINUE answer', async () => {
@@ -414,6 +416,7 @@ describe('AskUserQuestionTool', () => {
     });
 
     it('should reset reviewCount on plan_gate_needs_user', async () => {
+      gateState.needsUserPending = true;
       const params = {
         questions: [
           {
@@ -438,6 +441,93 @@ describe('AskUserQuestionTool', () => {
       await invocation.execute(new AbortController().signal);
 
       expect(gateState.reviewCount).toBe(0);
+    });
+
+    it('should ignore plan_gate_cap when capEscalationPending is false', async () => {
+      gateState.capEscalationPending = false;
+      const params = {
+        questions: [
+          {
+            question: 'Cap reached',
+            header: 'Gate',
+            options: [
+              { label: 'Continue editing plan', description: 'Keep going' },
+              { label: 'Approve execution', description: 'Skip gate' },
+            ],
+          },
+        ],
+        metadata: { source: 'plan_gate_cap' },
+      };
+
+      const invocation = tool.build(params);
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { '0': 'Approve execution' },
+      });
+      await invocation.execute(new AbortController().signal);
+
+      // gateMode should NOT change because capEscalationPending was false
+      expect(gateState.gateMode).toBe('capped');
+    });
+
+    it('should reset reviewCount on plan_gate_needs_user when needsUserPending is true', async () => {
+      gateState.needsUserPending = true;
+      const params = {
+        questions: [
+          {
+            question: 'What DB?',
+            header: 'DB',
+            options: [
+              { label: 'Postgres', description: 'PG' },
+              { label: 'MySQL', description: 'My' },
+            ],
+          },
+        ],
+        metadata: { source: 'plan_gate_needs_user' },
+      };
+
+      const invocation = tool.build(params);
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { '0': 'Postgres' },
+      });
+      await invocation.execute(new AbortController().signal);
+
+      expect(gateState.reviewCount).toBe(0);
+      expect(gateState.needsUserPending).toBe(false);
+    });
+
+    it('should ignore plan_gate_needs_user when needsUserPending is false', async () => {
+      gateState.needsUserPending = false;
+      const params = {
+        questions: [
+          {
+            question: 'What DB?',
+            header: 'DB',
+            options: [
+              { label: 'Postgres', description: 'PG' },
+              { label: 'MySQL', description: 'My' },
+            ],
+          },
+        ],
+        metadata: { source: 'plan_gate_needs_user' },
+      };
+
+      const invocation = tool.build(params);
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { '0': 'Postgres' },
+      });
+      await invocation.execute(new AbortController().signal);
+
+      // reviewCount should NOT be reset because needsUserPending was false
+      expect(gateState.reviewCount).toBe(3);
     });
 
     it('should not mutate state when no metadata source', async () => {

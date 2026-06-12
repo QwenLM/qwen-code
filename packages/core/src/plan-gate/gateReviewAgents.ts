@@ -59,15 +59,27 @@ Rules:
 
 // ── Evidence formatting ────────────────────────────────────────────────
 
+/**
+ * Escapes closing `</untrusted-content>` tags so bundle content cannot
+ * break out of the XML sandbox in the review prompt.
+ */
+function escapeUntrustedDelimiter(text: string): string {
+  return text.replace(/<\/untrusted-content>/gi, '&lt;/untrusted-content&gt;');
+}
+
 export function formatEvidence(bundle: EvidenceBundle): string {
   const sections: string[] = [];
 
-  sections.push(`## Original User Request\n${bundle.originalRequest}`);
+  sections.push(
+    `## Original User Request\n${escapeUntrustedDelimiter(bundle.originalRequest)}`,
+  );
 
-  sections.push(`## Current Plan\n${bundle.plan}`);
+  sections.push(`## Current Plan\n${escapeUntrustedDelimiter(bundle.plan)}`);
 
   if (bundle.researchSummary) {
-    sections.push(`## Research Summary\n${bundle.researchSummary}`);
+    sections.push(
+      `## Research Summary\n${escapeUntrustedDelimiter(bundle.researchSummary)}`,
+    );
   }
 
   if (bundle.lastFindings && bundle.lastFindings.length > 0) {
@@ -79,7 +91,7 @@ export function formatEvidence(bundle: EvidenceBundle): string {
 
   if (bundle.resolutionSummary) {
     sections.push(
-      `## Resolution Summary (model's response to previous findings)\n${bundle.resolutionSummary}`,
+      `## Resolution Summary (model's response to previous findings)\n${escapeUntrustedDelimiter(bundle.resolutionSummary)}`,
     );
   }
 
@@ -117,12 +129,15 @@ export async function runGateAgent(
     ApprovalMode.PLAN,
   );
 
+  let disposeSubagent: (() => Promise<void>) | undefined;
+
   try {
     const subagentManager = config.getSubagentManager();
-    const subagent = await subagentManager.createAgentHeadless(
+    const { subagent, dispose } = await subagentManager.createAgentHeadless(
       subagentConfig,
       planConfig,
     );
+    disposeSubagent = dispose;
 
     const contextState = new ContextState();
     contextState.set('task_prompt', taskPrompt);
@@ -144,14 +159,16 @@ export async function runGateAgent(
 
     return parseGateAgentResult(rawText);
   } finally {
-    // Stop the override's tool registry to prevent listener leaks
-    // (each createApprovalModeOverride rebuilds a fresh registry).
-    try {
-      await planConfig.getToolRegistry().stop();
-    } catch (error) {
-      debugLogger.warn(
-        `[runGateAgent] Failed to stop override tool registry: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    // Dispose the subagent (stops its per-spawn ToolRegistry and
+    // unregisters per-agent hooks, preventing listener leaks).
+    if (disposeSubagent) {
+      try {
+        await disposeSubagent();
+      } catch (error) {
+        debugLogger.warn(
+          `[runGateAgent] Failed to dispose subagent: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     cleanup();
   }

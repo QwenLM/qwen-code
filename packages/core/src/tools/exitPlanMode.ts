@@ -116,7 +116,8 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     const gateState = this.config.getPlanGateState();
     if (
       isAutonomousPrePlanMode(prePlanMode) &&
-      gateState?.gateMode !== 'user_takeover'
+      gateState &&
+      gateState.gateMode !== 'user_takeover'
     ) {
       return 'allow';
     }
@@ -197,7 +198,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         }
 
         const bundle: EvidenceBundle = {
-          originalRequest: originalRequest ?? '(not provided)',
+          originalRequest:
+            originalRequest ||
+            '(original request not provided by model — review the plan on its own merits)',
           plan,
           researchSummary,
           resolutionSummary: gateState.lastResolutionSummary,
@@ -224,6 +227,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
           };
         }
 
+        // Re-read prePlanMode after the async gate in case it was updated
+        // (e.g. config reload) while the gate was running.
+        const currentPrePlanMode = this.config.getPrePlanMode();
+
         switch (decision.kind) {
           case 'approved': {
             const notes = decision.nonBlockingFindings
@@ -231,7 +238,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
               : '';
             return this.approveAndRestore(
               plan,
-              prePlanMode,
+              currentPrePlanMode,
               'Gate approved' + (notes ? `\n\n${notes}` : ''),
             );
           }
@@ -241,6 +248,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
               returnDisplay: `Plan gate: blocked (${decision.findings.length} finding(s))`,
             };
           case 'needs_user':
+            gateState.needsUserPending = true;
             return {
               llmContent: formatNeedsUserResponse(decision),
               returnDisplay: `Plan gate: needs user input (${decision.questions.length} question(s))`,

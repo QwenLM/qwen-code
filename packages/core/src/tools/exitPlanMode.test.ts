@@ -358,6 +358,7 @@ describe('ExitPlanModeTool', () => {
           gateMode: 'user_override',
           lastFindings: [],
           capEscalationPending: false,
+          needsUserPending: false,
         },
       );
 
@@ -387,6 +388,7 @@ describe('ExitPlanModeTool', () => {
           gateMode: 'capped',
           lastFindings: [],
           capEscalationPending: false,
+          needsUserPending: false,
         },
       );
 
@@ -394,6 +396,21 @@ describe('ExitPlanModeTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should fall back to ask when no gateState even with YOLO prePlanMode', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+      (mockConfig.getPlanGateState as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'YOLO no gate' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 });

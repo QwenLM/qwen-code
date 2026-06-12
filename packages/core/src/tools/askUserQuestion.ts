@@ -301,6 +301,14 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
       gateState.capEscalationPending = false;
     } else if (source === 'plan_gate_needs_user') {
+      // Only honor when the gate actually returned needs_user
+      // (prevents model from fabricating this metadata).
+      if (!gateState.needsUserPending) {
+        debugLogger.warn(
+          '[applyPlanGateMetadata] plan_gate_needs_user ignored: no needs_user pending',
+        );
+        return;
+      }
       // User answered a gate-suggested question. Only reset the
       // review count when the gate actually asked for user input
       // (gateMode must still be active, not already overridden).
@@ -310,6 +318,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       ) {
         gateState.reviewCount = 0;
       }
+      gateState.needsUserPending = false;
     }
   }
 }
