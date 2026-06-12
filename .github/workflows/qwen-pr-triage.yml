@@ -247,8 +247,31 @@ jobs:
     outputs:
       verdict: '${{ steps.capture.outputs.verdict }}'
     steps:
+      # ECS → GitHub cross-border transfers can stall or drop. Abort
+      # transfers slower than 1 KB/s for 60s and retry up to 3 times.
       - name: 'Checkout repo'
+        id: 'checkout'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout repo (retry 1)'
+        if: "steps.checkout.outcome == 'failure'"
+        id: 'checkout_retry1'
+        continue-on-error: true
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout repo (retry 2)'
+        if: "steps.checkout_retry1.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run product-decision'
         id: 'run'
@@ -391,10 +414,37 @@ jobs:
 
       - name: 'Checkout base branch'
         if: "steps.pr_state.outputs.should_review == 'true'"
+        id: 'checkout_base'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout base branch (retry 1)'
+        if: "steps.checkout_base.outcome == 'failure'"
+        id: 'checkout_base_retry1'
+        continue-on-error: true
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout base branch (retry 2)'
+        if: "steps.checkout_base_retry1.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run review'
         if: "steps.pr_state.outputs.should_review == 'true'"
@@ -546,10 +596,37 @@ jobs:
 
       - name: 'Checkout PR code'
         if: "steps.pr_state.outputs.should_test == 'true'"
+        id: 'checkout_pr'
+        continue-on-error: true
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
           fetch-depth: 1
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout PR code (retry 1)'
+        if: "steps.checkout_pr.outcome == 'failure'"
+        id: 'checkout_pr_retry1'
+        continue-on-error: true
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
+          fetch-depth: 1
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
+
+      - name: 'Checkout PR code (retry 2)'
+        if: "steps.checkout_pr_retry1.outcome == 'failure'"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: 'refs/pull/${{ needs.resolve.outputs.pr_number }}/merge'
+          fetch-depth: 1
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: '1000'
+          GIT_HTTP_LOW_SPEED_TIME: '60'
 
       - name: 'Run tmux testing'
         if: "steps.pr_state.outputs.should_test == 'true'"
