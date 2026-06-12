@@ -514,7 +514,47 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('does not clear the terminal just because width changed', () => {
+    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      mockStdout.write.mockClear();
+
+      capturedUIActions.refreshStatic();
+
+      // VP mode owns the viewport via the React tree, so refreshStatic must not
+      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+    });
+
+    // #4891 changed the resize contract: width changes now trigger ONE full
+    // clearTerminal after RESIZE_REPAINT_SETTLE_MS (trailing-edge debounce),
+    // instead of never (#3967) or per-event (pre-#3967). This test pins the
+    // synchronous half: no immediate clear during the burst. The settle-time
+    // half is not observable here — ink-testing-library's rerender does not
+    // flush update-time passive effects — and is covered by
+    // useResizeSettleRepaint.test.ts.
+    it('does not clear the terminal synchronously on width change', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       const { rerender } = render(

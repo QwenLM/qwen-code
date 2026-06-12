@@ -103,6 +103,7 @@ const MCP_BATCH_FLUSH_MS = 16;
 const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
+import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -879,26 +880,6 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
-
-  // Targeted repaint for resize events: move cursor to top-left and erase
-  // downward instead of a full clearTerminal, avoiding the full-screen
-  // flash. Ink's <Static> region is append-only, so when terminal width
-  // changes (tmux split, fullscreen toggle, font size change) we must
-  // explicitly re-emit the static history at the new width — otherwise
-  // header content stays at the old width and visibly tears.
-  // VP mode handles resize via ink's reflow + its own overflow clipping, so
-  // the physical write is unnecessary there too.
-  const repaintStaticViewport = useCallback(() => {
-    if (!useTerminalBuffer) {
-      stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
-    }
-    remountStaticHistory();
-  }, [useTerminalBuffer, remountStaticHistory, stdout]);
-
-  // Track previous terminal width across renders so we only repaint when
-  // the width actually changes. Initialized to the current width to avoid
-  // a spurious repaint on first mount.
-  const previousTerminalWidthRef = useRef(terminalWidth);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -2438,18 +2419,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
-  // Repaint static header on terminal resize. Without this, tmux pane
-  // resizes and fullscreen toggles leave the static region rendered at the
-  // old width — header content visibly tears until the next refreshStatic
-  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
-  // full clearTerminal to avoid the full-screen flash.
-  useEffect(() => {
-    if (previousTerminalWidthRef.current === terminalWidth) {
-      return;
-    }
-    previousTerminalWidthRef.current = terminalWidth;
-    repaintStaticViewport();
-  }, [terminalWidth, repaintStaticViewport]);
+  // Repaint static history on the trailing edge of a resize burst (#4891).
+  useResizeSettleRepaint(terminalWidth, refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {
