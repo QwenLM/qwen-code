@@ -1221,9 +1221,12 @@
       // (grayed + disabled) per the backend's list-don't-hide design.
       // textContent/createElement only (name/description are command-file text).
       async function invokeCommand(name, btn, note) {
-        const id = $('session').value.trim();
+        // Use the WATCHED session (the captured watchedSessionId), not the live
+        // #session input, so invoke targets the same session as the composer/log
+        // (the section label promises "the watched session").
+        const id = watchedSessionId;
         if (!id) {
-          note.textContent = ' watch/enter a session first';
+          note.textContent = ' watch a session first';
           return;
         }
         btn.disabled = true;
