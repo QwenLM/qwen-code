@@ -2549,7 +2549,11 @@ export const useGeminiStream = (
 
     // Enable durable cron support (loads tasks from disk, acquires lock).
     // Missed one-shots arrive as late fires through the start() callback.
-    void scheduler.enableDurable(sessionStates.sessionId).catch(() => {});
+    void scheduler.enableDurable(sessionStates.sessionId).catch((err) => {
+      debugLogger.warn(
+        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+      );
+    });
 
     scheduler.start((job: { prompt: string; missed?: boolean }) => {
       const label = job.prompt.slice(0, 40);

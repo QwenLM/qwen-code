@@ -1298,7 +1298,11 @@ export async function runNonInteractive(
           if (scheduler) {
             await scheduler
               .enableDurable(config.getSessionId())
-              .catch(() => {});
+              .catch((err) => {
+                debugLogger.warn(
+                  `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
+                );
+              });
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
               // drop scheduler.sessionSize to 0 on their own, so without
