@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -576,5 +576,30 @@ describe('push routes', () => {
     expect(sent[0].endpoint).toBe('https://push.example.com/owner-sub');
     expect(sent[0].payload.kind).toBe('task.completed');
     expect(sent[0].payload.sessionId).toBe('sess-9');
+  });
+});
+
+describe('DELETE forgets the rate-limit window', () => {
+  it('invokes notifier.forgetRateLimit with the removed subscription id', async () => {
+    const spy = vi.spyOn(notifier, 'forgetRateLimit');
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(204);
+    expect(spy).toHaveBeenCalledWith(rec.id);
+    spy.mockRestore();
+  });
+
+  it('does NOT forget anything when the DELETE 404s (unknown id)', async () => {
+    const spy = vi.spyOn(notifier, 'forgetRateLimit');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/push/subscriptions/nope`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(404);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

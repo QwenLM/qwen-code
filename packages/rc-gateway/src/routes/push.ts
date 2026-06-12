@@ -115,6 +115,9 @@ export function createPushRouter(
       return;
     }
     await store.remove(rec.id);
+    // Free the subscription's in-memory rate-limit window so stale counters
+    // don't accumulate as subscriptions churn (no-op without a limiter).
+    notifier.forgetRateLimit(rec.id);
     void audit?.record({
       action: 'push_unsubscribed',
       actorTokenId: req.rcClient!.id,
