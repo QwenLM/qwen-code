@@ -1027,7 +1027,7 @@ describe('Server Config (config.ts)', () => {
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
 
-      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+      await config.switchModel(AuthType.QWEN_OAUTH, { id: 'coder-model' });
 
       expect(config.getModel()).toBe('coder-model');
       expect(refreshSpy).not.toHaveBeenCalled();
@@ -1069,7 +1069,7 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(AuthType.QWEN_OAUTH);
 
-      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+      await config.switchModel(AuthType.QWEN_OAUTH, { id: 'coder-model' });
     });
 
     it('should notify model change listeners after switchModel', async () => {
@@ -1106,7 +1106,7 @@ describe('Server Config (config.ts)', () => {
       const listener = vi.fn();
       const unsubscribe = config.onModelChange(listener);
 
-      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+      await config.switchModel(AuthType.QWEN_OAUTH, { id: 'coder-model' });
 
       expect(listener).toHaveBeenCalledWith('coder-model');
 
@@ -1351,10 +1351,9 @@ describe('Server Config (config.ts)', () => {
       const refreshSpy = vi.spyOn(configWithModelProviders, 'refreshAuth');
 
       // Switch to model-b (different envKey)
-      await configWithModelProviders.switchModel(
-        AuthType.USE_OPENAI,
-        'model-b',
-      );
+      await configWithModelProviders.switchModel(AuthType.USE_OPENAI, {
+        id: 'model-b',
+      });
 
       // Should trigger full refresh because envKey changed
       expect(refreshSpy).toHaveBeenCalledWith(AuthType.USE_OPENAI);

@@ -149,9 +149,9 @@ import {
   resolveOutputLanguage,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
-
   getOutputLanguageFilePath,
-  writeOutputLanguageAndRegisterPath} from '../utils/languageUtils.js';
+  writeOutputLanguageAndRegisterPath,
+} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -6585,15 +6585,24 @@ class QwenAgent implements Agent {
               }
             }
 
+            const newModelId = newMerged.model?.id;
             const newModelName = newMerged.model?.name;
+            const newModelBaseUrl = newMerged.model?.baseUrl;
+            const newModelProvider = newMerged.model?.provider;
             if (
               changed.has('model') &&
-              newModelName &&
-              newModelName !== config.getModel() &&
+              (newModelId || newModelName) &&
+              (newModelId !== config.getModel() ||
+                newModelName !== config.getModelDisplayName()) &&
               authType
             ) {
               try {
-                await config.switchModel(authType, newModelName);
+                await config.switchModel(authType, {
+                  id: newModelId,
+                  name: newModelName,
+                  baseUrl: newModelBaseUrl,
+                  provider: newModelProvider ?? authType,
+                });
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,

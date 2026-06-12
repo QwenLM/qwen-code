@@ -71,7 +71,7 @@ describe('ModelsConfig', () => {
     });
 
     // Establish a known baseline state via a successful switch.
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'openai-a');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'openai-a' });
     const baselineAuthType = modelsConfig.getCurrentAuthType();
     const baselineModel = modelsConfig.getModel();
     const baselineStrict = modelsConfig.isStrictModelProviderSelection();
@@ -85,7 +85,7 @@ describe('ModelsConfig', () => {
     });
 
     await expect(
-      modelsConfig.switchModel(AuthType.USE_ANTHROPIC, 'anthropic-b'),
+      modelsConfig.switchModel(AuthType.USE_ANTHROPIC, { id: 'anthropic-b' }),
     ).rejects.toThrow('refresh failed');
 
     // Ensure state is fully rolled back (selection + generation config + flags).
@@ -130,7 +130,7 @@ describe('ModelsConfig', () => {
       modelProvidersConfig,
     });
 
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-a');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'model-a' });
     const baselineModel = modelsConfig.getModel();
     const baselineGc = snapshotGenerationConfig(modelsConfig);
     const baselineSources = deepClone(
@@ -142,7 +142,7 @@ describe('ModelsConfig', () => {
     });
 
     await expect(
-      modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-b'),
+      modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'model-b' }),
     ).rejects.toThrow('hot-update failed');
 
     expect(modelsConfig.getModel()).toBe(baselineModel);
@@ -183,7 +183,7 @@ describe('ModelsConfig', () => {
     // Simulate key prompt flow / explicit key provided via CLI/settings.
     modelsConfig.updateCredentials({ apiKey: 'manual-key', model: 'model-a' });
 
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-b');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'model-b' });
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('model-b');
@@ -222,7 +222,7 @@ describe('ModelsConfig', () => {
 
     modelsConfig.updateCredentials({ apiKey: 'manual-key', model: 'model-a' });
 
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-b');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'model-b' });
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('model-b');
@@ -433,7 +433,9 @@ describe('ModelsConfig', () => {
     });
 
     // Step 1: Switch to a provider model - this applies provider config
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'provider-model');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, {
+      id: 'provider-model',
+    });
 
     // Verify provider config is applied
     let gc = currentGenerationConfig(modelsConfig);
@@ -516,7 +518,9 @@ describe('ModelsConfig', () => {
     });
 
     // Switch to provider model - this overwrites with provider config
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'provider-model');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, {
+      id: 'provider-model',
+    });
 
     // Verify provider config is applied (overwriting settings)
     let gc = currentGenerationConfig(modelsConfig);
@@ -546,7 +550,7 @@ describe('ModelsConfig', () => {
     });
 
     // Switching within qwen-oauth triggers applyResolvedModelDefaults().
-    await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    await modelsConfig.switchModel(AuthType.QWEN_OAUTH, { id: 'coder-model' });
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
@@ -574,7 +578,9 @@ describe('ModelsConfig', () => {
       modelProvidersConfig,
     });
 
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-with-extras');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, {
+      id: 'model-with-extras',
+    });
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.extra_body).toEqual({
@@ -1444,7 +1450,7 @@ describe('ModelsConfig', () => {
       modelProvidersConfig,
     });
 
-    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3.6-plus');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'qwen3.6-plus' });
     expect(modelsConfig.getGenerationConfig().modalities).toEqual({
       image: true,
       video: true,
@@ -2150,7 +2156,7 @@ describe('ModelsConfig', () => {
       });
 
       // Verify initial model
-      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'gpt-4' });
       expect(modelsConfig.getModel()).toBe('gpt-4');
 
       // Reload with new config
@@ -2178,7 +2184,7 @@ describe('ModelsConfig', () => {
         },
       });
 
-      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'gpt-4' });
       expect(modelsConfig.getModel()).toBe('gpt-4');
 
       // Reload with config that still includes gpt-4
@@ -2367,7 +2373,7 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'gpt-4' });
 
       const gc = currentGenerationConfig(modelsConfig);
       expect(gc.samplingParams).toBeUndefined();
@@ -2392,7 +2398,7 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'gpt-4' });
 
       const gc = currentGenerationConfig(modelsConfig);
       // Should preserve existing sampling params but not inject max_tokens
@@ -2422,7 +2428,7 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, { id: 'gpt-4' });
 
       const gc = currentGenerationConfig(modelsConfig);
       // Should preserve both values from provider
@@ -2457,7 +2463,9 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      await claudeConfig.switchModel(AuthType.USE_ANTHROPIC, 'claude-3-opus');
+      await claudeConfig.switchModel(AuthType.USE_ANTHROPIC, {
+        id: 'claude-3-opus',
+      });
 
       let gc = currentGenerationConfig(claudeConfig);
       expect(gc.samplingParams).toBeUndefined();
@@ -2468,7 +2476,7 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      await geminiConfig.switchModel(AuthType.USE_GEMINI, 'gemini-pro');
+      await geminiConfig.switchModel(AuthType.USE_GEMINI, { id: 'gemini-pro' });
 
       gc = currentGenerationConfig(geminiConfig);
       expect(gc.samplingParams).toBeUndefined();

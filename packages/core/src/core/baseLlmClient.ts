@@ -499,7 +499,7 @@ export class BaseLlmClient {
     const modelId = selector.modelId;
 
     if (selector.authType) {
-      return modelsConfig.getResolvedModel(selector.authType, modelId);
+      return modelsConfig.getResolvedModel(selector.authType, { id: modelId });
     }
 
     const allAuthTypes: AuthType[] = [
@@ -512,13 +512,15 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, {
+        id: modelId,
+      });
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, modelId);
+      const resolved = modelsConfig.getResolvedModel(authType, { id: modelId });
       if (resolved) return resolved;
     }
 

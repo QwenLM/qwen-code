@@ -41,7 +41,7 @@ async function switchMainModel(
   if (parsed.authType) {
     await config.switchModel(
       parsed.authType,
-      parsed.modelId,
+      { name: parsed.modelId },
       parsed.authType !== currentAuthType &&
         parsed.authType === AuthType.QWEN_OAUTH
         ? { requireCachedCredentials: true }
@@ -59,7 +59,7 @@ async function switchMainModel(
     return matched?.label ?? parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await config.switchModel(currentAuthType, { name: modelArg }, undefined);
   const available = config.getAvailableModelsForAuthType(currentAuthType);
   const matched = available.find((m) => m.id === modelArg);
   persistSetting(settings, 'model.id', modelArg);

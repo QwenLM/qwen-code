@@ -522,13 +522,16 @@ export function ModelDialog({
           selectedBaseUrl = parsed.baseUrl;
         }
 
-        await config.switchModel(selectedAuthType, modelId, {
-          ...(selectedAuthType !== authType &&
-          selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : {}),
-          baseUrl: selectedBaseUrl,
-        });
+        await config.switchModel(
+          selectedAuthType,
+          { id: modelId, baseUrl: selectedBaseUrl },
+          {
+            ...(selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+              ? { requireCachedCredentials: true }
+              : {}),
+          },
+        );
 
         if (!isRuntime) {
           const event = new ModelSlashCommandEvent(modelId);

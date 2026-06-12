@@ -149,41 +149,44 @@ export class ModelRegistry {
   }
 
   /**
-   * Get model configuration by authType and modelId.
-   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
-   * When baseUrl is omitted, tries the plain id first (backward compatible),
-   * then scans all entries for the first match by model id.
+   * Get model configuration by authType.
+   * Matches against provided options; missing fields are skipped.
+   * All provided conditions must match. Returns the first match.
    */
   getModel(
     authType: AuthType,
-    modelId: string,
-    baseUrl?: string,
+    options: { id?: string; name?: string; baseUrl?: string },
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return undefined;
 
-    if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+    // Composite key lookup (id + baseUrl)
+    if (options.id && options.baseUrl) {
+      const found = models.get(modelRegistryKey(options.id, options.baseUrl));
+      if (found && (!options.name || found.name === options.name)) {
+        return found;
+      }
     }
 
-    // Try plain id key first (models registered without explicit baseUrl)
-    const plain = models.get(modelId);
-    if (plain) return plain;
-
-    // Scan for the first entry with matching model id
+    // Scan: match against all provided conditions
     for (const model of models.values()) {
-      if (model.id === modelId) return model;
+      if (options.id && model.id !== options.id) continue;
+      if (options.baseUrl && model.baseUrl !== options.baseUrl) continue;
+      if (options.name && model.name !== options.name) continue;
+      return model;
     }
     return undefined;
   }
 
   /**
    * Check if model exists for given authType.
-   * When baseUrl is provided, checks the exact composite key.
-   * When baseUrl is omitted, checks plain id and scans by model id.
+   * Matches against provided options; missing fields are skipped.
    */
-  hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {
-    return this.getModel(authType, modelId, baseUrl) !== undefined;
+  hasModel(
+    authType: AuthType,
+    options: { id?: string; name?: string; baseUrl?: string },
+  ): boolean {
+    return this.getModel(authType, options) !== undefined;
   }
 
   /**
@@ -195,7 +198,7 @@ export class ModelRegistry {
     authType: AuthType,
   ): ResolvedModelConfig | undefined {
     if (authType === AuthType.QWEN_OAUTH) {
-      return this.getModel(authType, DEFAULT_QWEN_MODEL);
+      return this.getModel(authType, { id: DEFAULT_QWEN_MODEL });
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;

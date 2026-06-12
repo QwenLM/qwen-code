@@ -2526,7 +2526,7 @@ export class Session implements SessionContext {
 
     await this.config.switchModel(
       selectedAuthType,
-      parsed.modelId,
+      { id: parsed.modelId },
       selectedAuthType !== previousAuthType &&
         selectedAuthType === AuthType.QWEN_OAUTH
         ? { requireCachedCredentials: true }

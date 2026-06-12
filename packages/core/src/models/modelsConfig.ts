@@ -296,21 +296,26 @@ export class ModelsConfig {
   }
 
   /**
-   * Check if a model exists for the given authType
+   * Check if a model exists for the given authType.
+   * Matching logic: composite key (id+baseUrl) first, then scan with all
+   * provided conditions. Case-sensitive for display name matching.
    */
-  hasModel(authType: AuthType, modelId: string): boolean {
-    return this.modelRegistry.hasModel(authType, modelId);
+  hasModel(
+    authType: AuthType,
+    modelOptions: { id?: string; name?: string; baseUrl?: string },
+  ): boolean {
+    return this.modelRegistry.hasModel(authType, modelOptions);
   }
 
   /**
-   * Get a fully resolved provider model config for the given authType/modelId.
+   * Get a fully resolved provider model config for the given authType.
    * Returns undefined for raw runtime models that are not present in the registry.
    */
   getResolvedModel(
     authType: AuthType,
-    modelId: string,
+    modelOptions: { id?: string; name?: string; baseUrl?: string },
   ): ResolvedModelConfig | undefined {
-    return this.modelRegistry.getModel(authType, modelId);
+    return this.modelRegistry.getModel(authType, modelOptions);
   }
 
   /**
@@ -321,7 +326,9 @@ export class ModelsConfig {
    */
   getModelDisplayName(modelId: string): string {
     if (!this.currentAuthType) return modelId;
-    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    const resolved = this.modelRegistry.getModel(this.currentAuthType, {
+      id: modelId,
+    });
     return resolved?.name ?? modelId;
   }
 
@@ -356,9 +363,9 @@ export class ModelsConfig {
     // If model exists in registry, use full switch logic
     if (
       this.currentAuthType &&
-      this.modelRegistry.hasModel(this.currentAuthType, newModel)
+      this.modelRegistry.hasModel(this.currentAuthType, { name: newModel })
     ) {
-      await this.switchModel(this.currentAuthType, newModel);
+      await this.switchModel(this.currentAuthType, { name: newModel });
       return;
     }
 
@@ -433,11 +440,17 @@ export class ModelsConfig {
    */
   async switchModel(
     authType: AuthType,
-    modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    modelOptions: {
+      id?: string;
+      name?: string;
+      baseUrl?: string;
+      provider?: string;
+    },
+    options?: { requireCachedCredentials?: boolean },
   ): Promise<void> {
     // Check if this is a RuntimeModelSnapshot reference
-    const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelId);
+    const modelKey = modelOptions.id ?? modelOptions.name ?? '';
+    const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelKey);
     if (runtimeModelSnapshotId) {
       await this.switchToRuntimeModel(runtimeModelSnapshotId);
       return;
@@ -452,25 +465,21 @@ export class ModelsConfig {
       const isAuthTypeChange = authType !== this.currentAuthType;
       this.currentAuthType = authType;
 
-      const model = this.modelRegistry.getModel(
-        authType,
-        modelId,
-        options?.baseUrl,
-      );
+      const model = this.modelRegistry.getModel(authType, modelOptions);
       if (!model) {
         throw new Error(
-          `Model '${modelId}' not found for authType '${authType}'`,
+          `Model '${modelOptions.id ?? modelOptions.name}' not found for authType '${authType}'`,
         );
       }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
       const previousModel =
         !isAuthTypeChange && previousModelId
-          ? (this.modelRegistry.getModel(
-              authType,
-              previousModelId,
-              rollbackSnapshot.generationConfig.baseUrl,
-            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+          ? (this.modelRegistry.getModel(authType, {
+              id: previousModelId,
+              baseUrl: rollbackSnapshot.generationConfig.baseUrl || undefined,
+            }) ??
+            this.modelRegistry.getModel(authType, { id: previousModelId }))
           : undefined;
       const canReusePreviousApiKey =
         authType !== AuthType.QWEN_OAUTH &&
@@ -701,7 +710,7 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
-    if (this.modelRegistry.hasModel(currentAuthType, model, baseUrl)) {
+    if (this.modelRegistry.hasModel(currentAuthType, { id: model, baseUrl })) {
       return;
     }
 
@@ -916,15 +925,13 @@ export class ModelsConfig {
 
     // Get previous and current model configs.
     // Use current baseUrl to disambiguate when multiple models share the same id.
-    const currentModel = this.modelRegistry.getModel(
-      authType,
-      this._generationConfig.model || '',
-      this._generationConfig.baseUrl || undefined,
-    );
-    const previousModel = this.modelRegistry.getModel(
-      authType,
-      previousModelId,
-    );
+    const currentModel = this.modelRegistry.getModel(authType, {
+      id: this._generationConfig.model || '',
+      baseUrl: this._generationConfig.baseUrl || undefined,
+    });
+    const previousModel = this.modelRegistry.getModel(authType, {
+      id: previousModelId,
+    });
 
     // If either model is not in registry, require refresh to be safe
     if (!previousModel || !currentModel) {
@@ -971,8 +978,10 @@ export class ModelsConfig {
         ? this._generationConfig.baseUrl
         : undefined;
     const resolved = modelId
-      ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
-        this.modelRegistry.getModel(authType, modelId))
+      ? (this.modelRegistry.getModel(authType, {
+          id: modelId,
+          baseUrl: providerBaseUrl,
+        }) ?? this.modelRegistry.getModel(authType, { id: modelId }))
       : undefined;
     if (resolved) {
       // When authType and modelId haven't changed (startup/restart scenario),
@@ -1067,7 +1076,7 @@ export class ModelsConfig {
     const shouldPreserveCredentials =
       !isAuthTypeChange &&
       (modelId === undefined ||
-        !this.modelRegistry.hasModel(authType, modelId)) &&
+        !this.modelRegistry.hasModel(authType, { id: modelId })) &&
       (this.hasManualCredentials || hasExistingCredentials);
 
     if (shouldPreserveCredentials) {
@@ -1139,7 +1148,12 @@ export class ModelsConfig {
     }
 
     // Check if model exists in registry - if so, it's not a runtime model
-    if (this.modelRegistry.hasModel(currentAuthType, currentModel, baseUrl)) {
+    if (
+      this.modelRegistry.hasModel(currentAuthType, {
+        id: currentModel,
+        baseUrl,
+      })
+    ) {
       // Current is a registry model, clear any previous RuntimeModelSnapshot for this authType
       this.clearRuntimeModelSnapshotForAuthType(currentAuthType);
       return undefined;
