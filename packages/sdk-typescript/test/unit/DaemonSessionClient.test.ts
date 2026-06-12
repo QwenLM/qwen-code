@@ -32,10 +32,14 @@ function sseResponse(frames: string): Response {
   });
 }
 
-function pendingSseResponse(onCancel: () => void): Response {
+function pendingSseResponse(
+  onCancel: () => void,
+  onStart?: (controller: ReadableStreamDefaultController<Uint8Array>) => void,
+): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
+      onStart?.(controller);
       controller.enqueue(encoder.encode(': keepalive\n\n'));
     },
     cancel() {
@@ -541,9 +545,17 @@ describe('DaemonSessionClient', () => {
   });
 
   it('rejects locally in subscription mode when pending prompts reach the cap', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/events')) {
-        return pendingSseResponse(() => {});
+        return pendingSseResponse(
+          () => {},
+          (controller) => {
+            eventsController = controller;
+          },
+        );
       }
       if (req.url.endsWith('/session/s-1/prompt')) {
         return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
@@ -594,6 +606,7 @@ describe('DaemonSessionClient', () => {
       expect(secondResult).toBeInstanceOf(DaemonPendingPromptLimitError);
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(1);
     } finally {
+      eventsController?.close();
       secondCtrl.abort();
       eventsAbort.abort();
       await first;
