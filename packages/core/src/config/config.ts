@@ -1158,7 +1158,7 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly fileCheckpointingEnabled: boolean;
+  private fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private cwd: string;
@@ -3791,6 +3791,11 @@ export class Config {
     return this.fileCheckpointingEnabled;
   }
 
+  enableFileCheckpointing(): void {
+    this.fileCheckpointingEnabled = true;
+    this.fileHistoryService = undefined;
+  }
+
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
       this.fileHistoryService = new FileHistoryService(
@@ -3798,6 +3803,15 @@ export class Config {
         this.fileCheckpointingEnabled,
         this.cwd,
       );
+      const snapshots = this.sessionData?.fileHistorySnapshots;
+      if (snapshots?.length && this.fileHistoryService.isEnabled()) {
+        this.fileHistoryService.restoreFromSnapshots(snapshots);
+        void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
+          this.debugLogger.error(
+            `FileHistory: validateRestoredSnapshots failed: ${e}`,
+          );
+        });
+      }
     }
     return this.fileHistoryService;
   }

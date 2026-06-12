@@ -15,9 +15,16 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
+import {
+  deserializeSnapshots,
+  FILE_HISTORY_DIR,
+  MAX_SNAPSHOTS,
+} from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
@@ -130,6 +137,8 @@ export interface ResumedSessionData {
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
   lastCompletedUuid: string | null;
+  /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
+  fileHistorySnapshots?: FileHistorySnapshot[];
 }
 
 /**
@@ -157,6 +166,57 @@ const MAX_PROMPT_SCAN_LINES = 10;
  * Used by readLastRecordUuid which still does its own tail read.
  */
 const TAIL_READ_SIZE = 64 * 1024;
+
+async function copyFileHistoryBackups(
+  sourceSessionId: string,
+  targetSessionId: string,
+): Promise<void> {
+  const fsPromises = await import('node:fs/promises');
+  const sourceDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    sourceSessionId,
+  );
+  const targetDir = path.join(
+    Storage.getGlobalQwenDir(),
+    FILE_HISTORY_DIR,
+    targetSessionId,
+  );
+
+  let entries: string[];
+  try {
+    entries = await fsPromises.readdir(sourceDir);
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    debugLogger.warn(`copyFileHistoryBackups: readdir failed: ${e}`);
+    return;
+  }
+  if (entries.length === 0) return;
+
+  try {
+    await fsPromises.mkdir(targetDir, { recursive: true });
+  } catch (e) {
+    debugLogger.warn(`copyFileHistoryBackups: mkdir failed: ${e}`);
+    return;
+  }
+  await Promise.all(
+    entries.map(async (name) => {
+      const src = path.join(sourceDir, name);
+      const dst = path.join(targetDir, name);
+      try {
+        await fsPromises.link(src, dst);
+      } catch {
+        try {
+          await fsPromises.copyFile(src, dst);
+        } catch (copyErr) {
+          debugLogger.warn(
+            `copyFileHistoryBackups: failed to copy ${name}: ${copyErr}`,
+          );
+        }
+      }
+    }),
+  );
+}
 
 /**
  * Service for managing chat sessions.
@@ -750,10 +810,48 @@ export class SessionService {
       messages,
     };
 
+    // Extract file history snapshots for /rewind across resume
+    const fileHistorySnapshots: FileHistorySnapshot[] = [];
+    const seenPromptIds = new Map<string, number>();
+    for (const msg of messages) {
+      if (
+        msg.type === 'system' &&
+        msg.subtype === 'file_history_snapshot' &&
+        msg.systemPayload
+      ) {
+        const payload = msg.systemPayload as FileHistorySnapshotRecordPayload;
+        if (!Array.isArray(payload?.snapshots)) continue;
+        let deserialized: FileHistorySnapshot[];
+        try {
+          deserialized = deserializeSnapshots(payload.snapshots);
+        } catch (e) {
+          debugLogger.warn(
+            `loadSession: skipping malformed file_history_snapshot: ${e}`,
+          );
+          continue;
+        }
+        for (const s of deserialized) {
+          const existingIdx = seenPromptIds.get(s.promptId);
+          if (existingIdx !== undefined) {
+            fileHistorySnapshots[existingIdx] = s;
+          } else {
+            seenPromptIds.set(s.promptId, fileHistorySnapshots.length);
+            fileHistorySnapshots.push(s);
+          }
+        }
+      }
+    }
+    const cappedSnapshots =
+      fileHistorySnapshots.length > MAX_SNAPSHOTS
+        ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
+        : fileHistorySnapshots;
+
     return {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
+      fileHistorySnapshots:
+        cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
     };
   }
 
@@ -989,6 +1087,8 @@ export class SessionService {
     } finally {
       fs.closeSync(fd);
     }
+
+    await copyFileHistoryBackups(sourceSessionId, newSessionId);
 
     return { filePath: targetPath, copiedCount: forked.length };
   }
