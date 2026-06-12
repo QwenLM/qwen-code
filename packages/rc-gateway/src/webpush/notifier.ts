@@ -135,9 +135,28 @@ export class PushNotifier {
           return;
         }
         // Per-subscription prefs filter (cycle 16): absent prefs → receive all;
-        // a list → only those kinds; [] → nothing. Skip is silent (no audit),
-        // matching the cycle-9 scope-skip posture. Runs after scope + snooze.
-        if (r.prefs !== undefined && !r.prefs.includes(payload.kind)) return;
+        // a list → only those kinds; [] → nothing. Runs after scope + snooze.
+        // AUDITED (cycle 53, reason:'prefs'): prefs is a suppression DECISION
+        // ("we could have sent, we chose not to") like quiet_hours/
+        // working_device on either side of it - NOT a permission/security
+        // boundary like the silent scope/session-lock skips - so it belongs in
+        // the "why no push" feed (R6). Per-event like its siblings (no firstDrop
+        // dedup); as an always-on allowlist this is the highest-volume reason,
+        // which is correct - the operator asked, the honest answer is "this
+        // filter, repeatedly" (cycle-49 /rc/events backpressure absorbs it,
+        // /rc/audit stays complete).
+        if (r.prefs !== undefined && !r.prefs.includes(payload.kind)) {
+          void this.audit?.record({
+            action: 'push_suppressed',
+            target: ctx.sessionId,
+            detail: {
+              kind: payload.kind,
+              reason: 'prefs',
+              subscriptionId: r.id,
+            },
+          });
+          return;
+        }
         // Quiet-hours skip (cycle 29): if `now` falls inside this
         // subscription's own quiet window, suppress (any kind — quiet hours
         // silences the device entirely). Runs after prefs, before

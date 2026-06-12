@@ -177,7 +177,14 @@ describe('PushNotifier', () => {
     });
     await store.setPrefs(subC.id, []);
 
-    const notifier = new PushNotifier(tokens, store, sender);
+    const notifierAudit = fakeAudit();
+    const notifier = new PushNotifier(
+      tokens,
+      store,
+      sender,
+      undefined,
+      notifierAudit,
+    );
     await notifier.notify(
       {
         type: 'permission_request',
@@ -188,9 +195,23 @@ describe('PushNotifier', () => {
 
     // Only A (no prefs) receives the permission.required event.
     expect(sent.map((s) => s.endpoint)).toEqual(['https://push.example.com/a']);
-    // The per-sub skip is silent: only A's push_sent appears (no skip audit).
-    expect(audit.calls.map((c) => c.action)).toEqual(['push_sent']);
-    expect(audit.calls[0].detail).toMatchObject({ subscriptionId: subA.id });
+    // B and C are suppressed by their prefs filter, each AUDITED (cycle 53): a
+    // prefs mute is a suppression DECISION ("why no push"), not a silent
+    // boundary — in fan-out order (A sent, then B, then C suppressed).
+    const prefsSkips = notifierAudit.calls.filter(
+      (c) => c.action === 'push_suppressed',
+    );
+    expect(prefsSkips.map((c) => c.detail)).toEqual([
+      { kind: 'permission.required', reason: 'prefs', subscriptionId: subB.id },
+      { kind: 'permission.required', reason: 'prefs', subscriptionId: subC.id },
+    ]);
+    // A (allowed) produced no prefs suppression.
+    expect(
+      prefsSkips.some(
+        (c) =>
+          (c.detail as { subscriptionId?: string }).subscriptionId === subA.id,
+      ),
+    ).toBe(false);
   });
 
   it('does nothing for a non-notifiable event (buildPayload null)', async () => {
