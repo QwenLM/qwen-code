@@ -152,6 +152,12 @@
       <div><button id="list-sessions">List sessions</button></div>
       <pre id="sessions">(not listed)</pre>
     </section>
+    <section id="push-prefs">
+      <strong>Push preferences</strong> (quiet hours + rate cap; requires
+      owner scope)
+      <div><button id="list-subs">List subscriptions</button></div>
+      <div id="subs">(not listed)</div>
+    </section>
     <div id="status"></div>
     <div id="cards"></div>
     <section id="composer" style="display: none">
@@ -679,8 +685,7 @@
       function buildSessionTree(sessions, truncated) {
         const byId = new Map(sessions.map((s) => [s.sessionId, s]));
         const isChild = new Set();
-        for (const s of sessions)
-          for (const f of s.forks || []) isChild.add(f);
+        for (const s of sessions) for (const f of s.forks || []) isChild.add(f);
         const lines = [];
         const visited = new Set();
         const walk = (s, depth) => {
@@ -723,6 +728,129 @@
             Array.isArray(body.sessions) ? body.sessions : [],
             !!body.truncated,
           );
+        } catch (e) {
+          out.textContent = 'list error: ' + e;
+        }
+      };
+
+      // Push preferences (cycle 58): GET /rc/push/subscriptions?all=true
+      // (OWNER) + PATCH /rc/push/subscriptions/:id. The /ui is an owner
+      // console, so an OWNER token's OWN subscriptions are ~always empty
+      // (push targets the phone, not this laptop) -> list ?all=true. The raw
+      // `endpoint` is a sensitive capability URL and is NEVER rendered. Only
+      // the unambiguous quietHours + maxPerHour are editable here; the prefs
+      // kind-allowlist is shown read-only (prefs:[]="mute all" vs
+      // prefs:null="receive all" is a footgun deferred to a future toggle).
+      // createElement + textContent / input.value only (server fields are
+      // hex/enum/number) — never innerHTML.
+      function subRow(s) {
+        const row = document.createElement('div');
+        row.className = 'token-row';
+        const head = document.createElement('div');
+        const date = new Date(s.createdAt).toISOString().slice(0, 16);
+        head.textContent =
+          s.id +
+          '  created ' +
+          date +
+          '  prefs: ' +
+          (Array.isArray(s.prefs)
+            ? s.prefs.length
+              ? s.prefs.join(',')
+              : '(muted)'
+            : 'all');
+        const qh = s.quietHours || {};
+        const from = document.createElement('input');
+        from.placeholder = 'from HH:MM';
+        from.value = qh.from || '';
+        const to = document.createElement('input');
+        to.placeholder = 'to HH:MM';
+        to.value = qh.to || '';
+        const tz = document.createElement('input');
+        tz.placeholder = 'IANA timezone';
+        tz.value = qh.timezone || '';
+        const max = document.createElement('input');
+        max.type = 'number';
+        max.placeholder = 'maxPerHour';
+        max.value = s.maxPerHour != null ? String(s.maxPerHour) : '';
+        const note = document.createElement('span');
+        const save = document.createElement('button');
+        save.textContent = 'Save';
+        save.onclick = () =>
+          saveSub(s.id, { from, to, tz, max }, save, note);
+        for (const el of [head, from, to, tz, max, save, note])
+          row.appendChild(el);
+        return row;
+      }
+      async function saveSub(id, fields, btn, note) {
+        const f = fields.from.value.trim();
+        const t = fields.to.value.trim();
+        const z = fields.tz.value.trim();
+        const m = fields.max.value.trim();
+        // All three quiet-hours inputs blank -> clear (null); otherwise send
+        // verbatim so the backend's parseTimeOfDay validates a partial window
+        // and the 400 surfaces (vs the UI silently dropping the field).
+        const quietHours =
+          !f && !t && !z ? null : { from: f, to: t, timezone: z };
+        const maxPerHour = m === '' ? null : Number(m);
+        btn.disabled = true;
+        note.textContent = ' saving…';
+        try {
+          const res = await fetch(
+            '/rc/push/subscriptions/' + encodeURIComponent(id),
+            {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ quietHours, maxPerHour }),
+            },
+          );
+          if (res.ok) {
+            note.textContent = ' saved';
+          } else {
+            let code = res.status;
+            try {
+              const body = await res.json();
+              if (body && body.code) code = body.code;
+            } catch {
+              /* non-JSON error body */
+            }
+            note.textContent = ' failed: ' + code;
+          }
+        } catch (e) {
+          note.textContent = ' error: ' + e;
+        } finally {
+          btn.disabled = false;
+        }
+      }
+      $('list-subs').onclick = async () => {
+        if (!token()) return setStatus('pair first');
+        const out = $('subs');
+        out.textContent = 'loading…';
+        try {
+          const res = await fetch('/rc/push/subscriptions?all=true', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            out.textContent =
+              res.status === 401 || res.status === 403
+                ? 'not authorized — needs an owner token'
+                : res.status === 404
+                  ? 'push not configured on this gateway'
+                  : 'list failed (' + res.status + ')';
+            return;
+          }
+          const body = await res.json();
+          const subs = Array.isArray(body.subscriptions)
+            ? body.subscriptions
+            : [];
+          out.textContent = '';
+          if (subs.length === 0) {
+            out.textContent = '(no subscriptions)';
+            return;
+          }
+          for (const s of subs) out.appendChild(subRow(s));
         } catch (e) {
           out.textContent = 'list error: ' + e;
         }
