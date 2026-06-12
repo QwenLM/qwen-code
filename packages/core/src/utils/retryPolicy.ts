@@ -6,6 +6,14 @@
 
 export type RetryAfterMode = 'ignore' | 'minimum';
 
+/**
+ * Largest delay Node.js `setTimeout` can represent. Values above the signed
+ * 32-bit limit overflow and fire immediately, which would turn a long
+ * server-directed wait into a 0ms tight retry loop. Every computed delay is
+ * clamped to this ceiling.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 export interface RetryDelayPolicyOptions {
   attempt: number;
   initialDelayMs: number;
@@ -34,8 +42,12 @@ export interface RetryDelayPolicyOptions {
  */
 export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
   const normalizedAttempt = Math.max(1, options.attempt);
+  // Cap the exponent so a large attempt count in persistent mode cannot push
+  // `Math.pow(2, n)` to Infinity. `2^31` already exceeds any realistic
+  // maxDelayMs, so the subsequent Math.min still clamps correctly.
+  const exponent = Math.min(normalizedAttempt - 1, 31);
   const cappedExponentialDelayMs = Math.min(
-    options.initialDelayMs * Math.pow(2, normalizedAttempt - 1),
+    options.initialDelayMs * Math.pow(2, exponent),
     options.maxDelayMs,
   );
   const retryAfterMode = options.retryAfterMode ?? 'ignore';
@@ -72,16 +84,23 @@ export function getRetryAfterDelayMs(error: unknown): number | null {
     getResponseHeaderValue(error, 'retry-after');
   if (value === null) return null;
 
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return seconds * 1000;
+  const trimmed = value.trim();
+  // RFC 7231 delay-seconds is decimal digits only. Restrict parsing to a plain
+  // (optionally fractional) decimal so non-RFC shapes Number() would otherwise
+  // accept (e.g. "0x10", "1e3") fall through to the HTTP-date branch instead of
+  // silently producing a wrong delay.
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, MAX_TIMEOUT_MS);
+    }
   }
 
-  const retryAtMs = Date.parse(value);
+  const retryAtMs = Date.parse(trimmed);
   if (!Number.isFinite(retryAtMs)) return null;
 
   const delayMs = retryAtMs - Date.now();
-  return delayMs > 0 ? delayMs : 0;
+  return delayMs > 0 ? Math.min(delayMs, MAX_TIMEOUT_MS) : 0;
 }
 
 function getHeaderValue(error: unknown, headerName: string): string | null {

@@ -215,4 +215,57 @@ describe('getRetryAfterDelayMs', () => {
       getRetryAfterDelayMs({ response: { headers: undefined } }),
     ).toBeNull();
   });
+
+  it('should cap oversized numeric Retry-After at the setTimeout ceiling', () => {
+    // 30 days in seconds → 2.592e9 ms, which exceeds the signed 32-bit
+    // setTimeout limit and would otherwise fire immediately.
+    expect(
+      getRetryAfterDelayMs({ headers: { 'retry-after': '2592000' } }),
+    ).toBe(2_147_483_647);
+  });
+
+  it('should reject non-RFC numeric Retry-After shapes', () => {
+    // Number() would accept these (16, 1000) but RFC 7231 allows decimal
+    // digits only; they are not valid HTTP-dates either, so the result is null.
+    expect(
+      getRetryAfterDelayMs({ headers: { 'retry-after': '0x10' } }),
+    ).toBeNull();
+    expect(
+      getRetryAfterDelayMs({ headers: { 'retry-after': '1e3' } }),
+    ).toBeNull();
+  });
+
+  it('should honor fractional Retry-After seconds', () => {
+    expect(getRetryAfterDelayMs({ headers: { 'retry-after': '1.5' } })).toBe(
+      1500,
+    );
+  });
+
+  it('should cap far-future HTTP-date Retry-After at the setTimeout ceiling', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    try {
+      expect(
+        getRetryAfterDelayMs({
+          headers: { 'retry-after': 'Fri, 01 Jan 2100 00:00:00 GMT' },
+        }),
+      ).toBe(2_147_483_647);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('getRetryDelayMs - exponential overflow', () => {
+  it('clamps to maxDelayMs for very large attempt counts without overflowing', () => {
+    // attempt high enough that 2^(attempt-1) would be Infinity if uncapped.
+    expect(
+      getRetryDelayMs({
+        attempt: 5000,
+        initialDelayMs: 1000,
+        maxDelayMs: 300_000,
+      }),
+    ).toBe(300_000);
+  });
 });
