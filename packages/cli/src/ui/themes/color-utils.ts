@@ -247,6 +247,14 @@ const INK_NAME_TO_HEX: Readonly<Record<string, string>> = {
   white: '#ffffff',
   gray: '#808080',
   grey: '#808080',
+  blackbright: '#808080',
+  redbright: '#ff8080',
+  greenbright: '#80ff80',
+  yellowbright: '#ffff80',
+  bluebright: '#8080ff',
+  cyanbright: '#80ffff',
+  magentabright: '#ff80ff',
+  whitebright: '#ffffff',
 };
 
 /**
