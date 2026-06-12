@@ -211,6 +211,94 @@ class RestSseTransport implements DaemonTransport {
 - Manages conn-scoped + session-scoped SSE streams internally
 - Same URL→JSON-RPC mapping + request correlation
 
+### 2.7 Transport auto-detection
+
+Server advertises supported transports in `GET /capabilities`:
+
+```json
+{
+  "transports": ["rest+sse", "acp-http+sse", "acp-ws"],
+  ...existing capabilities fields...
+}
+```
+
+SDK provides a one-shot static factory:
+
+```typescript
+// Probe once before React render, never switches mid-session
+const transport = await DaemonTransport.negotiate(baseUrl, token);
+// Returns best available: acp-ws > acp-http > rest (fallback)
+```
+
+Implementation:
+1. `GET /capabilities` → read `transports` array
+2. If `acp-ws` in list → try WS upgrade; on success return `AcpWsTransport`
+3. If WS fails or not in list → try `acp-http`; on success return `AcpHttpTransport`
+4. Fallback → `RestSseTransport`
+
+No existing API affected: `GET /capabilities` adds a new field (additive),
+existing consumers ignore unknown fields.
+
+### 2.8 Runtime fallback (WS → REST on disconnect)
+
+When a non-REST transport disconnects mid-session:
+
+```
+AcpWsTransport (connected=true)
+  │
+  ├── WS drops (network, server restart, idle timeout)
+  │
+  ├── connected = false
+  ├── All pending fetch() calls → reject with DaemonTransportClosedError
+  ├── All subscribeEvents generators → throw DaemonTransportClosedError
+  │
+  └── Consumer (Provider / third party) detects disconnect:
+        1. Create new RestSseTransport (guaranteed to work if daemon is up)
+        2. Create new DaemonClient({ transport: newTransport })
+        3. For each active session: session/load to re-attach
+        4. Resume event subscription
+```
+
+**Key constraint**: runtime fallback is **consumer-driven, not transport-internal**.
+The transport does not silently switch protocols — it fails loudly
+(`DaemonTransportClosedError`) and the consumer decides whether to rebuild.
+
+Rationale:
+- WS teardown destroys all owned sessions server-side (`registry.delete` →
+  `conn.destroy`). A silent switch would hide this data loss.
+- `session/load` re-attaches to the existing bridge session (transcripts
+  preserved), but the prompt in flight is aborted. The consumer must handle
+  this explicitly (retry or surface to user).
+- No `Last-Event-ID` resume across transports yet (Phase 4). Events between
+  disconnect and reconnect may be lost. The consumer should request a full
+  state resync via `session/load` (which replays history).
+
+**AutoReconnectTransport** (~150 lines, optional wrapper):
+
+```typescript
+class AutoReconnectTransport implements DaemonTransport {
+  constructor(
+    private baseUrl: string,
+    private token: string,
+    private preferred: 'acp-ws' | 'acp-http' | 'rest',
+  ) {}
+
+  // On DaemonTransportClosedError from inner transport:
+  // 1. Try to re-create preferred transport
+  // 2. If preferred fails, fallback to REST
+  // 3. Re-initialize connection
+  // Caller still needs to session/load — this wrapper only
+  // handles transport-level reconnect, not session-level.
+}
+```
+
+This wrapper is opt-in. Existing consumers who don't want auto-reconnect
+simply catch `DaemonTransportClosedError` and handle it themselves.
+
+**Impact on existing functionality**: zero. All auto-detection and fallback
+code is additive and opt-in. `new DaemonClient({ baseUrl, token })` without
+`transport` = current REST behavior, no auto-detection, no fallback logic.
+
 ---
 
 ## 3. Breaking change audit
@@ -243,7 +331,7 @@ class RestSseTransport implements DaemonTransport {
 | `subscribeEvents` on transport, not just `fetch` | SSE re-encoding through fetch is wasteful and fragile |
 | `connected: boolean` on transport | Provider reconnect loop needs to distinguish "transport dead" from "transient 500" |
 | Lazy-init (not explicit `connect()`) | Keeps DaemonClient construction synchronous; default `new RestSseTransport()` needs no init |
-| No `auto` fallback | Cross-transport session migration has no handoff protocol. Explicit selection. |
+| Auto-detection is one-shot, not mid-session | `negotiate()` probes once at startup; runtime fallback is consumer-driven via `DaemonTransportClosedError`, not silent internal switch |
 | No error taxonomy prerequisite | ACP transports map errors to HTTP-equivalent status codes internally; `DaemonHttpError` works as-is |
 | No provider changes needed | Third parties construct `DaemonClient` with `transport` directly; provider creates `DaemonClient` from workspace context which can carry a transport |
 
@@ -299,6 +387,18 @@ Parallel `AcpSessionProvider` + `ChatBridgeContext` + `SessionBridgeContext`.
 | Tests | WS integration tests |
 
 ### PR 3: AcpHttpTransport (optional, ~800 lines, follow-up)
+
+### PR 4: Transport auto-detection + runtime fallback (~250 lines)
+
+| File | Change | Lines |
+|------|--------|-------|
+| `packages/cli/src/serve/server.ts` | Add `transports` field to `GET /capabilities` response | ~5 |
+| `packages/sdk-typescript/src/daemon/DaemonTransport.ts` | Add `negotiate()` static factory | ~60 |
+| `packages/sdk-typescript/src/daemon/AutoReconnectTransport.ts` | Optional wrapper: reconnect + fallback | ~150 |
+| `packages/sdk-typescript/src/daemon/index.ts` | Export new types | ~3 |
+
+**Zero impact on existing**: `GET /capabilities` adds a field (additive);
+`negotiate()` and `AutoReconnectTransport` are new opt-in APIs.
 
 ---
 
