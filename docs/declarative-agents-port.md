@@ -8,7 +8,36 @@ coordinating with the workflow port in issue [#4721][i4721] / PR [#4732][p4732].
 [i4721]: https://github.com/QwenLM/qwen-code/issues/4721
 [p4732]: https://github.com/QwenLM/qwen-code/pull/4732
 
-**Implementation status:** PR [#4842](https://github.com/QwenLM/qwen-code/pull/4842) ships `permissionMode`, `maxTurns`, and a tightened `color` allowlist. The other fields documented below are reference material for follow-up PRs once their prerequisite infra exists (`effort` → model-layer param; `mcpServers`/`hooks` → nested YAML parser; `memory` → scoped memory subsystem; `isolation` → workflow PR #4732; `initialPrompt` → `--agent` flag; `skills` → SkillManager wiring).
+## Implementation status (vertical-sliced)
+
+PR [#4842][p4842] shipped the fields with an end-to-end runtime path at the
+time. PR [#4870][p4870] then replaced the YAML parser to support block
+scalars. This follow-up PR builds on both: it replaces the YAML
+**stringifier** (PR #4870 left it hand-rolled — see
+`docs/yaml-parser-replacement.md`), surfaces `mcpServers` + `hooks` on
+`SubagentConfig`, and wires them to the runtime so per-agent MCP servers
+and hooks actually fire when a subagent runs.
+
+| Field             | Status                  | Notes                                                                                                                                                               |
+| ----------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode`  | **shipped (#4842)**     | bridges to existing qwen `approvalMode` at parse time                                                                                                               |
+| `maxTurns`        | **shipped (#4842)**     | wired into existing `runConfig.max_turns` runtime path                                                                                                              |
+| `color` allowlist | **shipped (#4842)**     | tightens existing field to CC's `_Y` set + `auto` legacy sentinel handling                                                                                          |
+| `mcpServers`      | **shipped (follow-up)** | nested YAML round-trip safe via eemeli/`yaml` stringify; runtime override merges session + agent servers via subagent Config wrapper + forced tool-registry rebuild |
+| `hooks`           | **shipped (follow-up)** | ephemeral HookRegistry entries registered at subagent spawn, removed via `onStop`; v1 fires globally (no agent-scope filter)                                        |
+| `effort`          | deferred                | no model-layer `effort` parameter exists yet in qwen providers                                                                                                      |
+| `memory`          | deferred                | qwen's auto-memory has no `user`/`project`/`local` scope distinction yet                                                                                            |
+| `isolation`       | deferred                | workflow PR #4732 owns the runtime; per-agent default lands when that lands                                                                                         |
+| `initialPrompt`   | deferred                | requires `--agent` CLI flag (no main-session-agent infra in qwen)                                                                                                   |
+| `skills`          | deferred                | requires SkillManager consumption of `config.skills`                                                                                                                |
+
+The full reverse-engineering record below is retained as the design reference
+for the deferred fields — schema constants, DL7/Ig5 semantics, error
+messages, and the coordination matrix with workflow are still load-bearing
+for that work.
+
+[p4842]: https://github.com/QwenLM/qwen-code/pull/4842
+[p4870]: https://github.com/QwenLM/qwen-code/pull/4870
 
 ---
 

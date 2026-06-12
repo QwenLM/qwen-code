@@ -120,6 +120,13 @@ function isRegexContext(source: string, i: number): boolean {
 }
 
 import * as vm from 'node:vm';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+// Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
+// instance with the same 'WORKFLOW' namespace). Re-exported so orchestrator
+// imports the same instance — orchestrator already imports from this module,
+// so this is the natural direction (the reverse would be a circular dep).
+export const debugLogger = createDebugLogger('WORKFLOW');
 
 // Cap log + phase lines to prevent unbounded memory growth from runaway
 // model-authored loops.
@@ -220,11 +227,16 @@ export interface SandboxOptions {
 }
 
 /**
- * T23 (PR #4732 R2): default async wall-clock cap. 30 minutes is generous
- * for any realistic P1 sequential workflow (single agent capped at
- * 10 min × ~10 agents max practical → ~100 min upper bound, but typical
- * workflows finish in seconds). 30 min stops 0-token hang patterns
- * before they waste operator hours.
+ * T23 (PR #4732 R2): default async wall-clock cap. The wall clock is a
+ * 0-token-hang backstop, NOT a precise cost cap: it bounds patterns like an
+ * in-script `await new Promise(() => {})` that the vm timeout cannot reach.
+ * For genuine cost control, use the env-overridable per-run cap
+ * (`QWEN_CODE_MAX_WORKFLOW_AGENTS`) and concurrency window
+ * (`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`). 30 minutes is set generously
+ * enough that typical workflows never see it but a hang doesn't waste
+ * operator hours; raise via `QWEN_CODE_MAX_WORKFLOW_SECONDS` for long
+ * legitimate fan-outs (1000 agents × 10-min subagent cap ÷ default
+ * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 
@@ -341,6 +353,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
     hostAgent: opts.dispatch,
+    // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
+    // catch path. Mirrors the rejection-logging in settleToNullArray so an
+    // operator running with debug logging can distinguish "thunk rejected"
+    // (settleToNullArray.warn) from "thunk resolved to a non-JSON-serializable
+    // value" (this warn). Receives only primitive strings/numbers — the bridge
+    // contract forbids host objects crossing back to the script.
+    logRevivalFailure: (idx: number, reason: string): void => {
+      debugLogger.warn(
+        `Workflow result revival failed at index ${idx}: ${reason}; ` +
+          `slot set to null (non-JSON-serializable thunk return).`,
+      );
+    },
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
     hasParallel: !!opts.parallel,
@@ -510,32 +534,80 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       });
 
       // --- parallel / pipeline ---
+      // SECURITY (PR #4732 P2): the host impl resolves with a HOST-realm array.
+      // vmAsync's resolve path is verbatim (it does NOT re-wrap resolved
+      // values), so handing that host array to the script would reopen the
+      // T1/T8/T14 escape: result.constructor.constructor('return process')()
+      // walks the host Array.prototype chain to the host Function constructor.
+      // We revive the array INSIDE the vm realm with JSON.parse(JSON.stringify)
+      // -- the same mechanism that makes the args global safe (see the args
+      // revival above) -- so the value the script sees has vm-realm prototypes
+      // whose constructors can't reach host process. Agent results are JSON
+      // strings (and null slots), so the round-trip is lossless for P2.
+      //
+      // EAD-1 (P2 self-review): revive PER-ELEMENT, not the whole array in one
+      // JSON.stringify. A single slot whose VALUE is non-serializable (a thunk
+      // that returns a BigInt or a circular object) must become null at its
+      // index -- it must NOT throw on the whole array and destroy every sibling
+      // result, which would defeat errors-as-data for return values. The outer
+      // [] is built in-realm here, so the result keeps vm-realm prototypes.
+      //
+      // SECURITY (PR #4947 R1 wenshao): reviveInRealm MUST remain inside this
+      // vm init runInContext block. JSON, Array, Object here are vm-realm
+      // globals; extracting this function to a host-side utility (e.g. a
+      // shared utils/jsonRevive.ts) would resolve those references against
+      // the HOST realm, silently reopening the T1/T8/T14 escape that the
+      // revival is designed to prevent. The textual identity to a host-side
+      // util is exactly the trap.
+      function reviveInRealm(hostArr) {
+        const out = [];
+        for (let i = 0; i < hostArr.length; i++) {
+          try {
+            out[i] = JSON.parse(JSON.stringify(hostArr[i]));
+          } catch (e) {
+            // Cross to host realm for debug logging. The bridge function
+            // accepts only primitive strings/numbers; the error message is
+            // coerced to a String here so no vm-realm Error object crosses.
+            __b.logRevivalFailure(i, String(e?.message ?? e));
+            out[i] = null;
+          }
+        }
+        return out;
+      }
       if (__b.hasParallel) {
-        globalThis.parallel = vmAsync(function (thunks) {
+        const callParallel = vmAsync(function (thunks) {
           return __b.hostParallel(thunks);
         });
+        globalThis.parallel = function parallel(thunks) {
+          return callParallel(thunks).then(reviveInRealm);
+        };
       } else {
         globalThis.parallel = function parallel() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'parallel() is not supported in P1. Sequential agent() is the only ' +
-              'execution mode in P1. Concurrent fan-out is scheduled for P2.'
+              'parallel() is unavailable: this sandbox was created without a ' +
+              'parallel implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no concurrent-dispatch capability.'
             ));
           });
         };
       }
       if (__b.hasPipeline) {
-        globalThis.pipeline = vmAsync(function (items) {
+        const callPipeline = vmAsync(function (items) {
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
         });
+        globalThis.pipeline = function pipeline() {
+          return callPipeline.apply(null, arguments).then(reviveInRealm);
+        };
       } else {
         globalThis.pipeline = function pipeline() {
           return new Promise(function (_, reject) {
             reject(new Error(
-              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-              'is scheduled for P2.'
+              'pipeline() is unavailable: this sandbox was created without a ' +
+              'pipeline implementation. The orchestrator injects one; a bare ' +
+              'sandbox has no staggered multi-stage capability.'
             ));
           });
         };

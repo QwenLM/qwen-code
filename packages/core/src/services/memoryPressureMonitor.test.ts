@@ -21,6 +21,8 @@ import type { FileReadCache } from './fileReadCache.js';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
 import { MICROCOMPACT_CLEARED_MESSAGE } from './microcompaction/microcompact.js';
+import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
+import { MemoryMetricType } from '../telemetry/metrics.js';
 
 // Hoisted so vi.mock can consume it.
 const { mockDebugLogger } = vi.hoisted(() => ({
@@ -81,6 +83,7 @@ const {
 
 vi.mock('node:os', () => ({
   totalmem: () => getMockOsTotalmem(),
+  cpus: () => [{ model: 'mock', speed: 0, times: {} }],
 }));
 
 vi.mock('node:fs', () => ({
@@ -96,6 +99,29 @@ vi.mock('node:v8', () => ({
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
+
+// Partial mock: only the functions the monitor's sampling path calls are
+// replaced; everything else (e.g. the MemoryMetricType enum) stays real.
+const {
+  mockIsPerformanceMonitoringActive,
+  mockRecordMemoryUsage,
+  mockRecordCpuUsage,
+} = vi.hoisted(() => ({
+  mockIsPerformanceMonitoringActive: vi.fn().mockReturnValue(false),
+  mockRecordMemoryUsage: vi.fn(),
+  mockRecordCpuUsage: vi.fn(),
+}));
+
+vi.mock('../telemetry/metrics.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/metrics.js')>();
+  return {
+    ...actual,
+    isPerformanceMonitoringActive: mockIsPerformanceMonitoringActive,
+    recordMemoryUsage: mockRecordMemoryUsage,
+    recordCpuUsage: mockRecordCpuUsage,
+  };
+});
 
 // Must be a dynamic import AFTER vi.mock so the mocked os takes effect.
 // Use let + beforeAll pattern.
@@ -967,7 +993,13 @@ describe('MemoryPressureMonitor', () => {
       vi.spyOn(monitor, 'getPressureLevel')
         .mockReturnValueOnce('soft')
         .mockReturnValueOnce('critical');
+      // Call order: check1 sampling snapshot, light memBefore, check2
+      // sampling snapshot, light memAfter, then the dequeued aggressive
+      // cleanup's memBefore (the throw under test), then the RSS read in
+      // recordCleanupFailure.
       vi.spyOn(process, 'memoryUsage')
+        .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
+        .mockReturnValueOnce(createMemUsage(8 * 1024 * 1024 * 1024))
         .mockReturnValueOnce(createMemUsage(9 * 1024 * 1024 * 1024))
         .mockReturnValueOnce(createMemUsage(8 * 1024 * 1024 * 1024))
         .mockImplementationOnce(() => {
@@ -1632,6 +1664,127 @@ describe('MemoryPressureMonitor', () => {
         expect.objectContaining({
           consecutiveIneffectiveCleanups: 3,
         }),
+      );
+    });
+  });
+
+  describe('runtime sampling and telemetry', () => {
+    beforeEach(() => {
+      setOsTotalmem(16 * 1024 * 1024 * 1024);
+      mockIsPerformanceMonitoringActive.mockReturnValue(false);
+      mockRecordMemoryUsage.mockClear();
+      mockRecordCpuUsage.mockClear();
+    });
+
+    it('reports memory and CPU metrics when performance monitoring is active', () => {
+      mockIsPerformanceMonitoringActive.mockReturnValue(true);
+      const rss = 4 * 1024 * 1024 * 1024; // 4/16 = 0.25: normal, no cleanup
+      const heapUsed = 256 * 1024 * 1024;
+      setMemUsage(rss, heapUsed);
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+
+      monitor.performCheck();
+
+      expect(mockRecordMemoryUsage).toHaveBeenCalledTimes(2);
+      expect(mockRecordMemoryUsage).toHaveBeenCalledWith(
+        expect.anything(),
+        rss,
+        { memory_type: MemoryMetricType.RSS },
+      );
+      expect(mockRecordMemoryUsage).toHaveBeenCalledWith(
+        expect.anything(),
+        heapUsed,
+        { memory_type: MemoryMetricType.HEAP_USED },
+      );
+      expect(mockRecordCpuUsage).toHaveBeenCalledTimes(1);
+      expect(mockRecordCpuUsage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(Number),
+        {},
+      );
+    });
+
+    it('does not report metrics when performance monitoring is inactive', () => {
+      setMemUsage(4 * 1024 * 1024 * 1024);
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+
+      monitor.performCheck();
+
+      expect(mockRecordMemoryUsage).not.toHaveBeenCalled();
+      expect(mockRecordCpuUsage).not.toHaveBeenCalled();
+    });
+
+    it('does not throw and skips metric reporting when memory usage cannot be read', () => {
+      mockIsPerformanceMonitoringActive.mockReturnValue(true);
+      vi.spyOn(process, 'memoryUsage').mockImplementation(() => {
+        throw new Error('memory API unavailable');
+      });
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+
+      expect(() => monitor.performCheck()).not.toThrow();
+      expect(mockRecordMemoryUsage).not.toHaveBeenCalled();
+      expect(mockRecordCpuUsage).not.toHaveBeenCalled();
+      // readMemoryUsage() logs the failure once; getPressureLevel() must be
+      // skipped (mem is undefined) so it doesn't fire a second failing syscall
+      // and log the same error twice on this cycle.
+      expect(mockDebugLogger.error).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs first sampling failure at error level and subsequent ones at debug', () => {
+      // Make the OTel recording path throw so the sampling try/catch fires.
+      mockIsPerformanceMonitoringActive.mockReturnValue(true);
+      mockRecordMemoryUsage.mockImplementation(() => {
+        throw new Error('OTel export failed');
+      });
+      setMemUsage(4 * 1024 * 1024 * 1024); // normal pressure, no cleanup
+
+      const monitor = new MemoryPressureMonitor(createMockConfig());
+      mockDebugLogger.error.mockClear();
+      mockDebugLogger.debug.mockClear();
+
+      // First failure: should log at error level
+      monitor.performCheck();
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+
+      mockDebugLogger.error.mockClear();
+      mockDebugLogger.debug.mockClear();
+
+      // Second failure: should log at debug level (not error)
+      monitor.performCheck();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+      expect(mockDebugLogger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('Runtime sampling failed'),
+      );
+    });
+
+    it('passes runtime samples to the diagnostics dumper on hard pressure', async () => {
+      const dumpSpy = vi
+        .spyOn(MemoryDiagnosticsDumper.prototype, 'dump')
+        .mockResolvedValue(undefined);
+      const rss = 11 * 1024 * 1024 * 1024; // 11/16 = 0.6875: hard
+      setMemUsage(rss);
+      const monitor = new MemoryPressureMonitor(createMockConfig(), {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+      // Advance the clock past the ring's construction tick so record()
+      // sees elapsed > 0 and actually pushes a sample.
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 50);
+
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(dumpSpy).toHaveBeenCalledTimes(1);
+      expect(dumpSpy).toHaveBeenCalledWith(
+        'hard',
+        expect.arrayContaining([expect.objectContaining({ rss })]),
       );
     });
   });

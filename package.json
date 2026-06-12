@@ -12,7 +12,8 @@
     "packages/channels/weixin",
     "packages/channels/dingtalk",
     "packages/channels/feishu",
-    "packages/channels/plugin-example"
+    "packages/channels/plugin-example",
+    "!packages/desktop"
   ],
   "repository": {
     "type": "git",
@@ -75,6 +76,7 @@
     "changelog": "node scripts/generate-changelog.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
+    "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
     "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"

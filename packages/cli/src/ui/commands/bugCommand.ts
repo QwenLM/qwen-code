@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItem } from '../types.js';
 import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
 import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
@@ -55,7 +55,7 @@ export const bugCommand: SlashCommand = {
     context.ui.addItem(bugReportItem, Date.now());
 
     try {
-      await open(bugReportUrl);
+      await openBrowserSecurely(bugReportUrl);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

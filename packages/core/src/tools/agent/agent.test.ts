@@ -648,9 +648,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should execute subagent successfully', async () => {
@@ -1437,9 +1438,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1619,9 +1621,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -1952,9 +1955,10 @@ describe('AgentTool', () => {
         emitDuringExecute(capturedInvocation.eventEmitter);
       });
 
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
       const params: AgentParams = {
         description: 'Edit files',
@@ -2265,9 +2269,10 @@ describe('AgentTool', () => {
       ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
-      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockAgent,
-      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
     });
 
     it('should run in background when agent definition has background: true', async () => {

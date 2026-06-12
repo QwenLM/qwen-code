@@ -107,6 +107,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_create',
   'session_scope_override',
   'session_load',
+  'session_resume',
   'unstable_session_resume',
   'session_list',
   'session_prompt',
