@@ -1166,6 +1166,9 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private fileCheckpointingEnabled: boolean;
+  // Object (not primitive) so sub-agents via Object.create(parentConfig)
+  // share the same budget instance through prototype lookup.
+  private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private cwd: string;
@@ -2269,6 +2272,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
@@ -4243,6 +4247,14 @@ export class Config {
     }
 
     return this.toolOutputBatchBudget;
+  }
+
+  trackToolResultBytes(n: number): void {
+    this.toolResultBudget.bytesWritten += n;
+  }
+
+  getToolResultBytesWritten(): number {
+    return this.toolResultBudget.bytesWritten;
   }
 
   getOutputFormat(): OutputFormat {
