@@ -89,19 +89,32 @@ describe('createAcpSessionBridge', () => {
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];
+    const events: string[] = [];
     const spanAttributes = new Map<string, Record<string, unknown>>();
     const telemetry: BridgeTelemetry = {
-      captureContext: () => ({ captured: true }),
-      async runWithContext(_captured, fn) {
+      captureContext: () => {
+        events.push('capture');
+        return { captured: true };
+      },
+      async runWithContext(captured, fn) {
+        events.push(
+          `run:${(captured as { captured?: boolean } | undefined)?.captured === true}`,
+        );
         return await fn();
       },
       async withSpan(operation, attributes, fn) {
         operations.push(operation);
         spanAttributes.set(operation, attributes);
-        return await fn();
+        events.push(`span:${operation}:start`);
+        try {
+          return await fn();
+        } finally {
+          events.push(`span:${operation}:end`);
+        }
       },
       event() {},
       injectPromptContext(request) {
+        events.push('inject');
         const meta =
           (request as { _meta?: Record<string, unknown> })._meta ?? {};
         return {
@@ -141,6 +154,12 @@ describe('createAcpSessionBridge', () => {
         'prompt.dispatch',
       ]),
     );
+    expect(events.slice(-4)).toEqual([
+      'run:true',
+      'span:prompt.dispatch:start',
+      'inject',
+      'span:prompt.dispatch:end',
+    ]);
     expect(handle.agent.promptCalls[0]!._meta).toMatchObject({
       keep: 'value',
       'qwen.telemetry.traceparent': 'daemon-traceparent',

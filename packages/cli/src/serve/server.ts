@@ -17,6 +17,7 @@ import {
   SessionService,
   shouldShowStep,
   TrustGateError,
+  addDaemonRequestAttribute,
   emitDaemonLog,
   hashDaemonWorkspace,
   recordDaemonBridgeError,
@@ -276,9 +277,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -2190,6 +2189,7 @@ export function createServeApp(
       });
       return;
     }
+    addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
     const abort = new AbortController();
     const effectiveDeadlineMs = resolvePromptDeadlineMs(

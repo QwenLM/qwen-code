@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import { trace, type Span } from '@opentelemetry/api';
 import {
   createServeApp,
   detectFromLoopback,
@@ -2964,6 +2965,34 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('adds the generated promptId to the active daemon request span', async () => {
+      const setAttribute = vi.fn();
+      const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({
+        setAttribute,
+        spanContext: () => ({
+          traceId: '1'.repeat(32),
+          spanId: '2'.repeat(16),
+          traceFlags: 1,
+        }),
+      } as unknown as Span);
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      try {
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ prompt: [{ type: 'text', text: 'hi' }] });
+
+        expect(res.status).toBe(202);
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.prompt_id',
+          res.body.promptId,
+        );
+      } finally {
+        getSpanSpy.mockRestore();
+      }
+    });
+
     it('400 when prompt body is missing', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -3478,9 +3507,7 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(
-          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=0`,
-        )
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=0`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
@@ -3494,9 +3521,7 @@ describe('createServeApp', () => {
         { bridge, boundWorkspace: WS_BOUND },
       );
       const res = await request(app)
-        .get(
-          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=200`,
-        )
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=200`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
     });
