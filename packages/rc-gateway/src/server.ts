@@ -45,6 +45,7 @@ import {
 import { PushSender } from './webpush/sender.js';
 import { PushNotifier } from './webpush/notifier.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
+import { PushCoalescer } from './webpush/coalescer.js';
 import type { SnoozeStore } from './routing/snooze.js';
 import type { RoutingMatcher } from './routing/rules.js';
 import {
@@ -72,6 +73,12 @@ export interface GatewayDeps {
   commandLoader?: CommandLoader;
   /** User-level slash-command root; defaults to ~/.qwen/commands. */
   commandsUserDir?: string;
+  /**
+   * Same-kind push coalescing window in ms (design D6). Default 0 = DISABLED
+   * (the prompt-safety default: coalescing is the one fail-CLOSED gate, so it is
+   * opt-in). Falls back to the `QWEN_RC_COALESCE_MS` env when unset.
+   */
+  coalesceWindowMs?: number;
 }
 
 export interface GatewayApp {
@@ -286,6 +293,13 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     // Per-subscription rolling-hour push rate limiter (cycle 46). In-memory:
     // a restart resets the counters (fail-open — never suppress a notification).
     const rateLimiter = new PushRateLimiter();
+    // Same-kind coalescing (cycle 63, design D6). DISABLED by default (window 0
+    // -> tryPass always true -> no behavior change); an operator opts in via
+    // deps.coalesceWindowMs or the QWEN_RC_COALESCE_MS env. Opt-in because it is
+    // the one fail-CLOSED gate (it can drop a real second prompt).
+    const coalesceWindowMs =
+      deps.coalesceWindowMs ?? (Number(process.env.QWEN_RC_COALESCE_MS) || 0);
+    const coalescer = new PushCoalescer(coalesceWindowMs);
     notifier = new PushNotifier(
       deps.store,
       deps.pushStore,
@@ -295,6 +309,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       workingDevice,
       deps.routing,
       rateLimiter,
+      coalescer,
     );
     app.use(
       '/rc/push',

@@ -314,6 +314,18 @@ describe('gateway app', () => {
 
     const withoutStores = createGatewayApp({ daemon, store, pairing });
     expect(withoutStores.notifier).toBeUndefined();
+
+    // The opt-in coalescing window is accepted and still yields a notifier
+    // (cycle 63; default 0 = disabled, so the unset case above is the no-op path).
+    const withCoalesce = createGatewayApp({
+      daemon,
+      store,
+      pairing,
+      vapid,
+      pushStore,
+      coalesceWindowMs: 5000,
+    });
+    expect(withCoalesce.notifier).toBeDefined();
   });
 
   it('createGatewayApp returns the audit instance', async () => {
