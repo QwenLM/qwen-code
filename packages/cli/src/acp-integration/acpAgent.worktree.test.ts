@@ -130,6 +130,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
+  DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
   getMCPDiscoveryState: vi.fn(() => 'not_started'),
   getMCPServerStatus: vi.fn(() => 'disconnected'),

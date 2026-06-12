@@ -314,6 +314,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       ),
     ];
 
+    // Shared newline handler for all multi-line input shortcuts. Inserts a
+    // literal '\n' at the cursor instead of submitting.
+    const insertNewline = (view: EditorView) => {
+      view.dispatch(view.state.replaceSelection('\n'));
+      return true;
+    };
+
     const submitKeymap = keymap.of([
       {
         key: 'Enter',
@@ -331,19 +338,24 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           return submitText(view);
         },
       },
+      // Newline shortcuts, mirroring the CLI TUI's NEWLINE bindings:
+      // Shift+Enter, Ctrl+J, Ctrl+Enter / Cmd+Enter (Mod-Enter), and
+      // Option/Alt+Enter for terminal muscle memory.
       {
         key: 'Shift-Enter',
-        run: (view) => {
-          view.dispatch(view.state.replaceSelection('\n'));
-          return true;
-        },
+        run: insertNewline,
       },
       {
         key: 'Ctrl-j',
-        run: (view) => {
-          view.dispatch(view.state.replaceSelection('\n'));
-          return true;
-        },
+        run: insertNewline,
+      },
+      {
+        key: 'Mod-Enter',
+        run: insertNewline,
+      },
+      {
+        key: 'Alt-Enter',
+        run: insertNewline,
       },
       {
         key: 'Escape',

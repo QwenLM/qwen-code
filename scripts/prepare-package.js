@@ -167,6 +167,11 @@ if (result.signal) {
     files: [
       'cli-entry.js',
       'cli.js',
+      // Worker thread entry loaded by FzfWorkerHandle at runtime via
+      // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
+      // Must ship in the tarball or the @-picker silently falls back to the
+      // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
+      'fzfWorker.js',
       'chunks',
       'vendor',
       '*.sb',

@@ -18,6 +18,7 @@
 import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getErrorMessage } from '../../utils/errors.js';
 import type {
   Backend,
   AgentSpawnConfig,
@@ -50,6 +51,7 @@ import {
   assignTeammateColor,
   writeTeamFile,
   findMemberByName,
+  classifyShutdownResponse,
 } from './teamHelpers.js';
 import {
   consumeUnread,
@@ -106,6 +108,28 @@ interface PendingMessage {
   priority: MessagePriority;
 }
 
+/**
+ * The stable tag wrapping teammate→leader messages in the leader's
+ * conversation. No secret/nonce: forgery is prevented structurally by
+ * escaping any copy of this delimiter a teammate puts in its own body
+ * (see {@link TeamManager.escapeEnvelopeTags}). Defined once so the
+ * open/close literals and the escape regex can't drift apart on a
+ * rename — a drift would silently stop defanging the new delimiter.
+ */
+const LEADER_ENVELOPE_TAG = 'teammate_message';
+
+/**
+ * Matches the opening/closing `<teammate_message …>` delimiter token
+ * only — boundary-anchored so lookalikes (`<teammate_messages>`,
+ * `<teammate_message_x>`) are left intact. Module-level so the pattern
+ * compiles once; safe to share because it is used exclusively with
+ * `String.prototype.replace`, which resets the `/g` flag's `lastIndex`.
+ */
+const LEADER_ENVELOPE_TAG_RE = new RegExp(
+  `<(\\/?\\s*${LEADER_ENVELOPE_TAG})(?=[\\s>/]|$)`,
+  'gi',
+);
+
 // ─── TeamManager ────────────────────────────────────────────
 
 export class TeamManager {
@@ -142,29 +166,14 @@ export class TeamManager {
 
   /**
    * Callback to inject teammate messages into the leader. Receives the
-   * full model-bound text (the nonce-tagged envelope) and a compact,
-   * human-readable `display` line for the leader's UI — the two-text
-   * split that lets the on-screen line stay short while the model still
-   * gets the whole report.
+   * full model-bound text (the `<teammate_message>` envelope) and a
+   * compact, human-readable `display` line for the leader's UI — the
+   * two-text split that lets the on-screen line stay short while the
+   * model still gets the whole report.
    */
   private leaderMessageCallback:
     | ((message: string, display: string) => void)
     | null = null;
-
-  /** Tracks how far we've read in the leader inbox. */
-  private lastInboxOffset = 0;
-
-  /** Serialises read+slice+advance over `lastInboxOffset` so
-   *  pollLeaderInbox and getLeaderMessages can't double-deliver. */
-  private inboxAccessLock: Promise<void> = Promise.resolve();
-
-  /** Per-session nonce woven into the teammate-message envelope
-   *  so a teammate's body cannot spoof the closing tag and inject
-   *  a forged envelope (e.g. one claiming `from="leader"`) into
-   *  the leader's conversation. Generated once per TeamManager
-   *  instance so the leader's own pattern matching can recognise
-   *  the envelope, while teammates have no way to learn it. */
-  private readonly envelopeNonce: string = randomBytes(8).toString('hex');
 
   /** Names of teammates with a pending leader-requested shutdown.
    *  Gates both the per-idle mailbox read in flushNextMessage and
@@ -452,12 +461,30 @@ export class TeamManager {
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
+      // Classify a shutdown response up front, but only for a teammate
+      // the leader actually asked to shut down (the gate) and only when
+      // the reply *leads* with the structured token — not merely
+      // mentions it in prose. The resulting type is carried on the
+      // message and drives the abort decision below, instead of
+      // re-scanning the free-text body. This is what keeps a
+      // pending-shutdown teammate that mentions "shutdown_approved"
+      // mid-report (e.g. while reviewing shutdown code) from being
+      // aborted, and a non-requested teammate from ever triggering one.
+      const sender = from
+        ? findMemberByName(this.teamFile.members, from)
+        : undefined;
+      const shutdownResponse =
+        sender && this._shutdownPending.has(sender.name)
+          ? classifyShutdownResponse(message)
+          : undefined;
+
       await writeMessage(this.teamFile.name, LEADER_NAME, {
         from: from ?? 'unknown',
         text: message,
         summary,
         timestamp: new Date().toISOString(),
         read: false,
+        type: shutdownResponse,
       });
       this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
         from: from ?? 'unknown',
@@ -466,33 +493,27 @@ export class TeamManager {
         timestamp: Date.now(),
       });
 
-      // Handle shutdown responses: if the teammate the leader
-      // asked to shut down approved, abort that agent so it
-      // actually retires. Only abort senders that the leader
-      // explicitly requested — otherwise a free-text mention of
-      // "shutdown_approved" by an unrelated teammate would kill
-      // them, and a forged shutdown_request couldn't be used to
-      // make the leader abort arbitrary peers.
-      if (from && /\bshutdown_approved\b/i.test(message)) {
-        const member = findMemberByName(this.teamFile.members, from);
-        if (member && this._shutdownPending.has(member.name)) {
-          this._shutdownPending.delete(member.name);
-          const agent = this.getAgentFromBackend(member.agentId);
-          if (agent) {
-            agent.abort();
-          }
-        }
-      } else if (from && /\bshutdown_rejected\b/i.test(message)) {
-        // A rejection must clear the pending flag too. Leaving it set
-        // permanently degrades the teammate: it stays excluded from
-        // auto-claim (scanIdleAgentsForTasks skips pending-shutdown
-        // members) and kill-armed — any later message of its that
-        // happens to contain "shutdown_approved" would abort it. The
-        // rejection reason itself reaches the leader through the
-        // inbox write above; nothing extra to surface here.
-        const member = findMemberByName(this.teamFile.members, from);
-        if (member) {
-          this._shutdownPending.delete(member.name);
+      // Act on the typed shutdown response. Approval aborts the
+      // teammate so it actually retires; rejection just clears the
+      // pending flag — leaving it set would keep the teammate excluded
+      // from auto-claim (scanIdleAgentsForTasks skips pending-shutdown
+      // members) and kill-armed. Either way the reply text still
+      // reaches the leader through the inbox write above.
+      //
+      // Re-check the pending flag here, after the await: the response
+      // was classified before `writeMessage`, so a concurrent reply from
+      // the same teammate could have cleared the flag in between. Acting
+      // on the stale capture would abort a teammate whose latest reply
+      // was a rejection — so gate the act on the flag still being set,
+      // keeping check-and-act atomic as the pre-refactor path was.
+      if (
+        sender &&
+        shutdownResponse &&
+        this._shutdownPending.has(sender.name)
+      ) {
+        this._shutdownPending.delete(sender.name);
+        if (shutdownResponse === 'shutdown_approved') {
+          this.getAgentFromBackend(sender.agentId)?.abort();
         }
       }
 
@@ -605,91 +626,81 @@ export class TeamManager {
   }
 
   /**
-   * Read messages sent to the leader by teammates that have not yet
-   * been consumed by polling or a prior call. Advances the inbox
-   * offset so the same messages aren't redelivered later — task_list
-   * and pollLeaderInbox share `lastInboxOffset` as the high-water
-   * mark of "already surfaced to the leader".
+   * Consume the messages teammates have sent to the leader since the
+   * last poll / call, in arrival order. Marks them read so the inbox
+   * file compacts (`writeMessage` drops read entries past the retention
+   * window) — the `read` flag is the high-water mark, so there is no
+   * array index for compaction to shift a message out from under.
+   * task_list and pollLeaderInbox both drain through here, and
+   * `consumeUnread` is atomic per inbox, so they can't double-deliver.
    */
   async getLeaderMessages(): Promise<
     Array<{ from: string; text: string; timestamp: string }>
   > {
-    return this.withInboxLock(async () => {
-      const inbox = await this.readLeaderInboxOrQuarantine();
-      if (inbox.length <= this.lastInboxOffset) return [];
-      const newMessages = inbox.slice(this.lastInboxOffset);
-      this.lastInboxOffset = inbox.length;
-      return newMessages.map((m) => ({
-        from: m.from,
-        text: m.text,
-        timestamp: m.timestamp,
-      }));
-    });
+    const consumed = await this.consumeLeaderInbox();
+    return consumed.map((m) => ({
+      from: m.from,
+      text: m.text,
+      timestamp: m.timestamp,
+    }));
   }
 
   /**
-   * Read the leader inbox, distinguishing the legitimate "no inbox
-   * yet" case (ENOENT) from corruption. On parse / I-O failure the
-   * file is quarantined to `.corrupt-{ts}` and `lastInboxOffset` is
-   * reset so a fresh inbox can replace it; the caller still gets an
-   * empty array for this read.
+   * Drain the leader's unread inbox, marking the drained messages read.
+   *
+   * The 500ms poll runs continuously while teammates are alive, so the
+   * common "nothing new" case stays lockless: a tmp+rename write lets
+   * `readInbox` observe a consistent snapshot without paying
+   * lock-contention cost on the hot path. Only when that snapshot
+   * actually shows unread messages do we take the file lock to consume
+   * and mark them read atomically (so a concurrent writer or the other
+   * reader can't clobber or double-deliver). On a corrupt / unreadable
+   * inbox the file is quarantined and an empty batch returned.
    */
-  private async readLeaderInboxOrQuarantine(): Promise<MailboxMessage[]> {
-    const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
+  private async consumeLeaderInbox(): Promise<MailboxMessage[]> {
+    let snapshot: MailboxMessage[];
     try {
-      const inbox = await readInbox(this.teamFile.name, LEADER_NAME);
-      // A writer can quarantine and recreate a corrupt leader inbox
-      // behind this reader (writeMessage's readInboxRaw does so under
-      // its own per-file lock). If the file shrank below the high-water
-      // mark, restart from 0 — re-surfacing a message beats silently
-      // skipping new ones until the offset is overtaken.
-      if (inbox.length < this.lastInboxOffset) {
-        this.lastInboxOffset = 0;
-      }
-      return inbox;
+      snapshot = await readInbox(this.teamFile.name, LEADER_NAME);
     } catch (err) {
-      // readInbox already maps the legitimate "no inbox yet" case
-      // (ENOENT) to []; it only throws on real corruption (parse error)
-      // or an unreadable file. So anything reaching here warrants
-      // quarantine — there is no ENOENT branch to special-case.
-      const errMsg = err instanceof Error ? err.message : String(err);
+      return this.quarantineLeaderInbox(err);
+    }
+    if (!snapshot.some((m) => !m.read)) {
+      return [];
+    }
+    try {
+      return await consumeUnread(this.teamFile.name, LEADER_NAME);
+    } catch (err) {
+      // The lockless snapshot above parsed cleanly, and writers commit
+      // via atomic tmp+rename — so a failure here is lock contention or
+      // a transient I/O hiccup, not corruption. Leave the inbox intact
+      // and retry on the next poll rather than quarantining a healthy
+      // file (which would drop all of its unread messages).
       debug.warn(
-        `Quarantining corrupt leader inbox at ${inboxPath}: ${errMsg}`,
+        `Leader inbox consume failed (transient), will retry: ${getErrorMessage(err)}`,
       );
-      try {
-        await fsPromises.rename(
-          inboxPath,
-          `${inboxPath}.corrupt-${Date.now()}`,
-        );
-      } catch (renameErr) {
-        const renameMsg =
-          renameErr instanceof Error ? renameErr.message : String(renameErr);
-        debug.warn(`Failed to quarantine ${inboxPath}: ${renameMsg}`);
-      }
-      this.lastInboxOffset = 0;
       return [];
     }
   }
 
   /**
-   * Serialise read+slice+advance against `lastInboxOffset`. Both
-   * pollLeaderInbox (500ms timer) and getLeaderMessages (task_list
-   * tool result) await readInbox before slicing, which without a
-   * lock lets them both observe the same offset and deliver the
-   * same messages twice.
+   * Quarantine a corrupt / unreadable leader inbox to `.corrupt-{ts}`
+   * so a fresh inbox can replace it, and return an empty batch for this
+   * read. `readInbox` already maps the legitimate "no inbox yet" case
+   * (ENOENT) to [], so anything throwing past it is real corruption.
    */
-  private async withInboxLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = this.inboxAccessLock;
-    let release!: () => void;
-    this.inboxAccessLock = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
+  private async quarantineLeaderInbox(err: unknown): Promise<MailboxMessage[]> {
+    const inboxPath = getInboxPath(this.teamFile.name, LEADER_NAME);
+    debug.warn(
+      `Quarantining corrupt leader inbox at ${inboxPath}: ${getErrorMessage(err)}`,
+    );
     try {
-      return await fn();
-    } finally {
-      release();
+      await fsPromises.rename(inboxPath, `${inboxPath}.corrupt-${Date.now()}`);
+    } catch (renameErr) {
+      debug.warn(
+        `Failed to quarantine ${inboxPath}: ${getErrorMessage(renameErr)}`,
+      );
     }
+    return [];
   }
 
   // ─── Leader inbox polling ────────────────────────────────
@@ -742,18 +753,15 @@ export class TeamManager {
    * Check for new leader inbox messages and deliver them.
    */
   private async pollLeaderInbox(): Promise<void> {
-    if (!this.leaderMessageCallback) {
+    // Capture the callback before consuming: consumeLeaderInbox marks
+    // messages read, so consuming without a sink would silently drop
+    // them. A stale-but-non-null callback is safe to call (callbacks
+    // only append to an array).
+    const callback = this.leaderMessageCallback;
+    if (!callback) {
       return;
     }
-    const newMessages = await this.withInboxLock(async () => {
-      const inbox = await this.readLeaderInboxOrQuarantine();
-      if (inbox.length <= this.lastInboxOffset) {
-        return [];
-      }
-      const slice = inbox.slice(this.lastInboxOffset);
-      this.lastInboxOffset = inbox.length;
-      return slice;
-    });
+    const newMessages = await this.consumeLeaderInbox();
 
     if (newMessages.length === 0) {
       // No new messages — check if all teammates are done.
@@ -767,41 +775,47 @@ export class TeamManager {
       return;
     }
 
-    // Re-check after the awaited read: the callback can be detached
-    // (manager swap, team_delete, React unmount) while we were reading
-    // the inbox. Calling a now-null callback throws — and because this
-    // runs inside the setInterval-driven poll, that would become an
-    // unhandled rejection. Dropping the batch is acceptable here: a
-    // detached callback means the leader these messages were bound for
-    // is being torn down or replaced.
-    const callback = this.leaderMessageCallback;
-    if (callback) {
-      callback(
-        this.formatLeaderEnvelope(newMessages).join('\n\n'),
-        this.formatLeaderDisplay(newMessages),
-      );
-    }
+    callback(
+      this.formatLeaderEnvelope(newMessages).join('\n\n'),
+      this.formatLeaderDisplay(newMessages),
+    );
   }
 
   /**
-   * Wrap teammate-to-leader messages in a per-session nonce-tagged
-   * envelope. The body is interpolated raw, but a teammate cannot
-   * spoof the closing tag without knowing `envelopeNonce`, so they
-   * cannot inject a forged envelope (e.g. one claiming
-   * `from="leader"`) into the leader's conversation.
+   * Wrap teammate-to-leader messages in a stable `<teammate_message>`
+   * envelope. Forgery is prevented structurally rather than by a
+   * secret: {@link TeamManager.escapeEnvelopeTags} defangs any copy of
+   * the delimiter a teammate embeds in its own body, so it cannot break
+   * out and inject a forged envelope (e.g. one claiming `from="leader"`)
+   * into the leader's conversation. A stable tag has nothing to leak —
+   * unlike the per-session nonce this replaced, which the leader model
+   * could echo back to a teammate, who could then forge the delimiter.
    *
    * Exposed so any path that surfaces teammate text to the leader
-   * (`pollLeaderInbox`, `task_list`, ...) shares the same anti-
-   * spoofing framing instead of each one re-implementing it.
+   * (`pollLeaderInbox`, `task_list`, ...) shares the same anti-spoofing
+   * framing instead of each one re-implementing it.
    */
   formatLeaderEnvelope(
     messages: ReadonlyArray<{ from: string; text: string }>,
   ): string[] {
-    const open = `<teammate_message_${this.envelopeNonce}`;
-    const close = `</teammate_message_${this.envelopeNonce}>`;
     return messages.map(
-      (m) => `${open} from="${m.from}">\n${m.text}\n${close}`,
+      (m) =>
+        `<${LEADER_ENVELOPE_TAG} from="${m.from}">\n` +
+        `${TeamManager.escapeEnvelopeTags(m.text)}\n` +
+        `</${LEADER_ENVELOPE_TAG}>`,
     );
+  }
+
+  /**
+   * Defang any `<teammate_message …>` / `</teammate_message>` delimiter
+   * embedded in untrusted teammate text by escaping the opening `<` to
+   * `&lt;`, so the teammate cannot break out of its envelope and inject
+   * a forged one. Only the `<` that begins the delimiter token is
+   * touched (see {@link LEADER_ENVELOPE_TAG_RE}); every other angle
+   * bracket — code, comparisons in reports — is left intact.
+   */
+  private static escapeEnvelopeTags(text: string): string {
+    return text.replace(LEADER_ENVELOPE_TAG_RE, '&lt;$1');
   }
 
   /**
@@ -1396,14 +1410,15 @@ export class TeamManager {
         queue.sort((a, b) => a.priority - b.priority);
       }
       const msg = queue.shift()!;
-      // Nonce-envelope the sender attribution, mirroring
-      // formatLeaderEnvelope: a bare "[Message from X]: text" prefix
-      // would let any teammate embed "\n[Message from leader]: ..."
-      // in its body and impersonate the leader to a peer. The nonce
-      // is FRESH per delivery — never the leader-trust
-      // `envelopeNonce`, which must not reach teammate context where
-      // it could be replayed in reports to forge leader-inbox
-      // envelopes.
+      // Nonce-envelope the sender attribution: a bare "[Message from
+      // X]: text" prefix would let any teammate embed "\n[Message from
+      // leader]: ..." in its body and impersonate the leader to a peer.
+      // The nonce is FRESH per delivery so a teammate can't learn it
+      // ahead of time. (The leader→teammate-trust envelope takes a
+      // different tack — a stable tag with structural escaping, see
+      // formatLeaderEnvelope — because that text is shown to the leader
+      // model, which could echo a secret back to a teammate; peer
+      // deliveries aren't, so a fresh nonce is enough here.)
       let labeled: string;
       if (msg.from) {
         const nonce = randomBytes(8).toString('hex');
@@ -1492,8 +1507,7 @@ export class TeamManager {
         // generated per claim (not a shared per-session one): a teammate
         // that learned a previous task's nonce — by claiming it — still
         // cannot forge the closing tag of a *later* task's envelope to
-        // break out and inject the next claimant. It is also distinct from
-        // the leader-trust `envelopeNonce`, so it can never leak that.
+        // break out and inject the next claimant.
         // Mirrors treating `send_message` as a privileged sink.
         const taskNonce = randomBytes(8).toString('hex');
         const open = `<task_content_${taskNonce}>`;

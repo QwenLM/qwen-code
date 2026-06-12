@@ -193,6 +193,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_create',
       'session_scope_override',
       'session_load',
+      'session_resume',
       'unstable_session_resume',
       'session_list',
       'session_prompt',

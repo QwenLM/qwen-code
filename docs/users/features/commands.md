@@ -18,14 +18,15 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command     | Description                                               | Usage Examples                       |
-| ----------- | --------------------------------------------------------- | ------------------------------------ |
-| `/init`     | Analyze current directory and create initial context file | `/init`                              |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| Command          | Description                                                              | Usage Examples                       |
+| ---------------- | ------------------------------------------------------------------------ | ------------------------------------ |
+| `/init`          | Analyze current directory and create initial context file                | `/init`                              |
+| `/summary`       | Generate project summary based on conversation history                   | `/summary`                           |
+| `/compress`      | Replace chat history with summary to save Tokens                         | `/compress`                          |
+| `/compress-fast` | Fast compression without AI — strips old tool outputs and thinking parts | `/compress-fast`                     |
+| `/resume`        | Resume a previous conversation session                                   | `/resume`                            |
+| `/recap`         | Generate a one-line session recap now                                    | `/recap`                             |
+| `/restore`       | Restore files to state before tool execution                             | `/restore` (list) or `/restore <ID>` |
 
 ### 1.2 Interface and Workspace Control
 

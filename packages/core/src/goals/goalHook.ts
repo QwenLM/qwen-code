@@ -276,6 +276,13 @@ export function registerGoalHook(args: {
   sessionId: string;
   condition: string;
   tokensAtStart: number;
+  /**
+   * Iteration count to resume from. Used on session resume so the
+   * MAX_GOAL_ITERATIONS safety cap survives a reload instead of resetting to
+   * zero (which would let an unreachable goal auto-loop another full budget
+   * every resume). Defaults to 0 for a freshly set goal.
+   */
+  initialIterations?: number;
 }): ActiveGoal {
   const { config, sessionId, condition, tokensAtStart } = args;
   const system = config.getHookSystem();
@@ -310,7 +317,7 @@ export function registerGoalHook(args: {
 
   const goal: ActiveGoal = {
     condition,
-    iterations: 0,
+    iterations: Math.max(0, args.initialIterations ?? 0),
     setAt: Date.now(),
     tokensAtStart,
     hookId,
