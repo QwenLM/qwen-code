@@ -120,6 +120,8 @@ export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,

@@ -75,6 +75,8 @@ export interface MountAcpHttpOptions {
   maxConnections?: number;
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
+  /** Effective direct session shell policy for ACP initialize/dispatch. */
+  sessionShellCommandEnabled?: boolean;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
 }
@@ -113,6 +115,7 @@ export function mountAcpHttp(
     opts.workspace,
     opts.fsFactory,
     opts.deviceFlowRegistry,
+    opts.sessionShellCommandEnabled === true,
   );
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.

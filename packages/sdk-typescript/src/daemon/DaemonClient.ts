@@ -1373,6 +1373,13 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  /**
+   * Execute a direct daemon-side shell command for a session. The daemon must
+   * be started with direct session shell enabled and bearer auth configured;
+   * callers must also provide a client id already bound to this session.
+   * Prefer `DaemonSessionClient.shellCommand()` when available because it
+   * forwards the session-bound client id automatically.
+   */
   async shellCommand(
     sessionId: string,
     command: string,

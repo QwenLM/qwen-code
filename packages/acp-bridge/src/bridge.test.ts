@@ -31,6 +31,8 @@ import {
   InvalidSessionScopeError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   RestoreInProgressError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   SessionNotFoundError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
@@ -40,7 +42,7 @@ import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, ShellExecutionService } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
   type ChannelHandle,
@@ -4764,6 +4766,117 @@ describe('createAcpSessionBridge', () => {
           modelId: 'qwen3-coder',
         }),
       ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+  });
+
+  describe('executeShellCommand permission policy', () => {
+    function mockShellExecute(output = 'ok') {
+      return vi.spyOn(ShellExecutionService, 'execute').mockResolvedValue({
+        pid: 123,
+        result: Promise.resolve({
+          rawOutput: Buffer.from(output),
+          output,
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 123,
+          executionMethod: 'none',
+        }),
+      });
+    }
+
+    async function setupShellSession() {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      return { bridge, session, handle };
+    }
+
+    it('rejects direct shell by default before executing the command', async () => {
+      const shellSpy = mockShellExecute();
+      const { bridge, session } = await setupShellSession();
+      const disabledBridge = makeBridge({
+        channelFactory: async () => {
+          throw new Error('disabled shell should not spawn a channel');
+        },
+      });
+
+      await expect(
+        disabledBridge.executeShellCommand(session.sessionId, 'echo hi'),
+      ).rejects.toBeInstanceOf(SessionShellDisabledError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      await disabledBridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('requires a client id before checking whether the session exists', async () => {
+      const shellSpy = mockShellExecute();
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => {
+          throw new Error('missing client id should not spawn a channel');
+        },
+      });
+
+      await expect(
+        bridge.executeShellCommand('unknown-session', 'echo hi'),
+      ).rejects.toBeInstanceOf(SessionShellClientRequiredError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('rejects unregistered client ids when direct shell is enabled', async () => {
+      const shellSpy = mockShellExecute();
+      const { bridge, session } = await setupShellSession();
+
+      await expect(
+        bridge.executeShellCommand(session.sessionId, 'echo hi', undefined, {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      expect(shellSpy).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
+    it('executes and stamps events when the client id belongs to the session', async () => {
+      const shellSpy = mockShellExecute('hello\n');
+      const { bridge, session } = await setupShellSession();
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      const result = await bridge.executeShellCommand(
+        session.sessionId,
+        'echo hello',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      expect(result).toEqual({
+        exitCode: 0,
+        output: 'hello\n',
+        aborted: false,
+      });
+      expect(shellSpy).toHaveBeenCalledTimes(1);
+      const it = events[Symbol.asyncIterator]();
+      const first = await it.next();
+      expect(first.value?.type).toBe('user_shell_command');
+      expect(first.value?.originatorClientId).toBe(session.clientId);
+
+      abort.abort();
+      await bridge.shutdown();
+      shellSpy.mockRestore();
     });
   });
 
