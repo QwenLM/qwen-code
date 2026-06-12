@@ -259,6 +259,18 @@ describe('search route', () => {
     });
   });
 
+  it('SECURITY: a session-locked token with a blank lock is denied (no unfiltered leak)', async () => {
+    // Unreachable via share creation (it rejects an empty sessionId), but the
+    // handler must not force sessionId='' (= "no filter" → full-workspace leak).
+    client = { id: 'bad', scopes: [SHARE, SESSION_READ], sessionLockId: '' };
+    const url = await mount(async () => dir);
+    const res = await fetch(`${url}/rc/search?q=oauth&sessionId=sess-1`);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'insufficient_scope',
+    );
+  });
+
   it('a non-owner, non-locked token is denied (403 scope_denied)', async () => {
     client = { id: 'reader', scopes: [SESSION_READ] };
     const url = await mount(async () => dir);

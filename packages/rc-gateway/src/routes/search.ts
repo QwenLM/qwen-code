@@ -47,6 +47,23 @@ export function createSearchRoute(
     const lock = req.rcClient?.sessionLockId;
     let sessionId: string | undefined;
     if (lock !== undefined) {
+      // Defense-in-depth: a BLANK lock must never fall through to an unfiltered
+      // full-workspace search (the scanner treats sessionId='' as "no filter").
+      // Share creation rejects an empty sessionId so this is unreachable today,
+      // but the handler must not depend on that external invariant — deny it.
+      if (lock === '') {
+        void audit?.record({
+          action: 'scope_denied',
+          actorTokenId: req.rcClient?.id,
+          shareId: req.rcClient?.shareId,
+          shareLabel: req.rcClient?.shareLabel,
+          detail: { reason: 'invalid_session_lock' },
+        });
+        res
+          .status(403)
+          .json({ error: 'Insufficient scope', code: 'insufficient_scope' });
+        return;
+      }
       sessionId = lock;
     } else {
       if (!req.rcClient?.scopes.includes(OWNER)) {
