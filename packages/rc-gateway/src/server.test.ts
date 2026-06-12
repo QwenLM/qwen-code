@@ -484,6 +484,59 @@ describe('gateway app', () => {
     expect(vote.status).toBe(200);
   });
 
+  it('lets an APPROVE-scoped share vote on its locked session, 403s another (cycle 80 spine)', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    // Owner mints an APPROVE-scoped share locked to sess-1.
+    const mint = await fetch(`${url}/rc/share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({
+        sessionId: 'sess-1',
+        ttlSec: 3600,
+        scope: 'approve',
+      }),
+    });
+    expect(mint.status).toBe(201);
+    const share = (await mint.json()) as { token: string };
+
+    // Votes on its locked session → passes requireScope(APPROVE)+enforceSessionLock
+    // and reaches the daemon (stub answers 200).
+    const ok = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${share.token}`,
+      },
+      body: JSON.stringify({ outcome: 'cancelled' }),
+    });
+    expect(ok.status).toBe(200);
+
+    // Votes on a DIFFERENT session → 403 session_locked (the lock backstop).
+    const wrong = await fetch(`${url}/rc/session/sess-2/permission/req-1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${share.token}`,
+      },
+      body: JSON.stringify({ outcome: 'cancelled' }),
+    });
+    expect(wrong.status).toBe(403);
+    expect(((await wrong.json()) as { code: string }).code).toBe(
+      'session_locked',
+    );
+  });
+
   it('routes a write-scoped prompt to the daemon', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]);
