@@ -66,6 +66,10 @@ export {
   type RateLimitResult,
 } from './webpush/rateLimiter.js';
 export {
+  PushCoalescer,
+  DEFAULT_COALESCE_WINDOW_MS,
+} from './webpush/coalescer.js';
+export {
   SessionEventPump,
   type SessionEventPumpOptions,
   type PumpNotifier,
