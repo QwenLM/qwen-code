@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -55,6 +56,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -410,6 +412,81 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  it('wires file history snapshot updates to chat recording', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+      chatRecording: true,
+    });
+    const recordedSnapshots: FileHistorySnapshot[] = [];
+    const recordFileHistorySnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+      recordedSnapshots.push(structuredClone(snapshot));
+    });
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const fileHistoryService = config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot('p1');
+      await fileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0].trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops stale file history callbacks after session switch', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+    });
+    const recordFileHistorySnapshot = vi.fn();
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const oldFileHistoryService = config.getFileHistoryService();
+      await oldFileHistoryService.makeSnapshot('p1');
+      config.startNewSession('new-session-id');
+      await oldFileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
   describe('FileReadCache isolation', () => {
     it('returns a distinct cache for child Configs created via Object.create', () => {
       // Subagent / scoped-agent / fork construction all use
@@ -675,6 +752,28 @@ describe('Server Config (config.ts)', () => {
       const newSessionId = config.startNewSession();
 
       expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+
+    it('flushes the outgoing chat recording service when switching sessions', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+      });
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService?: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = { finalize, flush };
+
+      config.startNewSession();
+
+      expect(finalize).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledTimes(1);
     });
   });
 
