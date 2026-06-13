@@ -1,0 +1,278 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { MatrixRoomStore } from './roomStore.js';
+import {
+  handleMessage,
+  handleReaction,
+  senderPowerLevel,
+  ENCRYPTED_ROOM_NOTICE,
+  type MatrixDispatchDeps,
+  type TrackedEvent,
+} from './dispatch.js';
+import type { WriteResult } from '../client.js';
+
+let dir: string;
+let rooms: MatrixRoomStore;
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'rc-mx-disp-'));
+  rooms = await MatrixRoomStore.open(join(dir, 'rooms.json'));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+function deps(over: Partial<MatrixDispatchDeps> = {}) {
+  const prompts: Array<{
+    sessionId: string;
+    prompt: string;
+    subActor: string;
+  }> = [];
+  const votes: Array<{
+    sessionId: string;
+    requestId: string;
+    outcome: string;
+    subActor: string;
+  }> = [];
+  const sent: Array<{ roomId: string; body: string }> = [];
+  let promptResult: WriteResult = { ok: true, status: 200 };
+  let voteResult: WriteResult = { ok: true, status: 200 };
+
+  const base: MatrixDispatchDeps = {
+    bridge: {
+      sendPrompt: async (sessionId, prompt, subActor) => {
+        prompts.push({ sessionId, prompt, subActor });
+        return promptResult;
+      },
+      vote: async (sessionId, requestId, outcome, subActor) => {
+        votes.push({ sessionId, requestId, outcome, subActor });
+        return voteResult;
+      },
+    },
+    rest: {
+      sendMessage: async (roomId, content) => {
+        sent.push({ roomId, body: (content as { body: string }).body });
+        return { ok: true, status: 200, eventId: '$sent' };
+      },
+    },
+    rooms,
+    bans: new Set<string>(),
+    encryptedRooms: new Set<string>(),
+    tracked: new Map<string, TrackedEvent>(),
+    commandPrefix: '!qwen',
+    ...over,
+  };
+  return {
+    deps: base,
+    prompts,
+    votes,
+    sent,
+    setPromptResult: (r: WriteResult) => (promptResult = r),
+    setVoteResult: (r: WriteResult) => (voteResult = r),
+  };
+}
+
+const msg = (over: Record<string, unknown> = {}) => ({
+  roomId: '!abc:home.example.com',
+  sender: '@evan:home.example.com',
+  isBot: false,
+  body: 'hi',
+  powerLevel: 0,
+  ...over,
+});
+
+describe('senderPowerLevel', () => {
+  it('prefers users[sender], falls back to users_default, then 0', () => {
+    expect(senderPowerLevel({ users: { '@a:h': 100 } }, '@a:h')).toBe(100);
+    expect(senderPowerLevel({ users_default: 25 }, '@a:h')).toBe(25);
+    expect(senderPowerLevel(undefined, '@a:h')).toBe(0);
+    expect(senderPowerLevel({ users: {} }, '@a:h')).toBe(0);
+  });
+});
+
+describe('matrix dispatch — message → prompt', () => {
+  it('forwards a bound-room message with the MXID sub-actor', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    await handleMessage(msg({ body: 'run the tests' }), f.deps);
+    expect(f.prompts).toEqual([
+      {
+        sessionId: 'sess_xyz',
+        prompt: 'run the tests',
+        subActor: 'matrix:@evan:home.example.com',
+      },
+    ]);
+  });
+
+  it('ignores the bot’s own messages', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    await handleMessage(msg({ isBot: true }), f.deps);
+    expect(f.prompts).toHaveLength(0);
+  });
+
+  it('ignores messages in unbound rooms', async () => {
+    const f = deps();
+    await handleMessage(msg(), f.deps);
+    expect(f.prompts).toHaveLength(0);
+  });
+
+  it('drops a banned sender; caches a 403', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const banned = deps({ bans: new Set(['matrix:@evan:home.example.com']) });
+    await handleMessage(msg(), banned.deps);
+    expect(banned.prompts).toHaveLength(0);
+
+    const f = deps();
+    f.setPromptResult({ ok: false, status: 403 });
+    await handleMessage(msg(), f.deps);
+    expect(f.deps.bans.has('matrix:@evan:home.example.com')).toBe(true);
+  });
+
+  it('posts a room "slow down" reply on a 429', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    f.setPromptResult({ ok: false, status: 429, retryAfterSec: 9 });
+    await handleMessage(msg(), f.deps);
+    expect(f.sent[0].body).toContain('9 seconds');
+  });
+});
+
+describe('matrix dispatch — !qwen commands + power-level gate', () => {
+  it('attach binds when the invoker is a moderator (power ≥ 50)', async () => {
+    const f = deps();
+    await handleMessage(
+      msg({ body: '!qwen attach sess_xyz', powerLevel: 50 }),
+      f.deps,
+    );
+    expect(rooms.sessionFor('!abc:home.example.com')).toBe('sess_xyz');
+    expect(f.sent[0].body).toContain('Room bound to session');
+    expect(f.sent[0].body).toContain('React 👍/👎');
+  });
+
+  it('rejects attach from a non-moderator (power < 50), no binding', async () => {
+    const f = deps();
+    await handleMessage(
+      msg({
+        body: '!qwen attach sess_xyz',
+        sender: '@guest:home.example.com',
+        powerLevel: 0,
+      }),
+      f.deps,
+    );
+    expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
+    expect(f.sent[0].body).toContain('power level ≥ 50');
+  });
+
+  it('refuses attach in an encrypted room', async () => {
+    const f = deps({ encryptedRooms: new Set(['!abc:home.example.com']) });
+    await handleMessage(
+      msg({ body: '!qwen attach sess_xyz', powerLevel: 100 }),
+      f.deps,
+    );
+    expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
+    expect(f.sent[0].body).toBe(ENCRYPTED_ROOM_NOTICE);
+  });
+
+  it('detach unbinds for a moderator', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    await handleMessage(msg({ body: '!qwen detach', powerLevel: 50 }), f.deps);
+    expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
+    expect(f.sent[0].body).toContain('unbound');
+  });
+
+  it('status reports the binding', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    await handleMessage(msg({ body: '!qwen status' }), f.deps);
+    expect(f.sent[0].body).toContain('sess_xyz');
+  });
+
+  it('a command is never forwarded as a prompt', async () => {
+    await rooms.bind('!abc:home.example.com', 'sess_xyz');
+    const f = deps();
+    await handleMessage(msg({ body: '!qwen status', powerLevel: 50 }), f.deps);
+    expect(f.prompts).toHaveLength(0);
+  });
+});
+
+describe('matrix dispatch — reaction → vote', () => {
+  const react = (over: Record<string, unknown> = {}) => ({
+    roomId: '!abc:home.example.com',
+    sender: '@evan:home.example.com',
+    targetEventId: '$m_42',
+    key: '\u{1F44D}',
+    ...over,
+  });
+
+  it('casts approve for a 👍 on a tracked event with the MXID sub-actor', async () => {
+    const tracked = new Map([
+      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+    ]);
+    const f = deps({ tracked });
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toEqual([
+      {
+        sessionId: 'sess_xyz',
+        requestId: 'req_xyz',
+        outcome: 'allow_once',
+        subActor: 'matrix:@evan:home.example.com',
+      },
+    ]);
+  });
+
+  it('casts cancelled for a 👎', async () => {
+    const tracked = new Map([
+      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+    ]);
+    const f = deps({ tracked });
+    await handleReaction(react({ key: '\u{1F44E}' }), f.deps);
+    expect(f.votes[0].outcome).toBe('cancelled');
+  });
+
+  it('ignores a reaction on an untracked event', async () => {
+    const f = deps();
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(0);
+  });
+
+  it('ignores a non-thumb reaction', async () => {
+    const tracked = new Map([
+      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+    ]);
+    const f = deps({ tracked });
+    await handleReaction(react({ key: '❤️' }), f.deps);
+    expect(f.votes).toHaveLength(0);
+  });
+
+  it('drops a banned reactor without voting or redacting', async () => {
+    const tracked = new Map([
+      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+    ]);
+    const f = deps({
+      tracked,
+      bans: new Set(['matrix:@evan:home.example.com']),
+    });
+    await handleReaction(react(), f.deps);
+    expect(f.votes).toHaveLength(0);
+    expect(f.sent).toHaveLength(0); // not redacted
+  });
+
+  it('caches the ban on a daemon 403', async () => {
+    const tracked = new Map([
+      ['$m_42', { requestId: 'req_xyz', sessionId: 'sess_xyz' }],
+    ]);
+    const f = deps({ tracked });
+    f.setVoteResult({ ok: false, status: 403 });
+    await handleReaction(react(), f.deps);
+    expect(f.deps.bans.has('matrix:@evan:home.example.com')).toBe(true);
+  });
+});
