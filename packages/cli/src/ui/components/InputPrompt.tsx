@@ -53,6 +53,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { isLiveAgentPanelVisibleEntry } from './background-view/liveAgentPanelVisibility.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -164,10 +165,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setSelectedIndex: setBgSelectedIndex,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
-  // Live-panel roster: count only `kind === 'agent'` entries — exactly what the
-  // LiveAgentPanel renders, so it's the right gate for focusing the panel.
-  const bgAgentCount = useMemo(
-    () => bgEntries.filter((e) => e.kind === 'agent').length,
+  const getVisibleBgAgents = useCallback(
+    () => bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
     [bgEntries],
   );
   const hasActiveToolConfirmation = useMemo(
@@ -519,13 +518,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // top→bottom order: live agent panel (if bg sub-agents) → tab bar (if
   // Arena) → stay put. Always consumes the key.
   const descendFromComposer = useCallback((): boolean => {
-    if (bgAgentCount > 0) {
+    if (getVisibleBgAgents().length > 0) {
       setLivePanelFocused(true);
     } else if (hasAgents) {
       setAgentTabBarFocused(true);
     }
     return true;
-  }, [bgAgentCount, hasAgents, setLivePanelFocused, setAgentTabBarFocused]);
+  }, [
+    getVisibleBgAgents,
+    hasAgents,
+    setLivePanelFocused,
+    setAgentTabBarFocused,
+  ]);
 
   const handleInput = useCallback(
     (key: Key): boolean => {
@@ -538,8 +542,21 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Enter opens dialog for selected agent, Esc/↑-at-top returns
       // focus to composer. Printable chars type through (auto-unfocus).
       if (livePanelFocused) {
+        const visibleBgAgents = getVisibleBgAgents();
+        if (visibleBgAgents.length === 0) {
+          setLivePanelFocused(false);
+          if (
+            key.sequence &&
+            key.sequence.length === 1 &&
+            !key.ctrl &&
+            !key.meta
+          ) {
+            return false;
+          }
+          return descendFromComposer();
+        }
         if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
+          const maxIdx = visibleBgAgents.length; // 0=main, 1..N=agents
           if (livePanelSelectedIndex < maxIdx) {
             setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
           } else if (hasAgents) {
@@ -567,8 +584,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             setLivePanelFocused(false);
           } else {
             const agentIdx = livePanelSelectedIndex - 1;
-            if (agentIdx < bgAgentCount) {
-              setBgSelectedIndex(agentIdx);
+            const entry = visibleBgAgents[agentIdx];
+            const entryIdx = entry
+              ? bgEntries.findIndex(
+                  (e) => e.kind === 'agent' && e.agentId === entry.agentId,
+                )
+              : -1;
+            if (entryIdx >= 0) {
+              setBgSelectedIndex(entryIdx);
               enterBgDetailFromPanel();
             }
             setLivePanelFocused(false);
@@ -1396,7 +1419,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setLivePanelSelectedIndex,
       livePanelFocused,
       livePanelSelectedIndex,
-      bgAgentCount,
+      bgEntries,
+      getVisibleBgAgents,
       descendFromComposer,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
