@@ -50,6 +50,13 @@ export interface DaemonCapabilities {
   limits?: DaemonCapabilitiesLimits;
   modelServices: string[];
   /**
+   * Transport protocols the daemon advertises. Clients use this to
+   * negotiate the preferred transport (e.g. `['rest-sse', 'acp-ws',
+   * 'acp-http']`). Optional because older v=1 daemons predate
+   * transport negotiation — absence implies `['rest-sse']` only.
+   */
+  transports?: readonly string[];
+  /**
    * Absolute canonical workspace path this daemon is bound to
    * (1 daemon = 1 workspace). Clients use this to
    * (a) detect mismatch before posting `/session` (vs. waiting for

@@ -270,4 +270,190 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+
+  // ---- Session diagnostic / action routes --------------------------------
+
+  // GET /session/:id/context → session/context
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/context$/,
+    mapping: {
+      method: 'session/context',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/context-usage → session/context_usage
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/context-usage$/,
+    mapping: {
+      method: 'session/context_usage',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/supported-commands → session/supported_commands
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/supported-commands$/,
+    mapping: {
+      method: 'session/supported_commands',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/tasks → session/tasks
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/tasks$/,
+    mapping: {
+      method: 'session/tasks',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // POST /session/:id/tasks/:taskId/cancel → session/task_cancel
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/cancel$/,
+    mapping: {
+      method: 'session/task_cancel',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        taskId: segs[1],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // POST /session/:id/goal/clear → session/goal_clear
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/goal\/clear$/,
+    mapping: {
+      method: 'session/goal_clear',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // GET /session/:id/stats → session/stats
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/stats$/,
+    mapping: {
+      method: 'session/stats',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/rewind/snapshots → session/rewind_snapshots
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/rewind\/snapshots$/,
+    mapping: {
+      method: 'session/rewind_snapshots',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // POST /session/:id/rewind → session/rewind
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/rewind$/,
+    mapping: {
+      method: 'session/rewind',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // POST /session/:id/language → session/language
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/language$/,
+    mapping: {
+      method: 'session/language',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+
+  // ---- File system routes -----------------------------------------------
+  // These map the DaemonClient's file-system helpers to _qwen/file/* RPC
+  // methods on the ACP daemon.
+
+  // GET /file → _qwen/file/read (query params forwarded as RPC params)
+  {
+    httpMethod: 'GET',
+    pattern: /^\/file\/?$/,
+    mapping: {
+      method: '_qwen/file/read',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /file/bytes → _qwen/file/read_bytes
+  {
+    httpMethod: 'GET',
+    pattern: /^\/file\/bytes\/?$/,
+    mapping: {
+      method: '_qwen/file/read_bytes',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /stat → _qwen/file/stat
+  {
+    httpMethod: 'GET',
+    pattern: /^\/stat\/?$/,
+    mapping: {
+      method: '_qwen/file/stat',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /list → _qwen/file/list
+  {
+    httpMethod: 'GET',
+    pattern: /^\/list\/?$/,
+    mapping: {
+      method: '_qwen/file/list',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /glob → _qwen/file/glob
+  {
+    httpMethod: 'GET',
+    pattern: /^\/glob\/?$/,
+    mapping: {
+      method: '_qwen/file/glob',
+      extractParams: () => ({}),
+    },
+  },
+  // POST /file/write → _qwen/file/write
+  {
+    httpMethod: 'POST',
+    pattern: /^\/file\/write\/?$/,
+    mapping: {
+      method: '_qwen/file/write',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // POST /file/edit → _qwen/file/edit
+  {
+    httpMethod: 'POST',
+    pattern: /^\/file\/edit\/?$/,
+    mapping: {
+      method: '_qwen/file/edit',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+
+  // ---- Bulk session operations -------------------------------------------
+
+  // POST /sessions/delete → _qwen/sessions/delete
+  {
+    httpMethod: 'POST',
+    pattern: /^\/sessions\/delete\/?$/,
+    mapping: {
+      method: '_qwen/sessions/delete',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
 ];

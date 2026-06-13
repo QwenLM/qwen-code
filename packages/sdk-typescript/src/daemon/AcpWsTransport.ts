@@ -68,6 +68,14 @@ const INIT_TIMEOUT_MS = 30_000;
  * Lazy-init: the WebSocket connection is established on the first
  * `fetch()` call. An `initialize` JSON-RPC request is sent on
  * connect and its result is cached for `GET /capabilities` requests.
+ *
+ * **Browser limitation**: The browser WebSocket API does not support
+ * custom headers on the upgrade request. In Node (>=22), the token
+ * is passed via an `Authorization` header. In browser environments,
+ * the transport connects without auth headers — callers must rely on
+ * token-less loopback access or a proxy that injects auth. A future
+ * enhancement may use a subprotocol or query-param based token
+ * exchange for browser contexts.
  */
 export class AcpWsTransport implements DaemonTransport {
   private readonly wsUrl: string;
@@ -156,12 +164,31 @@ export class AcpWsTransport implements DaemonTransport {
     // For notifications, send and return 204 immediately.
     if (mapping.notification) {
       const params = mapping.extractParams(segments, body, httpMethod);
+      const notifMeta = extractHeaderMeta(init.headers);
+      if (notifMeta) {
+        params._meta = {
+          ...(isRecord(params._meta) ? params._meta : {}),
+          ...notifMeta,
+        };
+      }
       this.sendNotification(mapping.method, params);
       return synthesizeResponse(204, null);
     }
 
     // Normal request-response.
     const params = mapping.extractParams(segments, body, httpMethod);
+
+    // Forward per-request headers as JSON-RPC _meta so the server can
+    // see X-Qwen-Client-Id and similar metadata that HTTP transports
+    // carry natively.
+    const headerMeta = extractHeaderMeta(init.headers);
+    if (headerMeta) {
+      params._meta = {
+        ...(isRecord(params._meta) ? params._meta : {}),
+        ...headerMeta,
+      };
+    }
+
     const response = await this.sendRequest(
       mapping.method,
       params,
@@ -332,15 +359,25 @@ export class AcpWsTransport implements DaemonTransport {
       // Pass token via Authorization header on the upgrade request.
       // Node >=22 supports an options object as the second argument:
       //   new WebSocket(url, { headers: { ... } })
-      // The DOM typings only declare (url, protocols?) so we cast
-      // through `unknown` to pass the Node-specific options bag.
-      const wsOptions = this.token
-        ? { headers: { Authorization: `Bearer ${this.token}` } }
-        : undefined;
-      const ws = new (WebSocket as unknown as new (
-        url: string,
-        opts?: { headers?: Record<string, string> },
-      ) => WebSocket)(this.wsUrl, wsOptions);
+      // The browser WebSocket API does NOT support custom headers —
+      // in browser environments we connect without auth and rely on
+      // loopback/proxy auth (see class JSDoc).
+      const isBrowser =
+        typeof globalThis.window !== 'undefined' &&
+        typeof globalThis.window.document !== 'undefined';
+      let ws: WebSocket;
+      if (isBrowser || !this.token) {
+        ws = new WebSocket(this.wsUrl);
+      } else {
+        // Node: cast through unknown because DOM typings only declare
+        // (url, protocols?) — Node accepts an options bag.
+        ws = new (WebSocket as unknown as new (
+          url: string,
+          opts?: { headers?: Record<string, string> },
+        ) => WebSocket)(this.wsUrl, {
+          headers: { Authorization: `Bearer ${this.token}` },
+        });
+      }
       this.ws = ws;
 
       // Timeout for the initialize handshake.
@@ -528,4 +565,51 @@ export class AcpWsTransport implements DaemonTransport {
       this.ws!.send(JSON.stringify(req));
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Headers forwarded from per-request `init.headers` into JSON-RPC `_meta`. */
+const FORWARDED_HEADERS = ['x-qwen-client-id'] as const;
+
+/**
+ * Extract metadata-relevant headers from `RequestInit.headers` and
+ * return them as a plain object suitable for merging into `_meta`.
+ * Returns `undefined` when no relevant headers are present.
+ */
+function extractHeaderMeta(
+  headers: HeadersInit | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+
+  const meta: Record<string, string> = {};
+
+  const get = (key: string): string | undefined => {
+    if (headers instanceof Headers) return headers.get(key) ?? undefined;
+    if (Array.isArray(headers)) {
+      const pair = headers.find(([k]) => k.toLowerCase() === key.toLowerCase());
+      return pair ? pair[1] : undefined;
+    }
+    // Plain object
+    const h = headers as Record<string, string>;
+    for (const k of Object.keys(h)) {
+      if (k.toLowerCase() === key.toLowerCase()) return h[k];
+    }
+    return undefined;
+  };
+
+  for (const hdr of FORWARDED_HEADERS) {
+    const value = get(hdr);
+    if (value !== undefined) {
+      // Normalize header name to a camelCase _meta key.
+      // 'x-qwen-client-id' → 'clientId'
+      if (hdr === 'x-qwen-client-id') {
+        meta['clientId'] = value;
+      }
+    }
+  }
+
+  return Object.keys(meta).length > 0 ? meta : undefined;
 }

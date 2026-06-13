@@ -271,6 +271,162 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('session/branch');
   });
 
+  // ---- Session diagnostic / action routes --------------------------------
+
+  it('GET /session/:id/context maps to session/context', () => {
+    const result = matchRoute('/session/s14/context', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/context');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's14' });
+  });
+
+  it('GET /session/:id/context-usage maps to session/context_usage', () => {
+    const result = matchRoute('/session/s15/context-usage', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/context_usage');
+  });
+
+  it('GET /session/:id/supported-commands maps to session/supported_commands', () => {
+    const result = matchRoute('/session/s16/supported-commands', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/supported_commands');
+  });
+
+  it('GET /session/:id/tasks maps to session/tasks', () => {
+    const result = matchRoute('/session/s17/tasks', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/tasks');
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to session/task_cancel', () => {
+    const result = matchRoute('/session/s18/tasks/t1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/task_cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'shell' },
+      'POST',
+    );
+    expect(params).toEqual({ sessionId: 's18', taskId: 't1', kind: 'shell' });
+  });
+
+  it('POST /session/:id/goal/clear maps to session/goal_clear', () => {
+    const result = matchRoute('/session/s19/goal/clear', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/goal_clear');
+  });
+
+  it('GET /session/:id/stats maps to session/stats', () => {
+    const result = matchRoute('/session/s20/stats', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/stats');
+  });
+
+  it('GET /session/:id/rewind/snapshots maps to session/rewind_snapshots', () => {
+    const result = matchRoute('/session/s21/rewind/snapshots', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/rewind_snapshots');
+  });
+
+  it('POST /session/:id/rewind maps to session/rewind', () => {
+    const result = matchRoute('/session/s22/rewind', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/rewind');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { promptId: 'p1' },
+      'POST',
+    );
+    expect(params).toEqual({ sessionId: 's22', promptId: 'p1' });
+  });
+
+  it('POST /session/:id/language maps to session/language', () => {
+    const result = matchRoute('/session/s23/language', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/language');
+  });
+
+  // ---- File system routes -----------------------------------------------
+
+  it('GET /file maps to _qwen/file/read', () => {
+    const result = matchRoute('/file', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/read');
+  });
+
+  it('GET /file/ (trailing slash) maps to _qwen/file/read', () => {
+    const result = matchRoute('/file/', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/read');
+  });
+
+  it('GET /file/bytes maps to _qwen/file/read_bytes', () => {
+    const result = matchRoute('/file/bytes', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/read_bytes');
+  });
+
+  it('GET /stat maps to _qwen/file/stat', () => {
+    const result = matchRoute('/stat', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/stat');
+  });
+
+  it('GET /list maps to _qwen/file/list', () => {
+    const result = matchRoute('/list', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/list');
+  });
+
+  it('GET /glob maps to _qwen/file/glob', () => {
+    const result = matchRoute('/glob', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/glob');
+  });
+
+  it('POST /file/write maps to _qwen/file/write', () => {
+    const result = matchRoute('/file/write', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/write');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { path: '/a.txt', content: 'hi' },
+      'POST',
+    );
+    expect(params).toEqual({ path: '/a.txt', content: 'hi' });
+  });
+
+  it('POST /file/edit maps to _qwen/file/edit', () => {
+    const result = matchRoute('/file/edit', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/file/edit');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { path: '/b.txt', oldText: 'a', newText: 'b' },
+      'POST',
+    );
+    expect(params).toEqual({ path: '/b.txt', oldText: 'a', newText: 'b' });
+  });
+
+  // ---- Bulk session operations -------------------------------------------
+
+  it('POST /sessions/delete maps to _qwen/sessions/delete', () => {
+    const result = matchRoute('/sessions/delete', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/sessions/delete');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { sessionIds: ['a', 'b'] },
+      'POST',
+    );
+    expect(params).toEqual({ sessionIds: ['a', 'b'] });
+  });
+
   // ---- Unknown/unmatched routes ---------------------------------------
 
   it('returns null for unknown path', () => {

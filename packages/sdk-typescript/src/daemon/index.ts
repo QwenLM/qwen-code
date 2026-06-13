@@ -28,16 +28,17 @@ export type {
   DaemonTransportType,
 } from './DaemonTransport.js';
 export { RestSseTransport } from './RestSseTransport.js';
-// negotiateTransport lives in its own file to break the static import
-// chain from this barrel → ACP transports, keeping the browser bundle
-// under budget.  Import it directly:
-//   import { negotiateTransport } from '@qwen-code/sdk/daemon/negotiateTransport';
+// negotiateTransport + ACP transport classes live in their own files to
+// break the static import chain from this barrel, keeping the browser
+// bundle under budget.  Monorepo consumers import from source paths:
+//   import { negotiateTransport } from '../../sdk-typescript/src/daemon/negotiateTransport.js';
+//   import { AcpWsTransport }     from '../../sdk-typescript/src/daemon/AcpWsTransport.js';
+//   import { AcpHttpTransport }   from '../../sdk-typescript/src/daemon/AcpHttpTransport.js';
+//   import { AutoReconnectTransport } from '../../sdk-typescript/src/daemon/AutoReconnectTransport.js';
+// Deep package exports are intentionally omitted: the SDK barrel does not
+// re-export these classes, and the package's `files` field ships only
+// `dist/` which does not include per-module entry points for them.
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
-// ACP transports: import directly from their modules to avoid browser bundle bloat.
-//   import { AcpWsTransport } from '@qwen-code/sdk/daemon/AcpWsTransport';
-//   import { AcpHttpTransport } from '@qwen-code/sdk/daemon/AcpHttpTransport';
-//   import { AutoReconnectTransport } from '@qwen-code/sdk/daemon/AutoReconnectTransport';
-//   import { negotiateTransport } from '@qwen-code/sdk/daemon/negotiateTransport';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
