@@ -31,6 +31,7 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Execute]: 'execute',
   [Kind.Think]: 'think',
   [Kind.Fetch]: 'fetch',
+  [Kind.Agent]: 'agent' as ToolKind,
   [Kind.Other]: 'other',
 };
 

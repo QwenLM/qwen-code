@@ -856,6 +856,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 

@@ -107,6 +107,9 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
     if (toolCall.kind === 'switch_mode') {
       return 'Would you like to proceed?';
     }
+    if (toolCall.kind === 'agent') {
+      return 'Launch this agent?';
+    }
     return toolCall.title || 'Permission Required';
   };
 
@@ -236,7 +239,8 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
             toolCall.kind === 'write' ||
             toolCall.kind === 'read' ||
             toolCall.kind === 'execute' ||
-            toolCall.kind === 'bash') &&
+            toolCall.kind === 'bash' ||
+            toolCall.kind === 'agent') &&
             toolCall.title && (
               <div
                 /* 13px, normal font weight; normal whitespace wrapping + long word breaking; maximum 3 lines with overflow ellipsis */

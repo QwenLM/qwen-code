@@ -2907,6 +2907,11 @@
           "type": "string"
         },
         {
+          "const": "agent",
+          "description": "Launching an autonomous sub-agent.",
+          "type": "string"
+        },
+        {
           "const": "other",
           "description": "Other tool types (default).",
           "type": "string"

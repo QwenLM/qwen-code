@@ -24,7 +24,7 @@ function tc(kind: string, extra?: Partial<ToolCallData>): ToolCallData {
 
 function agentTc(): ToolCallData {
   return {
-    kind: 'other',
+    kind: 'agent',
     rawOutput: {
       type: 'task_execution',
       taskDescription: 'test task',

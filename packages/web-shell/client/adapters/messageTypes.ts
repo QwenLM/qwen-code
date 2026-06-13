@@ -20,6 +20,7 @@ export type DaemonMessageToolKind =
   | 'think'
   | 'fetch'
   | 'switch_mode'
+  | 'agent'
   | 'other';
 
 export interface DaemonMessageToolCallLocation {

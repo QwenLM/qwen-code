@@ -104,6 +104,8 @@ export const getToolDisplayLabel = ({
       }
       return 'ExitPlanMode';
     }
+    case 'agent':
+      return 'Agent';
     case 'task':
       return 'Task';
     case 'skill':

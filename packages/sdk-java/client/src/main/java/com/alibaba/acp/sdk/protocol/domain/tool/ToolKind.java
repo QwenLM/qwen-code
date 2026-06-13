@@ -30,6 +30,9 @@ public enum ToolKind {
     @JSONField(name = "switch_mode", label = "Switching the current session mode.")
     SWITCH_MODE,
 
+    @JSONField(name = "agent", label = "Launching an autonomous sub-agent.")
+    AGENT,
+
     @JSONField(name = "other", label = "Other tool types (default).")
     OTHER;
 }

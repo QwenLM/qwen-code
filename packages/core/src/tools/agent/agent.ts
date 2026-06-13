@@ -562,7 +562,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       AgentTool.Name,
       ToolDisplayNames.AGENT,
       'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
-      Kind.Other,
+      Kind.Agent,
       initialSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput - Enable live output updates for real-time progress

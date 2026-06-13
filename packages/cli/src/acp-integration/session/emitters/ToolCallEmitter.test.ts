@@ -426,6 +426,7 @@ describe('ToolCallEmitter', () => {
       expect(emitter.mapToolKind(Kind.Execute)).toBe('execute');
       expect(emitter.mapToolKind(Kind.Think)).toBe('think');
       expect(emitter.mapToolKind(Kind.Fetch)).toBe('fetch');
+      expect(emitter.mapToolKind(Kind.Agent)).toBe('agent');
       expect(emitter.mapToolKind(Kind.Other)).toBe('other');
     });
 
