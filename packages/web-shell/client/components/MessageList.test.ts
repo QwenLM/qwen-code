@@ -8,7 +8,11 @@ import {
   VIRTUAL_SCROLL_THRESHOLD,
 } from './MessageList';
 
-function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
+function makeAgentToolGroup(
+  id: string,
+  toolName = 'Agent',
+  timestamp?: number,
+): Message {
   return {
     id,
     role: 'tool_group',
@@ -20,6 +24,7 @@ function makeAgentToolGroup(id: string, toolName = 'Agent'): Message {
         args: { description: `task ${id}` },
       },
     ],
+    ...(timestamp !== undefined ? { timestamp } : {}),
   };
 }
 
@@ -99,6 +104,18 @@ describe('groupParallelAgents', () => {
       expect(items[0].agents).toHaveLength(3);
       expect(items[0].agents[0].callId).toBe('call-1');
       expect(items[0].agents[2].callId).toBe('call-3');
+    }
+  });
+
+  it('carries the first launch time onto the grouped parallel-agents row', () => {
+    const msgs = [
+      makeAgentToolGroup('1', 'Agent', 1000),
+      makeAgentToolGroup('2', 'Agent', 2000),
+    ];
+    const items = groupParallelAgents(msgs);
+    expect(items[0].type).toBe('parallel_agents');
+    if (items[0].type === 'parallel_agents') {
+      expect(items[0].timestamp).toBe(1000);
     }
   });
 
