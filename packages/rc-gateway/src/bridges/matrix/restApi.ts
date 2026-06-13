@@ -56,6 +56,7 @@ export class MatrixRestApi {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<MatrixRestResult> {
     let res: Response;
     try {
@@ -67,9 +68,10 @@ export class MatrixRestApi {
           'content-type': 'application/json',
         },
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
       });
     } catch {
-      return { ok: false, status: 0 }; // network error → caller backs off
+      return { ok: false, status: 0 }; // network error / abort → caller backs off
     }
     const json = (await res.json().catch(() => undefined)) as
       | { retry_after_ms?: number }
@@ -80,6 +82,26 @@ export class MatrixRestApi {
     }
     if (json !== undefined) out.body = json;
     return out;
+  }
+
+  /**
+   * Long-poll `/sync` from `since` (the prior `next_batch`, or undefined for the
+   * initial full sync), blocking up to `timeoutMs` server-side. Returns the raw
+   * result; the caller hands `.body` to the sync extractor.
+   */
+  async sync(
+    since: string | undefined,
+    timeoutMs = 30000,
+    signal?: AbortSignal,
+  ): Promise<MatrixRestResult> {
+    const q = new URLSearchParams({ timeout: String(timeoutMs) });
+    if (since) q.set('since', since);
+    return this.call(
+      'GET',
+      `/_matrix/client/v3/sync?${q.toString()}`,
+      undefined,
+      signal,
+    );
   }
 
   /** Resolve the access token's MXID (startup fail-fast checks it matches). */

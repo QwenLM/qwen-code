@@ -33,6 +33,9 @@ import { DiscordRestApi } from './bridges/discord/restApi.js';
 import { DiscordChannelStore } from './bridges/discord/channelStore.js';
 import { DiscordBridge } from './bridges/discord/runner.js';
 import { makeDiscordGateway } from './bridges/discord/gateway.js';
+import { MatrixRestApi } from './bridges/matrix/restApi.js';
+import { MatrixRoomStore } from './bridges/matrix/roomStore.js';
+import { MatrixBridge } from './bridges/matrix/runner.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
@@ -569,6 +572,64 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     }
   }
 
+  // In-process Matrix bridge (add-matrix-bridge), opt-in. Same HYBRID as the
+  // others: in-process but loopback-contract-only with an OPERATOR-MINTED
+  // QWEN_BRIDGE_TOKEN. UNENCRYPTED rooms only — encrypted rooms are detected and
+  // refused (E2EE/olm crypto is deferred). Started only when homeserver, MXID,
+  // access token, and bridge token are all present AND whoami matches the MXID.
+  let matrixAbort: AbortController | undefined;
+  const mxHomeserver = process.env.MATRIX_HOMESERVER_URL;
+  const mxUserId = process.env.MATRIX_USER_ID;
+  const mxAccessToken = process.env.MATRIX_ACCESS_TOKEN;
+  if (mxHomeserver && mxUserId && mxAccessToken) {
+    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
+    if (!bridgeToken) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'matrix bridge: homeserver creds set but QWEN_BRIDGE_TOKEN missing — ' +
+          "mint a bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
+          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
+      );
+    } else {
+      const loopbackUrl = `http://127.0.0.1:${port}`;
+      const mxRest = new MatrixRestApi({
+        homeserverUrl: mxHomeserver,
+        accessToken: mxAccessToken,
+      });
+      // whoami fail-fast (in-process analog: log + don't start, never kill the
+      // gateway). The configured MXID must match the access token's identity.
+      const who = await mxRest.whoami();
+      if (who.userId && who.userId !== mxUserId) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `matrix bridge: MXID mismatch (token resolves to a different user than ${mxUserId}). Bridge NOT started.`,
+        );
+      } else {
+        const runner = new MatrixBridge({
+          client: new BridgeClient({
+            baseUrl: loopbackUrl,
+            token: bridgeToken,
+          }),
+          rest: mxRest,
+          rooms: await MatrixRoomStore.open(
+            join(homedir(), '.qwen', 'rc', 'bridges', 'matrix', 'rooms.json'),
+          ),
+          botUserId: mxUserId,
+          baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
+          commandPrefix: process.env.MATRIX_COMMAND_PREFIX || '!qwen',
+          syncOnce: (since, signal) =>
+            mxRest.sync(since, 30000, signal).then((r) => r.body),
+          // eslint-disable-next-line no-console
+          log: (m) => console.log(m),
+        });
+        matrixAbort = new AbortController();
+        void runner.start(matrixAbort.signal);
+        // eslint-disable-next-line no-console
+        console.log('matrix bridge: started (in-process, loopback contract)');
+      }
+    }
+  }
+
   const shutdown = async () => {
     for (const w of watchers) w.close();
     reloader?.stop();
@@ -576,6 +637,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     telegramAbort?.abort();
     discordAbort?.abort();
+    matrixAbort?.abort();
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);

@@ -61,6 +61,29 @@ describe('MatrixRestApi — whoami', () => {
   });
 });
 
+describe('MatrixRestApi — sync', () => {
+  it('GETs /sync with the since + timeout query and returns the body', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      json: { next_batch: 's2' },
+    }));
+    const r = await api(impl).sync('s1', 30000);
+    expect((r.body as { next_batch: string }).next_batch).toBe('s2');
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toBe(
+      'https://home.example.com/_matrix/client/v3/sync?timeout=30000&since=s1',
+    );
+  });
+
+  it('omits since on the initial sync', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
+    await api(impl).sync(undefined, 0);
+    expect(calls[0].url).toBe(
+      'https://home.example.com/_matrix/client/v3/sync?timeout=0',
+    );
+  });
+});
+
 describe('MatrixRestApi — joinRoom', () => {
   it('POSTs the URL-encoded join path', async () => {
     const { impl, calls } = fakeFetch(() => ({
