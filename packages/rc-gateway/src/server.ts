@@ -234,11 +234,12 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // + session-lock so a confined share token can only toggle its own session.
   // No recordActivity: setting a preference is not "working on" the session, and
   // marking the device working here would wrongly suppress a real permission push.
+  const idleStatusResolver = deps.idleStatus ?? (() => undefined);
   app.post(
     '/rc/session/:id/idle-suggest-toggle',
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
-    createIdleToggleRoute(idleToggles, audit),
+    createIdleToggleRoute(idleToggles, idleStatusResolver, audit),
   );
   // GET the same path reports EFFECTIVE idle state (`/suggest status`). SESSION_READ
   // (a read) + session-lock so a confined share token sees only its own session.
@@ -246,7 +247,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/session/:id/idle-suggest-toggle',
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
-    createIdleStatusRoute(idleToggles, deps.idleStatus ?? (() => undefined)),
+    createIdleStatusRoute(idleToggles, idleStatusResolver),
   );
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.

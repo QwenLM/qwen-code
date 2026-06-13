@@ -28,14 +28,22 @@ let base: string;
 let toggles: IdleSessionToggles;
 let audit: ReturnType<typeof fakeAudit>;
 
-function mount() {
+// Default resolver: idle globally ON with a full budget (so effective enabled
+// follows the override). Individual tests override it.
+const ON: IdleStatusResolver = () => ({
+  globalEnabled: true,
+  maxSuggestionsPerHour: 5,
+  remainingThisHour: 5,
+});
+
+function mount(resolver: IdleStatusResolver = ON) {
   toggles = new IdleSessionToggles();
   audit = fakeAudit();
   const app = express();
   app.use(express.json());
   app.post(
     '/rc/session/:id/idle-suggest-toggle',
-    createIdleToggleRoute(toggles, audit),
+    createIdleToggleRoute(toggles, resolver, audit),
   );
   return new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
@@ -55,15 +63,23 @@ async function post(id: string, body: unknown) {
 }
 
 describe('POST /rc/session/:id/idle-suggest-toggle', () => {
-  beforeEach(mount);
+  beforeEach(() => mount());
   afterEach(
     () => new Promise<void>((r) => (server ? server.close(() => r()) : r())),
   );
 
-  it('sets enabled:false, stores it, and audits the flag only', async () => {
+  it('sets enabled:false, stores intent, returns effective body, audits the flag', async () => {
     const { status, json } = await post(SESSION, { enabled: false });
     expect(status).toBe(200);
-    expect(json).toEqual({ sessionId: SESSION, enabled: false });
+    // Effective body (same shape as GET); global ON but override false → disabled.
+    expect(json).toEqual({
+      sessionId: SESSION,
+      available: true,
+      enabled: false,
+      globalEnabled: true,
+      maxSuggestionsPerHour: 5,
+      remainingThisHour: 5,
+    });
     expect(toggles.get(SESSION)).toBe(false);
     expect(audit.calls).toHaveLength(1);
     expect(audit.calls[0].action).toBe('idle_toggle_set');
@@ -71,11 +87,23 @@ describe('POST /rc/session/:id/idle-suggest-toggle', () => {
     expect(audit.calls[0].detail).toEqual({ enabled: false });
   });
 
-  it('sets enabled:true (revert to default)', async () => {
+  it('sets enabled:true (revert to default) → effective enabled under global-on', async () => {
     const { status, json } = await post(SESSION, { enabled: true });
     expect(status).toBe(200);
     expect(json.enabled).toBe(true);
     expect(toggles.get(SESSION)).toBe(true);
+  });
+
+  it('POST {enabled:true} under a global-off stores intent but reports effective false (coherent with GET)', async () => {
+    await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
+    await mount(() => ({
+      globalEnabled: false,
+      maxSuggestionsPerHour: 5,
+      remainingThisHour: 5,
+    }));
+    const { json } = await post(SESSION, { enabled: true });
+    expect(json.enabled).toBe(false); // narrows-only: can't widen past global-off
+    expect(toggles.get(SESSION)).toBe(true); // but the intent IS stored
   });
 
   it('rejects a non-boolean enabled with 400 invalid_toggle (no store write)', async () => {
@@ -155,6 +183,7 @@ describe('GET /rc/session/:id/idle-suggest-toggle (status)', () => {
       sessionId: SESSION,
       available: true,
       enabled: true,
+      globalEnabled: true,
       maxSuggestionsPerHour: 5,
       remainingThisHour: 4,
     });

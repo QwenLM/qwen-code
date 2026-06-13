@@ -289,6 +289,13 @@
         aria-live="polite"
         style="color: #888; font-size: 0.85rem"
       ></span>
+      <div id="idle-suggest" style="margin-top: 6px; font-size: 0.85rem">
+        <label title="next-step suggestions when this session goes idle"
+          ><input id="idle-suggest-toggle" type="checkbox" disabled /> idle
+          suggestions</label
+        >
+        <span id="idle-suggest-status" style="color: #888"></span>
+      </div>
       <div
         id="idle-chips"
         aria-live="polite"
@@ -499,6 +506,93 @@
         idleChipTimer = setTimeout(clearIdleChips, 60000);
       }
 
+      // Per-session idle-suggestion toggle (`/suggest on|off|status`). Reads the
+      // EFFECTIVE state from GET so it never shows a lie (the POST narrows-only:
+      // a `true` intent under a global-off reports back as disabled).
+      function renderIdleToggle(s) {
+        const cb = $('idle-suggest-toggle');
+        const st = $('idle-suggest-status');
+        if (!cb || !st) return;
+        cb.checked = !!(s && s.enabled);
+        if (!s || !s.available) {
+          cb.disabled = true;
+          st.textContent =
+            ' — unavailable (no model configured on the workstation)';
+          return;
+        }
+        if (!s.globalEnabled) {
+          // The toggle can't widen past a global-off → disable + show the
+          // operator how to enable it (the privacy-preserving opt-in).
+          cb.disabled = true;
+          st.textContent =
+            ' — off globally; set enabled:true in ~/.qwen/rc/idle.yaml' +
+            ' (or QWEN_RC_IDLE_SUGGESTIONS=1)';
+          return;
+        }
+        cb.disabled = false;
+        const rem =
+          typeof s.remainingThisHour === 'number' ? s.remainingThisHour : '?';
+        const cap =
+          typeof s.maxSuggestionsPerHour === 'number'
+            ? s.maxSuggestionsPerHour
+            : '?';
+        st.textContent = ' — ' + rem + '/' + cap + ' left this hour';
+      }
+      async function refreshIdleToggle() {
+        const cb = $('idle-suggest-toggle');
+        const st = $('idle-suggest-status');
+        if (!cb || !st) return;
+        cb.disabled = true;
+        if (!watchedSessionId || !token()) {
+          st.textContent = '';
+          return;
+        }
+        try {
+          const res = await fetch(
+            '/rc/session/' +
+              encodeURIComponent(watchedSessionId) +
+              '/idle-suggest-toggle',
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            st.textContent = '';
+            return;
+          }
+          renderIdleToggle(await res.json());
+        } catch {
+          st.textContent = '';
+        }
+      }
+      $('idle-suggest-toggle').onchange = async () => {
+        if (!watchedSessionId || !token()) return;
+        const cb = $('idle-suggest-toggle');
+        const desired = cb.checked;
+        cb.disabled = true;
+        try {
+          const res = await fetch(
+            '/rc/session/' +
+              encodeURIComponent(watchedSessionId) +
+              '/idle-suggest-toggle',
+            {
+              method: 'POST',
+              headers: {
+                Authorization: 'Bearer ' + token(),
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({ enabled: desired }),
+            },
+          );
+          if (res.ok) {
+            renderIdleToggle(await res.json()); // reflect EFFECTIVE state
+          } else {
+            setStatus('idle toggle failed (' + res.status + ')');
+            await refreshIdleToggle();
+          }
+        } catch {
+          await refreshIdleToggle();
+        }
+      };
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -559,6 +653,7 @@
           }
           setStatus('streaming');
           $('composer').style.display = '';
+          void refreshIdleToggle(); // reflect this session's idle-suggest state
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
