@@ -271,6 +271,19 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     },
   },
 
+  // POST /session/:id/detach → session/detach
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/detach$/,
+    mapping: {
+      method: 'session/detach',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+
   // ---- Session diagnostic / action routes --------------------------------
 
   // GET /session/:id/context → session/context
@@ -374,6 +387,16 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
       }),
+    },
+  },
+
+  // GET /session/:id/hooks → session/hooks
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/hooks$/,
+    mapping: {
+      method: 'session/hooks',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
 
