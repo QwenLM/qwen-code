@@ -3400,6 +3400,23 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('shows an error when restoring files without a prompt id', async () => {
+      const harness = renderRewindHarness();
+
+      await runRewind(rewindUserItem(3, 'second prompt'), 'code');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot restore files: this turn was created before file checkpointing was enabled.',
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('truncates conversation when both-mode file restore succeeds', async () => {
       const harness = renderRewindHarness();
 
@@ -3444,6 +3461,13 @@ describe('AppContainer State Management', () => {
       expect(harness.loadHistory).not.toHaveBeenCalled();
       expect(harness.setText).not.toHaveBeenCalled();
       expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Restored 1 file(s).',
+        }),
+        expect.any(Number),
+      );
     });
 
     it('rewinds conversation only without restoring files', async () => {
@@ -3458,6 +3482,11 @@ describe('AppContainer State Management', () => {
         { id: 2, type: 'gemini', text: 'first response' },
       ]);
       expect(harness.setText).toHaveBeenCalledWith('second prompt');
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        harness.snapshots.slice(0, 2),
+      );
     });
 
     it('shows an error and returns for conversation-only rewind with no client', async () => {
