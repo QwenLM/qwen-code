@@ -591,6 +591,9 @@ describe('clipboardUtils', () => {
     beforeEach(() => {
       stdoutWriteMock = vi.fn();
       stderrWriteMock = vi.fn();
+      // Control multiplexer env vars for deterministic tests
+      vi.stubEnv('TMUX', undefined as unknown as string);
+      vi.stubEnv('STY', undefined as unknown as string);
       // Mock isTTY and write
       Object.defineProperty(process.stdout, 'isTTY', {
         value: true,
@@ -624,7 +627,10 @@ describe('clipboardUtils', () => {
       const result = writeOsc52(text);
 
       expect(result).toBe(true);
-      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
       expect(stderrWriteMock).not.toHaveBeenCalled();
     });
 
@@ -645,7 +651,10 @@ describe('clipboardUtils', () => {
       const result = writeOsc52(text);
 
       expect(result).toBe(true);
-      expect(stderrWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stderrWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
       expect(stdoutWriteMock).not.toHaveBeenCalled();
     });
 
@@ -674,7 +683,10 @@ describe('clipboardUtils', () => {
       const result = writeOsc52(text);
 
       expect(result).toBe(true);
-      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
     });
 
     it('should handle empty string', () => {
@@ -685,7 +697,10 @@ describe('clipboardUtils', () => {
       const result = writeOsc52(text);
 
       expect(result).toBe(true);
-      expect(stdoutWriteMock).toHaveBeenCalledWith(expectedSequence);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
     });
 
     it('should return false on write error', () => {
@@ -696,6 +711,38 @@ describe('clipboardUtils', () => {
       const result = writeOsc52('hello');
 
       expect(result).toBe(false);
+    });
+
+    it('should wrap in tmux DCS envelope when TMUX is set', () => {
+      vi.stubEnv('TMUX', '/tmp/tmux-1000/default,12345,0');
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const rawSequence = `\x1b]52;c;${expectedBase64}\x07`;
+      const expectedSequence = `\x1bPtmux;\x1b${rawSequence}\x1b\\`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
+    });
+
+    it('should wrap in screen DCS envelope when STY is set', () => {
+      vi.stubEnv('STY', '12345.pts-0.host');
+      const text = 'hello world';
+      const expectedBase64 = Buffer.from(text, 'utf-8').toString('base64');
+      const rawSequence = `\x1b]52;c;${expectedBase64}\x07`;
+      const expectedSequence = `\x1bP${rawSequence}\x1b\\`;
+
+      const result = writeOsc52(text);
+
+      expect(result).toBe(true);
+      expect(stdoutWriteMock).toHaveBeenCalledWith(
+        expectedSequence,
+        expect.any(Function),
+      );
     });
   });
 });
