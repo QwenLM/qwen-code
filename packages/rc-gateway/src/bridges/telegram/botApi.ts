@@ -61,7 +61,11 @@ export class TelegramBotApi {
     );
   }
 
-  private async call(method: string, body: unknown): Promise<TgApiResult> {
+  private async call(
+    method: string,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<TgApiResult> {
     let res: Response;
     try {
       res = await this.fetchImpl(
@@ -70,10 +74,11 @@ export class TelegramBotApi {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
+          signal,
         },
       );
     } catch {
-      return { ok: false, status: 0 }; // network error → caller backs off
+      return { ok: false, status: 0 }; // network error / abort → caller backs off
     }
     const json = (await res.json().catch(() => undefined)) as
       | {
@@ -124,12 +129,20 @@ export class TelegramBotApi {
    * up to `timeoutSec` server-side. Returns the parsed updates ([] on error or
    * timeout). Restricts allowed_updates to the two kinds the bridge handles.
    */
-  async getUpdates(offset: number, timeoutSec = 25): Promise<TelegramUpdate[]> {
-    const res = await this.call('getUpdates', {
-      offset,
-      timeout: timeoutSec,
-      allowed_updates: ['message', 'callback_query'],
-    });
+  async getUpdates(
+    offset: number,
+    timeoutSec = 25,
+    signal?: AbortSignal,
+  ): Promise<TelegramUpdate[]> {
+    const res = await this.call(
+      'getUpdates',
+      {
+        offset,
+        timeout: timeoutSec,
+        allowed_updates: ['message', 'callback_query'],
+      },
+      signal,
+    );
     return res.ok && Array.isArray(res.result)
       ? (res.result as TelegramUpdate[])
       : [];

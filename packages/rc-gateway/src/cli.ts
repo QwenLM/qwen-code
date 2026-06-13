@@ -25,6 +25,10 @@ import {
   formatRoutingTest,
 } from './routing/test.js';
 import { createGatewayApp } from './server.js';
+import { BridgeClient } from './bridges/client.js';
+import { TelegramBotApi } from './bridges/telegram/botApi.js';
+import { TelegramChatStore } from './bridges/telegram/chatStore.js';
+import { TelegramBridge } from './bridges/telegram/runner.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
@@ -475,11 +479,51 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     quietDigestTimer.unref();
   }
 
+  // In-process Telegram bridge (add-telegram-bridge), opt-in. The HYBRID: it runs
+  // in this process but talks the gateway ONLY over the loopback contract with an
+  // OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN, minted via POST /rc/tokens
+  // {scopes:['bridge']}) — never an auto-minted internal token — so it stays
+  // extractable to a sidecar by changing only its config. Started only when both
+  // a bot token and a bridge token are present.
+  let telegramAbort: AbortController | undefined;
+  const tgBotToken =
+    process.env.QWEN_RC_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+  if (tgBotToken) {
+    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
+    if (!bridgeToken) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'telegram bridge: bot token set but QWEN_BRIDGE_TOKEN missing — mint a ' +
+          "bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
+          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
+      );
+    } else {
+      const loopbackUrl = `http://127.0.0.1:${port}`;
+      const runner = new TelegramBridge({
+        botApi: new TelegramBotApi({ botToken: tgBotToken }),
+        client: new BridgeClient({ baseUrl: loopbackUrl, token: bridgeToken }),
+        chats: await TelegramChatStore.open(
+          join(homedir(), '.qwen', 'rc', 'bridges', 'telegram', 'chats.json'),
+        ),
+        // Deeplinks must be user-reachable (a phone can't hit loopback); prefer
+        // QWEN_DAEMON_URL when the operator set a reachable address.
+        baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
+        // eslint-disable-next-line no-console
+        log: (m) => console.log(m),
+      });
+      telegramAbort = new AbortController();
+      void runner.start(telegramAbort.signal);
+      // eslint-disable-next-line no-console
+      console.log('telegram bridge: started (in-process, loopback contract)');
+    }
+  }
+
   const shutdown = async () => {
     for (const w of watchers) w.close();
     reloader?.stop();
     routingReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
+    telegramAbort?.abort();
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
