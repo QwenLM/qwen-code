@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import {
   assembleListing,
   readFirstRecord,
+  readSessionTitle,
   listSessions,
   MAX_LIST_SESSIONS,
   type SessionEntry,
@@ -170,5 +171,109 @@ describe('listSessions', () => {
 
   it('exposes a positive default cap', () => {
     expect(MAX_LIST_SESSIONS).toBeGreaterThan(0);
+  });
+});
+
+describe('readSessionTitle', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-title-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const titleRec = (t: string) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'custom_title',
+      systemPayload: { customTitle: t, titleSource: 'manual' },
+      sessionId: 's',
+    });
+  const msgRec = (i: number) =>
+    JSON.stringify({ type: 'user', sessionId: 's', uuid: 'm' + i });
+
+  async function writeLines(id: string, lines: string[]): Promise<void> {
+    await writeFile(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
+  }
+
+  it('reads a custom_title record at EOF', async () => {
+    await writeLines(ID(1), [
+      msgRec(0),
+      msgRec(1),
+      titleRec('Fix the login bug'),
+    ]);
+    expect(await readSessionTitle(dir, ID(1))).toBe('Fix the login bug');
+  });
+
+  it('returns the MOST RECENT title when several exist', async () => {
+    await writeLines(ID(1), [
+      titleRec('old name'),
+      msgRec(0),
+      titleRec('new name'),
+    ]);
+    expect(await readSessionTitle(dir, ID(1))).toBe('new name');
+  });
+
+  it('reads a title that is the only (first) record of a short file', async () => {
+    await writeLines(ID(1), [titleRec('just a header')]);
+    expect(await readSessionTitle(dir, ID(1))).toBe('just a header');
+  });
+
+  it('returns null when there is no custom_title record', async () => {
+    await writeLines(ID(1), [msgRec(0), msgRec(1)]);
+    expect(await readSessionTitle(dir, ID(1))).toBeNull();
+  });
+
+  it('returns null for a missing file', async () => {
+    expect(await readSessionTitle(dir, ID(9))).toBeNull();
+  });
+
+  it('finds a title inside the tail window and misses one outside it', async () => {
+    // Title at the START, then padding so the title sits OUTSIDE a tiny tail
+    // window → null (the documented >maxBytes-only-at-start limit). The exact
+    // same shape with a title at EOF IS found.
+    const pad = Array.from({ length: 50 }, (_, i) => msgRec(i));
+    await writeLines(ID(1), [titleRec('early only'), ...pad]);
+    expect(await readSessionTitle(dir, ID(1), { maxBytes: 200 })).toBeNull();
+
+    await writeLines(ID(2), [...pad, titleRec('at the end')]);
+    expect(await readSessionTitle(dir, ID(2), { maxBytes: 200 })).toBe(
+      'at the end',
+    );
+  });
+});
+
+describe('listSessions titles (cycle 85)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-list-title-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('threads a custom_title onto the right item; untitled sessions have no title key', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) +
+        '\n' +
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Named one' },
+          sessionId: ID(1),
+        }) +
+        '\n',
+    );
+    await writeFile(
+      join(dir, `${ID(2)}.jsonl`),
+      JSON.stringify({ sessionId: ID(2), type: 'user' }) + '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions).toEqual([
+      { sessionId: ID(1), title: 'Named one', forks: [] },
+      { sessionId: ID(2), forks: [] },
+    ]);
   });
 });

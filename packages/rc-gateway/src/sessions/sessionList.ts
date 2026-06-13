@@ -15,6 +15,8 @@ export interface SessionListItem {
   sessionId: string;
   /** The fork parent, when this session is a fork. Omitted for a root. */
   parentSessionId?: string;
+  /** Human title (core `custom_title`), when set. Omitted otherwise. */
+  title?: string;
   /** Child session ids PRESENT in this listing that forked from this one. */
   forks: string[];
 }
@@ -102,10 +104,92 @@ export async function readFirstRecord(
   }
 }
 
+/**
+ * Reads a session's human title (core's `custom_title` system record) by a
+ * BOUNDED TAIL scan — the mirror of {@link readFirstRecord} from EOF. `stat`s
+ * the size, reads the last `min(size, maxBytes)` bytes at an explicit offset,
+ * decodes once, drops a possibly-partial leading line when the window did not
+ * start at byte 0, then scans BACKWARDS for the most recent line whose parsed
+ * record has `subtype === 'custom_title'`, returning its non-empty
+ * `systemPayload.customTitle` or `null`.
+ *
+ * 64 KiB matches core's anchor strategy (the title is re-appended near EOF every
+ * ~32 KiB and on finalize), so the tail catches it for any non-trivial session;
+ * a short session (`size <= maxBytes`) is read in full from offset 0. The only
+ * miss is a > maxBytes session whose title was written ONLY at the very start and
+ * never re-anchored → `null` (graceful, never a wrong title).
+ *
+ * Title reading is ENRICHMENT, so this NEVER throws: ENOENT / any open / read /
+ * parse error yields `null`, and the handle is always closed.
+ */
+export async function readSessionTitle(
+  chatsDir: string,
+  id: string,
+  opts: { maxBytes?: number } = {},
+): Promise<string | null> {
+  const maxBytes = opts.maxBytes ?? 64 * 1024;
+  let handle;
+  try {
+    handle = await open(join(chatsDir, `${id}.jsonl`), 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) return null;
+    const readBytes = Math.min(size, maxBytes);
+    const start = size - readBytes;
+    const buf = Buffer.allocUnsafe(readBytes);
+    let off = 0;
+    while (off < readBytes) {
+      const { bytesRead } = await handle.read(
+        buf,
+        off,
+        readBytes - off,
+        start + off,
+      );
+      if (bytesRead === 0) break;
+      off += bytesRead;
+    }
+    const lines = buf.subarray(0, off).toString('utf8').split('\n');
+    // When the window did not start at byte 0, its first line may be a partial
+    // record — drop it so JSON.parse only ever sees complete lines.
+    if (start > 0) lines.shift();
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      // Cheap pre-filter avoids parsing every unrelated record.
+      if (!line || line.indexOf('custom_title') === -1) continue;
+      try {
+        const rec = JSON.parse(line) as {
+          subtype?: unknown;
+          systemPayload?: { customTitle?: unknown };
+        };
+        const title = rec.systemPayload?.customTitle;
+        if (
+          rec.subtype === 'custom_title' &&
+          typeof title === 'string' &&
+          title.length > 0
+        ) {
+          return title;
+        }
+      } catch {
+        // Non-JSON / partial line → keep scanning earlier lines.
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 /** A session id paired with its resolved fork parent (null = root). */
 export interface SessionEntry {
   sessionId: string;
   parentSessionId: string | null;
+  /** Human title (core `custom_title`), when set. */
+  title?: string;
 }
 
 /**
@@ -128,6 +212,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
     items.set(e.sessionId, {
       sessionId: e.sessionId,
       ...(isRoot ? {} : { parentSessionId: e.parentSessionId as string }),
+      ...(e.title ? { title: e.title } : {}),
       forks: [],
     });
   }
@@ -189,7 +274,13 @@ export async function listSessions(
       // Unreadable first line (e.g. EACCES) -> list it as a root, don't drop.
       parent = null;
     }
-    entries.push({ sessionId: id, parentSessionId: parent });
+    // Title is best-effort enrichment (never throws) — a bounded tail read.
+    const title = await readSessionTitle(chatsDir, id);
+    entries.push({
+      sessionId: id,
+      parentSessionId: parent,
+      ...(title ? { title } : {}),
+    });
   }
 
   return { sessions: assembleListing(entries), truncated };

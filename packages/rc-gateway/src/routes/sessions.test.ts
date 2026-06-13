@@ -95,6 +95,34 @@ describe('GET /rc/sessions', () => {
     expect(JSON.stringify(audit.calls[0].detail)).not.toContain(FORK);
   });
 
+  it('surfaces a custom_title as the item title, never in the audit (cycle 85)', async () => {
+    await mkdir(chatsDir, { recursive: true });
+    await writeFile(
+      join(chatsDir, `${ROOT}.jsonl`),
+      JSON.stringify({ sessionId: ROOT, type: 'user' }) +
+        '\n' +
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Refactor the auth flow' },
+          sessionId: ROOT,
+        }) +
+        '\n',
+    );
+    const audit = fakeAudit();
+    const base = await mount(CWD, audit);
+    const res = await fetch(`${base}/rc/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; title?: string }>;
+    };
+    expect(body.sessions).toEqual([
+      { sessionId: ROOT, title: 'Refactor the auth flow', forks: [] },
+    ]);
+    // Privacy: the title (user content) is NEVER in the audit.
+    expect(JSON.stringify(audit.calls[0].detail)).not.toContain('Refactor');
+  });
+
   it('200 empty when the chats dir does not exist yet', async () => {
     const audit = fakeAudit();
     const base = await mount(CWD, audit);
