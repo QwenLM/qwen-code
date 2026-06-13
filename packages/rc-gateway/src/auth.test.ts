@@ -16,8 +16,10 @@ import {
   enforceSessionLock,
   resolveSubActor,
   parseSubActor,
+  enforceSubActorRateLimit,
 } from './auth.js';
 import { SESSION_READ, APPROVE, WRITE, BRIDGE } from './scopes.js';
+import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -300,5 +302,60 @@ describe('resolveSubActor middleware', () => {
     });
     expect(called).toBe(true);
     expect(req.rcClient).toBeUndefined();
+  });
+});
+
+describe('enforceSubActorRateLimit middleware', () => {
+  /** A req with a resolved subActor (a bridge-mediated request). */
+  function bridgeReq(subActor: string | undefined): Request {
+    return {
+      rcClient: { id: 'tkn-bridge', scopes: [BRIDGE], subActor },
+      params: { id: 's1' },
+    } as unknown as Request;
+  }
+
+  it('passes through a request with NO sub-actor (never limits normal clients)', () => {
+    const limiter = new SubActorRateLimiter();
+    const mw = enforceSubActorRateLimit(limiter, 1, undefined, () => 0);
+    // Even called many times, a no-subActor request is never limited.
+    for (let i = 0; i < 5; i++) {
+      const res = fakeRes();
+      let called = false;
+      mw(bridgeReq(undefined), res, () => {
+        called = true;
+      });
+      expect(called).toBe(true);
+      expect(res._status).toBe(200);
+    }
+  });
+
+  it('429s a sub-actor over the cap and audits once (firstDrop)', () => {
+    const audit = fakeAudit();
+    const limiter = new SubActorRateLimiter();
+    let t = 0;
+    const mw = enforceSubActorRateLimit(limiter, 2, audit, () => t++);
+    const run = () => {
+      const res = fakeRes();
+      let called = false;
+      mw(bridgeReq('telegram:evan'), res, () => {
+        called = true;
+      });
+      return { res, called };
+    };
+    expect(run().called).toBe(true); // 1
+    expect(run().called).toBe(true); // 2 (at cap)
+    const third = run(); // 3 → over
+    expect(third.called).toBe(false);
+    expect(third.res._status).toBe(429);
+    expect(third.res._json).toMatchObject({ code: 'sub_actor_rate_limited' });
+    const fourth = run(); // 4 → still limited, no re-audit
+    expect(fourth.res._status).toBe(429);
+    // Audited exactly once (the transition), carrying the subActor.
+    const rows = audit.calls.filter(
+      (c) => c.action === 'sub_actor_rate_limited',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subActor).toBe('telegram:evan');
+    expect(rows[0].target).toBe('s1');
   });
 });

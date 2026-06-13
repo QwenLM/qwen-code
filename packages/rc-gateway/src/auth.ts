@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import type { TokenStore } from './tokenStore.js';
 import { BRIDGE, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
+import type { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
 import './types.js';
 
 /** Max length of an asserted sub-actor id (bounds audit-row size). */
@@ -96,6 +97,46 @@ export function enforceSessionLock(audit?: AuditRecorder): RequestHandler {
         detail: { reason: 'session_locked', path: req.path },
       });
       res.status(403).json({ error: 'Session locked', code: 'session_locked' });
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Per-sub-actor write rate limit (`add-bridge-protocol`). Applies ONLY when a
+ * sub-actor was asserted (a bridge-mediated request) — a normal owner/client
+ * write is never sub-actor-limited (it has no subActor). Over the cap → 429
+ * `sub_actor_rate_limited`, audited once per burst (firstDrop). Mount on write
+ * routes AFTER `resolveSubActor`. Never throws. A request with no subActor (the
+ * common case) is a pure pass-through.
+ */
+export function enforceSubActorRateLimit(
+  limiter: SubActorRateLimiter,
+  cap: number,
+  audit?: AuditRecorder,
+  now: () => number = Date.now,
+): RequestHandler {
+  return (req, res, next) => {
+    const sub = req.rcClient?.subActor;
+    if (!sub) {
+      next();
+      return;
+    }
+    const { allowed, firstDrop } = limiter.tryConsume(sub, cap, now());
+    if (!allowed) {
+      if (firstDrop) {
+        void audit?.record({
+          action: 'sub_actor_rate_limited',
+          actorTokenId: req.rcClient?.id,
+          subActor: sub,
+          target: req.params.id,
+        });
+      }
+      res.status(429).json({
+        error: 'Sub-actor rate limit exceeded',
+        code: 'sub_actor_rate_limited',
+      });
       return;
     }
     next();

@@ -18,7 +18,12 @@ import {
   requireScope,
   enforceSessionLock,
   resolveSubActor,
+  enforceSubActorRateLimit,
 } from './auth.js';
+import {
+  SubActorRateLimiter,
+  DEFAULT_SUB_ACTOR_CAP,
+} from './bridges/subActorRateLimiter.js';
 import {
   OWNER,
   SESSION_READ,
@@ -118,6 +123,12 @@ export interface GatewayDeps {
    * config + rate-limiter). Omitted → status reports `available:false`.
    */
   idleStatus?: IdleStatusResolver;
+  /**
+   * Per-sub-actor write cap within the limiter's rolling window (bridge
+   * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
+   * `QWEN_RC_SUBACTOR_CAP` when unset.
+   */
+  subActorCap?: number;
 }
 
 export interface GatewayApp {
@@ -166,6 +177,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // In-memory registry of live bridges (add-bridge-protocol). Advisory presence/
   // capability metadata; a gateway restart drops it and bridges re-register.
   const bridgeRegistry = new BridgeRegistry();
+  // Per-sub-actor write limiter: caps prompts/votes per asserted chat user so
+  // one rude bridge user can't saturate the per-session FIFO. Only bites when a
+  // sub-actor is asserted (bridge-mediated); normal clients pass through.
+  const subActorLimiter = new SubActorRateLimiter();
+  const rawCap = deps.subActorCap ?? Number(process.env.QWEN_RC_SUBACTOR_CAP);
+  const subActorCap =
+    typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0
+      ? rawCap
+      : DEFAULT_SUB_ACTOR_CAP;
+  const subActorRateLimit = enforceSubActorRateLimit(
+    subActorLimiter,
+    subActorCap,
+    audit,
+  );
 
   // Single loader instance: holds the per-process collision-warned set so a
   // workspace>user name collision is audited at most once for the lifetime.
@@ -228,6 +253,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(APPROVE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorRateLimit, // bridge fan-in: cap votes per chat user
     createPermissionVoteRoute(deps.daemon, audit),
   );
   app.post(
@@ -235,6 +261,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorRateLimit, // bridge fan-in: cap prompts per chat user
     createPromptRoute(deps.daemon, audit),
   );
   app.post(
