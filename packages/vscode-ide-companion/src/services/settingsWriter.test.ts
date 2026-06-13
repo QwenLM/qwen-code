@@ -131,9 +131,10 @@ describe('settingsWriter', () => {
       expect(written.env.TEST_API_KEY).toBe('sk-test');
       expect(written.security.auth.selectedType).toBe(AuthType.USE_OPENAI);
       expect(written.model.name).toBe('gpt-4o');
-      expect(written.modelProviders[AuthType.USE_OPENAI]).toEqual([
-        { id: 'gpt-4o', envKey: 'TEST_API_KEY' },
-      ]);
+      expect(written.modelProviders[AuthType.USE_OPENAI]).toEqual({
+        protocol: 'openai',
+        models: [{ id: 'gpt-4o', envKey: 'TEST_API_KEY' }],
+      });
     });
 
     it('strips a runtime snapshot prefix before persisting model.name', async () => {

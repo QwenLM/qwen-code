@@ -30,6 +30,12 @@ vi.mock('../core/contentGenerator.js', () => ({
   createContentGeneratorConfig: vi.fn().mockReturnValue({}),
   createContentGenerator: vi.fn().mockReturnValue({}),
   AuthType: { API_KEY: 'apiKey' },
+  Protocol: {
+    OPENAI: 'openai',
+    QWEN_OAUTH: 'qwen-oauth',
+    GEMINI: 'gemini',
+    ANTHROPIC: 'anthropic',
+  },
 }));
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
