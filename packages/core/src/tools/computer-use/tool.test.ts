@@ -7,13 +7,13 @@ import {
   buildLlmContent,
   buildDisplayText,
   coerceTypes,
+  isHighRiskCall,
 } from './tool.js';
 import { ComputerUseClient } from './client.js';
 import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { saveInstallState, isPackageSpecApproved } from './install-state.js';
 import { approvalKey } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
-import { ApprovalMode, type Config } from '../../config/config.js';
 import type { Part } from '@google/genai';
 
 function makeFakeClient(
@@ -384,67 +384,58 @@ describe('ComputerUseInvocation confirmation pathway', () => {
   //   - YOLO       → needsConfirmation() returns false, dialog never built.
   //   - AUTO_EDIT  → isAutoEditApproved() approves info-type tools, skips onConfirm.
   //   - AUTO       → classifier-approved calls skip onConfirm.
-  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.AUTO])(
-    'execute() under %s auto-approves install instead of declining (no dialog, no env var)',
-    async (mode) => {
-      const fake = makeFakeClient(async () => ({
-        content: [{ type: 'text', text: '[]' }],
-        isError: false,
-      }));
-      ComputerUseClient.setSharedForTest(fake);
+  // The install-gate / autoApproveInstall behavior moved to bootstrap.test.ts
+  // (runBootstrap with depsOverride + a cold client) — the correct layer to
+  // assert it. After review round 1, `autoApproveInstall = !!this.config`:
+  // reaching execute() with a Config means the scheduler already approved THIS
+  // call (dialog, always-allow rule, or auto-approve mode), so there is no
+  // longer a per-mode gate decision to assert through the tool wrapper. The
+  // warm-client tests above never reach the gate because runBootstrap
+  // short-circuits on a started client before the install step.
 
-      const config = {
-        getApprovalMode: () => mode,
-      } as unknown as Config;
+  // ---- high-risk auto-approve gating (review round 1, ⑧) ----
 
-      const tool = new ComputerUseTool(
-        'list_apps',
-        COMPUTER_USE_SCHEMAS.list_apps,
-        config,
-      );
-      const invocation = tool.build({});
-      const result = await invocation.execute(new AbortController().signal);
+  it('flags destructive / sensitive tools as high-risk', () => {
+    for (const name of [
+      'kill_app',
+      'launch_app',
+      'start_recording',
+      'set_config',
+    ]) {
+      expect(isHighRiskCall(name, {})).toBe(true);
+    }
+    expect(isHighRiskCall('page', { action: 'execute_javascript' })).toBe(true);
+  });
 
-      expect(result.error).toBeUndefined();
-      expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
-      // Approval persisted so later (interactive) calls also skip the prompt.
-      const approved = await isPackageSpecApproved(tmpHome, approvalKey());
-      expect(approved).toBe(true);
-    },
-  );
-
-  it('execute() under DEFAULT mode does NOT auto-approve install (still gated)', async () => {
-    // Negative guard for the false-branch of autoApproveInstall: DEFAULT (and
-    // PLAN) must NOT be auto-approved — DEFAULT shows the install dialog. If the
-    // condition were ever widened (e.g. `mode !== ApprovalMode.PLAN`), DEFAULT
-    // would silently auto-install a desktop-control binary; this test locks
-    // that lower boundary so such a regression fails CI.
-    delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
-    const fake = makeFakeClient(async () => ({
-      content: [{ type: 'text', text: '[]' }],
-      isError: false,
-    }));
-    ComputerUseClient.setSharedForTest(fake);
-
-    const config = {
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-    } as unknown as Config;
-
-    const tool = new ComputerUseTool(
+  it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
+    for (const name of [
+      'click',
+      'type_text',
       'list_apps',
-      COMPUTER_USE_SCHEMAS.list_apps,
-      config,
-    );
-    const invocation = tool.build({});
+      'get_window_state',
+      'page',
+    ]) {
+      expect(isHighRiskCall(name, {})).toBe(false);
+    }
+    expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
+  });
 
-    // No install state + no env var → bootstrap's headless fallback refuses
-    // rather than auto-approving.
-    await expect(
-      invocation.execute(new AbortController().signal),
-    ).rejects.toThrow(/declined/i);
-    expect(fake.callTool).not.toHaveBeenCalled();
-    const approved = await isPackageSpecApproved(tmpHome, approvalKey());
-    expect(approved).toBe(false);
+  it('high-risk tools surface as mcp type so AUTO_EDIT cannot auto-approve them', async () => {
+    // 'mcp' is excluded from isAutoEditApproved's (edit|info) allow-list, so
+    // AUTO_EDIT shows the dialog instead of silently approving kill_app.
+    const tool = new ComputerUseTool('kill_app', COMPUTER_USE_SCHEMAS.kill_app);
+    const details = await tool
+      .build({ pid: 123 })
+      .getConfirmationDetails(new AbortController().signal);
+    expect(details.type).toBe('mcp');
+  });
+
+  it('ordinary tools keep info type (auto-approved in AUTO_EDIT as before)', async () => {
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    const details = await tool
+      .build({ pid: 123 })
+      .getConfirmationDetails(new AbortController().signal);
+    expect(details.type).toBe('info');
   });
 });
 

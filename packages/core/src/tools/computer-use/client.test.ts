@@ -91,18 +91,22 @@ describe('isTransportClosedError', () => {
 // ---------------------------------------------------------------------------
 // callTool reconnect path
 //
-// Strategy: subclass ComputerUseClient and override start(), stop(), and
-// callTool() so we can inject fake behaviors without spawning real processes.
-// The overridden callTool re-implements the same logic as production, driven
-// by a `behaviors` queue so each call can throw or succeed independently.
+// Strategy: subclass ComputerUseClient and override ONLY start()/stop() to
+// install/remove a fake inner MCP client whose callTool consumes a `behaviors`
+// queue. callTool itself is the real production method — its 3-attempt
+// reconnect loop + 1s backoff is the code under test, not a re-implementation.
+// (review round 1: the previous override mirrored a single-retry algorithm, so
+// production's loop — backoff, 3-attempt exhaustion, non-transport rethrow —
+// had zero coverage.)
 // ---------------------------------------------------------------------------
 
 type BehaviorFn = () => Promise<CallToolResult>;
 
 /**
- * Test subclass that overrides start/stop/callTool to avoid real process
- * spawning. `behaviors` is a queue: the i-th entry is used on the i-th
- * underlying tool invocation.
+ * Test subclass that overrides ONLY start()/stop() to install/remove a fake
+ * inner MCP client (`this.client`) whose callTool pulls from a `behaviors`
+ * queue (i-th underlying invocation → i-th entry). callTool is intentionally
+ * NOT overridden, so production's real reconnect loop runs against the queue.
  */
 class ReconnectTestClient extends ComputerUseClient {
   callCount = 0;
@@ -110,9 +114,18 @@ class ReconnectTestClient extends ComputerUseClient {
   stopCalled = 0;
   startCalled = 0;
 
+  /** Install a fake inner MCP client whose callTool drives the behaviors queue. */
+  installInner(): void {
+    (
+      this as unknown as {
+        client: { callTool: () => Promise<CallToolResult> };
+      }
+    ).client = { callTool: () => this.runNextBehavior() };
+  }
+
   override async start(_onProgress?: (message: string) => void): Promise<void> {
     this.startCalled++;
-    (this as unknown as { client: object }).client = { __fake: true };
+    this.installInner();
   }
 
   override async stop(): Promise<void> {
@@ -120,25 +133,7 @@ class ReconnectTestClient extends ComputerUseClient {
     (this as unknown as { client: undefined }).client = undefined;
   }
 
-  override async callTool(
-    _name: string,
-    _args: Record<string, unknown>,
-  ): Promise<CallToolResult> {
-    if (!(this as unknown as { client: unknown }).client)
-      throw new Error('ComputerUseClient not started');
-    try {
-      return await this.runNextBehavior();
-    } catch (err) {
-      if (!isTransportClosedError(err)) throw err;
-      await this.stop();
-      await this.start();
-      if (!(this as unknown as { client: unknown }).client)
-        throw new Error('ComputerUseClient reconnect failed');
-      return await this.runNextBehavior();
-    }
-  }
-
-  private async runNextBehavior(): Promise<CallToolResult> {
+  private runNextBehavior(): Promise<CallToolResult> {
     const idx = this.callCount++;
     const b = this.behaviors[idx];
     if (!b) throw new Error(`No behavior defined for call index ${idx}`);
@@ -147,11 +142,10 @@ class ReconnectTestClient extends ComputerUseClient {
 }
 
 function makeClient(): ReconnectTestClient {
-  const c = new ReconnectTestClient({
-    binary: '/fake/cua-driver',
-  });
-  // Pre-seed the started state so callTool guard passes.
-  (c as unknown as { client: object }).client = { __fake: true };
+  const c = new ReconnectTestClient({ binary: '/fake/cua-driver' });
+  // Pre-seed a started inner client so the first callTool runs; production
+  // start() is only invoked on reconnect.
+  c.installInner();
   return c;
 }
 
@@ -287,6 +281,70 @@ describe('callTool reconnect path', () => {
     );
     // reconnect happened exactly once
     expect(c.stopCalled).toBe(1);
+    expect(c.startCalled).toBe(1);
+    expect(c.callCount).toBe(2);
+  });
+
+  // ---- production 3-attempt loop coverage (review round 1) ----
+
+  it('succeeds on a later attempt after backing off past an earlier transport failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const c = makeClient();
+      c.behaviors = [
+        async () => {
+          throw new Error('Connection closed'); // initial
+        },
+        async () => {
+          throw new Error('Connection closed'); // attempt 0 → 1s backoff
+        },
+        async () => successResult, // attempt 1 → success
+      ];
+      const p = c.callTool('get_window_state', { pid: 1 });
+      await vi.runAllTimersAsync(); // flush the 1s backoff between attempts
+      expect(await p).toBe(successResult);
+      expect(c.stopCalled).toBe(2);
+      expect(c.startCalled).toBe(2);
+      expect(c.callCount).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exhausts exactly 3 reconnect attempts on persistent transport errors, then re-throws the last', async () => {
+    vi.useFakeTimers();
+    try {
+      const c = makeClient();
+      // initial call + 3 retry attempts, all transport errors.
+      c.behaviors = Array.from({ length: 4 }, (_, i) => async () => {
+        throw new Error(`Connection refused (os error 61) #${i}`);
+      });
+      const p = c.callTool('list_windows', { pid: 1 });
+      const assertion = await expect(p).rejects.toThrow(/#3/); // the last attempt's error
+      await vi.runAllTimersAsync(); // flush all three 1s backoffs
+      await assertion;
+      expect(c.stopCalled).toBe(3);
+      expect(c.startCalled).toBe(3);
+      expect(c.callCount).toBe(4); // initial + 3 attempts
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rethrows immediately when a retry hits a non-transport error (no further attempts)', async () => {
+    const c = makeClient();
+    c.behaviors = [
+      async () => {
+        throw new Error('Connection closed'); // initial: transport → reconnect
+      },
+      async () => {
+        throw new Error('element_index out of range'); // attempt 0: non-transport
+      },
+    ];
+    await expect(c.callTool('click', { element_index: 9 })).rejects.toThrow(
+      'element_index out of range',
+    );
+    expect(c.stopCalled).toBe(1); // one reconnect, then non-transport rethrow
     expect(c.startCalled).toBe(1);
     expect(c.callCount).toBe(2);
   });

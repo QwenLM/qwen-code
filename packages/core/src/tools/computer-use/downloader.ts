@@ -8,13 +8,15 @@
  * Downloads + installs the pinned cua-driver binary into
  * `~/.qwen/computer-use/`.
  *
- * Source order is OSS mirror → GitHub (see constants.resolveAssetUrls);
- * the first reachable source wins. The downloaded asset's sha256 is
- * verified against the release `checksums.txt` before extraction, so a
- * mirror cannot serve a tampered or truncated binary undetected.
- *
- * The binaries are Developer-ID-signed + Apple-notarized by Cua AI, Inc.,
- * so on macOS they pass Gatekeeper without us signing anything.
+ * Source order is OSS mirror → GitHub (see constants.resolveAssetUrls); the
+ * first reachable source wins. The asset's sha256 is verified against the
+ * release `checksums.txt` before extraction — this guards against truncation
+ * and corruption in transit. It does NOT defend against a compromised mirror:
+ * `checksums.txt` is fetched from the same source order, so whichever source
+ * wins controls both the asset and its expected hash. The real second factor
+ * on macOS is signing — the binaries are Developer-ID-signed + Apple-notarized
+ * by Cua AI, Inc., so they pass Gatekeeper; Linux/Windows have no equivalent
+ * signature check.
  */
 
 import { createHash } from 'node:crypto';
@@ -90,8 +92,15 @@ async function fetchFirst(
   let lastErr: unknown;
   for (const url of urls) {
     try {
-      const res = await fetchImpl(url, { redirect: 'follow' });
+      // Per-URL timeout so a stalled mirror (e.g. OSS firewalled outside CN —
+      // TCP connects but never responds) fails over to the next source in ~30s
+      // instead of hanging on undici's multi-minute default. (review round 1)
+      const res = await fetchImpl(url, {
+        redirect: 'follow',
+        signal: AbortSignal.timeout(30_000),
+      });
       if (res.ok && res.body) return { url, res };
+      await res.body?.cancel();
       lastErr = new Error(`HTTP ${res.status} for ${url}`);
     } catch (err) {
       lastErr = err;
@@ -263,10 +272,16 @@ async function extractArchive(
 
 /**
  * Unzip a `.zip` on Windows with no new dependency, trying OS tools in order:
- *   1. bsdtar (`tar.exe`) — bundled since Windows 10 1803 (2018). Reads zip,
- *      fast, one-shot; most modern hosts take this path.
- *   2. PowerShell `Expand-Archive` — fallback for hosts without bsdtar.
- * Surfaces both failures if neither is available.
+ *   1. `tar -xf` (no flags) — Windows 10 1803+ ships bsdtar (libarchive) as
+ *      `tar.exe`; it reads zip AND handles `C:\…` paths natively. Most hosts.
+ *   2. `tar --force-local -xf` — if GNU tar shadows bsdtar on PATH (e.g. Git
+ *      for Windows), it otherwise reads `C:\…` as a remote `host:path`; the
+ *      flag forces a local path. bsdtar REJECTS `--force-local`, which is why
+ *      it must be the SECOND attempt, not the first. (review round 1 — the
+ *      earlier code put `--force-local` first, so bsdtar always failed and
+ *      every install silently leaned on the PowerShell fallback.)
+ *   3. PowerShell `Expand-Archive` — last resort.
+ * Surfaces all failures if none succeed.
  */
 async function extractZipWindows(
   zipPath: string,
@@ -275,32 +290,29 @@ async function extractZipWindows(
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const run = promisify(execFile);
-  try {
-    // `--force-local`: Windows bsdtar otherwise parses the `C:\…` archive path
-    // as a remote `host:path` and fails with "Cannot connect to C: resolve failed".
-    await run('tar', ['--force-local', '-xf', zipPath, '-C', destDir], {
-      timeout: 120_000,
-    });
-  } catch (bsdtarErr) {
+  const psCommand =
+    `Expand-Archive -LiteralPath ${psSingleQuote(zipPath)} ` +
+    `-DestinationPath ${psSingleQuote(destDir)} -Force`;
+  const attempts: Array<{ cmd: string; args: string[] }> = [
+    { cmd: 'tar', args: ['-xf', zipPath, '-C', destDir] },
+    { cmd: 'tar', args: ['--force-local', '-xf', zipPath, '-C', destDir] },
+    {
+      cmd: 'powershell',
+      args: ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+    },
+  ];
+  const errors: string[] = [];
+  for (const { cmd, args } of attempts) {
     try {
-      await run(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Expand-Archive -LiteralPath ${psSingleQuote(zipPath)} ` +
-            `-DestinationPath ${psSingleQuote(destDir)} -Force`,
-        ],
-        { timeout: 180_000 },
-      );
-    } catch (psErr) {
-      throw new Error(
-        `Computer Use: failed to unzip ${zipPath} on Windows ` +
-          `(bsdtar: ${errMsg(bsdtarErr)}; PowerShell: ${errMsg(psErr)}).`,
-      );
+      await run(cmd, args, { timeout: 180_000 });
+      return;
+    } catch (err) {
+      errors.push(`${cmd} ${args[0]}: ${errMsg(err)}`);
     }
   }
+  throw new Error(
+    `Computer Use: failed to unzip ${zipPath} on Windows (${errors.join('; ')}).`,
+  );
 }
 
 /** Quote a string as a PowerShell single-quoted literal (`'` → `''`). */

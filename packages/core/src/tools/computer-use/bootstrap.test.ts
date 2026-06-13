@@ -99,6 +99,24 @@ describe('runBootstrap', () => {
     expect(client.start).not.toHaveBeenCalled();
   });
 
+  it('auto-approves the install (no prompt) and persists state when autoApproveInstall is set', async () => {
+    // review #1 (⑤): an auto-approve mode or an always-allow-ruled call passes
+    // autoApproveInstall. The gate must skip promptInstallApproval, persist the
+    // install state (so later cold calls also skip the gate), and proceed —
+    // this is what closes the DEFAULT-mode "install declined" dead-end.
+    const { isPackageSpecApproved } = await import('./install-state.js');
+    const client = makeFakeClient();
+    await runBootstrap(
+      client as never,
+      { signal: new AbortController().signal, autoApproveInstall: true },
+      deps,
+    );
+    expect(deps.promptInstallApproval).not.toHaveBeenCalled();
+    expect(await isPackageSpecApproved(tmpHome, KEY)).toBe(true);
+    expect(deps.install).toHaveBeenCalledOnce();
+    expect(client.start).toHaveBeenCalledOnce();
+  });
+
   it('guides one permission at a time: Accessibility pane, then Screen Recording pane', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
@@ -214,6 +232,10 @@ describe('runBootstrap', () => {
     );
     expect(client.start).not.toHaveBeenCalled();
     expect(deps.startStatusDaemon).not.toHaveBeenCalled();
+    // The warm-client short-circuit must precede the install step: a started
+    // client implies the binary is present, so the downloader must NOT run
+    // (otherwise unit tests trigger a real ~20MB download). (review round 1)
+    expect(deps.install).not.toHaveBeenCalled();
   });
 });
 

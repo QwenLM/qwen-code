@@ -225,6 +225,14 @@ export async function runBootstrap(
   const pollIntervalMs = deps.pollIntervalMs ?? 5000;
   const pollTimeoutMs = deps.pollTimeoutMs ?? 10 * 60_000;
 
+  // A warm client (already started this session) has already passed the install
+  // gate, the download, and the permission flow — short-circuit before any of
+  // them run again. This MUST precede the install gate and `deps.install()`:
+  // a started client implies the binary already exists, and otherwise a unit
+  // test that injects a started fake client still triggers the real downloader
+  // (network + ~20MB) and writes install-state into the repo CWD. (review #1)
+  if (client.isStarted()) return;
+
   // Step 1: install approval gate (gates the download).
   const approved = await isPackageSpecApproved(deps.homeDir, deps.approvalKey);
   if (!approved) {
@@ -249,9 +257,6 @@ export async function runBootstrap(
 
   // Step 2: ensure the binary is present (download on first use; no-op after).
   await deps.install(ctx.updateOutput);
-
-  // A warm client (already started this session) is past the permission flow.
-  if (client.isStarted()) return;
 
   // Step 3: macOS permission flow (one permission at a time; see file header).
   if (deps.platform === 'darwin') {

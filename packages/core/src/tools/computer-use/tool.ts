@@ -23,7 +23,7 @@ import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
 import { approvalKey } from './constants.js';
-import { ApprovalMode, type Config } from '../../config/config.js';
+import { type Config } from '../../config/config.js';
 import { homedir } from 'node:os';
 
 type ComputerUseParams = Record<string, unknown>;
@@ -32,6 +32,33 @@ const INSTALL_REASON =
   'This downloads the Computer Use driver (~20MB, signed + notarized) into ~/.qwen/computer-use/ the first time. ' +
   'Computer Use can click, type, and read your desktop apps in the background. ' +
   "On macOS you'll be guided through Accessibility / Screen Recording permissions next.";
+
+/**
+ * Tools / params that perform irreversible or sensitive actions and must NOT be
+ * silently auto-approved in AUTO_EDIT mode (review round 1). They surface a
+ * confirmation in AUTO_EDIT; AUTO still routes them through its classifier
+ * (getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
+ *   - kill_app        force-kills a PID
+ *   - launch_app      launches arbitrary apps (incl. with CDP debug ports)
+ *   - start_recording captures the screen to disk
+ *   - set_config      mutates driver configuration
+ *   - page + action 'execute_javascript' runs arbitrary JS in the user's
+ *     logged-in browser (cookie / credential exfiltration)
+ */
+const HIGH_RISK_TOOLS = new Set([
+  'kill_app',
+  'launch_app',
+  'start_recording',
+  'set_config',
+]);
+
+export function isHighRiskCall(
+  upstreamName: string,
+  params: Record<string, unknown>,
+): boolean {
+  if (HIGH_RISK_TOOLS.has(upstreamName)) return true;
+  return upstreamName === 'page' && params['action'] === 'execute_javascript';
+}
 
 class ComputerUseInvocation extends BaseToolInvocation<
   ComputerUseParams,
@@ -98,34 +125,55 @@ class ComputerUseInvocation extends BaseToolInvocation<
       approvalKey(),
     );
 
-    const prompt = installApproved
-      ? `Tool: computer_use__${this.upstreamName}\n\nArgs: ${safeJsonStringify(this.params)}\n\nThis will act on your desktop via the Computer Use binary.`
-      : `Tool: computer_use__${this.upstreamName}\n\n${INSTALL_REASON}`;
+    const onConfirm = async (
+      outcome: ToolConfirmationOutcome,
+      _payload?: ToolConfirmationPayload,
+    ) => {
+      // Any non-Cancel outcome means the user approved THIS call. Write install
+      // state (idempotent) so runBootstrap() can skip its env-var fallback
+      // prompt. PermissionManager handles per-tool "always allow" via
+      // permissionRules — install state is no longer a blanket grant.
+      if (outcome !== ToolConfirmationOutcome.Cancel) {
+        await saveInstallState(homedir(), {
+          approvedPackageSpec: approvalKey(),
+          approvedAtIso: new Date().toISOString(),
+        });
+      }
+    };
 
-    const details: ToolCallConfirmationDetails = {
+    // High-risk calls (review round 1) surface as 'mcp' type so AUTO_EDIT does
+    // NOT silently auto-approve them — isAutoEditApproved() only auto-approves
+    // 'edit'/'info'. AUTO still routes them through its classifier (this tool's
+    // getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
+    if (isHighRiskCall(this.upstreamName, this.params)) {
+      return {
+        type: 'mcp',
+        title: installApproved
+          ? `Allow high-risk Computer Use (${this.upstreamName})`
+          : `Allow high-risk Computer Use (${this.upstreamName}) — first use also downloads the driver`,
+        serverName: 'cua-driver',
+        toolName: this.upstreamName,
+        toolDisplayName: `computer_use__${this.upstreamName}`,
+        permissionRules,
+        onConfirm,
+      };
+    }
+
+    // Non-high-risk: 'info'. The install variant is a SUPERSET — always show
+    // Args (the first call can be a mutating action the user must see), then
+    // append INSTALL_REASON when install isn't yet approved. (review round 1)
+    const argsJson = safeJsonStringify(this.params);
+    const prompt = installApproved
+      ? `Tool: computer_use__${this.upstreamName}\n\nArgs: ${argsJson}\n\nThis will act on your desktop via the Computer Use binary.`
+      : `Tool: computer_use__${this.upstreamName}\n\nArgs: ${argsJson}\n\n${INSTALL_REASON}`;
+
+    return {
       type: 'info',
       title: `Allow Computer Use (${this.upstreamName})`,
       prompt,
       permissionRules,
-      onConfirm: async (
-        outcome: ToolConfirmationOutcome,
-        _payload?: ToolConfirmationPayload,
-      ) => {
-        // Any non-Cancel outcome means the user approved THIS call.
-        // Write install state (idempotent if already exists) so the
-        // bootstrap state machine in runBootstrap() can skip its env-var
-        // fallback prompt path. PermissionManager handles per-tool
-        // "always allow" via the permissionRules above — install state
-        // is no longer a blanket permission grant.
-        if (outcome !== ToolConfirmationOutcome.Cancel) {
-          await saveInstallState(homedir(), {
-            approvedPackageSpec: approvalKey(),
-            approvedAtIso: new Date().toISOString(),
-          });
-        }
-      },
+      onConfirm,
     };
-    return details;
   }
 
   async execute(
@@ -145,11 +193,15 @@ class ComputerUseInvocation extends BaseToolInvocation<
     // approval instead of refusing with "install declined by user". DEFAULT
     // still shows the dialog; PLAN blocks. Headless / SDK contexts (no config)
     // fall back to the env-var path in bootstrap's default promptInstallApproval.
-    const mode = this.config?.getApprovalMode();
-    const autoApproveInstall =
-      mode === ApprovalMode.YOLO ||
-      mode === ApprovalMode.AUTO_EDIT ||
-      mode === ApprovalMode.AUTO;
+    // Reaching execute() means the scheduler already approved THIS call — via
+    // the confirmation dialog, a persisted always-allow rule, or an auto-approve
+    // mode (YOLO / AUTO_EDIT / AUTO). Treat any of those as install consent. The
+    // subtle case is a saved always-allow rule: it SUPPRESSES the dialog, so
+    // onConfirm never writes install-state, and in DEFAULT mode bootstrap would
+    // then fall into the headless refuse path and dead-end ("install declined")
+    // on every retry. Headless / SDK contexts (no config) keep the env-var
+    // fallback in bootstrap's default promptInstallApproval. (review round 1)
+    const autoApproveInstall = !!this.config;
     await runBootstrap(client, { signal, updateOutput, autoApproveInstall });
 
     let mcpResult: CallToolResult;
