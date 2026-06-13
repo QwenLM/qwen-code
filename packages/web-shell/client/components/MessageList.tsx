@@ -20,6 +20,7 @@ import {
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../App';
 import { MessageItem } from './MessageItem';
+import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
@@ -83,7 +84,16 @@ function getLastUserMessageId(messages: Message[]): string | null {
 
 export type DisplayItem =
   | { type: 'message'; key: string; message: Message }
-  | { type: 'parallel_agents'; key: string; agents: ACPToolCall[] };
+  | {
+      type: 'parallel_agents';
+      key: string;
+      agents: ACPToolCall[];
+      /**
+       * Wall-clock time of the first grouped launch, carried so the grouped
+       * box reveals its time on hover exactly like a standalone message row.
+       */
+      timestamp?: number;
+    };
 
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
@@ -229,6 +239,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+          timestamp: grouped[0].timestamp,
         });
         i = j;
         continue;
@@ -244,6 +255,7 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
           type: 'parallel_agents',
           key: `par-${grouped[0].id}`,
           agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
+          timestamp: grouped[0].timestamp,
         });
       } else {
         items.push({
@@ -677,11 +689,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
         if (item.type === 'parallel_agents') {
           return (
-            <ParallelAgentsGroup
-              agents={item.agents}
-              pendingApproval={pendingApproval}
-              onConfirm={onConfirm}
-            />
+            <MessageTimestamp timestamp={item.timestamp}>
+              <ParallelAgentsGroup
+                agents={item.agents}
+                pendingApproval={pendingApproval}
+                onConfirm={onConfirm}
+              />
+            </MessageTimestamp>
           );
         }
 
