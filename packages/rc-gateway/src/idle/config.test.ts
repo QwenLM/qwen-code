@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import {
   parseIdleConfig,
   loadIdleConfig,
+  applyIdleReload,
   IdleConfigError,
   DEFAULT_IDLE_CONFIG,
 } from './config.js';
@@ -66,6 +67,27 @@ describe('parseIdleConfig', () => {
   it('throws on a non-mapping document', () => {
     expect(() => parseIdleConfig('- a\n- b')).toThrow(IdleConfigError);
     expect(() => parseIdleConfig('42')).toThrow(IdleConfigError);
+  });
+});
+
+describe('applyIdleReload (hot-reload precedence)', () => {
+  it('parses + applies the file value when env does not force', () => {
+    expect(
+      applyIdleReload('enabled: true\nmaxSuggestions: 2', {
+        forceEnabled: false,
+      }),
+    ).toEqual({ enabled: true, maxSuggestionsPerHour: 5, maxSuggestions: 2 });
+  });
+
+  it('env force overrides a file that sets enabled:false', () => {
+    const cfg = applyIdleReload('enabled: false', { forceEnabled: true });
+    expect(cfg.enabled).toBe(true);
+  });
+
+  it('propagates the parse error (caller retains the previous config + audits)', () => {
+    expect(() =>
+      applyIdleReload('enabled: "nope"', { forceEnabled: false }),
+    ).toThrow(IdleConfigError);
   });
 });
 

@@ -50,7 +50,8 @@ export type AuditAction =
   | 'session_lineage_read'
   | 'session_list_read'
   | 'idle_suggested'
-  | 'idle_suggest_rate_limited';
+  | 'idle_suggest_rate_limited'
+  | 'idle_config_parse_failed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -90,6 +91,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'session_list_read',
   'idle_suggested',
   'idle_suggest_rate_limited',
+  'idle_config_parse_failed',
 ];
 
 export interface AuditEntry {

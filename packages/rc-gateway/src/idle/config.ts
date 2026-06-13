@@ -104,6 +104,22 @@ export function parseIdleConfig(text: string): IdleConfig {
 }
 
 /**
+ * Apply a hot-reload of idle.yaml text: parse it (may THROW {@link IdleConfigError}
+ * for the caller to audit + retain the previous config) and then re-apply the
+ * boot precedence — the `QWEN_RC_IDLE_SUGGESTIONS` env override forces
+ * `enabled: true` regardless of the file, so a reload can never silently disable
+ * a feature the operator turned on via the env. Pure.
+ */
+export function applyIdleReload(
+  text: string,
+  opts: { forceEnabled: boolean },
+): IdleConfig {
+  const cfg = parseIdleConfig(text);
+  if (opts.forceEnabled) cfg.enabled = true;
+  return cfg;
+}
+
+/**
  * Boot loader: read `path` and parse it, FAIL-OPEN to {@link DEFAULT_IDLE_CONFIG}
  * on a missing file (ENOENT) OR a malformed one (logged via `warn`) — idle
  * suggestions are enrichment, so a bad config must never crash boot. (The

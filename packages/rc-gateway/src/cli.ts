@@ -33,7 +33,12 @@ import {
   resolveIdleEnabled,
   createIdleSuggestionHandler,
 } from './idle/idleSuggestions.js';
-import { loadIdleConfig } from './idle/config.js';
+import { readFile } from 'node:fs/promises';
+import {
+  loadIdleConfig,
+  applyIdleReload,
+  DEFAULT_IDLE_CONFIG,
+} from './idle/config.js';
 import { PushRateLimiter } from './webpush/rateLimiter.js';
 import {
   loadLayeredPolicy,
@@ -302,6 +307,68 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         : 'idle suggestions: available but disabled ' +
             '(set `enabled: true` in ~/.qwen/rc/idle.yaml)',
     );
+
+    // Hot-reload idle.yaml (debounced 250 ms): on a successful reparse, mutate
+    // the shared `idleConfig` ref IN PLACE (the handler reads it live, so the new
+    // enabled/maxSuggestions* apply on the next idle edge with no rebuild). A
+    // parse error RETAINS the previous good config and audits
+    // idle_config_parse_failed (never crashes/widens on a half-typed save —
+    // mirrors the policy reloader). A deleted file reverts to shipped defaults.
+    // The env force (QWEN_RC_IDLE_SUGGESTIONS) is re-applied each reload so a file
+    // edit can't silently disable an env-enabled feature.
+    const idlePath = join(homedir(), '.qwen', 'rc', 'idle.yaml');
+    const forceIdleEnabled = resolveIdleEnabled();
+    let idleReloadTimer: ReturnType<typeof setTimeout> | undefined;
+    const reloadIdle = (): void => {
+      if (idleReloadTimer) clearTimeout(idleReloadTimer);
+      idleReloadTimer = setTimeout(() => {
+        void (async () => {
+          let text: string;
+          try {
+            text = await readFile(idlePath, 'utf8');
+          } catch {
+            // Deleted/unreadable → revert to shipped defaults (+ env force).
+            Object.assign(idleConfig, DEFAULT_IDLE_CONFIG);
+            if (forceIdleEnabled) idleConfig.enabled = true;
+            return;
+          }
+          try {
+            Object.assign(
+              idleConfig,
+              applyIdleReload(text, { forceEnabled: forceIdleEnabled }),
+            );
+            // eslint-disable-next-line no-console
+            console.log(
+              `idle: reloaded (enabled=${idleConfig.enabled}, ` +
+                `${idleConfig.maxSuggestionsPerHour}/hr)`,
+            );
+          } catch (err) {
+            void audit.record({
+              action: 'idle_config_parse_failed',
+              detail: { reason: (err as Error)?.name ?? 'error' },
+            });
+            // eslint-disable-next-line no-console
+            console.warn('idle: reload failed, keeping previous config');
+          }
+        })();
+      }, 250);
+      if (
+        typeof idleReloadTimer === 'object' &&
+        idleReloadTimer &&
+        'unref' in idleReloadTimer
+      ) {
+        (idleReloadTimer as { unref: () => void }).unref();
+      }
+    };
+    try {
+      watchers.push(
+        watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
+          if (filename === null || filename === 'idle.yaml') reloadIdle();
+        }),
+      );
+    } catch {
+      // Missing/unwatchable dir → no idle hot-reload (boot value stands).
+    }
   }
 
   // Hold the gateway's own daemon subscriptions so push fires with no browser
