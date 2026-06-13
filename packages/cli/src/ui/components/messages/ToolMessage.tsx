@@ -671,15 +671,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
   const { compactMode } = useCompactMode();
 
-  // Per-tool collapse: completed tools default to collapsed (header only).
-  // In compact mode, the old behavior (hide all results) is preserved
-  // unless forceShowResult is set.
   const isCompleted = status === ToolCallStatus.Success;
-  const shouldDefaultCollapse = isCompleted && !forceShowResult;
-  const effectiveDisplayRenderer =
-    (!compactMode || forceShowResult) && !shouldDefaultCollapse
-      ? displayRenderer
-      : { type: 'none' as const };
+  const shouldCollapse = compactMode && isCompleted && !forceShowResult;
+  const effectiveDisplayRenderer = shouldCollapse
+    ? { type: 'none' as const }
+    : displayRenderer;
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
