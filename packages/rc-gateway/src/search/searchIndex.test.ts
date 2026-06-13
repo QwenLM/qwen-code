@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SearchIndex, toFtsMatch } from './searchIndex.js';
@@ -214,6 +214,67 @@ describe('SearchIndex', () => {
     idx.reindex(chatsDir);
     expect(idx.query('widget').hits).toHaveLength(0);
     expect(idx.query('gadget').hits.map((h) => h.eventId)).toEqual(['v2']);
+  });
+
+  it('incremental: re-indexes only changed/new files, skips unchanged, prunes removed', async () => {
+    const fileA = join(chatsDir, `${ID(1)}.jsonl`);
+    const fileB = join(chatsDir, `${ID(2)}.jsonl`);
+    await writeFile(
+      fileA,
+      rec({ uuid: 'a1', text: 'alpha widget content' }) + '\n',
+    );
+    await writeFile(
+      fileB,
+      rec({ uuid: 'b1', text: 'beta gadget content' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    const first = idx.reindexIncremental(chatsDir);
+    expect(first.updated).toBe(2);
+    expect(first.scanned).toBe(2);
+    expect(idx.query('widget').hits.map((h) => h.eventId)).toEqual(['a1']);
+
+    // A no-op pass (nothing changed) re-indexes nothing.
+    const noop = idx.reindexIncremental(chatsDir);
+    expect({ updated: noop.updated, removed: noop.removed }).toEqual({
+      updated: 0,
+      removed: 0,
+    });
+
+    // Change ONLY fileA (force a newer mtime so the change is observable even on
+    // a coarse-resolution clock), then incrementally reindex.
+    await writeFile(
+      fileA,
+      rec({ uuid: 'a2', text: 'alpha sprocket content' }) + '\n',
+    );
+    const future = new Date(Date.now() + 10_000);
+    await utimes(fileA, future, future);
+    const second = idx.reindexIncremental(chatsDir);
+    expect(second.updated).toBe(1); // only fileA
+    expect(idx.query('widget').hits).toHaveLength(0); // old content gone
+    expect(idx.query('sprocket').hits.map((h) => h.eventId)).toEqual(['a2']);
+    expect(idx.query('gadget').hits.map((h) => h.eventId)).toEqual(['b1']); // B untouched
+
+    // Remove fileB → its rows are pruned.
+    await rm(fileB);
+    const third = idx.reindexIncremental(chatsDir);
+    expect(third.removed).toBe(1);
+    expect(third.updated).toBe(0);
+    expect(idx.query('gadget').hits).toHaveLength(0);
+  });
+
+  it('incremental after a full reindex does no work (full build seeds file_meta)', async () => {
+    await writeFile(
+      join(chatsDir, `${ID(1)}.jsonl`),
+      rec({ uuid: 'x', text: 'seeded content here' }) + '\n',
+    );
+    idx = SearchIndex.open(dbPath);
+    idx.reindex(chatsDir); // full build now also seeds file_meta
+    const inc = idx.reindexIncremental(chatsDir);
+    expect({ updated: inc.updated, removed: inc.removed }).toEqual({
+      updated: 0,
+      removed: 0,
+    });
+    expect(idx.query('seeded').hits).toHaveLength(1);
   });
 
   it('indexes and finds CJK content (substring, ≥3 chars via trigram)', async () => {

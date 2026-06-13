@@ -566,21 +566,35 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'reindex') {
-  // `qwen-rc reindex [--cwd=<dir>]` — (re)build the BM25 full-text index for a
-  // workspace's transcripts (full drop+rebuild). The index db lives under the
+  // `qwen-rc reindex [--cwd=<dir>] [--full]` — update the BM25 full-text index
+  // for a workspace's transcripts. DEFAULT is INCREMENTAL (only new/changed
+  // files re-indexed, vanished files pruned via per-file mtime) — cheap to
+  // re-run; `--full` forces a drop+rebuild. The index db lives under the
   // workspace's 0700 search-index dir. The NATIVE better-sqlite3 is loaded HERE
   // via a dynamic import, so `qwen serve` / the gateway never load the addon.
   void (async () => {
-    const cwdFlag = process.argv.slice(3).find((a) => a.startsWith('--cwd='));
+    const args = process.argv.slice(3);
+    const cwdFlag = args.find((a) => a.startsWith('--cwd='));
     const cwd = cwdFlag ? cwdFlag.slice('--cwd='.length) : process.cwd();
+    const full = args.includes('--full');
     const { SearchIndex } = await loadSearchIndexModule();
     const chatsDir = resolveChatsDir(cwd);
     const dbPath = join(resolveSearchIndexDir(cwd), 'index.db');
     const idx = SearchIndex.open(dbPath);
     try {
-      const { files, records } = idx.reindex(chatsDir);
-      // eslint-disable-next-line no-console
-      console.log(`indexed ${records} record(s) from ${files} file(s)`);
+      if (full) {
+        const { files, records } = idx.reindex(chatsDir);
+        // eslint-disable-next-line no-console
+        console.log(`indexed ${records} record(s) from ${files} file(s)`);
+      } else {
+        const { scanned, updated, removed, records } =
+          idx.reindexIncremental(chatsDir);
+        // eslint-disable-next-line no-console
+        console.log(
+          `reindexed ${updated} changed + ${removed} removed file(s) ` +
+            `(${records} record(s); ${scanned} scanned). Use --full to rebuild.`,
+        );
+      }
     } finally {
       idx.close();
     }

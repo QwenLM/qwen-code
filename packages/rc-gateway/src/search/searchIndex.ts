@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  chmodSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import {
@@ -114,6 +120,17 @@ export class SearchIndex {
          tokenize='trigram'
        )`,
     );
+    // Per-file mtime sidecar for incremental reindex (cycle 93). A plain table
+    // (not FTS5) keyed by transcript filename. CREATE IF NOT EXISTS so reopening
+    // an index.db built before this column migrates cleanly — an empty file_meta
+    // just makes the first incremental pass treat every file as new (re-indexed
+    // once), after which it tracks mtimes normally.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS file_meta (
+         file TEXT PRIMARY KEY,
+         mtimeMs REAL NOT NULL
+       )`,
+    );
     return new SearchIndex(db);
   }
 
@@ -133,51 +150,161 @@ export class SearchIndex {
     } catch {
       names = []; // missing/unreadable dir → an empty index, not an error.
     }
-    const insert = this.db.prepare(
-      `INSERT INTO records (body, file, sessionId, eventId, kind, ts, tsKey)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    const upsertMeta = this.db.prepare(
+      `INSERT INTO file_meta (file, mtimeMs) VALUES (?, ?)
+       ON CONFLICT(file) DO UPDATE SET mtimeMs = excluded.mtimeMs`,
     );
     let files = 0;
     let records = 0;
     const rebuild = this.db.transaction(() => {
       this.db.exec('DELETE FROM records');
+      this.db.exec('DELETE FROM file_meta');
       for (const name of names) {
         if (!name.endsWith('.jsonl')) continue;
-        let text: string;
+        const n = this.indexFile(chatsDir, name);
+        if (n === null) continue; // unreadable file → skip.
+        // Seed file_meta with the mtime so a later incremental pass treats this
+        // file as unchanged (a full rebuild leaves a consistent mtime baseline).
         try {
-          text = readFileSync(join(chatsDir, name), 'utf8');
+          upsertMeta.run(name, statSync(join(chatsDir, name)).mtimeMs);
         } catch {
-          continue; // unreadable file → skip.
+          /* stat raced a delete → its rows just won't be tracked; harmless */
         }
         files++;
-        for (const line of text.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let rec: TranscriptRecord;
-          try {
-            rec = JSON.parse(trimmed) as TranscriptRecord;
-          } catch {
-            continue; // corrupt / non-JSON line → skip.
-          }
-          const body = recordText(rec);
-          if (!body) continue; // no searchable text → can never be a hit.
-          const ms = Date.parse(rec.timestamp ?? '');
-          const tsKey = Number.isNaN(ms) ? '' : tsKeyOf(ms);
-          insert.run(
-            body,
-            name,
-            rec.sessionId ?? '',
-            rec.uuid ?? '',
-            rec.type ?? '',
-            rec.timestamp ?? '',
-            tsKey,
-          );
-          records++;
-        }
+        records += n;
       }
     });
     rebuild();
     return { files, records };
+  }
+
+  /**
+   * Incrementally reconcile the index to the JSONL transcripts under `chatsDir`,
+   * re-indexing ONLY files whose mtime changed (or are new) and dropping files
+   * that vanished — far cheaper than a full rebuild on a large workspace with
+   * one freshly-appended transcript. Returns the work done: `scanned` (.jsonl on
+   * disk), `updated` (new/changed files re-indexed), `removed` (gone files
+   * dropped), and `records` (rows (re)inserted this pass).
+   *
+   * Removed-file detection unions `file_meta` with the DISTINCT files actually in
+   * `records`, so a legacy index.db built before the mtime sidecar (empty
+   * file_meta, populated records) still has vanished files pruned — and every
+   * surviving file looks "new" so it is re-indexed once, seeding file_meta. All
+   * in one transaction; missing dir / unreadable file / corrupt line never throw.
+   */
+  reindexIncremental(chatsDir: string): {
+    scanned: number;
+    updated: number;
+    removed: number;
+    records: number;
+  } {
+    let names: string[];
+    try {
+      names = readdirSync(chatsDir).filter((n) => n.endsWith('.jsonl'));
+    } catch {
+      names = [];
+    }
+    // Current on-disk mtimes (a file that vanishes mid-stat is treated as gone).
+    const disk = new Map<string, number>();
+    for (const name of names) {
+      try {
+        disk.set(name, statSync(join(chatsDir, name)).mtimeMs);
+      } catch {
+        /* vanished/unreadable → not on disk for our purposes */
+      }
+    }
+
+    const known = new Map<string, number>(
+      (
+        this.db.prepare('SELECT file, mtimeMs FROM file_meta').all() as Array<{
+          file: string;
+          mtimeMs: number;
+        }>
+      ).map((r) => [r.file, r.mtimeMs]),
+    );
+    const recordFiles = (
+      this.db.prepare('SELECT DISTINCT file FROM records').all() as Array<{
+        file: string;
+      }>
+    ).map((r) => r.file);
+
+    const upsertMeta = this.db.prepare(
+      `INSERT INTO file_meta (file, mtimeMs) VALUES (?, ?)
+       ON CONFLICT(file) DO UPDATE SET mtimeMs = excluded.mtimeMs`,
+    );
+
+    let updated = 0;
+    let removed = 0;
+    let records = 0;
+    const run = this.db.transaction(() => {
+      // Prune files that are gone from disk (union of meta + actual record files
+      // so a legacy db with empty file_meta still gets vanished files cleaned).
+      const tracked = new Set<string>([...known.keys(), ...recordFiles]);
+      for (const file of tracked) {
+        if (!disk.has(file)) {
+          this.db.prepare('DELETE FROM records WHERE file = ?').run(file);
+          this.db.prepare('DELETE FROM file_meta WHERE file = ?').run(file);
+          removed++;
+        }
+      }
+      // (Re)index new or changed files; skip unchanged ones.
+      for (const [name, mtimeMs] of disk) {
+        if (known.get(name) === mtimeMs) continue; // unchanged → skip
+        this.db.prepare('DELETE FROM records WHERE file = ?').run(name);
+        const n = this.indexFile(chatsDir, name);
+        if (n === null) continue; // became unreadable → leave its rows dropped
+        upsertMeta.run(name, mtimeMs);
+        updated++;
+        records += n;
+      }
+    });
+    run();
+    return { scanned: disk.size, updated, removed, records };
+  }
+
+  /**
+   * Read + parse one transcript file and insert its searchable records. Returns
+   * the count inserted, or `null` when the file is unreadable (caller skips).
+   * Shared by full {@link reindex} and {@link reindexIncremental} so both index
+   * IDENTICAL content. Caller is responsible for any prior DELETE + the txn.
+   */
+  private indexFile(chatsDir: string, name: string): number | null {
+    let text: string;
+    try {
+      text = readFileSync(join(chatsDir, name), 'utf8');
+    } catch {
+      return null;
+    }
+    const insert = this.db.prepare(
+      `INSERT INTO records (body, file, sessionId, eventId, kind, ts, tsKey)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    let records = 0;
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let rec: TranscriptRecord;
+      try {
+        rec = JSON.parse(trimmed) as TranscriptRecord;
+      } catch {
+        continue; // corrupt / non-JSON line → skip.
+      }
+      const body = recordText(rec);
+      if (!body) continue; // no searchable text → can never be a hit.
+      const ms = Date.parse(rec.timestamp ?? '');
+      const tsKey = Number.isNaN(ms) ? '' : tsKeyOf(ms);
+      insert.run(
+        body,
+        name,
+        rec.sessionId ?? '',
+        rec.uuid ?? '',
+        rec.type ?? '',
+        rec.timestamp ?? '',
+        tsKey,
+      );
+      records++;
+    }
+    return records;
   }
 
   /**
