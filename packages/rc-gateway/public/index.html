@@ -280,6 +280,11 @@
         aria-live="polite"
         style="color: #888; font-size: 0.85rem"
       ></span>
+      <div
+        id="idle-chips"
+        aria-live="polite"
+        style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px"
+      ></div>
     </section>
     <pre id="log"></pre>
     <script>
@@ -438,6 +443,53 @@
         if (controller) controller.abort();
       };
 
+      // Idle suggestions (add-idle-suggestions): render an idle_suggestions owner
+      // frame as next-step chips for the session currently in the composer. Chips
+      // FILL the prompt on click (never auto-send — a terse later "yes" must never
+      // bind to a suggestion the user didn't choose) and auto-expire. textContent
+      // only (server-supplied strings, never innerHTML).
+      let idleChipTimer = null;
+      function clearIdleChips() {
+        const box = $('idle-chips');
+        if (box) box.textContent = '';
+        if (idleChipTimer) {
+          clearTimeout(idleChipTimer);
+          idleChipTimer = null;
+        }
+      }
+      function renderIdleChips(frame) {
+        const box = $('idle-chips');
+        if (!box) return;
+        // Send targets watchedSessionId, so only show chips for that session.
+        if (!frame || frame.sessionId !== watchedSessionId) return;
+        const list = Array.isArray(frame.suggestions) ? frame.suggestions : [];
+        clearIdleChips();
+        if (list.length === 0) return;
+        const label = document.createElement('span');
+        label.textContent = 'next:';
+        label.style.cssText =
+          'color:#888;font-size:0.85rem;align-self:center';
+        box.appendChild(label);
+        for (const s of list) {
+          if (typeof s !== 'string' || !s) continue;
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.textContent = s;
+          chip.title = 'fill the prompt (does not send)';
+          chip.style.cssText =
+            'font-size:0.85rem;padding:2px 8px;border-radius:12px;cursor:pointer';
+          chip.onclick = () => {
+            const ta = $('prompt');
+            ta.value = s;
+            ta.focus();
+            clearIdleChips();
+          };
+          box.appendChild(chip);
+        }
+        // Auto-expire so stale suggestions don't linger after you move on.
+        idleChipTimer = setTimeout(clearIdleChips, 60000);
+      }
+
       $('send').onclick = async () => {
         const prompt = $('prompt').value.trim();
         if (!prompt) return setStatus('empty prompt');
@@ -478,6 +530,7 @@
         if (!token()) return setStatus('pair first');
         const id = $('session').value.trim();
         if (!id) return setStatus('enter a session id');
+        if (id !== watchedSessionId) clearIdleChips(); // drop a prior session's chips
         watchedSessionId = id;
         controller = new AbortController();
         $('watch').disabled = true;
@@ -661,10 +714,13 @@
                 );
                 continue;
               }
-              // The owner bus is multiplexed: this is the AUDIT feed, so ignore
-              // non-audit frames (e.g. idle_suggestions) rather than rendering
-              // them as garbage "undefined undefined" rows. A dedicated consumer
-              // for idle_suggestions arrives in a later slice.
+              // The owner bus is multiplexed. idle_suggestions frames render as
+              // next-step chips for the session you're watching (fill-on-click,
+              // never auto-send); everything else non-audit is ignored here.
+              if (frame.type === 'idle_suggestions') {
+                renderIdleChips(frame);
+                continue;
+              }
               if (frame.type && frame.type !== 'audit') continue;
               const rec = frame.record || frame;
               const parts = [rec.ts, rec.action];
