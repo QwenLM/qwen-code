@@ -507,6 +507,28 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     },
   },
 
+  // ---- Workspace catch-all (must be AFTER all specific workspace routes) --
+  // Handles any workspace path not matched above (e.g., /workspace/custom/path).
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/(.+)$/,
+    mapping: {
+      method: '_qwen/workspace',
+      extractParams: (segs) => ({ path: segs[0] }),
+    },
+  },
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/(.+)$/,
+    mapping: {
+      method: '_qwen/workspace',
+      extractParams: (segs, body) => ({
+        path: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+
   // ---- File system routes -----------------------------------------------
   // These map the DaemonClient's file-system helpers to _qwen/file/* RPC
   // methods on the ACP daemon.

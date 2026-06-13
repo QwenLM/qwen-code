@@ -161,7 +161,7 @@ export class RestSseTransport implements DaemonTransport {
     }
 
     if (!res.body) {
-      throw new Error('SSE response has no body');
+      throw new Error('No SSE body');
     }
 
     yield* parseSseStream(res.body, opts.signal);
