@@ -287,49 +287,40 @@ describe('callTool reconnect path', () => {
 
   // ---- production 3-attempt loop coverage (review round 1) ----
 
+  // These two exercise the real 1s backoff with REAL timers (generous test
+  // timeouts). Fake timers were CI-flaky here: eslint --fix adds an `await`
+  // before the `runAllTimersAsync()` flush, so the rejecting promise is awaited
+  // before its timers advance and the test hangs.
   it('succeeds on a later attempt after backing off past an earlier transport failure', async () => {
-    vi.useFakeTimers();
-    try {
-      const c = makeClient();
-      c.behaviors = [
-        async () => {
-          throw new Error('Connection closed'); // initial
-        },
-        async () => {
-          throw new Error('Connection closed'); // attempt 0 → 1s backoff
-        },
-        async () => successResult, // attempt 1 → success
-      ];
-      const p = c.callTool('get_window_state', { pid: 1 });
-      await vi.runAllTimersAsync(); // flush the 1s backoff between attempts
-      expect(await p).toBe(successResult);
-      expect(c.stopCalled).toBe(2);
-      expect(c.startCalled).toBe(2);
-      expect(c.callCount).toBe(3);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    const c = makeClient();
+    c.behaviors = [
+      async () => {
+        throw new Error('Connection closed'); // initial
+      },
+      async () => {
+        throw new Error('Connection closed'); // attempt 0 → 1s backoff
+      },
+      async () => successResult, // attempt 1 → success
+    ];
+    expect(await c.callTool('get_window_state', { pid: 1 })).toBe(
+      successResult,
+    );
+    expect(c.stopCalled).toBe(2);
+    expect(c.startCalled).toBe(2);
+    expect(c.callCount).toBe(3);
+  }, 10_000);
 
   it('exhausts exactly 3 reconnect attempts on persistent transport errors, then re-throws the last', async () => {
-    vi.useFakeTimers();
-    try {
-      const c = makeClient();
-      // initial call + 3 retry attempts, all transport errors.
-      c.behaviors = Array.from({ length: 4 }, (_, i) => async () => {
-        throw new Error(`Connection refused (os error 61) #${i}`);
-      });
-      const p = c.callTool('list_windows', { pid: 1 });
-      const assertion = await expect(p).rejects.toThrow(/#3/); // the last attempt's error
-      await vi.runAllTimersAsync(); // flush all three 1s backoffs
-      await assertion;
-      expect(c.stopCalled).toBe(3);
-      expect(c.startCalled).toBe(3);
-      expect(c.callCount).toBe(4); // initial + 3 attempts
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    const c = makeClient();
+    // initial call + 3 retry attempts, all transport errors.
+    c.behaviors = Array.from({ length: 4 }, (_, i) => async () => {
+      throw new Error(`Connection refused (os error 61) #${i}`);
+    });
+    await expect(c.callTool('list_windows', { pid: 1 })).rejects.toThrow(/#3/);
+    expect(c.stopCalled).toBe(3);
+    expect(c.startCalled).toBe(3);
+    expect(c.callCount).toBe(4); // initial + 3 attempts
+  }, 15_000);
 
   it('rethrows immediately when a retry hits a non-transport error (no further attempts)', async () => {
     const c = makeClient();
