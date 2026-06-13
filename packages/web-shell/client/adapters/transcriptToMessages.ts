@@ -85,6 +85,10 @@ export function transcriptBlocksToDaemonMessages(
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
+    // Wall-clock of this block, surfaced as a hover tooltip on the rendered
+    // message. Prefer the daemon-authoritative stamp so every client agrees;
+    // fall back to the local receive time when the daemon left it unset.
+    const blockTime = block.serverTimestamp ?? block.clientReceivedAt;
 
     switch (block.kind) {
       case 'user': {
@@ -95,6 +99,7 @@ export function transcriptBlocksToDaemonMessages(
           id: block.id,
           role: 'user',
           content: textBlock.text,
+          timestamp: blockTime,
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {
@@ -134,6 +139,7 @@ export function transcriptBlocksToDaemonMessages(
                   id: `${block.id}-ir-${readyCount++}`,
                   role: 'insight_ready',
                   path: seg.data.path,
+                  timestamp: blockTime,
                 });
               } else if (seg.data.type === 'insight_error') {
                 hasTerminal = true;
@@ -141,6 +147,7 @@ export function transcriptBlocksToDaemonMessages(
                   id: `${block.id}-ie-${errorCount++}`,
                   role: 'insight_error',
                   error: seg.data.error,
+                  timestamp: blockTime,
                 });
               }
             } else {
@@ -148,6 +155,7 @@ export function transcriptBlocksToDaemonMessages(
                 id: `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                timestamp: blockTime,
               });
               currentAssistantIdx = messages.length - 1;
             }
@@ -159,6 +167,7 @@ export function transcriptBlocksToDaemonMessages(
               stage: lastProgress.stage,
               progress: lastProgress.progress,
               detail: lastProgress.detail,
+              timestamp: blockTime,
             });
           }
           needsNewContentMessage = true;
@@ -182,6 +191,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'assistant',
             content: textBlock.text,
             isStreaming: textBlock.streaming,
+            timestamp: blockTime,
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -221,6 +231,7 @@ export function transcriptBlocksToDaemonMessages(
             content: '',
             thinking: textBlock.text,
             isStreaming: textBlock.streaming,
+            timestamp: blockTime,
           });
           currentAssistantIdx = messages.length - 1;
           needsNewContentMessage = false;
@@ -254,7 +265,7 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        appendToolCallMessage(messages, block.id, toolCall);
+        appendToolCallMessage(messages, block.id, toolCall, blockTime);
         toolsByCallId.set(toolCall.callId, toolCall);
         needsNewContentMessage = true;
         break;
@@ -300,6 +311,7 @@ export function transcriptBlocksToDaemonMessages(
                 rawOutput: shellBlock.text,
               },
             ],
+            timestamp: blockTime,
           });
           needsNewContentMessage = true;
         }
@@ -314,6 +326,7 @@ export function transcriptBlocksToDaemonMessages(
           command: shellBlock.command,
           output: shellBlock.text,
           ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -367,13 +380,23 @@ export function transcriptBlocksToDaemonMessages(
             if (!isSubAgentPermission) {
               permissionToolCall.status = 'in_progress';
             }
-            appendToolCallMessage(messages, block.id, permissionToolCall);
+            appendToolCallMessage(
+              messages,
+              block.id,
+              permissionToolCall,
+              blockTime,
+            );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
           } else {
             permissionToolCall.status = 'failed';
             permissionToolCall.endTime = permBlock.updatedAt;
-            appendToolCallMessage(messages, block.id, permissionToolCall);
+            appendToolCallMessage(
+              messages,
+              block.id,
+              permissionToolCall,
+              blockTime,
+            );
             toolsByCallId.set(permissionToolCall.callId, permissionToolCall);
             needsNewContentMessage = true;
           }
@@ -392,6 +415,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'plan',
             todos,
+            timestamp: blockTime,
           });
           needsNewContentMessage = true;
           break;
@@ -405,6 +429,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: text,
           variant: 'info',
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -418,6 +443,7 @@ export function transcriptBlocksToDaemonMessages(
           content: errorBlock.text,
           variant: 'error',
           retryable: errorBlock.source === 'turn_error',
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -429,6 +455,7 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: promptCancelledText,
           variant: 'info',
+          timestamp: blockTime,
         });
         needsNewContentMessage = true;
         break;
@@ -457,6 +484,7 @@ function appendToolCallMessage(
   messages: DaemonMessage[],
   blockId: string,
   toolCall: DaemonMessageToolCall,
+  timestamp?: number,
 ): void {
   // Native CLI groups every tool call of one scheduler batch into a single
   // bordered tool_group (mapToDisplay in useReactToolScheduler). The daemon
@@ -485,6 +513,7 @@ function appendToolCallMessage(
     id: `tg-${blockId}`,
     role: 'tool_group',
     tools: [toolCall],
+    timestamp,
   });
 }
 
