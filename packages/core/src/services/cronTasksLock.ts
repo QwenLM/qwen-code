@@ -1,8 +1,9 @@
 /**
  * Per-project lock for the durable cron scheduler. Ensures only one
- * session fires file-backed tasks when multiple sessions share a cwd.
+ * session fires file-backed tasks when multiple sessions share a project.
  *
- * Lock file: `<projectRoot>/.qwen/scheduled_tasks.lock`
+ * Lock file: `~/.qwen/tmp/<project-hash>/scheduled_tasks.lock` (per-machine
+ * runtime state — kept out of the working tree, next to the tasks file).
  * Content: `{ "pid": <number>, "sessionId": "<string>", "lockId": "<string>" }`
  *
  * `lockId` distinguishes lock holders that share a pid and sessionId —
@@ -23,7 +24,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { QWEN_DIR } from '../utils/paths.js';
+import { getProjectHash } from '../utils/paths.js';
+import { Storage } from '../config/storage.js';
 
 const LOCK_FILENAME = 'scheduled_tasks.lock';
 
@@ -38,7 +40,14 @@ interface LockContent {
 }
 
 export function getLockFilePath(projectRoot: string): string {
-  return path.join(projectRoot, QWEN_DIR, LOCK_FILENAME);
+  // Co-located with the tasks file under the user runtime dir, keyed by a
+  // hash of the project root — the lock is per-machine state and must not
+  // live in (or be committed from) the working tree.
+  return path.join(
+    Storage.getGlobalTempDir(),
+    getProjectHash(projectRoot),
+    LOCK_FILENAME,
+  );
 }
 
 function isProcessAlive(pid: number): boolean {

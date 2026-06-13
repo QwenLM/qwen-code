@@ -4,8 +4,9 @@ import * as path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CronListTool } from './cron-list.js';
 import { CronScheduler } from '../services/cronScheduler.js';
-import { writeCronTasks } from '../services/cronTasksFile.js';
+import { getCronFilePath, writeCronTasks } from '../services/cronTasksFile.js';
 import type { DurableCronTask } from '../services/cronTasksFile.js';
+import { Storage } from '../config/storage.js';
 
 function makeDurableTask(
   overrides?: Partial<DurableCronTask>,
@@ -39,12 +40,15 @@ describe('CronListTool', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-list-test-'));
+    // Durable tasks live under the user runtime dir, not the tree.
+    Storage.setRuntimeBaseDir(tmpDir);
     config = makeConfig(tmpDir);
     tool = new CronListTool(config);
   });
 
   afterEach(async () => {
     config._scheduler.destroy();
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -114,7 +118,7 @@ describe('CronListTool', () => {
   });
 
   it('surfaces a corrupted tasks file as an error instead of an empty list', async () => {
-    const tasksFile = path.join(tmpDir, '.qwen', 'scheduled_tasks.json');
+    const tasksFile = getCronFilePath(tmpDir);
     await fs.mkdir(path.dirname(tasksFile), { recursive: true });
     await fs.writeFile(tasksFile, '{broken json!!');
 

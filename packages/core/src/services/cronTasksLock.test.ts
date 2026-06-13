@@ -7,6 +7,8 @@ import {
   releaseLock,
   tryAcquireLock,
 } from './cronTasksLock.js';
+import { Storage } from '../config/storage.js';
+import { getProjectHash } from '../utils/paths.js';
 
 // Hook for the takeover-race test: runs just before the implementation
 // renames the lock file aside, so a test can interleave a competing
@@ -35,18 +37,28 @@ describe('cronTasksLock', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lock-test-'));
+    // Lock lives under the user runtime dir, not the working tree; redirect
+    // that base into the test temp dir.
+    Storage.setRuntimeBaseDir(tmpDir);
   });
 
   afterEach(async () => {
     renameHook.current = null;
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   describe('getLockFilePath', () => {
-    it('returns path under .qwen/', () => {
-      expect(getLockFilePath('/project')).toBe(
-        path.join('/project', '.qwen', 'scheduled_tasks.lock'),
+    it('resolves to the per-project runtime dir, not the working tree', () => {
+      const lock = getLockFilePath('/project');
+      expect(lock).toBe(
+        path.join(
+          Storage.getGlobalTempDir(),
+          getProjectHash('/project'),
+          'scheduled_tasks.lock',
+        ),
       );
+      expect(lock.startsWith('/project')).toBe(false);
     });
   });
 

@@ -14,6 +14,7 @@ import {
   writeCronTasks,
   type DurableCronTask,
 } from './cronTasksFile.js';
+import { Storage } from '../config/storage.js';
 
 // Pass-through mock with a test-controlled gate on readCronTasks, so a
 // test can hold the scheduler inside its startup read while stop() runs,
@@ -416,9 +417,10 @@ describe('CronScheduler', () => {
 
   // Removing a scheduler's temp dir while its fire-and-forget writes
   // (fire stamps, removals, lock release) are still in flight makes rm
-  // race a file creation inside .qwen → ENOTEMPTY. Settle the chains
-  // first; keep rm retries for writes launched outside them (e.g. a
-  // probe takeover's lock write).
+  // race a file creation inside the runtime dir → ENOTEMPTY. Settle the
+  // chains first; keep rm retries for writes launched outside them (e.g. a
+  // probe takeover's lock write). Reset the runtime base only after the
+  // chains settle, so a late write can't escape to the real ~/.qwen.
   async function removeTmpDir(tmpDir: string): Promise<void> {
     scheduler.destroy();
     const internals = scheduler as unknown as {
@@ -427,6 +429,7 @@ describe('CronScheduler', () => {
     };
     await internals.pendingPersist;
     await internals.pendingRelease;
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, {
       recursive: true,
       force: true,
@@ -440,6 +443,8 @@ describe('CronScheduler', () => {
 
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-sched-test-'));
+      // Durable files live under the user runtime dir, not the project tree.
+      Storage.setRuntimeBaseDir(tmpDir);
       scheduler = new CronScheduler(tmpDir);
     });
 
@@ -546,9 +551,11 @@ describe('CronScheduler', () => {
     });
 
     it('recovers from a failed setup so a later enableDurable can retry', async () => {
-      // Replace .qwen with a regular file so lock acquisition throws.
-      const qwenDir = path.join(tmpDir, '.qwen');
-      await fs.writeFile(qwenDir, 'not a directory');
+      // Put a regular file where the per-project runtime dir should be, so
+      // lock acquisition's mkdir throws.
+      const runtimeDir = path.dirname(getLockFilePath(tmpDir));
+      await fs.mkdir(path.dirname(runtimeDir), { recursive: true });
+      await fs.writeFile(runtimeDir, 'not a directory');
 
       await expect(scheduler.enableDurable('session-1')).rejects.toThrow();
       // Half-on state would turn every retry into a no-op and keep
@@ -557,7 +564,7 @@ describe('CronScheduler', () => {
       expect(scheduler.hasPendingWork).toBe(false);
 
       // Obstruction cleared — the retry must not short-circuit.
-      await fs.rm(qwenDir);
+      await fs.rm(runtimeDir);
       await scheduler.enableDurable('session-1');
       expect(scheduler.durableActive).toBe(true);
       const owner = JSON.parse(
@@ -572,6 +579,8 @@ describe('CronScheduler', () => {
 
     beforeEach(async () => {
       tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-owner-test-'));
+      // Durable files live under the user runtime dir, not the project tree.
+      Storage.setRuntimeBaseDir(tmpDir);
       scheduler = new CronScheduler(tmpDir);
     });
 

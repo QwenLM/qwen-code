@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CronCreateTool } from './cron-create.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import { readCronTasks } from '../services/cronTasksFile.js';
+import { Storage } from '../config/storage.js';
 
 let tmpDir: string;
 
@@ -25,11 +26,14 @@ describe('CronCreateTool', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-create-test-'));
+    // Durable tasks persist under the user runtime dir, not the tree.
+    Storage.setRuntimeBaseDir(tmpDir);
     config = makeConfig();
     tool = new CronCreateTool(config);
   });
 
   afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -74,7 +78,7 @@ describe('CronCreateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain(
-      'Persisted to .qwen/scheduled_tasks.json',
+      'Persisted to ~/.qwen/tmp/<project-hash>/scheduled_tasks.json',
     );
     expect(result.returnDisplay).toContain('[durable]');
 

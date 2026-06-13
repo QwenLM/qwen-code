@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CronDeleteTool } from './cron-delete.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import { readCronTasks, writeCronTasks } from '../services/cronTasksFile.js';
+import { Storage } from '../config/storage.js';
 
 function makeConfig(projectRoot: string) {
   const scheduler = new CronScheduler(projectRoot);
@@ -24,12 +25,15 @@ describe('CronDeleteTool', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-delete-test-'));
+    // Durable tasks live under the user runtime dir, not the tree.
+    Storage.setRuntimeBaseDir(tmpDir);
     config = makeConfig(tmpDir);
     tool = new CronDeleteTool(config);
   });
 
   afterEach(async () => {
     config._scheduler.destroy();
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

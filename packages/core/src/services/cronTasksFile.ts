@@ -1,5 +1,10 @@
 /**
- * File I/O for durable cron tasks. Reads/writes `.qwen/scheduled_tasks.json`.
+ * File I/O for durable cron tasks. Reads/writes the per-project tasks file
+ * under the user's runtime dir (`~/.qwen/tmp/<project-hash>/`), NOT the
+ * working tree — durable tasks are the user's own automation against a
+ * project, not project-shared config, so they live alongside the other
+ * per-project-private runtime state (checkpoints, shell history) and never
+ * become a committed/pulled prompt-injection surface.
  * Session-only tasks never touch this module.
  */
 
@@ -9,7 +14,8 @@ import { Mutex } from 'async-mutex';
 
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { QWEN_DIR } from '../utils/paths.js';
+import { getProjectHash } from '../utils/paths.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('CRON_TASKS_FILE');
 
@@ -24,8 +30,10 @@ export interface DurableCronTask {
 
 const TASKS_FILENAME = 'scheduled_tasks.json';
 
-/** Project-relative path of the tasks file, for user-facing messages. */
-export const CRON_TASKS_DISPLAY_PATH = `${QWEN_DIR}/${TASKS_FILENAME}`;
+/** Generic label for the tasks file, for user-facing messages and tool
+ * descriptions. The real path is per-project (hashed); this template
+ * communicates the location without leaking the hash. */
+export const CRON_TASKS_DISPLAY_PATH = `~/.qwen/tmp/<project-hash>/${TASKS_FILENAME}`;
 
 // Cross-process write-lock tuning for updateCronTasks. Updates hold the
 // lock for single-digit milliseconds, so anything older than STALE_MS is
@@ -55,7 +63,14 @@ function getUpdateMutex(filePath: string): Mutex {
 }
 
 export function getCronFilePath(projectRoot: string): string {
-  return path.join(projectRoot, QWEN_DIR, TASKS_FILENAME);
+  // Per-project-private, under the user runtime dir — keyed by a hash of
+  // the project root (same scheme as checkpoints/shell-history), so the
+  // file is never in the working tree.
+  return path.join(
+    Storage.getGlobalTempDir(),
+    getProjectHash(projectRoot),
+    TASKS_FILENAME,
+  );
 }
 
 export async function readCronTasks(

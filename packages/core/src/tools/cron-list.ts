@@ -31,7 +31,7 @@ class CronListInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
-    // File-first: durable jobs come straight from .qwen/scheduled_tasks.json
+    // File-first: durable jobs come straight from the durable tasks file
     // so management works in every mode — headless included — regardless
     // of what the scheduler has loaded.
     // The scheduler contributes only this process's session-only jobs.

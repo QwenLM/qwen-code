@@ -11,6 +11,15 @@ import {
   updateCronTasks,
   writeCronTasks,
 } from './cronTasksFile.js';
+import { Storage } from '../config/storage.js';
+import { getProjectHash } from '../utils/paths.js';
+
+/** Seeds the on-disk tasks file directly, creating its (now hashed) dir. */
+async function seedTasksFile(projectRoot: string, raw: string): Promise<void> {
+  const file = getCronFilePath(projectRoot);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, raw);
+}
 
 // Hook for the stale-lock race test: runs just before the implementation
 // renames a stale update lock aside, so a test can interleave a competing
@@ -50,18 +59,31 @@ describe('cronTasksFile', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-test-'));
+    // Durable tasks live under the user runtime dir, not the working tree.
+    // Redirect that base into the test temp dir so the per-project hash dir
+    // lands under tmpDir instead of the real ~/.qwen.
+    Storage.setRuntimeBaseDir(tmpDir);
   });
 
   afterEach(async () => {
     renameHook.current = null;
+    Storage.setRuntimeBaseDir(null);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   describe('getCronFilePath', () => {
-    it('returns path under .qwen/', () => {
-      expect(getCronFilePath('/project')).toBe(
-        path.join('/project', '.qwen', 'scheduled_tasks.json'),
+    it('resolves to the per-project runtime dir, not the working tree', () => {
+      const file = getCronFilePath('/project');
+      expect(file).toBe(
+        path.join(
+          Storage.getGlobalTempDir(),
+          getProjectHash('/project'),
+          'scheduled_tasks.json',
+        ),
       );
+      // Crucially, not in the project working tree.
+      expect(file.startsWith('/project')).toBe(false);
+      expect(file).not.toContain(`${path.sep}.qwen${path.sep}scheduled_tasks`);
     });
   });
 
@@ -74,31 +96,22 @@ describe('cronTasksFile', () => {
     // empty schedule: [] would let a reload reconcile every loaded job
     // away and let the next write clobber the user's recoverable file.
     it('throws for malformed JSON', async () => {
-      const dir = path.join(tmpDir, '.qwen');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, 'scheduled_tasks.json'), 'NOT JSON{{{');
+      await seedTasksFile(tmpDir, 'NOT JSON{{{');
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Malformed JSON/);
     });
 
     it('throws for non-array JSON', async () => {
-      const dir = path.join(tmpDir, '.qwen');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, 'scheduled_tasks.json'), '{"foo":1}');
+      await seedTasksFile(tmpDir, '{"foo":1}');
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/JSON array/);
     });
 
     it('filters out invalid entries', async () => {
-      const dir = path.join(tmpDir, '.qwen');
-      await fs.mkdir(dir, { recursive: true });
       const data = [
         makeTask(),
         { id: 'bad', missing: 'fields' },
         makeTask({ id: 'good2' }),
       ];
-      await fs.writeFile(
-        path.join(dir, 'scheduled_tasks.json'),
-        JSON.stringify(data),
-      );
+      await seedTasksFile(tmpDir, JSON.stringify(data));
       const result = await readCronTasks(tmpDir);
       expect(result).toHaveLength(2);
       expect(result[0]!.id).toBe('test001');
@@ -107,19 +120,14 @@ describe('cronTasksFile', () => {
 
     it('reads valid tasks', async () => {
       const task = makeTask();
-      const dir = path.join(tmpDir, '.qwen');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(
-        path.join(dir, 'scheduled_tasks.json'),
-        JSON.stringify([task]),
-      );
+      await seedTasksFile(tmpDir, JSON.stringify([task]));
       const result = await readCronTasks(tmpDir);
       expect(result).toEqual([task]);
     });
   });
 
   describe('writeCronTasks', () => {
-    it('creates .qwen/ directory if missing', async () => {
+    it('creates the tasks dir if missing', async () => {
       await writeCronTasks(tmpDir, [makeTask()]);
       const content = await fs.readFile(getCronFilePath(tmpDir), 'utf-8');
       expect(JSON.parse(content)).toHaveLength(1);
@@ -133,10 +141,11 @@ describe('cronTasksFile', () => {
     });
 
     it('replaces a symlink at the tasks path instead of writing through it', async () => {
-      // The tasks file is project-controlled, so a cloned/edited repo could
-      // pre-place it as a symlink to a file outside the repo. The write must
-      // replace the link, not clobber its target.
-      await fs.mkdir(path.join(tmpDir, '.qwen'), { recursive: true });
+      // A pre-placed symlink at the tasks path (e.g. a tampered runtime dir)
+      // must be replaced, not written through to clobber its target.
+      await fs.mkdir(path.dirname(getCronFilePath(tmpDir)), {
+        recursive: true,
+      });
       const outside = path.join(tmpDir, 'outside.txt');
       await fs.writeFile(outside, 'PROTECTED');
       await fs.symlink(outside, getCronFilePath(tmpDir));
@@ -197,9 +206,11 @@ describe('cronTasksFile', () => {
     });
 
     it('leaves no trace when nothing matches', async () => {
-      // A miss must not mkdir .qwen/ or touch a lock file.
+      // A miss must not create the tasks dir or touch a lock file.
       expect(await removeCronTasks(tmpDir, ['ghost'])).toBe(0);
-      await expect(fs.stat(path.join(tmpDir, '.qwen'))).rejects.toThrow();
+      await expect(
+        fs.stat(path.dirname(getCronFilePath(tmpDir))),
+      ).rejects.toThrow();
     });
   });
 

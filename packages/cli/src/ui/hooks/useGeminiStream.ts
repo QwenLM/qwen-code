@@ -2557,19 +2557,17 @@ export const useGeminiStream = (
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
 
-    // Enable durable (file-backed) cron only in a trusted folder:
-    // .qwen/scheduled_tasks.json is project-controlled, and a watcher
-    // reload turns it into a live prompt-injection channel. Gate it the
-    // same way project hooks are gated (Config.getProjectHooks). Session-
-    // only loops created in-session still run via start() below.
-    if (config.isTrustedFolder()) {
-      // Missed one-shots arrive as late fires through the start() callback.
-      void scheduler.enableDurable(cronSessionIdRef.current).catch((err) => {
-        debugLogger.warn(
-          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
-        );
-      });
-    }
+    // Enable durable (file-backed) cron support (loads tasks from the
+    // user's per-project runtime dir, acquires the lock). The tasks file
+    // lives under ~/.qwen, not the working tree, so it's user-owned rather
+    // than project-controlled — no folder-trust gate needed; the user's
+    // own loops run regardless of how the folder is trusted.
+    // Missed one-shots arrive as late fires through the start() callback.
+    void scheduler.enableDurable(cronSessionIdRef.current).catch((err) => {
+      debugLogger.warn(
+        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+      );
+    });
 
     scheduler.start((job: { prompt: string; missed?: boolean }) => {
       const label = job.prompt.slice(0, 40);
