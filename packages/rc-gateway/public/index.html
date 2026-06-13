@@ -187,6 +187,10 @@
         </select>
         <button id="search-btn">Search</button>
       </div>
+      <div>
+        <label>since <input id="search-since" type="datetime-local" /></label>
+        <label>until <input id="search-until" type="datetime-local" /></label>
+      </div>
       <div id="search-results">(not searched)</div>
     </section>
     <section id="share-create">
@@ -1122,6 +1126,15 @@
         out.textContent = 'searching…';
         try {
           const params = new URLSearchParams({ q, kind, limit: '50' });
+          // Optional time-range bounds (cycle 87, surfaces the cycle-79 backend
+          // ?since/?until). A datetime-local value is tz-less local time; resolve
+          // it against the CLIENT's tz and send unambiguous UTC ISO so a phone in
+          // another tz than the workstation filters by the instant the user meant
+          // (raw send would have the server's Date.parse assume its own tz).
+          const since = $('search-since').value;
+          const until = $('search-until').value;
+          if (since) params.set('since', new Date(since).toISOString());
+          if (until) params.set('until', new Date(until).toISOString());
           const res = await fetch('/rc/search?' + params.toString(), {
             headers: { Authorization: 'Bearer ' + token() },
           });
