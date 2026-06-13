@@ -695,9 +695,11 @@ export function App({
       opts?: { optimisticUserMessage?: boolean; retry?: boolean },
     ) => {
       clearFollowup();
-      if (!opts?.retry) {
+      const isUserPrompt = !text.trimStart().startsWith('/');
+      if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
+        retriedTurnErrorIdRef.current = null;
       }
       setShowRetryHint(false);
       return sessionActions.sendPrompt(text, {
@@ -712,6 +714,8 @@ export function App({
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const retryableTurnErrorIdRef = useRef<string | null>(null);
+  const retriedTurnErrorIdRef = useRef<string | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
@@ -1117,6 +1121,7 @@ export function App({
 
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage) => {
+      const previousLanguage = selectedLanguage;
       const command = `/language ui ${nextLanguage}`;
       handleLanguageChange(nextLanguage);
       const refreshSettings = () => {
@@ -1130,6 +1135,7 @@ export function App({
       sendPrompt(command)
         .then(() => Promise.all([refreshSettings()]))
         .catch((error: unknown) => {
+          handleLanguageChange(previousLanguage);
           reportError(error, 'Failed to sync /language command');
         });
     },
@@ -1139,6 +1145,7 @@ export function App({
       reloadWorkspaceSettings,
       reportError,
       sendPrompt,
+      selectedLanguage,
       sessionActions,
     ],
   );
@@ -1222,16 +1229,21 @@ export function App({
   }, [streamingState]);
 
   useEffect(() => {
-    let hasTurnError = false;
+    let retryableTurnErrorId: string | null = null;
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i];
       if (block?.kind === 'user') break;
       if (block?.kind === 'error' && block.source === 'turn_error') {
-        hasTurnError = true;
+        retryableTurnErrorId = block.id;
         break;
       }
+      if (block?.kind !== 'debug') break;
     }
-    setShowRetryHint(hasTurnError);
+    retryableTurnErrorIdRef.current = retryableTurnErrorId;
+    setShowRetryHint(
+      retryableTurnErrorId !== null &&
+        retryableTurnErrorId !== retriedTurnErrorIdRef.current,
+    );
   }, [blocks]);
 
   useEffect(() => {
@@ -2175,8 +2187,10 @@ export function App({
     if (
       showRetryHintRef.current &&
       streamingStateRef.current === 'idle' &&
+      retryableTurnErrorIdRef.current &&
       lastSubmittedPromptRef.current
     ) {
+      retriedTurnErrorIdRef.current = retryableTurnErrorIdRef.current;
       setShowRetryHint(false);
       sendPrompt(
         lastSubmittedPromptRef.current,

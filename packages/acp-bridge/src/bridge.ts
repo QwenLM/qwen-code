@@ -356,13 +356,6 @@ interface SessionEntry {
    * own per-client eviction.
    */
   clientLastSeenAt: Map<string, number>;
-  /**
-   * Text of the most recent user prompt for this session. Captured on
-   * every non-retry `sendPrompt` so the web-shell retry path can
-   * re-submit the same text. Dropped implicitly when the session entry
-   * is removed from `byId`.
-   */
-  lastPromptText?: string;
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -2737,30 +2730,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // for now the common text path is the immediate fix.
                   //
                   // Retry: skip echo — the original user_message_chunk is already
-                  // in the transcript from the first attempt. Also save the prompt
-                  // text so the daemon's retry endpoint can re-send without
-                  // re-reading from the session history.
+                  // in the transcript from the first attempt.
                   entry.cancelBroadcast = false;
                   const isRetry =
                     (req as unknown as { retry?: boolean }).retry === true;
                   if (!isRetry) {
-                    const firstTextBlock = normalized.prompt?.find(
-                      (b: unknown) =>
-                        typeof b === 'object' &&
-                        b !== null &&
-                        (b as { type?: string }).type === 'text',
-                    );
-                    if (
-                      firstTextBlock &&
-                      typeof firstTextBlock === 'object' &&
-                      'text' in firstTextBlock &&
-                      typeof (firstTextBlock as { text: unknown }).text ===
-                        'string'
-                    ) {
-                      entry.lastPromptText = (
-                        firstTextBlock as { text: string }
-                      ).text;
-                    }
                     echoPromptToSessionBus(
                       entry,
                       normalized,
@@ -3025,12 +2999,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
-    },
-
-    getSessionLastPromptText(sessionId) {
-      const entry = byId.get(sessionId);
-      if (!entry) return undefined;
-      return entry.lastPromptText;
     },
 
     respondToPermission(requestId, response, context) {

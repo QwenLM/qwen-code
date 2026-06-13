@@ -54,7 +54,7 @@ interface ToolGroupProps {
     answers?: Record<string, string>,
   ) => void;
   workspaceCwd?: string;
-  shellOutputMaxLines: number;
+  shellOutputMaxLines?: number;
 }
 
 const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;

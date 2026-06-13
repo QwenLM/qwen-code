@@ -268,14 +268,6 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Return the text of the most recent non-retry user prompt for this
-   * session. Used by the web-shell Ctrl+Y handler to re-send the same
-   * prompt text. Returns `undefined` when the session has never received
-   * a prompt or the id is unknown.
-   */
-  getSessionLastPromptText(sessionId: string): string | undefined;
-
-  /**
    * Update mutable session metadata. Currently supports `displayName` only.
    * Throws `SessionNotFoundError` for unknown ids.
    */
