@@ -60,14 +60,28 @@ export interface DaemonMessageTodoItem {
   priority?: 'high' | 'medium' | 'low';
 }
 
-export interface DaemonUserMessage {
+/**
+ * Fields shared by every history message. Kept as a base interface so a new
+ * cross-cutting field is declared once rather than on each role.
+ */
+export interface DaemonMessageMeta {
+  /**
+   * Wall-clock epoch milliseconds when the backing transcript block was first
+   * observed, populated from `serverTimestamp ?? clientReceivedAt`. Surfaced
+   * as a hover tooltip in the message list. Undefined for synthetic messages
+   * that have no backing block.
+   */
+  timestamp?: number;
+}
+
+export interface DaemonUserMessage extends DaemonMessageMeta {
   id: string;
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
 }
 
-export interface DaemonAssistantMessage {
+export interface DaemonAssistantMessage extends DaemonMessageMeta {
   id: string;
   role: 'assistant';
   content: string;
@@ -75,19 +89,19 @@ export interface DaemonAssistantMessage {
   isStreaming?: boolean;
 }
 
-export interface DaemonToolGroupMessage {
+export interface DaemonToolGroupMessage extends DaemonMessageMeta {
   id: string;
   role: 'tool_group';
   tools: DaemonMessageToolCall[];
 }
 
-export interface DaemonPlanMessage {
+export interface DaemonPlanMessage extends DaemonMessageMeta {
   id: string;
   role: 'plan';
   todos: DaemonMessageTodoItem[];
 }
 
-export interface DaemonSystemMessage {
+export interface DaemonSystemMessage extends DaemonMessageMeta {
   id: string;
   role: 'system';
   content: string;
@@ -95,7 +109,7 @@ export interface DaemonSystemMessage {
   retryable?: boolean;
 }
 
-export interface DaemonUserShellMessage {
+export interface DaemonUserShellMessage extends DaemonMessageMeta {
   id: string;
   role: 'user_shell';
   command: string;
@@ -103,7 +117,7 @@ export interface DaemonUserShellMessage {
   cwd?: string;
 }
 
-export interface DaemonBtwMessage {
+export interface DaemonBtwMessage extends DaemonMessageMeta {
   id: string;
   role: 'btw';
   question: string;
@@ -111,7 +125,7 @@ export interface DaemonBtwMessage {
   isPending: boolean;
 }
 
-export interface DaemonInsightProgressMessage {
+export interface DaemonInsightProgressMessage extends DaemonMessageMeta {
   id: string;
   role: 'insight_progress';
   stage: string;
@@ -119,13 +133,13 @@ export interface DaemonInsightProgressMessage {
   detail?: string;
 }
 
-export interface DaemonInsightReadyMessage {
+export interface DaemonInsightReadyMessage extends DaemonMessageMeta {
   id: string;
   role: 'insight_ready';
   path: string;
 }
 
-export interface DaemonInsightErrorMessage {
+export interface DaemonInsightErrorMessage extends DaemonMessageMeta {
   id: string;
   role: 'insight_error';
   error: string;

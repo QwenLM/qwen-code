@@ -1,10 +1,11 @@
-import { memo } from 'react';
+import { memo, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
 import { AssistantMessage } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
@@ -43,73 +44,83 @@ export const MessageItem = memo(function MessageItem({
   onRetryClick,
   shellOutputMaxLines,
 }: MessageItemProps) {
-  switch (message.role) {
-    case 'user':
-      return <UserMessage content={message.content} images={message.images} />;
-    case 'assistant':
-      return (
-        <AssistantMessage
-          content={message.content}
-          thinking={message.thinking}
-          isStreaming={message.isStreaming}
-        />
-      );
-    case 'tool_group':
-      return (
-        <ToolGroup
-          tools={message.tools}
-          pendingApproval={pendingApproval}
-          onConfirm={onConfirm}
-          workspaceCwd={workspaceCwd}
-          shellOutputMaxLines={shellOutputMaxLines}
-        />
-      );
-    case 'plan':
-      return <PlanMessage todos={message.todos} />;
-    case 'system':
-      return (
-        <SystemMessage
-          content={message.content}
-          variant={message.variant}
-          onShowContextDetail={onShowContextDetail}
-          isLatest={isLatest}
-          showRetryHint={showRetryHint && message.retryable === true}
-          onRetryClick={onRetryClick}
-        />
-      );
-    case 'user_shell':
-      return (
-        <UserShellMessage command={message.command} output={message.output} />
-      );
-    case 'btw':
-      return (
-        <BtwMessage
-          question={message.question}
-          answer={message.answer}
-          isPending={message.isPending}
-        />
-      );
-    case 'insight_progress':
-      return (
-        <InsightProgress
-          progress={{
-            stage: message.stage,
-            progress: message.progress,
-            detail: message.detail,
-          }}
-        />
-      );
-    case 'insight_ready':
-      return <InsightReady path={message.path} />;
-    case 'insight_error':
-      return (
-        <div style={{ color: 'var(--error-color, #e06c75)' }}>
-          {message.error}
-        </div>
-      );
-    default:
-      return null;
-  }
+  const body = ((): ReactElement | null => {
+    switch (message.role) {
+      case 'user':
+        return (
+          <UserMessage content={message.content} images={message.images} />
+        );
+      case 'assistant':
+        return (
+          <AssistantMessage
+            content={message.content}
+            thinking={message.thinking}
+            isStreaming={message.isStreaming}
+          />
+        );
+      case 'tool_group':
+        return (
+          <ToolGroup
+            tools={message.tools}
+            pendingApproval={pendingApproval}
+            onConfirm={onConfirm}
+            workspaceCwd={workspaceCwd}
+            shellOutputMaxLines={shellOutputMaxLines}
+          />
+        );
+      case 'plan':
+        return <PlanMessage todos={message.todos} />;
+      case 'system':
+        return (
+          <SystemMessage
+            content={message.content}
+            variant={message.variant}
+            onShowContextDetail={onShowContextDetail}
+            isLatest={isLatest}
+            showRetryHint={showRetryHint && message.retryable === true}
+            onRetryClick={onRetryClick}
+          />
+        );
+      case 'user_shell':
+        return (
+          <UserShellMessage command={message.command} output={message.output} />
+        );
+      case 'btw':
+        return (
+          <BtwMessage
+            question={message.question}
+            answer={message.answer}
+            isPending={message.isPending}
+          />
+        );
+      case 'insight_progress':
+        return (
+          <InsightProgress
+            progress={{
+              stage: message.stage,
+              progress: message.progress,
+              detail: message.detail,
+            }}
+          />
+        );
+      case 'insight_ready':
+        return <InsightReady path={message.path} />;
+      case 'insight_error':
+        return (
+          <div style={{ color: 'var(--error-color, #e06c75)' }}>
+            {message.error}
+          </div>
+        );
+      default:
+        return null;
+    }
+  })();
+
+  if (body === null) return null;
+
+  return (
+    <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+  );
 }, areMessageItemPropsEqual);
 
 function areMessageItemPropsEqual(
@@ -130,6 +141,7 @@ function areMessageItemPropsEqual(
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
+  if (prev.timestamp !== next.timestamp) return false;
   switch (prev.role) {
     case 'user':
       return (

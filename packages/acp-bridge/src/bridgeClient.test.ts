@@ -476,6 +476,66 @@ describe('BridgeClient — A2UI session update publishing', () => {
   });
 });
 
+describe('BridgeClient — original timestamp preservation', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function makeClientFor(sessionId: string, publish: ReturnType<typeof vi.fn>) {
+    const fakeEntry = { sessionId, events: { publish } };
+    return new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+  }
+
+  it('lifts a replayed update._meta.timestamp to the envelope serverTimestamp', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const client = makeClientFor('sess:replay', publish);
+    // A previous-day epoch — must survive to the envelope so EventBus does not
+    // overwrite it with publish-time Date.now().
+    const original = 1_700_000_000_000;
+
+    await client.sessionUpdate({
+      sessionId: 'sess:replay',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hi' },
+        _meta: { timestamp: original },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    const frame = publish.mock.calls[0][0] as {
+      _meta?: { serverTimestamp?: number };
+    };
+    expect(frame._meta?.serverTimestamp).toBe(original);
+  });
+
+  it('passes no envelope _meta for live updates without a timestamp', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const client = makeClientFor('sess:live', publish);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:live',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'yo' },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    const frame = publish.mock.calls[0][0] as {
+      _meta?: { serverTimestamp?: number };
+    };
+    // No envelope _meta → EventBus.publish applies its own Date.now() fallback.
+    expect(frame._meta).toBeUndefined();
+  });
+});
+
 /**
  * Wenshao review #4335 / 3271978365 — `requestPermission`'s pre-publish
  * `CancelSentinelCollisionError` guard prevents an orphan SSE
