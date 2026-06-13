@@ -771,7 +771,6 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
-  forkSubagentEnabled?: boolean;
   workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
@@ -1193,7 +1192,6 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly forkSubagentEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
@@ -1386,7 +1384,6 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
@@ -3736,11 +3733,6 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
-  }
-
-  isForkSubagentEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
-    return this.forkSubagentEnabled;
   }
 
   isWorkflowsEnabled(): boolean {

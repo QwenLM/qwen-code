@@ -894,8 +894,6 @@ export default {
     'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'Cannot fork before the first conversation turn.':
     'Cannot fork before the first conversation turn.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
   'The agent tool is unavailable; cannot fork.':
     'The agent tool is unavailable; cannot fork.',
   'Failed to launch fork: {{error}}': 'Failed to launch fork: {{error}}',
