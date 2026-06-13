@@ -344,7 +344,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Full expanded view
   const staticHeight = /* marginBottom */ 1;
-  const innerWidth = contentWidth;
+  const innerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
   for (const tool of inlineToolCalls) {
