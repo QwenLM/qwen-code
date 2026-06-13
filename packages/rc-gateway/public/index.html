@@ -217,6 +217,7 @@
       <strong>Fork session</strong> (full copy; requires write scope)
       <div>
         <input id="fork-id" placeholder="parent session id" />
+        <input id="fork-name" placeholder="optional name" />
         <button id="fork-btn">Fork</button>
       </div>
       <div id="fork-result"></div>
@@ -1645,6 +1646,10 @@
           return;
         }
         out.textContent = 'forking…';
+        // An optional human name (cycle 86): when set, the gateway appends a
+        // custom_title record so the fork shows this name in the picker / on
+        // resume / via /rc/sessions. Omitted when blank -> an unnamed fork.
+        const forkName = ($('fork-name').value || '').trim();
         try {
           const res = await fetch(
             '/rc/session/' + encodeURIComponent(id) + '/fork',
@@ -1654,7 +1659,11 @@
                 'Content-Type': 'application/json',
                 Authorization: 'Bearer ' + token(),
               },
-              body: JSON.stringify({ transcript: 'include' }),
+              body: JSON.stringify(
+                forkName
+                  ? { transcript: 'include', name: forkName }
+                  : { transcript: 'include' },
+              ),
             },
           );
           if (!res.ok) {

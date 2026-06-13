@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { forkRecords, serializeForked } from './forkTranscript.js';
+import {
+  forkRecords,
+  serializeForked,
+  buildForkTitleRecord,
+} from './forkTranscript.js';
 
 function sample(): Array<Record<string, unknown>> {
   return [
@@ -99,5 +103,80 @@ describe('serializeForked', () => {
       .filter((l) => l.length > 0)
       .map((l) => JSON.parse(l));
     expect(parsed).toEqual(out);
+  });
+});
+
+describe('buildForkTitleRecord', () => {
+  const opts = { uuid: 'title-uuid', timestamp: '2026-06-13T00:00:00.000Z' };
+
+  it('mirrors core renameSession shape: chained to tail, cwd/version from first', () => {
+    const forked = forkRecords(sample(), 'src', 'NEW');
+    const rec = buildForkTitleRecord(forked, 'My Fork', opts);
+    expect(rec).toEqual({
+      uuid: 'title-uuid',
+      // parentUuid = LAST forked record's uuid (u2) -> chains onto the tail.
+      parentUuid: 'u2',
+      sessionId: 'NEW',
+      timestamp: '2026-06-13T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      // cwd/version copied from the FIRST record (the fields core reads).
+      cwd: '/work/proj',
+      version: undefined,
+      systemPayload: { customTitle: 'My Fork', titleSource: 'manual' },
+    });
+  });
+
+  it('never stamps forkedFrom (synthesized, not a copied message)', () => {
+    const forked = forkRecords(sample(), 'src', 'NEW');
+    const rec = buildForkTitleRecord(forked, 'x', opts);
+    expect('forkedFrom' in rec).toBe(false);
+  });
+
+  it('copies version from the first record when present', () => {
+    const src = sample();
+    src[0]['version'] = 7;
+    const forked = forkRecords(src, 'src', 'NEW');
+    const rec = buildForkTitleRecord(forked, 'x', opts);
+    expect(rec['version']).toBe(7);
+  });
+
+  it('does not mutate the forked records it reads from', () => {
+    const forked = forkRecords(sample(), 'src', 'NEW');
+    const snapshot = JSON.stringify(forked);
+    buildForkTitleRecord(forked, 'x', opts);
+    expect(JSON.stringify(forked)).toBe(snapshot);
+  });
+
+  it('the appended title is the most-recent custom_title (wins over an inherited one)', () => {
+    // Parent already has a custom_title near the tail; forkRecords copies it
+    // verbatim, so the forked transcript inherits it. The appended record must
+    // win under readSessionTitle's most-recent-wins backwards scan.
+    const withTitle = [
+      ...sample(),
+      {
+        uuid: 'told',
+        parentUuid: 'u2',
+        sessionId: 'src',
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle: 'inherited name', titleSource: 'manual' },
+      },
+    ];
+    const forked = forkRecords(withTitle, 'src', 'NEW');
+    const rec = buildForkTitleRecord(forked, 'new name', opts);
+    // Chains onto the inherited title record (the literal last line) — faithful
+    // to core's readLastRecordUuid title->title chaining on a double-rename.
+    expect(rec['parentUuid']).toBe('told');
+
+    const body = serializeForked([...forked, rec]);
+    const titles = body
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l))
+      .filter((r) => r.subtype === 'custom_title')
+      .map((r) => r.systemPayload.customTitle);
+    // Both titles are present; the appended one is last -> wins a tail scan.
+    expect(titles).toEqual(['inherited name', 'new name']);
   });
 });

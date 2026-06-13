@@ -209,6 +209,67 @@ describe('fork route', () => {
     expect(JSON.stringify(entry)).not.toContain('hello');
   });
 
+  it('names a fork: appends a custom_title record, audits named:true not the title', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, { name: '  Refactor the auth flow  ' });
+    expect(res.status).toBe(200);
+
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    const recs = written
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l));
+    // The parent's single record plus the appended title record.
+    expect(recs).toHaveLength(2);
+    const titleRec = recs[recs.length - 1];
+    expect(titleRec.type).toBe('system');
+    expect(titleRec.subtype).toBe('custom_title');
+    // Trimmed, manual, chained onto the last copied record's uuid.
+    expect(titleRec.systemPayload).toEqual({
+      customTitle: 'Refactor the auth flow',
+      titleSource: 'manual',
+    });
+    expect(titleRec.parentUuid).toBe('p0');
+    expect(titleRec.sessionId).toBe(NEW_ID);
+    expect('forkedFrom' in titleRec).toBe(false);
+
+    // Audit: named flag only, never the title value (user content).
+    const entry = audit.calls.find((c) => c.action === 'session_forked');
+    expect(entry!.detail).toMatchObject({ copiedCount: 1, named: true });
+    expect(JSON.stringify(entry)).not.toContain('Refactor');
+  });
+
+  it('an un-named fork stays byte-identical and audits named:false', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    // Only the single copied record — no title record appended.
+    expect(written.split('\n').filter((l) => l.length > 0)).toHaveLength(1);
+    expect(written).not.toContain('custom_title');
+    const entry = audit.calls.find((c) => c.action === 'session_forked');
+    expect(entry!.detail).toMatchObject({ named: false });
+  });
+
+  it('a blank/whitespace name is treated as un-named (no title record)', async () => {
+    await writeParent();
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, { name: '   ' });
+    expect(res.status).toBe(200);
+    const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
+    expect(written).not.toContain('custom_title');
+    const entry = audit.calls.find((c) => c.action === 'session_forked');
+    expect(entry!.detail).toMatchObject({ named: false });
+  });
+
   it('502s and removes the fork file when loadSession rejects', async () => {
     await writeParent();
     const { daemon } = fakeDaemon(async () => {

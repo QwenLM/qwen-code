@@ -904,6 +904,97 @@ try {
         : bad(`fork unknown parent ${ur.status} ${JSON.stringify(ub)}`);
     }
 
+    // Named fork (cycle 86): POST {name} appends a core-faithful custom_title
+    // record. Assert against the REAL daemon that (a) the fork still restores by
+    // path (loadSession accepted the appended record — a malformed one would be
+    // a clean 502), and (b) the name surfaces via /rc/sessions' tail reader (the
+    // write-half counterpart to cycle 85's read half). Then fork the NAMED fork
+    // with a new name and assert most-recent-wins over the inherited title.
+    {
+      const { code: nc } = pairing.mint([SESSION_READ, OWNER]);
+      const nrr = await fetch(`${gw}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: nc, label: 'named-owner' }),
+      });
+      const ownerToken = (await nrr.json()).token;
+
+      const NAME = 'E2E Named Fork';
+      const nf = await fetch(`${gw}/rc/session/${parentId}/fork`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${forkToken}`,
+        },
+        body: JSON.stringify({ name: `  ${NAME}  ` }),
+      });
+      const nfb = await nf.json().catch(() => ({}));
+      let namedId;
+      if (nf.status === 200 && typeof nfb.sessionId === 'string') {
+        namedId = nfb.sessionId;
+        forkArtifacts.push(join(chatsDir, `${namedId}.jsonl`));
+        ok('named fork POST -> 200');
+      } else {
+        bad(`named fork POST ${nf.status} ${JSON.stringify(nfb)}`);
+      }
+
+      // (a) Restores by path against the real daemon.
+      if (namedId) {
+        try {
+          const summaries = await dc.listWorkspaceSessions(wsCwd);
+          summaries.some((s) => s.sessionId === namedId)
+            ? ok('named fork restored by path (in listWorkspaceSessions)')
+            : bad('named fork NOT in listWorkspaceSessions');
+        } catch (e) {
+          bad(`named fork listWorkspaceSessions threw: ${e?.message ?? e}`);
+        }
+      }
+
+      // (b) The name surfaces via /rc/sessions' tail reader (cycle 85 oracle).
+      if (namedId) {
+        const sr = await fetch(`${gw}/rc/sessions`, {
+          headers: { Authorization: `Bearer ${ownerToken}` },
+        });
+        const sb = await sr.json().catch(() => ({}));
+        const item = (Array.isArray(sb.sessions) ? sb.sessions : []).find(
+          (s) => s.sessionId === namedId,
+        );
+        sr.status === 200 && item && item.title === NAME
+          ? ok(`named fork title surfaces via /rc/sessions ("${NAME}")`)
+          : bad(`named fork title ${sr.status} item=${JSON.stringify(item)}`);
+      }
+
+      // (c) Fork the NAMED fork (now itself titled) with a different name -> the
+      //     new name wins over the inherited custom_title (most-recent-wins).
+      if (namedId) {
+        const SECOND = 'Renamed Grand Fork';
+        const gf = await fetch(`${gw}/rc/session/${namedId}/fork`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${forkToken}`,
+          },
+          body: JSON.stringify({ name: SECOND }),
+        });
+        const gfb = await gf.json().catch(() => ({}));
+        if (gf.status === 200 && typeof gfb.sessionId === 'string') {
+          forkArtifacts.push(join(chatsDir, `${gfb.sessionId}.jsonl`));
+          const sr = await fetch(`${gw}/rc/sessions`, {
+            headers: { Authorization: `Bearer ${ownerToken}` },
+          });
+          const sb = await sr.json().catch(() => ({}));
+          const item = (Array.isArray(sb.sessions) ? sb.sessions : []).find(
+            (s) => s.sessionId === gfb.sessionId,
+          );
+          item && item.title === SECOND
+            ? ok('named fork of a titled parent -> new name wins (most-recent)')
+            : bad(`grand fork title item=${JSON.stringify(item)}`);
+        } else {
+          bad(`grand fork POST ${gf.status} ${JSON.stringify(gfb)}`);
+        }
+      }
+    }
+
     // Error case: forking without a token -> 401.
     {
       const nr = await fetch(`${gw}/rc/session/${parentId}/fork`, {

@@ -48,6 +48,49 @@ export function forkRecords(
 }
 
 /**
+ * Builds a core-faithful `custom_title` system record to append to a freshly
+ * forked transcript, so a NAMED fork shows its title everywhere core does (the
+ * picker, on resume, and the gateway's `/rc/sessions` tail reader).
+ *
+ * Mirrors core `SessionService.renameSession`'s record shape EXACTLY (see
+ * `packages/core/src/services/sessionService.ts:847-857`):
+ *
+ * - `parentUuid` → the LAST forked record's uuid, so `reconstructHistory`
+ *   chains the title onto the tail (a `null` here would sever the chain and the
+ *   fork would load empty). This matches core's `readLastRecordUuid`, including
+ *   the faithful title→title chaining when the parent was itself renamed.
+ * - `cwd` / `version` → copied from the FIRST forked record (the exact fields
+ *   core copies; an absent `version` is dropped by `JSON.stringify`).
+ * - `sessionId` → taken from the forked records (already the new id).
+ * - NO `forkedFrom`: the record is synthesized at fork time, not copied from a
+ *   source message, so it carries no per-message lineage stamp (as in core).
+ *
+ * Pure: never mutates the input. The caller supplies `uuid`/`timestamp` (a
+ * fresh `randomUUID()` + ISO stamp) so the builder stays deterministic.
+ */
+export function buildForkTitleRecord(
+  forkedRecords: readonly ForkRecord[],
+  title: string,
+  opts: { uuid: string; timestamp: string },
+): ForkRecord {
+  const first = forkedRecords[0] ?? {};
+  const last = forkedRecords[forkedRecords.length - 1];
+  const lastUuid =
+    last && typeof last['uuid'] === 'string' ? (last['uuid'] as string) : null;
+  return {
+    uuid: opts.uuid,
+    parentUuid: lastUuid,
+    sessionId: first['sessionId'],
+    timestamp: opts.timestamp,
+    type: 'system',
+    subtype: 'custom_title',
+    cwd: first['cwd'],
+    version: first['version'],
+    systemPayload: { customTitle: title, titleSource: 'manual' },
+  };
+}
+
+/**
  * Serializes forked records to the exact byte shape core's `forkSession`
  * writes: one `JSON.stringify` per record joined by `\n`, plus a trailing `\n`.
  */

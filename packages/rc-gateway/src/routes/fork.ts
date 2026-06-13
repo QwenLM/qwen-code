@@ -9,7 +9,11 @@ import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
-import { forkRecords, serializeForked } from '../sessions/forkTranscript.js';
+import {
+  forkRecords,
+  serializeForked,
+  buildForkTitleRecord,
+} from '../sessions/forkTranscript.js';
 import {
   readParentRecords,
   writeFork,
@@ -76,7 +80,14 @@ export function createForkRoute(
     const body = (req.body ?? {}) as {
       transcript?: unknown;
       fromEventId?: unknown;
+      name?: unknown;
     };
+
+    // An optional human name for the fork. Trim, then cap to a sane length so a
+    // pathological client can't append a giant title record. A blank/absent
+    // name leaves the no-name fork path byte-identical to before this slice.
+    const name =
+      typeof body.name === 'string' ? body.name.trim().slice(0, 200) : '';
 
     // 1. Reject deferred fork modes explicitly (don't silently full-copy).
     if (
@@ -129,7 +140,20 @@ export function createForkRoute(
       res.status(500).json({ error: 'Fork failed', code: 'fork_failed' });
       return;
     }
-    const forked = serializeForked(forkRecords(records, parentId, newId));
+    const forkedRecords = forkRecords(records, parentId, newId);
+    // When named, append a core-faithful custom_title record (chained onto the
+    // tail) so the fork shows its name in the picker, on resume, and via
+    // /rc/sessions. Appended BEFORE writeFork → loadSession, so a malformed
+    // record falls into the existing removeFork+502 rollback (never corruption).
+    if (name) {
+      forkedRecords.push(
+        buildForkTitleRecord(forkedRecords, name, {
+          uuid: randomUUID(),
+          timestamp: now().toISOString(),
+        }),
+      );
+    }
+    const forked = serializeForked(forkedRecords);
     try {
       await writeFork(chatsDir, newId, forked);
     } catch (err) {
@@ -157,7 +181,11 @@ export function createForkRoute(
       action: 'session_forked',
       actorTokenId: req.rcClient?.id,
       target: parentId,
-      detail: { newSessionId: newId, copiedCount: records.length },
+      detail: {
+        newSessionId: newId,
+        copiedCount: records.length,
+        named: !!name,
+      },
     });
 
     res.status(200).json({
