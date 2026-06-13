@@ -16,6 +16,7 @@ import type {
   InputModalities,
   ProviderConfig,
   ProviderSetupInputs,
+  Protocol,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
@@ -153,7 +154,7 @@ export function useProviderSetupFlow(
       if (existingEnv) {
         const envKeyName =
           typeof config.envKey === 'function'
-            ? config.envKey(proto, resolved)
+            ? config.envKey(proto as Protocol, resolved)
             : config.envKey;
         prefillKey = existingEnv[envKeyName] ?? '';
       }
@@ -251,7 +252,7 @@ export function useProviderSetupFlow(
   // Shared helper: assemble ProviderSetupInputs from current form state
   const buildCurrentInputs = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => ({
-      protocol: provider?.protocolOptions ? protocol : undefined,
+      protocol: provider?.protocolOptions ? (protocol as Protocol) : undefined,
       baseUrl: baseUrl.trim(),
       apiKey: apiKey.trim(),
       modelIds: normalizeModelIds(modelIds),
@@ -410,7 +411,7 @@ export function useProviderSetupFlow(
     if (!provider) return '';
     const envKey =
       typeof provider.envKey === 'function'
-        ? provider.envKey(protocol, baseUrl.trim())
+        ? provider.envKey(protocol as Protocol, baseUrl.trim())
         : provider.envKey;
     const normalizedIds = normalizeModelIds(modelIds);
     const masked = maskApiKey(apiKey);

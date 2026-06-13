@@ -18,6 +18,7 @@ import type {
   ProviderConfig,
   BaseUrlOption,
   ModelSpec,
+  Protocol,
 } from '@qwen-code/qwen-code-core';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 import { normalizeModelIds } from './useAuth.js';
@@ -756,7 +757,7 @@ export function ProviderSetupSteps({
     case 'protocol': {
       const protocolOpts = provider.protocolOptions ?? [provider.protocol];
       const items = PROTOCOL_ITEMS.filter((p) =>
-        protocolOpts.includes(p.value as AuthType),
+        protocolOpts.includes(p.value as Protocol),
       );
       return (
         <>

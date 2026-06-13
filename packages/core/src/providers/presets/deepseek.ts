@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../../core/contentGenerator.js';
+import { Protocol } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const deepseekProvider: ProviderConfig = {
   id: 'deepseek',
   label: 'DeepSeek API Key',
   description: 'Quick setup for DeepSeek (deepseek-v4-flash, deepseek-v4-pro)',
-  protocol: AuthType.USE_OPENAI,
+  protocol: Protocol.OPENAI,
   baseUrl: 'https://api.deepseek.com',
   envKey: 'DEEPSEEK_API_KEY',
   models: [

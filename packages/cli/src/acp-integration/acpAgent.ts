@@ -72,6 +72,7 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
   ProviderSetupInputs,
+  Protocol,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -1567,7 +1568,7 @@ function readProviderSetupInputs(
   existingApiKey?: string,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
+    | Protocol
     | undefined;
   if (
     protocol &&

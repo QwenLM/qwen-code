@@ -179,9 +179,9 @@ export function resolveCliGenerationConfig(
   // The old candidate-loop code that fell through to OPENAI_MODEL is gone.
   let modelProvider: ProviderModelConfig | undefined;
   if (resolvedModel && authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
-      modelProvider = providers.find((p) => p.id === resolvedModel);
+    const providerConfig = settings.modelProviders[authType];
+    if (providerConfig && providerConfig.models) {
+      modelProvider = providerConfig.models.find((p) => p.id === resolvedModel);
     }
   }
 

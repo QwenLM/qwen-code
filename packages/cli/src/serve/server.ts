@@ -9,7 +9,7 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { ApprovalMode, Protocol } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   ALL_PROVIDERS,
@@ -1746,7 +1746,7 @@ export function createServeApp(
           knownProvider.protocolOptions && knownProvider.protocolOptions.length
             ? knownProvider.protocolOptions
             : [knownProvider.protocol];
-        if (!allowedProtocols.includes(installRequest.protocol)) {
+        if (!allowedProtocols.includes(installRequest.protocol as Protocol)) {
           res.status(400).json({
             error: `protocol must be one of: ${allowedProtocols.join(', ')}`,
             code: 'unsupported_protocol',

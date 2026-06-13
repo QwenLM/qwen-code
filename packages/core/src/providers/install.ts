@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Protocol } from '../core/contentGenerator.js';
 import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import type { ModelProvidersConfig, ProviderConfig } from '../models/types.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -47,7 +48,8 @@ function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
 ): ModelProvidersConfig {
-  const existingModels = existingModelProviders[patch.authType] ?? [];
+  const existingProvider = existingModelProviders[patch.authType];
+  const existingModels = existingProvider?.models ?? [];
 
   let updatedModels = patch.models;
   if (patch.mergeStrategy === 'append') {
@@ -69,9 +71,17 @@ function applyModelProvidersPatch(
         : [...patch.models, ...preservedModels];
   }
 
+  // Preserve the existing provider config (protocol, baseUrl, envKey) and update models
+  const updatedProvider: ProviderConfig = {
+    protocol: existingProvider?.protocol ?? Protocol.OPENAI,
+    models: updatedModels,
+    ...(existingProvider?.baseUrl ? { baseUrl: existingProvider.baseUrl } : {}),
+    ...(existingProvider?.envKey ? { envKey: existingProvider.envKey } : {}),
+  };
+
   return {
     ...existingModelProviders,
-    [patch.authType]: updatedModels,
+    [patch.authType]: updatedProvider,
   };
 }
 
@@ -186,7 +196,7 @@ export async function applyProviderInstallPlan(
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
-        updatedModelProviders[patch.authType] ?? [],
+        updatedModelProviders[patch.authType],
       );
     }
 

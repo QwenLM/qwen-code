@@ -23,14 +23,15 @@ const debugLogger = createDebugLogger('MODEL_REGISTRY');
 export { QWEN_OAUTH_MODELS } from './constants.js';
 
 /**
- * Validates if a string key is a valid AuthType enum value.
+ * Validates if a string key is a valid AuthType.
+ * Since AuthType is now a string type, any non-empty string is valid.
  * @param key - The key to validate
  * @returns The validated AuthType or undefined if invalid
  */
 function validateAuthTypeKey(key: string): AuthType | undefined {
-  // Check if the key is a valid AuthType enum value
-  if (Object.values(AuthType).includes(key as AuthType)) {
-    return key as AuthType;
+  // Any non-empty string is a valid AuthType
+  if (key && key.trim().length > 0) {
+    return key;
   }
 
   // Invalid key
@@ -76,12 +77,14 @@ export class ModelRegistry {
 
     // Register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+      for (const [rawKey, providerConfig] of Object.entries(
+        modelProvidersConfig,
+      )) {
         const authType = validateAuthTypeKey(rawKey);
 
         if (!authType) {
           debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
           );
           continue;
         }
@@ -91,7 +94,7 @@ export class ModelRegistry {
           continue;
         }
 
-        this.registerAuthTypeModels(authType, models);
+        this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }
   }
@@ -259,12 +262,14 @@ export class ModelRegistry {
 
     // Re-register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+      for (const [rawKey, providerConfig] of Object.entries(
+        modelProvidersConfig,
+      )) {
         const authType = validateAuthTypeKey(rawKey);
 
         if (!authType) {
           debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+            `Invalid authType key "${rawKey}" in modelProviders config. Skipping.`,
           );
           continue;
         }
@@ -274,7 +279,7 @@ export class ModelRegistry {
           continue;
         }
 
-        this.registerAuthTypeModels(authType, models);
+        this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }
   }
