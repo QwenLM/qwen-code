@@ -15,7 +15,7 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -208,12 +208,16 @@ function getBackupFileName(filePath: string, version: number): string {
 }
 
 function resolveBackupPath(backupFileName: string, sessionId: string): string {
-  return join(
+  const baseDir = resolve(
     Storage.getGlobalQwenDir(),
     FILE_HISTORY_DIR,
     sessionId,
-    backupFileName,
   );
+  const backupPath = resolve(baseDir, backupFileName);
+  if (!backupPath.startsWith(baseDir + sep)) {
+    throw new Error(`backupFileName escapes base directory: ${backupFileName}`);
+  }
+  return backupPath;
 }
 
 // Copy `src` to `dst`, creating the destination directory if it doesn't exist.
@@ -620,9 +624,13 @@ export class FileHistoryService {
     for (let i = 0; i < names.length; i += BATCH_SIZE) {
       const batch = names.slice(i, i + BATCH_SIZE);
       const results = await Promise.all(
-        batch.map((name) =>
-          pathExists(resolveBackupPath(name, this.sessionId)),
-        ),
+        batch.map(async (name) => {
+          try {
+            return await pathExists(resolveBackupPath(name, this.sessionId));
+          } catch {
+            return false;
+          }
+        }),
       );
       for (let j = 0; j < batch.length; j++) {
         if (!results[j]) missing.add(batch[j]);
@@ -633,12 +641,17 @@ export class FileHistoryService {
 
     // Single synchronous pass to mark failures — minimizes the mutation
     // window so concurrent makeSnapshot/trackEdit see a consistent state.
+    const affectedSnapshots = new Set<FileHistorySnapshot>();
     for (const snapshot of this.state.snapshots) {
       for (const backup of Object.values(snapshot.trackedFileBackups)) {
         if (backup.backupFileName && missing.has(backup.backupFileName)) {
           backup.failed = true;
+          affectedSnapshots.add(snapshot);
         }
       }
+    }
+    for (const snapshot of affectedSnapshots) {
+      this.recordSnapshotUpdate(snapshot);
     }
 
     debugLogger.warn(

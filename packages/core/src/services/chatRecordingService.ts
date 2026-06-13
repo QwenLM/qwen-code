@@ -539,11 +539,6 @@ export class ChatRecordingService {
   private cachedGitBranch:
     | { cwd: string; branch: string | undefined }
     | undefined;
-  private pendingFileHistorySnapshots = new Map<
-    string,
-    SerializedFileHistorySnapshot
-  >();
-  private fileHistorySnapshotFlushScheduled = false;
 
   /**
    * Approximate bytes of JSONL content appended since the last
@@ -837,7 +832,6 @@ export class ChatRecordingService {
    * teardown to ensure no records are dropped.
    */
   async flush(): Promise<void> {
-    this.flushPendingFileHistorySnapshots();
     await this.writeChain;
   }
 
@@ -1198,10 +1192,6 @@ export class ChatRecordingService {
       // post-rewind identical snapshot would be skipped and the rewound
       // session would lose all attribution state on restore.
       this.lastAttributionSnapshotJson = undefined;
-      // Pending single-snapshot updates belong to the branch that is about to
-      // be abandoned. Surviving file-history state is re-appended below.
-      this.pendingFileHistorySnapshots.clear();
-
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -1308,7 +1298,6 @@ export class ChatRecordingService {
         // best-effort
       }
     }
-    this.flushPendingFileHistorySnapshots();
     if (!this.currentCustomTitle) {
       return;
     }
@@ -1368,6 +1357,7 @@ export class ChatRecordingService {
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     let json: string | undefined;
     try {
+      this.cachedGitBranch = undefined;
       json = JSON.stringify(snapshot);
       if (json === this.lastAttributionSnapshotJson) {
         return;
@@ -1405,11 +1395,9 @@ export class ChatRecordingService {
 
   recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
     try {
-      this.pendingFileHistorySnapshots.set(
-        snapshot.promptId,
+      this.appendSerializedFileHistorySnapshotBatch([
         serializeSnapshot(snapshot),
-      );
-      this.scheduleFileHistorySnapshotFlush();
+      ]);
     } catch (error) {
       debugLogger.error('Error saving file history snapshot:', error);
     }
@@ -1419,27 +1407,10 @@ export class ChatRecordingService {
     if (snapshots.length === 0) return;
     try {
       const serialized = snapshots.map(serializeSnapshot);
-      this.flushPendingFileHistorySnapshots();
       this.appendSerializedFileHistorySnapshotBatch(serialized);
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
-  }
-
-  private scheduleFileHistorySnapshotFlush(): void {
-    if (this.fileHistorySnapshotFlushScheduled) return;
-    this.fileHistorySnapshotFlushScheduled = true;
-    queueMicrotask(() => {
-      this.fileHistorySnapshotFlushScheduled = false;
-      this.flushPendingFileHistorySnapshots();
-    });
-  }
-
-  private flushPendingFileHistorySnapshots(): void {
-    if (this.pendingFileHistorySnapshots.size === 0) return;
-    const snapshots = [...this.pendingFileHistorySnapshots.values()];
-    this.pendingFileHistorySnapshots.clear();
-    this.appendSerializedFileHistorySnapshotBatch(snapshots);
   }
 
   private appendSerializedFileHistorySnapshotBatch(

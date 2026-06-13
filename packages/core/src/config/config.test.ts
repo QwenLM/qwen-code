@@ -422,11 +422,9 @@ describe('Server Config (config.ts)', () => {
       chatRecording: true,
     });
     const recordedSnapshots: FileHistorySnapshot[] = [];
-    const recordFileHistorySnapshot = vi.fn(
-      (snapshot: FileHistorySnapshot) => {
-        recordedSnapshots.push(structuredClone(snapshot));
-      },
-    );
+    const recordFileHistorySnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+      recordedSnapshots.push(structuredClone(snapshot));
+    });
     vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
       recordFileHistorySnapshot,
     } as unknown as ReturnType<Config['getChatRecordingService']>);
@@ -721,6 +719,28 @@ describe('Server Config (config.ts)', () => {
       const newSessionId = config.startNewSession();
 
       expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+
+    it('flushes the outgoing chat recording service when switching sessions', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+      });
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService?: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = { finalize, flush };
+
+      config.startNewSession();
+
+      expect(finalize).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledTimes(1);
     });
   });
 

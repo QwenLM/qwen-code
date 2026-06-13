@@ -311,14 +311,30 @@ describe('ChatRecordingService', () => {
       });
     });
 
-    it('coalesces single-snapshot updates by prompt id before flush', async () => {
+    it('appends single-snapshot updates in order so resume can last-win', async () => {
       chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
       chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
       await chatRecordingService.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
-      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(first.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
+      expect(JSON.parse(JSON.stringify(second.systemPayload))).toEqual({
         snapshots: [
           {
             promptId: 'p1',
@@ -340,6 +356,49 @@ describe('ChatRecordingService', () => {
       });
     });
 
+    it('retains distinct prompt ids in one batch', async () => {
+      chatRecordingService.recordFileHistorySnapshotBatch([
+        oldSnapshot,
+        failedSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+          {
+            promptId: 'p2',
+            timestamp: '2026-06-13T00:02:00.000Z',
+            trackedFileBackups: {
+              'failed.txt': {
+                backupFileName: 'backup-failed-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:02:01.000Z',
+                failed: true,
+              },
+              'deleted.txt': {
+                backupFileName: null,
+                version: 2,
+                backupTime: '2026-06-13T00:02:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
     it('round-trips serialized snapshots through JSON and deserialization', () => {
       expect(
         deserializeSnapshots([
@@ -348,19 +407,20 @@ describe('ChatRecordingService', () => {
       ).toEqual([failedSnapshot]);
     });
 
-    it('drops pending single-snapshot updates before rewind re-records survivors', async () => {
+    it('re-records surviving snapshots after rewind on the active branch', async () => {
       chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
-      chatRecordingService.rewindRecording(
-        0,
-        { truncatedCount: 1 },
-        [oldSnapshot],
-      );
+      chatRecordingService.rewindRecording(0, { truncatedCount: 1 }, [
+        oldSnapshot,
+      ]);
       await chatRecordingService.flush();
 
-      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
-      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      const staleSnapshot = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
       const snapshots = vi.mocked(jsonl.writeLine).mock
-        .calls[1][1] as ChatRecord;
+        .calls[2][1] as ChatRecord;
+      expect(staleSnapshot.subtype).toBe('file_history_snapshot');
       expect(rewind.subtype).toBe('rewind');
       expect(JSON.parse(JSON.stringify(snapshots.systemPayload))).toEqual({
         snapshots: [
@@ -830,6 +890,27 @@ describe('ChatRecordingService', () => {
       });
       await chatRecordingService.flush();
       expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+    });
+
+    it('refreshes the cached git branch at the attribution turn boundary', async () => {
+      vi.mocked(execSync)
+        .mockReturnValueOnce('main\n')
+        .mockReturnValueOnce('feature\n');
+
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      await chatRecordingService.flush();
+
+      const userRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const attributionRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(userRecord.gitBranch).toBe('main');
+      expect(attributionRecord.gitBranch).toBe('feature');
     });
 
     // Sessions that touch many files emit a non-retry turn snapshot

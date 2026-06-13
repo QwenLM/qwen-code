@@ -644,6 +644,69 @@ describe('FileHistoryService', () => {
       // Path outside cwd should be preserved as-is.
       expect(snapshots[0].trackedFileBackups[externalPath]).toBeDefined();
     });
+
+    it('records failed markers when restored backup files are missing', async () => {
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
+      const fresh = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'deadbeefcafebabe@v1',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:00.000Z'),
+            },
+          },
+          timestamp: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      ]);
+
+      await fresh.validateRestoredSnapshots();
+
+      const backup = fresh.getSnapshots()[0]!.trackedFileBackups['a.txt']!;
+      expect(backup.failed).toBe(true);
+      expect(recordSnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0]!.trackedFileBackups['a.txt']?.failed).toBe(
+        true,
+      );
+    });
+
+    it('does not restore backup files that escape the session directory', async () => {
+      const fresh = new FileHistoryService('test-session', true, projectDir);
+      const victim = join(projectDir, 'victim.txt');
+      await writeFile(victim, 'current');
+      await writeFile(join(storageDir, 'outside.txt'), 'outside');
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            'victim.txt': {
+              backupFileName: '../../outside.txt',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:00.000Z'),
+            },
+          },
+          timestamp: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      ]);
+
+      const result = await fresh.rewind('p1');
+
+      expect(result.filesChanged).toEqual([]);
+      expect(result.filesFailed).toContain(victim);
+      expect(await readFile(victim, 'utf-8')).toBe('current');
+    });
   });
 
   describe('snapshot eviction', () => {

@@ -2239,11 +2239,15 @@ export class Config {
     sessionData?: ResumedSessionData,
   ): string {
     // Finalize the outgoing session before switching.
+    const outgoingChatRecordingService = this.chatRecordingService;
     try {
-      this.chatRecordingService?.finalize();
+      outgoingChatRecordingService?.finalize();
     } catch {
       // Best-effort — don't block session switch
     }
+    void outgoingChatRecordingService?.flush().catch(() => {
+      // Best-effort — don't block session switch
+    });
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
