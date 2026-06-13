@@ -1018,7 +1018,7 @@ export class AcpDispatcher {
           await this.bridge.setSessionApprovalMode(
             sessionId,
             modeId as ApprovalMode,
-            {},
+            { persist: false },
             ctx,
           );
           this.replySession(conn, sessionId, id, {});
