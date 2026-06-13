@@ -88,6 +88,12 @@ export interface GatewayApp {
   notifier?: PushNotifier;
   /** The gateway's audit log — shared with the policy enforcer at boot. */
   audit: AuditRecorder;
+  /**
+   * The owner-event bus backing GET /rc/events. Exposed so the boot wiring
+   * (cli.ts) can publish gateway-originated frames — e.g. the idle-suggestions
+   * handler emitting `idle_suggestions` when a session's active prompt finishes.
+   */
+  ownerEvents: OwnerEventBus;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -335,5 +341,5 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  return { app, notifier, audit };
+  return { app, notifier, audit, ownerEvents };
 }

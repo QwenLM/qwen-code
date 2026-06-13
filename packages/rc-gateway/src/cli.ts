@@ -26,6 +26,14 @@ import {
 import { createGatewayApp } from './server.js';
 import { SessionEventPump } from './webpush/pump.js';
 import {
+  resolveSuggestConfig,
+  createChatTransport,
+} from './idle/chatTransport.js';
+import {
+  resolveIdleEnabled,
+  createIdleSuggestionHandler,
+} from './idle/idleSuggestions.js';
+import {
   loadLayeredPolicy,
   lintPolicyFile,
   formatPolicyLint,
@@ -93,7 +101,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // eslint-disable-next-line no-console
       (msg) => console.warn(msg),
     );
-  const { app, notifier, audit } = createGatewayApp({
+  const { app, notifier, audit, ownerEvents } = createGatewayApp({
     daemon: handle.daemon,
     store,
     pairing,
@@ -249,11 +257,43 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
   });
 
+  // Idle suggestions (proposal `add-idle-suggestions`, slice 2): when explicitly
+  // enabled AND a coherent model endpoint resolves, build the gateway-own handler
+  // that fires on a session's active-prompt true→false edge. OFF by default even
+  // when model creds are present (resolveIdleEnabled gate) so a workstation never
+  // starts shipping transcript content to a model without the operator opting in;
+  // no coherent (key,host) → inert. The handler never touches the daemon session
+  // (option B) and degrades to silence on any failure.
+  let onSessionIdle:
+    | ((sessionId: string, workspaceCwd: string) => void)
+    | undefined;
+  if (resolveIdleEnabled()) {
+    const suggestCfg = resolveSuggestConfig();
+    if (suggestCfg) {
+      onSessionIdle = createIdleSuggestionHandler({
+        chat: createChatTransport(suggestCfg),
+        bus: ownerEvents,
+        audit,
+      });
+      // eslint-disable-next-line no-console
+      console.log(`idle suggestions: enabled (model ${suggestCfg.model})`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'idle suggestions: requested (QWEN_RC_IDLE_SUGGESTIONS) but no coherent ' +
+          'model endpoint resolved — staying inert',
+      );
+    }
+  }
+
   // Hold the gateway's own daemon subscriptions so push fires with no browser
   // open. Best-effort: start() always resolves, even if the daemon is unhappy.
   let pump: SessionEventPump | undefined;
   if (notifier) {
-    pump = new SessionEventPump(handle.daemon, notifier, { enforcer });
+    pump = new SessionEventPump(handle.daemon, notifier, {
+      enforcer,
+      ...(onSessionIdle ? { onSessionIdle } : {}),
+    });
     await pump.start();
     // eslint-disable-next-line no-console
     console.log('push pump: started');
