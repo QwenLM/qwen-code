@@ -1395,6 +1395,12 @@ export function createServeApp(
       // Surface the bound workspace so clients can detect mismatch
       // pre-flight and omit `cwd` on `POST /session`.
       workspaceCwd: boundWorkspace,
+      // Advertise supported transport families so SDK clients can
+      // auto-negotiate the best available transport via
+      // `negotiateTransport()`. REST is always available; future PRs
+      // will add 'acp-http' / 'acp-ws' entries when the corresponding
+      // routes are wired.
+      transports: ['rest'],
       // Active mediation policy under the `policy` namespace.
       policy: { permission: bridge.permissionPolicy },
       limits: {
