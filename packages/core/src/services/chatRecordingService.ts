@@ -536,6 +536,14 @@ export class ChatRecordingService {
    * hydrate.
    */
   private lastAttributionSnapshotJson: string | undefined;
+  private cachedGitBranch:
+    | { cwd: string; branch: string | undefined }
+    | undefined;
+  private pendingFileHistorySnapshots = new Map<
+    string,
+    SerializedFileHistorySnapshot
+  >();
+  private fileHistorySnapshotFlushScheduled = false;
 
   /**
    * Approximate bytes of JSONL content appended since the last
@@ -668,16 +676,24 @@ export class ChatRecordingService {
   private createBaseRecord(
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
+    const cwd = this.config.getProjectRoot();
     return {
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
       sessionId: this.getSessionId(),
       timestamp: new Date().toISOString(),
       type,
-      cwd: this.config.getProjectRoot(),
+      cwd,
       version: this.config.getCliVersion() || 'unknown',
-      gitBranch: getGitBranch(this.config.getProjectRoot()),
+      gitBranch: this.getCachedGitBranch(cwd),
     };
+  }
+
+  private getCachedGitBranch(cwd: string): string | undefined {
+    if (!this.cachedGitBranch || this.cachedGitBranch.cwd !== cwd) {
+      this.cachedGitBranch = { cwd, branch: getGitBranch(cwd) };
+    }
+    return this.cachedGitBranch.branch;
   }
 
   /**
@@ -821,6 +837,7 @@ export class ChatRecordingService {
    * teardown to ensure no records are dropped.
    */
   async flush(): Promise<void> {
+    this.flushPendingFileHistorySnapshots();
     await this.writeChain;
   }
 
@@ -1181,6 +1198,9 @@ export class ChatRecordingService {
       // post-rewind identical snapshot would be skipped and the rewound
       // session would lose all attribution state on restore.
       this.lastAttributionSnapshotJson = undefined;
+      // Pending single-snapshot updates belong to the branch that is about to
+      // be abandoned. Surviving file-history state is re-appended below.
+      this.pendingFileHistorySnapshots.clear();
 
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1288,6 +1308,7 @@ export class ChatRecordingService {
         // best-effort
       }
     }
+    this.flushPendingFileHistorySnapshots();
     if (!this.currentCustomTitle) {
       return;
     }
@@ -1383,17 +1404,54 @@ export class ChatRecordingService {
   }
 
   recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
-    this.recordFileHistorySnapshotBatch([snapshot]);
+    try {
+      this.pendingFileHistorySnapshots.set(
+        snapshot.promptId,
+        serializeSnapshot(snapshot),
+      );
+      this.scheduleFileHistorySnapshotFlush();
+    } catch (error) {
+      debugLogger.error('Error saving file history snapshot:', error);
+    }
   }
 
   recordFileHistorySnapshotBatch(snapshots: FileHistorySnapshot[]): void {
+    if (snapshots.length === 0) return;
+    try {
+      const serialized = snapshots.map(serializeSnapshot);
+      this.flushPendingFileHistorySnapshots();
+      this.appendSerializedFileHistorySnapshotBatch(serialized);
+    } catch (error) {
+      debugLogger.error('Error saving file history snapshot batch:', error);
+    }
+  }
+
+  private scheduleFileHistorySnapshotFlush(): void {
+    if (this.fileHistorySnapshotFlushScheduled) return;
+    this.fileHistorySnapshotFlushScheduled = true;
+    queueMicrotask(() => {
+      this.fileHistorySnapshotFlushScheduled = false;
+      this.flushPendingFileHistorySnapshots();
+    });
+  }
+
+  private flushPendingFileHistorySnapshots(): void {
+    if (this.pendingFileHistorySnapshots.size === 0) return;
+    const snapshots = [...this.pendingFileHistorySnapshots.values()];
+    this.pendingFileHistorySnapshots.clear();
+    this.appendSerializedFileHistorySnapshotBatch(snapshots);
+  }
+
+  private appendSerializedFileHistorySnapshotBatch(
+    snapshots: SerializedFileHistorySnapshot[],
+  ): void {
     if (snapshots.length === 0) return;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'file_history_snapshot',
-        systemPayload: { snapshots: snapshots.map(serializeSnapshot) },
+        systemPayload: { snapshots },
       };
       this.appendRecord(record);
     } catch (error) {

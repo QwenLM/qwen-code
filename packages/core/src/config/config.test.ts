@@ -56,6 +56,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -420,7 +421,12 @@ describe('Server Config (config.ts)', () => {
       fileCheckpointingEnabled: true,
       chatRecording: true,
     });
-    const recordFileHistorySnapshot = vi.fn();
+    const recordedSnapshots: FileHistorySnapshot[] = [];
+    const recordFileHistorySnapshot = vi.fn(
+      (snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      },
+    );
     vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
       recordFileHistorySnapshot,
     } as unknown as ReturnType<Config['getChatRecordingService']>);
@@ -436,9 +442,8 @@ describe('Server Config (config.ts)', () => {
       await fileHistoryService.makeSnapshot('p1');
       await fileHistoryService.trackEdit(trackedFile);
 
-      const snapshot = fileHistoryService.getSnapshots()[0];
-      expect(recordFileHistorySnapshot).toHaveBeenCalledWith(snapshot);
-      expect(snapshot.trackedFileBackups['a.txt']).toEqual(
+      expect(recordFileHistorySnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0].trackedFileBackups['a.txt']).toEqual(
         expect.objectContaining({
           backupFileName: expect.any(String),
           version: 1,

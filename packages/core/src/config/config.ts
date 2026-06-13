@@ -3819,18 +3819,20 @@ export class Config {
 
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
-      this.fileHistoryService = new FileHistoryService(
+      const service = new FileHistoryService(
         this.sessionId,
         this.fileCheckpointingEnabled,
         this.cwd,
         (snapshot) => {
+          if (this.fileHistoryService !== service) return;
           this.getChatRecordingService()?.recordFileHistorySnapshot(snapshot);
         },
       );
+      this.fileHistoryService = service;
       const snapshots = this.sessionData?.fileHistorySnapshots;
-      if (snapshots?.length && this.fileHistoryService.isEnabled()) {
-        this.fileHistoryService.restoreFromSnapshots(snapshots);
-        void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
+      if (snapshots?.length && service.isEnabled()) {
+        service.restoreFromSnapshots(snapshots);
+        void service.validateRestoredSnapshots().catch((e) => {
           this.debugLogger.error(
             `FileHistory: validateRestoredSnapshots failed: ${e}`,
           );

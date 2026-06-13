@@ -18,7 +18,11 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
-import type { FileHistorySnapshot } from './fileHistoryService.js';
+import {
+  deserializeSnapshots,
+  serializeSnapshot,
+  type FileHistorySnapshot,
+} from './fileHistoryService.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -220,6 +224,23 @@ describe('ChatRecordingService', () => {
         },
       },
     };
+    const failedSnapshot: FileHistorySnapshot = {
+      promptId: 'p2',
+      timestamp: new Date('2026-06-13T00:02:00.000Z'),
+      trackedFileBackups: {
+        'failed.txt': {
+          backupFileName: 'backup-failed-v1',
+          version: 1,
+          backupTime: new Date('2026-06-13T00:02:01.000Z'),
+          failed: true,
+        },
+        'deleted.txt': {
+          backupFileName: null,
+          version: 2,
+          backupTime: new Date('2026-06-13T00:02:02.000Z'),
+        },
+      },
+    };
 
     it('writes a system record with the serialized snapshot payload', async () => {
       chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
@@ -283,6 +304,74 @@ describe('ChatRecordingService', () => {
                 backupFileName: null,
                 version: 1,
                 backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('coalesces single-snapshot updates by prompt id before flush', async () => {
+      chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:01:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v2',
+                version: 2,
+                backupTime: '2026-06-13T00:01:01.000Z',
+              },
+              'b.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('round-trips serialized snapshots through JSON and deserialization', () => {
+      expect(
+        deserializeSnapshots([
+          JSON.parse(JSON.stringify(serializeSnapshot(failedSnapshot))),
+        ]),
+      ).toEqual([failedSnapshot]);
+    });
+
+    it('drops pending single-snapshot updates before rewind re-records survivors', async () => {
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      chatRecordingService.rewindRecording(
+        0,
+        { truncatedCount: 1 },
+        [oldSnapshot],
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const snapshots = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(rewind.subtype).toBe('rewind');
+      expect(JSON.parse(JSON.stringify(snapshots.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
               },
             },
           },

@@ -681,6 +681,10 @@ export class FileHistoryService {
 
     // Re-check after async backup — concurrent calls write the same
     // deterministic path, so the second overwrites the first harmlessly.
+    if (!this.state.snapshots.includes(mostRecent)) {
+      return;
+    }
+
     // Allow overwriting a `failed` entry so the heal path actually
     // records the fresh backup (otherwise we'd leave the failed marker
     // in place even though we successfully captured the file).
@@ -695,6 +699,10 @@ export class FileHistoryService {
     }
   }
 
+  /**
+   * Creates the next turn snapshot. Callers that need session persistence must
+   * record `getSnapshots().at(-1)` after this resolves.
+   */
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
 

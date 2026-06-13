@@ -30,7 +30,10 @@ vi.mock('../utils/debugLogger.js', () => ({
   }),
 }));
 
-import { FileHistoryService } from './fileHistoryService.js';
+import {
+  FileHistoryService,
+  type FileHistorySnapshot,
+} from './fileHistoryService.js';
 
 describe('FileHistoryService', () => {
   let projectDir: string;
@@ -63,7 +66,10 @@ describe('FileHistoryService', () => {
 
   describe('trackEdit', () => {
     it('records the updated latest snapshot after tracking a file', async () => {
-      const recordSnapshot = vi.fn();
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
       const recordingService = new FileHistoryService(
         'test-session',
         true,
@@ -77,7 +83,7 @@ describe('FileHistoryService', () => {
       await recordingService.trackEdit(file);
 
       expect(recordSnapshot).toHaveBeenCalledTimes(1);
-      const recorded = recordSnapshot.mock.calls[0][0];
+      const recorded = recordedSnapshots[0];
       expect(recorded.promptId).toBe('p1');
       expect(recorded.trackedFileBackups['a.txt']).toEqual(
         expect.objectContaining({
@@ -106,7 +112,10 @@ describe('FileHistoryService', () => {
     });
 
     it('records again when a second file is tracked in the same snapshot', async () => {
-      const recordSnapshot = vi.fn();
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
       const recordingService = new FileHistoryService(
         'test-session',
         true,
@@ -123,7 +132,7 @@ describe('FileHistoryService', () => {
       await recordingService.trackEdit(secondFile);
 
       expect(recordSnapshot).toHaveBeenCalledTimes(2);
-      const recorded = recordSnapshot.mock.calls[1][0];
+      const recorded = recordedSnapshots[1];
       expect(recorded.trackedFileBackups['a.txt']).toEqual(
         expect.objectContaining({
           backupFileName: expect.any(String),
@@ -233,7 +242,10 @@ describe('FileHistoryService', () => {
     // the failed flag stays sticky until the file content changes,
     // permanently poisoning rewind for that file.
     it('heals a failed entry on the next trackEdit attempt', async () => {
-      const recordSnapshot = vi.fn();
+      const recordedSnapshots: FileHistorySnapshot[] = [];
+      const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+        recordedSnapshots.push(structuredClone(snapshot));
+      });
       service = new FileHistoryService(
         'test-session',
         true,
@@ -270,7 +282,7 @@ describe('FileHistoryService', () => {
       expect(p2Backup.failed).toBeFalsy();
       expect(p2Backup.backupFileName).not.toBeNull();
       expect(recordSnapshot).toHaveBeenCalledTimes(2);
-      expect(recordSnapshot.mock.calls[1][0]).toEqual(
+      expect(recordedSnapshots[1]).toEqual(
         expect.objectContaining({
           promptId: 'p2',
           trackedFileBackups: expect.objectContaining({
