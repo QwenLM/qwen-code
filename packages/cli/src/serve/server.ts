@@ -2433,18 +2433,6 @@ export function createServeApp(
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
-      if (displayName !== undefined) {
-        try {
-          await new SessionService(boundWorkspace).renameSession(
-            sessionId,
-            displayName,
-          );
-        } catch {
-          // Best-effort: session file may not exist yet (fresh session
-          // with no turns written). The in-memory update still applies
-          // for the lifetime of this daemon process.
-        }
-      }
       res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {
