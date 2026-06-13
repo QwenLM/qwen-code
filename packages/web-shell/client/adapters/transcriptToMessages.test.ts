@@ -1875,6 +1875,31 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Connection lost',
         variant: 'error',
+        retryable: false,
+      },
+    ]);
+  });
+
+  it('marks turn_error blocks as retryable system errors', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        source: 'turn_error' as const,
+        text: 'Request failed',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Request failed',
+        variant: 'error',
+        retryable: true,
       },
     ]);
   });

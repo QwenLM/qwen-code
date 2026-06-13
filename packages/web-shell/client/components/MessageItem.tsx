@@ -27,6 +27,9 @@ interface MessageItemProps {
   onShowContextDetail?: () => void;
   workspaceCwd?: string;
   isLatest?: boolean;
+  showRetryHint?: boolean;
+  onRetryClick?: () => void;
+  shellOutputMaxLines: number;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -36,6 +39,9 @@ export const MessageItem = memo(function MessageItem({
   onShowContextDetail,
   workspaceCwd,
   isLatest = false,
+  showRetryHint = false,
+  onRetryClick,
+  shellOutputMaxLines,
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
@@ -55,6 +61,7 @@ export const MessageItem = memo(function MessageItem({
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
+          shellOutputMaxLines={shellOutputMaxLines}
         />
       );
     case 'plan':
@@ -66,6 +73,8 @@ export const MessageItem = memo(function MessageItem({
           variant={message.variant}
           onShowContextDetail={onShowContextDetail}
           isLatest={isLatest}
+          showRetryHint={showRetryHint && message.retryable === true}
+          onRetryClick={onRetryClick}
         />
       );
     case 'user_shell':
@@ -112,6 +121,9 @@ function areMessageItemPropsEqual(
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
+  if (prev.showRetryHint !== next.showRetryHint) return false;
+  if (prev.onRetryClick !== next.onRetryClick) return false;
+  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
@@ -136,7 +148,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'system' &&
         prev.content === next.content &&
-        prev.variant === next.variant
+        prev.variant === next.variant &&
+        prev.retryable === next.retryable
       );
     case 'user_shell':
       return (

@@ -92,6 +92,7 @@ export interface DaemonSystemMessage {
   role: 'system';
   content: string;
   variant: 'info' | 'error' | 'warning';
+  retryable?: boolean;
 }
 
 export interface DaemonUserShellMessage {

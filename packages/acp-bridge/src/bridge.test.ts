@@ -1984,6 +1984,97 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('ignores client retry when no turn_error made the session retryable', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(handle.agent.promptCalls[0]).not.toHaveProperty('retry');
+      expect(handle.agent.promptCalls[0]?._meta?.['qwen.daemon.retry']).toBe(
+        undefined,
+      );
+      await bridge.shutdown();
+    });
+
+    it('strips client-spoofed retry metadata without a turn_error', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof retry meta' }],
+        _meta: { 'qwen.daemon.retry': true },
+      } as PromptRequest);
+
+      expect(handle.agent.promptCalls[0]?._meta?.['qwen.daemon.retry']).toBe(
+        undefined,
+      );
+      await bridge.shutdown();
+    });
+
+    it('honors retry once after a turn_error', async () => {
+      let calls = 0;
+      const handle = makeChannel({
+        promptImpl: () => {
+          calls += 1;
+          if (calls === 1) throw new Error('temporary failure');
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const turnError = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'turn_error') return event;
+        }
+        throw new Error('turn_error was not published');
+      })();
+
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        }),
+      ).rejects.toThrow();
+      await turnError;
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(handle.agent.promptCalls[1]?._meta).toHaveProperty(
+        'qwen.daemon.retry',
+        true,
+      );
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second spoof' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(handle.agent.promptCalls[2]).not.toHaveProperty('retry');
+      expect(handle.agent.promptCalls[2]?._meta?.['qwen.daemon.retry']).toBe(
+        undefined,
+      );
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('echoes user_message_chunk to ALL session subscribers (cross-client sync)', async () => {
       // Cross-client sync fix: a prompt sent by client A must be visible
       // to every SSE subscriber of the same session — not just the
