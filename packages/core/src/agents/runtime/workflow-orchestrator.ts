@@ -391,17 +391,52 @@ async function runOverridePath(
     };
   }
 
+  // R3 review (wenshao T1 [Critical] + H1): schema mode used to (a)
+  // inherit the resolved agentType's `tools` allowlist verbatim — so
+  // `structured_output` was present in the per-call ToolRegistry but
+  // filtered OUT by prepareTools when the agentType allowlist didn't
+  // include it, producing the silent "after 2 nudges" dead-end with no
+  // hint that the tool was invisible; and (b) replace the resolved
+  // agentType's systemPrompt outright with WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
+  // silently dropping the agentType's persona (e.g. Explore's
+  // read-only / be-fast instructions). Upstream's contract is to APPEND
+  // the StructuredOutput instruction block to the resolved persona, so
+  // `agent('review X', {agentType:'code-reviewer', schema:S})` keeps the
+  // code-reviewer persona AND knows to call structured_output. Replace
+  // only on the ephemeral-default no-agentType path, where the persona
+  // IS WORKFLOW_SUBAGENT_SYSTEM_PROMPT and the schema variant is its
+  // strict superset (avoids two near-identical prompt blocks).
+  let schemaSystemPrompt: string | undefined;
+  if (opts.schema !== undefined) {
+    schemaSystemPrompt =
+      opts.agentType !== undefined && baseConfig.systemPrompt
+        ? `${baseConfig.systemPrompt}\n\n${WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA}`
+        : WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA;
+  }
+  // Tools allowlist: when schema mode runs over an agentType with a
+  // restricted allowlist (no '*'), ensure structured_output is part of
+  // the allowed set so prepareTools doesn't filter it out. The case
+  // where baseConfig.tools is undefined / empty is already covered by
+  // convertToRuntimeConfig defaulting to ['*'], which lets every
+  // registered tool through (including the per-call structured_output).
+  let schemaTools: string[] | undefined;
+  if (
+    opts.schema !== undefined &&
+    baseConfig.tools &&
+    baseConfig.tools.length > 0 &&
+    !baseConfig.tools.includes('*') &&
+    !baseConfig.tools.includes(ToolNames.STRUCTURED_OUTPUT)
+  ) {
+    schemaTools = [...baseConfig.tools, ToolNames.STRUCTURED_OUTPUT];
+  }
+
   const augmented: SubagentConfig = {
     ...baseConfig,
     ...(opts.model !== undefined ? { model: opts.model } : {}),
-    // Schema-mode replaces the subagent's systemPrompt with the variant
-    // that explicitly requires a `structured_output` call as the only path
-    // to a final answer. Without this, an `agentType` whose stock prompt
-    // says "answer in plain text" would compete with the schema contract
-    // and produce sustained 2-nudge thrash.
-    ...(opts.schema !== undefined
-      ? { systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA }
+    ...(schemaSystemPrompt !== undefined
+      ? { systemPrompt: schemaSystemPrompt }
       : {}),
+    ...(schemaTools !== undefined ? { tools: schemaTools } : {}),
     disallowedTools: Array.from(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
@@ -423,45 +458,61 @@ async function runOverridePath(
     );
   }
 
-  // Schema mode: build a per-call Config override with a fresh ToolRegistry
-  // containing a fresh SyntheticOutputTool whose params schema IS the
-  // user-supplied schema. Each agent({schema}) call gets its own override
-  // and its own registry, so concurrent calls under parallel()/pipeline()
-  // do not share state.
-  let schemaState: SchemaModeState | null = null;
-  if (opts.schema !== undefined) {
-    effectiveContext = await createSchemaConfigOverride(
-      effectiveContext,
-      opts.schema as Record<string, unknown>,
-    );
-    schemaState = createSchemaModeState();
-  }
+  // R3 review (wenshao T2/T5 [M1]): named parent-abort listener so the
+  // outer finally can remove it. Declared outside the try so it survives
+  // into the cleanup block. The previous `{ once: true }` registration
+  // only auto-removed when the parent actually aborted; the happy-path
+  // schema dispatch — success capture / 3-failure abort fires the CHILD
+  // controller, not the parent — left the listener attached. With N
+  // schema-mode calls in one workflow the registration accumulated on the
+  // per-run signal.
+  let onParentAbort: (() => void) | undefined;
 
-  // Schema mode chains a child AbortController so the dispatch can stop
-  // the subagent after 2 nudges (or as soon as a valid `structured_output`
-  // call is captured). Outside the schema path, the caller's signal is
-  // passed through unchanged.
-  let dispatchSignal: AbortSignal | undefined = signal;
-  if (schemaState) {
-    const child = new AbortController();
-    if (signal) {
-      if (signal.aborted) {
-        child.abort(signal.reason);
-      } else {
-        signal.addEventListener('abort', () => child.abort(signal.reason), {
-          once: true,
-        });
-      }
-    }
-    schemaState.abortController = child;
-    dispatchSignal = child.signal;
-  }
-
-  const eventEmitter = schemaState
-    ? createSchemaEventEmitter(schemaState)
-    : undefined;
-
+  // R3 review (wenshao T0 [Critical]): the outer try MUST start
+  // immediately after worktree provision. The earlier layout opened it
+  // only after createSchemaConfigOverride / createSchemaModeState /
+  // addEventListener — so any throw in those three (e.g. a broken MCP
+  // server during the schema override's tool-registry rebuild) orphaned
+  // the just-provisioned worktree on disk under .qwen/worktrees/. Move
+  // schema setup + signal chaining + emitter creation inside.
   try {
+    // Schema mode: build a per-call Config override with a fresh ToolRegistry
+    // containing a fresh SyntheticOutputTool whose params schema IS the
+    // user-supplied schema. Each agent({schema}) call gets its own override
+    // and its own registry, so concurrent calls under parallel()/pipeline()
+    // do not share state.
+    let schemaState: SchemaModeState | null = null;
+    if (opts.schema !== undefined) {
+      effectiveContext = await createSchemaConfigOverride(
+        effectiveContext,
+        opts.schema as Record<string, unknown>,
+      );
+      schemaState = createSchemaModeState();
+    }
+
+    // Schema mode chains a child AbortController so the dispatch can stop
+    // the subagent after the 3rd validation failure (or as soon as a valid
+    // `structured_output` call is captured). Outside the schema path, the
+    // caller's signal is passed through unchanged.
+    let dispatchSignal: AbortSignal | undefined = signal;
+    if (schemaState) {
+      const child = new AbortController();
+      if (signal) {
+        if (signal.aborted) {
+          child.abort(signal.reason);
+        } else {
+          onParentAbort = () => child.abort(signal.reason);
+          signal.addEventListener('abort', onParentAbort);
+        }
+      }
+      schemaState.abortController = child;
+      dispatchSignal = child.signal;
+    }
+
+    const eventEmitter = schemaState
+      ? createSchemaEventEmitter(schemaState)
+      : undefined;
+
     const { subagent, dispose } = await subagentMgr.createAgentHeadless(
       augmented,
       effectiveContext,
@@ -509,9 +560,39 @@ async function runOverridePath(
         if (signal?.aborted) {
           throw new DOMException('Workflow aborted.', 'AbortError');
         }
-        // Error message verbatim from upstream Claude Code 2.1.168 strings.
+        // R3 review (wenshao M2): the schema path used to throw the
+        // "after 2 in-conversation nudges" terminal for EVERY non-result
+        // outcome — including TIMEOUT (10 min cap), MAX_TURNS (50 cap),
+        // and ERROR (model client crash). Those aren't content failures
+        // and aren't nudge exhaustion; they're the same terminate-mode
+        // outcomes the non-schema branch below already distinguishes.
+        // Match that shape here BEFORE attributing the failure to schema.
+        const mode = subagent.getTerminateMode();
+        if (
+          mode !== AgentTerminateMode.GOAL &&
+          mode !== AgentTerminateMode.CANCELLED
+        ) {
+          throw new Error(
+            `Workflow subagent did not complete (terminate mode: ${mode}).`,
+          );
+        }
+        // The dispatch aborts via schemaState.abortController on the
+        // 3rd validation failure (attempts > 2) AND on success capture.
+        // The success path returns above, so reaching here means either
+        // (a) the model never called structured_output at all — answered
+        // in plain text — or (b) the 3-failure abort fired. Distinguish
+        // the messages so an operator sees what actually happened:
+        // upstream's verbatim "after 2 in-conversation nudges" wording is
+        // factually correct only for (b).
+        if (schemaState.attempts > 2) {
+          // Error message verbatim from upstream Claude Code 2.1.168 strings.
+          throw new Error(
+            'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
+          );
+        }
         throw new Error(
-          'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
+          'subagent completed without calling structured_output ' +
+            '(no validation attempt — model produced plain-text content).',
         );
       }
 
@@ -544,9 +625,20 @@ async function runOverridePath(
       await dispose();
     }
   } finally {
+    // R3 review (wenshao T2/T5 [M1]): always remove the parent-abort
+    // listener if we registered one. Happens regardless of how the
+    // dispatch ended — success capture, 3-failure abort, exception in
+    // schema setup, exception in execute — so a workflow with many
+    // schema-mode calls does not accumulate per-call listeners (and
+    // per-call AbortController closures) on the long-lived per-run
+    // parent signal.
+    if (onParentAbort && signal) {
+      signal.removeEventListener('abort', onParentAbort);
+    }
     // Outer fallback cleanup: fires only when worktree was provisioned
     // but the success-path cleanup didn't run (createAgentHeadless threw,
-    // or execute threw, or the terminateMode check threw). Swallow errors
+    // or execute threw, or the terminateMode check threw, or — after the
+    // R3 T0 fix — schema setup / signal chaining threw). Swallow errors
     // here — the original exception (already in flight) is more important
     // than a cleanup failure, but we still log so operators can find the
     // orphaned worktree.

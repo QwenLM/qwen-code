@@ -564,6 +564,20 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // global revival). The fallback to null on a non-serializable
         // resolve mirrors the errors-as-data convention parallel/pipeline
         // already use for individual slot failures.
+        // R3 review (wenshao T3 [Suggestion]): the null fallback below is
+        // a SECURITY backstop, not a contract path. In schema mode the
+        // host return is the validated args of a structured_output tool
+        // call -- LLM tool_call payloads are always JSON-serializable
+        // (the model sends them through the OpenAI tool-call protocol
+        // which serializes through JSON itself) and SyntheticOutputTool's
+        // AJV validation runs over the parsed JSON, so a non-serializable
+        // host return is unreachable in production schema mode. The
+        // sentinel preserves the errors-as-data convention parallel /
+        // pipeline already use for individual slot failures, and stays as
+        // residual defense for any future dispatch path whose return
+        // value isn't a tool_call payload. logRevivalFailure surfaces
+        // the actionable detail (slot 0 + the error string) to operators
+        // so a real trigger in production isn't silent.
         return __b.hostAgent(prompt, safeOpts).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
