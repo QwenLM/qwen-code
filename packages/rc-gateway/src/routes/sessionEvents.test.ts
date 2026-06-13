@@ -116,13 +116,12 @@ describe('session-events proxy', () => {
     const parsed = frames.map((f) => JSON.parse(f.data));
     // Non-permission frame: no bridgeHints added.
     expect(parsed[0].data.bridgeHints).toBeUndefined();
-    // Clean tool-call → renderable.
-    expect(parsed[1].data.bridgeHints).toEqual({ renderable: true });
-    // Secret-looking args → not renderable.
-    expect(parsed[2].data.bridgeHints).toEqual({
-      renderable: false,
-      reason: 'possible_secret',
-    });
+    // Clean tool-call → inline surface (run_shell is a mutating tool → medium).
+    expect(parsed[1].data.bridgeHints.recommendedSurface).toBe('inline');
+    expect(parsed[1].data.bridgeHints.sensitivity).toBe('medium');
+    // Secret-looking args → high sensitivity → deeplink.
+    expect(parsed[2].data.bridgeHints.sensitivity).toBe('high');
+    expect(parsed[2].data.bridgeHints.recommendedSurface).toBe('deeplink');
     // Original fields are preserved.
     expect(parsed[2].data.requestId).toBe('r2');
   });

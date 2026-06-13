@@ -4,55 +4,93 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/** Max serialized tool-call size considered safe to inline into a chat message. */
+/** Max serialized args size considered safe to inline into a chat message. */
 const MAX_RENDER_BYTES = 2048;
+/** Cap on `argsSummaryFull` so an enriched SSE frame can't grow unbounded. */
+const MAX_FULL_BYTES = 4096;
+/** Cap on the human short summary (spec: ≤140 chars). */
+const MAX_SHORT = 140;
 
 /**
- * Heuristic for secret-looking content in tool-call args — a key or value that
- * smells like a credential. Conservative (false-positives are fine: the bridge
- * just shows a "tap to view in the web client" link instead of inlining).
+ * Secret-looking content in tool-call args — a key or value that smells like a
+ * credential. Conservative (false-positives just downgrade to a deeplink).
  */
 const SECRET_RE =
   /(api[_-]?key|secret|token|password|passwd|credential|authorization|bearer|private[_-]?key|client[_-]?secret|access[_-]?key)/i;
 
+/** Mutating/destructive tool names → at least medium sensitivity. */
+const DANGEROUS_TOOL_RE =
+  /(write|edit|delete|remove|^rm$|run[_-]?shell|shell|exec|create|move|rename|patch|apply)/i;
+
+export type BridgeSensitivity = 'low' | 'medium' | 'high';
+export type BridgeSurface = 'inline' | 'deeplink';
+
 /**
- * Advisory hint on whether a permission request's tool-call args are safe to
- * render directly into a chat message (`add-bridge-protocol`). A bridge uses this
- * to decide between inlining the args and showing a "tap to view in the web
- * client" deep link — so secrets aren't echoed into a group chat and a huge diff
- * isn't dumped into Telegram.
+ * Advisory render hints on a `permission_request`, per the `add-bridge-protocol`
+ * contract (the field vocabulary discord/matrix bridges also consume). A bridge
+ * uses `recommendedSurface` to decide between inlining args into the chat message
+ * (`inline`) and showing a short summary + "open in web client" deeplink
+ * (`deeplink`) — so secrets aren't echoed into a group chat and a huge diff isn't
+ * dumped into Telegram.
  */
 export interface BridgeHints {
-  /** Safe to inline the args directly into a chat message? */
-  renderable: boolean;
-  /** Why not (only when `renderable` is false). */
-  reason?: 'too_large' | 'possible_secret';
+  /** ≤140-char human summary (secret args are redacted out of this). */
+  argsSummaryShort: string;
+  /** Canonical full args (capped); bridges MUST NOT render this in deeplink mode. */
+  argsSummaryFull: string;
+  /** Deterministic sensitivity classification given tool name + args. */
+  sensitivity: BridgeSensitivity;
+  /** `deeplink` when high-sensitivity OR too large to inline; else `inline`. */
+  recommendedSurface: BridgeSurface;
 }
 
 /**
  * Compute {@link BridgeHints} for a tool call. PURE + total (never throws — a
- * weird/unserializable shape degrades to not-renderable). Checks for a
- * secret-looking key/value first (worse than size), then the size cap.
+ * weird/unserializable shape degrades to a safe deeplink). The classification is
+ * DETERMINISTIC given the tool name + args (spec requirement): a secret-looking
+ * key/value → `high`; a mutating tool → at least `medium`; else `low`.
+ * `recommendedSurface` is `deeplink` when sensitivity is high OR the args are too
+ * large to inline, otherwise `inline`.
  */
 export function computeBridgeHints(toolCall: unknown): BridgeHints {
   const tc =
     toolCall && typeof toolCall === 'object'
       ? (toolCall as Record<string, unknown>)
       : {};
-  // Prefer the args sub-object when present; otherwise inspect the whole call.
+  const name = typeof tc['name'] === 'string' ? tc['name'] : 'tool';
   const subject = 'args' in tc ? tc['args'] : tc;
-  let json: string;
+
+  let rawFull: string;
   try {
-    json = JSON.stringify(subject ?? {}) ?? '';
+    rawFull = JSON.stringify(subject ?? {}) ?? '';
   } catch {
-    // Circular / unserializable → treat as not safe to render.
-    return { renderable: false, reason: 'too_large' };
+    // Circular / unserializable → treat as high-risk, deeplink, redacted.
+    return {
+      argsSummaryShort: `${name} (args unavailable)`.slice(0, MAX_SHORT),
+      argsSummaryFull: '(unserializable args)',
+      sensitivity: 'high',
+      recommendedSurface: 'deeplink',
+    };
   }
-  if (SECRET_RE.test(json)) {
-    return { renderable: false, reason: 'possible_secret' };
-  }
-  if (json.length > MAX_RENDER_BYTES) {
-    return { renderable: false, reason: 'too_large' };
-  }
-  return { renderable: true };
+
+  const secret = SECRET_RE.test(rawFull);
+  const tooLarge = rawFull.length > MAX_RENDER_BYTES;
+  const sensitivity: BridgeSensitivity = secret
+    ? 'high'
+    : DANGEROUS_TOOL_RE.test(name)
+      ? 'medium'
+      : 'low';
+  const recommendedSurface: BridgeSurface =
+    sensitivity === 'high' || tooLarge ? 'deeplink' : 'inline';
+
+  // Never put a possible secret in the short summary (it may be inlined to chat).
+  const argsSummaryShort = secret
+    ? `${name} (sensitive args hidden)`.slice(0, MAX_SHORT)
+    : `${name} ${rawFull}`.trim().slice(0, MAX_SHORT);
+  const argsSummaryFull =
+    rawFull.length > MAX_FULL_BYTES
+      ? `${rawFull.slice(0, MAX_FULL_BYTES)}…[truncated]`
+      : rawFull;
+
+  return { argsSummaryShort, argsSummaryFull, sensitivity, recommendedSurface };
 }

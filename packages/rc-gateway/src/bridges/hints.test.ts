@@ -7,48 +7,70 @@
 import { describe, it, expect } from 'vitest';
 import { computeBridgeHints } from './hints.js';
 
-describe('computeBridgeHints', () => {
-  it('renderable for small, clean args', () => {
-    expect(
-      computeBridgeHints({ name: 'read_file', args: { path: 'src/app.ts' } }),
-    ).toEqual({ renderable: true });
-  });
-
-  it('flags possible secrets (key or value) → not renderable', () => {
-    expect(computeBridgeHints({ args: { apiKey: 'sk-12345' } }).reason).toBe(
-      'possible_secret',
+describe('computeBridgeHints (bridge-protocol contract shape)', () => {
+  it('emits all four contract fields', () => {
+    const h = computeBridgeHints({ name: 'read_file', args: { path: 'a.ts' } });
+    expect(Object.keys(h).sort()).toEqual(
+      [
+        'argsSummaryFull',
+        'argsSummaryShort',
+        'recommendedSurface',
+        'sensitivity',
+      ].sort(),
     );
-    expect(
-      computeBridgeHints({ args: { env: 'AUTHORIZATION=Bearer x' } }).reason,
-    ).toBe('possible_secret');
-    expect(
-      computeBridgeHints({ args: { password: 'hunter2' } }).renderable,
-    ).toBe(false);
   });
 
-  it('flags oversized args → too_large', () => {
-    const big = { args: { blob: 'x'.repeat(5000) } };
-    expect(computeBridgeHints(big)).toEqual({
-      renderable: false,
-      reason: 'too_large',
+  it('clean read-only call → low sensitivity, inline', () => {
+    const h = computeBridgeHints({ name: 'read_file', args: { path: 'a.ts' } });
+    expect(h.sensitivity).toBe('low');
+    expect(h.recommendedSurface).toBe('inline');
+    expect(h.argsSummaryShort).toContain('read_file');
+    expect(h.argsSummaryFull).toContain('a.ts');
+  });
+
+  it('mutating tool → medium sensitivity, still inline (review in chat)', () => {
+    const h = computeBridgeHints({
+      name: 'edit_file',
+      args: { path: 'a.ts' },
     });
+    expect(h.sensitivity).toBe('medium');
+    expect(h.recommendedSurface).toBe('inline');
   });
 
-  it('inspects the whole call when there is no args sub-object', () => {
-    expect(computeBridgeHints({ secret: 'abc' }).reason).toBe(
-      'possible_secret',
-    );
+  it('secret-looking args → high sensitivity, deeplink, redacted summary', () => {
+    const h = computeBridgeHints({ name: 'set_env', args: { apiKey: 'sk-x' } });
+    expect(h.sensitivity).toBe('high');
+    expect(h.recommendedSurface).toBe('deeplink');
+    // The short summary must NOT echo the secret.
+    expect(h.argsSummaryShort).not.toContain('sk-x');
+    expect(h.argsSummaryShort).toContain('hidden');
   });
 
-  it('is total for odd inputs (null/undefined/primitive)', () => {
-    expect(computeBridgeHints(null)).toEqual({ renderable: true });
-    expect(computeBridgeHints(undefined)).toEqual({ renderable: true });
-    expect(computeBridgeHints(42)).toEqual({ renderable: true });
+  it('oversized args → deeplink, full summary capped', () => {
+    const h = computeBridgeHints({
+      name: 'read_file',
+      args: { blob: 'x'.repeat(5000) },
+    });
+    expect(h.recommendedSurface).toBe('deeplink');
+    expect(h.argsSummaryFull.length).toBeLessThan(5000);
+    expect(h.argsSummaryFull).toContain('truncated');
   });
 
-  it('degrades a circular (unserializable) arg to not-renderable', () => {
+  it('short summary is capped at 140 chars', () => {
+    const h = computeBridgeHints({
+      name: 'read_file',
+      args: { path: 'y'.repeat(500) },
+    });
+    expect(h.argsSummaryShort.length).toBeLessThanOrEqual(140);
+  });
+
+  it('is total for odd inputs and degrades unserializable args to a safe deeplink', () => {
+    expect(computeBridgeHints(null).recommendedSurface).toBe('inline');
+    expect(computeBridgeHints(42).sensitivity).toBe('low');
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
-    expect(computeBridgeHints({ args: circular }).renderable).toBe(false);
+    const h = computeBridgeHints({ name: 'x', args: circular });
+    expect(h.recommendedSurface).toBe('deeplink');
+    expect(h.sensitivity).toBe('high');
   });
 });
