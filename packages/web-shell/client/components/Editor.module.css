@@ -207,26 +207,59 @@
   color: #fff;
 }
 
-:global(.cm-tooltip-autocomplete) {
+:global([data-web-shell-tooltip-portal]) {
+  pointer-events: none;
+}
+
+:global([data-web-shell-tooltip-portal] .cm-tooltip) {
+  z-index: var(--web-shell-tooltip-z-index, 1000);
+  pointer-events: auto;
+}
+
+:global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete) {
+  --web-shell-completion-label-width: 20ch;
+  --web-shell-completion-column-gap: 2ch;
+  --web-shell-completion-detail-start: calc(
+    var(--web-shell-completion-label-width) +
+      var(--web-shell-completion-column-gap)
+  );
   min-width: 500px !important;
   max-width: 700px !important;
   max-height: 400px !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  background: var(--bg-secondary, #161616) !important;
+  border: 1px solid var(--border-color, #2a2a2a) !important;
+  border-radius: 6px !important;
+  overflow: visible;
 }
 
-:global(.cm-tooltip-autocomplete > ul) {
+:global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete > ul) {
   max-height: 380px !important;
+  overflow: auto;
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
 }
 
-:global(.cm-tooltip-autocomplete ul li) {
+:global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li) {
   display: flex !important;
   align-items: baseline;
   min-width: 0;
   padding: 4px 8px !important;
+  color: var(--text-primary, #e4e4e4) !important;
   overflow: hidden;
 }
 
-:global(.cm-tooltip-autocomplete completion-section) {
+:global(
+  [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li[aria-selected]
+) {
+  background: var(--bg-tertiary, #1e1e1e) !important;
+  color: var(--accent-color, #4a9eff) !important;
+}
+
+:global(
+  [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section
+) {
   display: block !important;
   height: 0;
   margin: 6px 10px 3px;
@@ -234,56 +267,136 @@
   border-bottom: 1px solid var(--border-color) !important;
 }
 
-:global(.cm-tooltip-autocomplete completion-section:first-of-type) {
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    completion-section:first-of-type
+) {
   display: none !important;
 }
 
-:global(.cm-tooltip-autocomplete .cm-completionLabel) {
+:global(
+  [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel
+) {
+  font-family: var(--font-mono, monospace);
   flex-shrink: 0;
-  min-width: 14ch;
-  max-width: 28ch;
+  width: var(--web-shell-completion-label-width);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-:global(.cm-tooltip-autocomplete .cm-completionDetail) {
+:global(
+  [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionDetail
+) {
   flex: 1 1 auto;
   min-width: 0;
+  font-style: normal;
   color: var(--text-secondary);
   font-size: 13px;
-  margin-left: 2ch;
+  margin-left: var(--web-shell-completion-column-gap);
   opacity: 0.8;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-:global(.cm-tooltip-autocomplete ul li.cm-file-completion .cm-completionLabel) {
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    ul
+    li.cm-file-completion
+    .cm-completionLabel
+) {
   flex: 1 1 auto;
+  width: auto;
   min-width: 0;
   max-width: none;
 }
 
-:global(.cm-tooltip-autocomplete ul li.cm-skill-completion) {
-  align-items: flex-start !important;
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    ul
+    li.cm-command-info-completion
+) {
+  display: grid !important;
+  grid-template-columns: var(--web-shell-completion-label-width) minmax(0, 1fr);
+  column-gap: var(--web-shell-completion-column-gap);
+  align-items: baseline !important;
 }
 
 :global(
-  .cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionLabel
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    ul
+    li.cm-command-info-completion
+    .cm-completionLabel
 ) {
-  align-self: center;
+  min-width: 0;
+  max-width: none;
 }
 
 :global(
-  .cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionDetail
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    ul
+    li.cm-command-info-completion
+    .cm-completionDetail
 ) {
-  white-space: normal !important;
-  display: -webkit-box !important;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  line-height: 1.35;
-  max-height: 2.7em;
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+:global([data-web-shell-tooltip-portal] .cm-tooltip.cm-completionInfo) {
+  z-index: 1;
+  width: min(
+    calc(100% - var(--web-shell-completion-detail-start)),
+    calc(100vw - 32px)
+  );
+  max-width: min(
+    calc(100% - var(--web-shell-completion-detail-start)),
+    calc(100vw - 32px)
+  ) !important;
+  max-height: min(280px, calc(100vh - 32px));
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--border-color, #2a2a2a);
+  border-radius: 6px;
+  background: var(--bg-secondary, #161616);
+  color: var(--text-primary, #e4e4e4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+:global(
+  [data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-right
+) {
+  margin-left: var(--web-shell-completion-column-gap);
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-completionInfo.cm-completionInfo-right-narrow
+) {
+  left: var(--web-shell-completion-detail-start);
+}
+
+:global(
+  [data-web-shell-tooltip-portal] .cm-completionInfo.cm-completionInfo-left
+) {
+  margin-right: var(--web-shell-completion-column-gap);
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-completionInfo.cm-completionInfo-left-narrow
+) {
+  right: var(--web-shell-completion-detail-start);
 }
 
 @media (max-width: 700px) {
