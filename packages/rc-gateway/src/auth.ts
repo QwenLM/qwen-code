@@ -16,12 +16,16 @@ import './types.js';
 const SUB_ACTOR_MAX = 128;
 /**
  * A sub-actor id must start alphanumeric and use only a safe id charset
- * (`<svc>:<user-id>` shapes like `telegram:evan`, `discord:12345`). The charset
- * deliberately EXCLUDES whitespace and control characters so an asserted value
- * can never inject a newline into a JSONL audit line or smuggle markup into a
- * client that renders it.
+ * (`<svc>:<user-id>` shapes like `telegram:evan`, `discord:12345`,
+ * `matrix:@user=foo:home.example.com`). The charset deliberately EXCLUDES
+ * whitespace and control characters so an asserted value can never inject a
+ * newline into a JSONL audit line or smuggle markup into a client that renders
+ * it. It DOES include `/ = +` because Matrix MXID localparts legally use them
+ * (the extended grammar) — rejecting those would silently drop federated/legacy
+ * users' prompts and votes. None of `/ = +` is a control/whitespace char, so the
+ * audit-injection guard is unaffected.
  */
-const SUB_ACTOR_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
+const SUB_ACTOR_RE = /^[A-Za-z0-9][A-Za-z0-9:._@/=+-]*$/;
 
 /**
  * Parse + validate an `X-RC-SubActor` header value. Returns the trimmed id, or

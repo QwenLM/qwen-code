@@ -259,6 +259,22 @@ describe('parseSubActor', () => {
     expect(parseSubActor('discord:123456789')).toBe('discord:123456789');
     expect(parseSubActor('  matrix:@a.b_c  ')).toBe('matrix:@a.b_c'); // trimmed
   });
+  it('accepts fully-qualified + extended-grammar MXIDs', () => {
+    expect(parseSubActor('matrix:@evan:home.example.com')).toBe(
+      'matrix:@evan:home.example.com',
+    );
+    // Extended MXID localpart chars (/ = +) are legal and must not be rejected.
+    expect(parseSubActor('matrix:@user=foo:home.example.com')).toBe(
+      'matrix:@user=foo:home.example.com',
+    );
+    expect(parseSubActor('matrix:@a/b+c:srv.org')).toBe(
+      'matrix:@a/b+c:srv.org',
+    );
+    // A homeserver with an explicit port (the `:` is already allowed).
+    expect(parseSubActor('matrix:@evan:home.example.com:8448')).toBe(
+      'matrix:@evan:home.example.com:8448',
+    );
+  });
   it('rejects empty / whitespace / overlong', () => {
     expect(parseSubActor(undefined)).toBeNull();
     expect(parseSubActor('')).toBeNull();
