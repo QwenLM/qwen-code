@@ -144,8 +144,6 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/list',
   'session/close',
   'session/fork',
-  'session/set_mode',
-  'session/set_model',
   ...ALL_QWEN_VENDOR_METHODS,
 ]);
 

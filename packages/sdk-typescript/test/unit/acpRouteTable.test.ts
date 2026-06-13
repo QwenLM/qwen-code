@@ -191,92 +191,64 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/health');
   });
 
-  // ---- workspace routes -----------------------------------------------
+  // ---- POST /session/:id/model → session/set_model --------------------
 
-  it('GET /workspace/foo/bar maps to _qwen/workspace with path', () => {
-    const result = matchRoute('/workspace/foo/bar', 'GET');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/workspace');
-    const params = result!.mapping.extractParams(
-      result!.segments,
-      undefined,
-      'GET',
-    );
-    expect(params).toEqual({ path: 'foo/bar' });
-  });
-
-  it('POST /workspace/settings maps to _qwen/workspace with body', () => {
-    const result = matchRoute('/workspace/settings', 'POST');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/workspace');
-    const params = result!.mapping.extractParams(
-      result!.segments,
-      { value: 42 },
-      'POST',
-    );
-    expect(params).toEqual({ path: 'settings', value: 42 });
-  });
-
-  // ---- PATCH /session/:id/metadata → session/metadata ----------------
-
-  it('PATCH /session/:id/metadata maps to session/metadata', () => {
-    const result = matchRoute('/session/s6/metadata', 'PATCH');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/metadata');
-  });
-
-  // ---- POST /session/:id/model → session/set_config_option -----------
-
-  it('POST /session/:id/model maps to session/set_config_option', () => {
+  it('POST /session/:id/model maps to session/set_model', () => {
     const result = matchRoute('/session/s7/model', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/set_config_option');
+    expect(result!.mapping.method).toBe('session/set_model');
   });
 
-  // ---- Other session action routes ------------------------------------
+  // ---- Vendor session extensions (_qwen/ prefix) ----------------------
 
-  it('POST /session/:id/heartbeat maps to session/heartbeat', () => {
+  it('PATCH /session/:id/metadata maps to _qwen/session/update_metadata', () => {
+    const result = matchRoute('/session/s6/metadata', 'PATCH');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/update_metadata');
+  });
+
+  it('POST /session/:id/heartbeat maps to _qwen/session/heartbeat', () => {
     const result = matchRoute('/session/s8/heartbeat', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/heartbeat');
+    expect(result!.mapping.method).toBe('_qwen/session/heartbeat');
   });
 
-  it('POST /session/:id/recap maps to session/recap', () => {
+  it('POST /session/:id/recap maps to _qwen/session/recap', () => {
     const result = matchRoute('/session/s9/recap', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/recap');
+    expect(result!.mapping.method).toBe('_qwen/session/recap');
   });
 
-  it('POST /session/:id/btw maps to session/btw', () => {
+  it('POST /session/:id/btw maps to _qwen/session/btw', () => {
     const result = matchRoute('/session/s10/btw', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/btw');
+    expect(result!.mapping.method).toBe('_qwen/session/btw');
   });
 
-  it('POST /session/:id/shell maps to session/shell', () => {
+  it('POST /session/:id/shell maps to _qwen/session/shell', () => {
     const result = matchRoute('/session/s11/shell', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/shell');
+    expect(result!.mapping.method).toBe('_qwen/session/shell');
   });
 
-  it('POST /session/:id/approval-mode maps to session/approval_mode', () => {
-    const result = matchRoute('/session/s12/approval-mode', 'POST');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/approval_mode');
-  });
-
-  it('POST /session/:id/branch maps to session/branch', () => {
+  it('POST /session/:id/branch maps to session/fork', () => {
     const result = matchRoute('/session/s13/branch', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/branch');
+    expect(result!.mapping.method).toBe('session/fork');
   });
 
-  // ---- Session diagnostic / action routes --------------------------------
+  it('POST /session/:id/detach maps to _qwen/session/detach', () => {
+    const result = matchRoute('/session/s14/detach', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/detach');
+  });
 
-  it('GET /session/:id/context maps to session/context', () => {
+  // ---- Session diagnostic routes (_qwen/ prefix) ----------------------
+
+  it('GET /session/:id/context maps to _qwen/session/context', () => {
     const result = matchRoute('/session/s14/context', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/context');
+    expect(result!.mapping.method).toBe('_qwen/session/context');
     const params = result!.mapping.extractParams(
       result!.segments,
       undefined,
@@ -285,70 +257,214 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ sessionId: 's14' });
   });
 
-  it('GET /session/:id/context-usage maps to session/context_usage', () => {
+  it('GET /session/:id/context-usage maps to _qwen/session/context_usage', () => {
     const result = matchRoute('/session/s15/context-usage', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/context_usage');
+    expect(result!.mapping.method).toBe('_qwen/session/context_usage');
   });
 
-  it('GET /session/:id/supported-commands maps to session/supported_commands', () => {
+  it('GET /session/:id/supported-commands maps to _qwen/session/supported_commands', () => {
     const result = matchRoute('/session/s16/supported-commands', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/supported_commands');
+    expect(result!.mapping.method).toBe('_qwen/session/supported_commands');
   });
 
-  it('GET /session/:id/tasks maps to session/tasks', () => {
+  it('GET /session/:id/tasks maps to _qwen/session/tasks', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/tasks');
+    expect(result!.mapping.method).toBe('_qwen/session/tasks');
   });
 
-  it('POST /session/:id/tasks/:taskId/cancel maps to session/task_cancel', () => {
-    const result = matchRoute('/session/s18/tasks/t1/cancel', 'POST');
+  // ---- Granular workspace routes ----------------------------------------
+
+  it('GET /workspace/mcp maps to _qwen/workspace/mcp', () => {
+    const result = matchRoute('/workspace/mcp', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/task_cancel');
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp');
+  });
+
+  it('GET /workspace/skills maps to _qwen/workspace/skills', () => {
+    const result = matchRoute('/workspace/skills', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/skills');
+  });
+
+  it('GET /workspace/providers maps to _qwen/workspace/providers', () => {
+    const result = matchRoute('/workspace/providers', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/providers');
+  });
+
+  it('GET /workspace/env maps to _qwen/workspace/env', () => {
+    const result = matchRoute('/workspace/env', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/env');
+  });
+
+  it('GET /workspace/preflight maps to _qwen/workspace/preflight', () => {
+    const result = matchRoute('/workspace/preflight', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/preflight');
+  });
+
+  it('POST /workspace/init maps to _qwen/workspace/init', () => {
+    const result = matchRoute('/workspace/init', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/init');
+  });
+
+  it('GET /workspace/tools maps to _qwen/workspace/tools', () => {
+    const result = matchRoute('/workspace/tools', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/tools');
+  });
+
+  it('GET /workspace/memory maps to _qwen/workspace/memory', () => {
+    const result = matchRoute('/workspace/memory', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory');
+  });
+
+  it('POST /workspace/memory maps to _qwen/workspace/memory/write', () => {
+    const result = matchRoute('/workspace/memory', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/write');
     const params = result!.mapping.extractParams(
       result!.segments,
-      { kind: 'shell' },
+      { content: 'hi' },
       'POST',
     );
-    expect(params).toEqual({ sessionId: 's18', taskId: 't1', kind: 'shell' });
+    expect(params).toEqual({ content: 'hi' });
   });
 
-  it('POST /session/:id/goal/clear maps to session/goal_clear', () => {
-    const result = matchRoute('/session/s19/goal/clear', 'POST');
+  it('GET /workspace/agents maps to _qwen/workspace/agents/list', () => {
+    const result = matchRoute('/workspace/agents', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/goal_clear');
+    expect(result!.mapping.method).toBe('_qwen/workspace/agents/list');
   });
 
-  it('GET /session/:id/stats maps to session/stats', () => {
-    const result = matchRoute('/session/s20/stats', 'GET');
+  it('POST /workspace/agents maps to _qwen/workspace/agents/create', () => {
+    const result = matchRoute('/workspace/agents', 'POST');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/stats');
+    expect(result!.mapping.method).toBe('_qwen/workspace/agents/create');
   });
 
-  it('GET /session/:id/rewind/snapshots maps to session/rewind_snapshots', () => {
-    const result = matchRoute('/session/s21/rewind/snapshots', 'GET');
+  it('GET /workspace/agents/:agentType maps to _qwen/workspace/agents/get', () => {
+    const result = matchRoute('/workspace/agents/coder', 'GET');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/rewind_snapshots');
-  });
-
-  it('POST /session/:id/rewind maps to session/rewind', () => {
-    const result = matchRoute('/session/s22/rewind', 'POST');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/rewind');
+    expect(result!.mapping.method).toBe('_qwen/workspace/agents/get');
     const params = result!.mapping.extractParams(
       result!.segments,
-      { promptId: 'p1' },
-      'POST',
+      undefined,
+      'GET',
     );
-    expect(params).toEqual({ sessionId: 's22', promptId: 'p1' });
+    expect(params).toEqual({ agentType: 'coder' });
   });
 
-  it('POST /session/:id/language maps to session/language', () => {
-    const result = matchRoute('/session/s23/language', 'POST');
+  it('DELETE /workspace/agents/:agentType maps to _qwen/workspace/agents/delete', () => {
+    const result = matchRoute('/workspace/agents/coder', 'DELETE');
     expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('session/language');
+    expect(result!.mapping.method).toBe('_qwen/workspace/agents/delete');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { scope: 'workspace' },
+      'DELETE',
+    );
+    expect(params).toEqual({ agentType: 'coder', scope: 'workspace' });
+  });
+
+  it('GET /workspace/mcp/:server/tools maps to _qwen/workspace/mcp/tools', () => {
+    const result = matchRoute('/workspace/mcp/fs/tools', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/tools');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ serverName: 'fs' });
+  });
+
+  it('POST /workspace/mcp/servers maps to _qwen/workspace/mcp/servers/add', () => {
+    const result = matchRoute('/workspace/mcp/servers', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/servers/add');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { name: 'test', config: {} },
+      'POST',
+    );
+    expect(params).toEqual({ name: 'test', config: {} });
+  });
+
+  it('DELETE /workspace/mcp/servers/:name maps to _qwen/workspace/mcp/servers/remove', () => {
+    const result = matchRoute('/workspace/mcp/servers/test', 'DELETE');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/servers/remove');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'DELETE',
+    );
+    expect(params).toEqual({ name: 'test' });
+  });
+
+  it('POST /workspace/set-tool-enabled maps to _qwen/workspace/set_tool_enabled', () => {
+    const result = matchRoute('/workspace/set-tool-enabled', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/set_tool_enabled');
+  });
+
+  it('POST /workspace/mcp/:server/restart maps to _qwen/workspace/restart_mcp_server', () => {
+    const result = matchRoute('/workspace/mcp/fs/restart', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/restart_mcp_server');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { entryIndex: 0 },
+      'POST',
+    );
+    expect(params).toEqual({ serverName: 'fs', entryIndex: 0 });
+  });
+
+  it('GET /workspace/auth/status maps to _qwen/workspace/auth/status', () => {
+    const result = matchRoute('/workspace/auth/status', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/auth/status');
+  });
+
+  it('POST /workspace/auth/device-flow maps to _qwen/workspace/auth/device_flow/start', () => {
+    const result = matchRoute('/workspace/auth/device-flow', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe(
+      '_qwen/workspace/auth/device_flow/start',
+    );
+  });
+
+  it('GET /workspace/auth/device-flow/:id maps to _qwen/workspace/auth/device_flow/get', () => {
+    const result = matchRoute('/workspace/auth/device-flow/flow-1', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/auth/device_flow/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ id: 'flow-1' });
+  });
+
+  it('DELETE /workspace/auth/device-flow/:id maps to _qwen/workspace/auth/device_flow/cancel', () => {
+    const result = matchRoute('/workspace/auth/device-flow/flow-1', 'DELETE');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe(
+      '_qwen/workspace/auth/device_flow/cancel',
+    );
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'DELETE',
+    );
+    expect(params).toEqual({ id: 'flow-1' });
   });
 
   // ---- File system routes -----------------------------------------------
@@ -425,6 +541,12 @@ describe('acpRouteTable – matchRoute', () => {
       'POST',
     );
     expect(params).toEqual({ sessionIds: ['a', 'b'] });
+  });
+
+  // ---- Removed routes (no dispatcher handler) ----------------------------
+
+  it('returns null for removed route /session/:id/approval-mode', () => {
+    expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
   });
 
   // ---- Unknown/unmatched routes ---------------------------------------

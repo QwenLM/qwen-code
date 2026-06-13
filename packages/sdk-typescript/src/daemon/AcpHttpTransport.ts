@@ -41,6 +41,15 @@ interface JsonRpcResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Pending request tracking
+// ---------------------------------------------------------------------------
+
+interface PendingRequest {
+  resolve: (response: JsonRpcResponse) => void;
+  reject: (error: Error) => void;
+}
+
+// ---------------------------------------------------------------------------
 // AcpHttpTransport
 // ---------------------------------------------------------------------------
 
@@ -50,7 +59,12 @@ interface JsonRpcResponse {
  * stream at `GET /acp`.
  *
  * Lazy-init: the first `fetch()` call sends `POST /acp { initialize }`
- * and opens the connection-scoped SSE stream.
+ * (which returns 200 with the initialize result inline), then opens a
+ * connection-scoped SSE stream at `GET /acp` for subsequent responses.
+ *
+ * Subsequent `POST /acp` requests return 202 (ack); the real JSON-RPC
+ * response rides the connection-scoped SSE stream. Responses are
+ * correlated by `id` using a `Map<id, {resolve, reject}>`.
  *
  * Session events are received via a session-scoped SSE stream at
  * `GET /acp` with appropriate headers (session filtering).
@@ -67,6 +81,11 @@ export class AcpHttpTransport implements DaemonTransport {
   private initResult: unknown = undefined;
   /** Connection id returned by the ACP initialize handshake. */
   private connectionId: string | undefined;
+
+  /** Pending requests awaiting their JSON-RPC response on the SSE stream. */
+  private readonly pending = new Map<number, PendingRequest>();
+  /** Abort controller for the connection-scoped SSE stream. */
+  private connStreamAbort: AbortController | undefined;
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
@@ -128,6 +147,7 @@ export class AcpHttpTransport implements DaemonTransport {
     }
 
     // Normal request: POST /acp with the JSON-RPC request body.
+    // The POST returns 202 (ack); the real response rides the SSE stream.
     const params = mapping.extractParams(segments, body, httpMethod);
     const response = await this.sendRequest(
       mapping.method,
@@ -259,6 +279,16 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this._disposed) return;
     this._disposed = true;
     this._initialized = false;
+
+    // Tear down the connection-scoped SSE stream.
+    this.connStreamAbort?.abort();
+    this.connStreamAbort = undefined;
+
+    // Reject all pending requests.
+    for (const [id, entry] of this.pending) {
+      entry.reject(new DaemonTransportClosedError());
+      this.pending.delete(id);
+    }
   }
 
   // -- Internal ----------------------------------------------------------
@@ -347,6 +377,121 @@ export class AcpHttpTransport implements DaemonTransport {
     }
   }
 
+  /**
+   * Open a connection-scoped SSE stream at `GET /acp` with the
+   * `Acp-Connection-Id` header. Incoming JSON-RPC responses are
+   * matched to pending requests by `id`.
+   */
+  private openConnStream(): void {
+    const abort = new AbortController();
+    this.connStreamAbort = abort;
+
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+    };
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+    if (this.connectionId) {
+      headers['Acp-Connection-Id'] = this.connectionId;
+    }
+
+    // Fire-and-forget: pump the SSE stream in the background.
+    void this.pumpConnStream(headers, abort.signal).catch(() => {
+      // Stream ended or errored — reject any remaining pending requests.
+      if (!this._disposed) {
+        for (const [id, entry] of this.pending) {
+          entry.reject(new Error('Connection SSE stream closed unexpectedly'));
+          this.pending.delete(id);
+        }
+      }
+    });
+  }
+
+  private async pumpConnStream(
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const res = await this._fetch(`${this.baseUrl}/acp`, {
+      headers,
+      signal,
+    });
+
+    if (!res.ok || !res.body) return;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    // Build an abort-aware read helper: `reader.read()` does not
+    // respect the signal on its own (the fetch mock may return a
+    // pre-built ReadableStream that isn't wired to the signal).
+    // Race each read against a signal-based rejection so dispose()
+    // can unblock a hanging `reader.read()`.
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      signal.addEventListener(
+        'abort',
+        () =>
+          reject(signal.reason ?? new DOMException('Aborted', 'AbortError')),
+        { once: true },
+      );
+    });
+
+    try {
+      while (!signal.aborted) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          abortPromise,
+        ]);
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const dataLine = frame
+            .split('\n')
+            .find((l) => l.startsWith('data: '));
+          if (!dataLine) continue;
+          try {
+            const parsed = JSON.parse(
+              dataLine.slice('data: '.length),
+            ) as JsonRpcResponse;
+            if (
+              typeof parsed === 'object' &&
+              parsed !== null &&
+              'id' in parsed
+            ) {
+              const pending = this.pending.get(parsed.id);
+              if (pending) {
+                this.pending.delete(parsed.id);
+                pending.resolve(parsed);
+              }
+            }
+          } catch {
+            // Ignore unparseable frames (heartbeats, etc.)
+          }
+        }
+      }
+    } catch {
+      // Abort or read error — fall through to cleanup.
+    } finally {
+      // Best-effort cancel with a timeout guard — some ReadableStream
+      // implementations (especially in test environments) can hang on
+      // cancel() if the underlying source never closes.
+      try {
+        reader.cancel().catch(() => {});
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+
   private async sendNotification(
     method: string,
     params: Record<string, unknown>,
@@ -378,6 +523,20 @@ export class AcpHttpTransport implements DaemonTransport {
     });
   }
 
+  /**
+   * Ensure the connection-scoped SSE stream is open. Called lazily on
+   * the first sendRequest that needs it (i.e. when the server returns
+   * 202, meaning the real response rides the SSE stream).
+   */
+  private ensureConnStream(): void {
+    if (this.connStreamAbort) return;
+    this.openConnStream();
+  }
+
+  /**
+   * Send a JSON-RPC request via `POST /acp` (returns 202 ack) and wait
+   * for the matching response on the connection-scoped SSE stream.
+   */
   private async sendRequest(
     method: string,
     params: Record<string, unknown>,
@@ -412,8 +571,7 @@ export class AcpHttpTransport implements DaemonTransport {
     });
 
     if (!res.ok) {
-      // Preserve the real HTTP status so the caller sees the
-      // correct error code instead of everything becoming 500.
+      // POST itself failed — return a synthetic error response.
       const text = await res.text().catch(() => '');
       return {
         jsonrpc: '2.0',
@@ -426,7 +584,37 @@ export class AcpHttpTransport implements DaemonTransport {
       };
     }
 
-    return (await res.json()) as JsonRpcResponse;
+    // If the server returned 200 with a JSON body (e.g. a server
+    // that doesn't use 202+SSE), consume it directly.
+    const ct = res.headers.get('content-type') ?? '';
+    if (res.status === 200 && ct.includes('application/json')) {
+      return (await res.json()) as JsonRpcResponse;
+    }
+
+    // 202 (ack) — the real response rides the connection-scoped SSE
+    // stream. Ensure it's open and register the pending request.
+    this.ensureConnStream();
+
+    const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
+      this.pending.set(req.id, { resolve, reject });
+    });
+
+    // Handle abort signal: if the caller aborts, reject the pending
+    // request and clean up.
+    if (signal) {
+      const abortHandler = () => {
+        const entry = this.pending.get(req.id);
+        if (entry) {
+          this.pending.delete(req.id);
+          entry.reject(
+            signal.reason ?? new DOMException('Aborted', 'AbortError'),
+          );
+        }
+      };
+      signal.addEventListener('abort', abortHandler, { once: true });
+    }
+
+    return responsePromise;
   }
 }
 
