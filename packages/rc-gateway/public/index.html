@@ -802,8 +802,15 @@
             s.parentSessionId && !byId.has(s.parentSessionId)
               ? ' (forked from ' + s.parentSessionId + ', not listed)'
               : '';
+          // Show the human title (cycle 85) when set; textContent-safe (the
+          // whole tree string is rendered via textContent at the call site).
+          const title = s.title ? ' — ' + s.title : '';
           lines.push(
-            '  '.repeat(depth) + (depth ? '└ ' : '') + s.sessionId + orphan,
+            '  '.repeat(depth) +
+              (depth ? '└ ' : '') +
+              s.sessionId +
+              title +
+              orphan,
           );
           for (const f of s.forks || []) walk(byId.get(f), depth + 1);
         };
