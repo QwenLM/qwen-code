@@ -35,8 +35,11 @@ import { createOwnerEventsRoute } from './routes/ownerEvents.js';
 import { OwnerEventBus } from './ownerEvents.js';
 import { createPushRouter } from './routes/push.js';
 import { createRoutingRouter } from './routes/routing.js';
-import { createSearchRoute } from './routes/search.js';
-import { resolveChatsDir } from './sessions/chatsPath.js';
+import { createSearchRoute, type RankedSearch } from './routes/search.js';
+import {
+  resolveChatsDir,
+  resolveSearchIndexDir,
+} from './sessions/chatsPath.js';
 import { CommandLoader } from './commands/loader.js';
 import {
   createListCommandsRoute,
@@ -279,6 +282,53 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(OWNER, audit),
     createShareRouter(deps.store, registry, audit),
   );
+  // BM25 ranked search provider (search slice 2) — opt-in `?rank=bm25`. The
+  // native better-sqlite3 is loaded LAZILY via a dynamic import the FIRST time a
+  // ranked query arrives (memoized), so the gateway's static graph never pulls
+  // it in and a fresh install / failed native build still boots and serves the
+  // scanner. Returns null (→ route falls back to the live scan) when the dep is
+  // absent, there is no workspace, the index is empty/never-built, or any error
+  // occurs — ranked search is strictly best-effort enrichment over the scan.
+  let searchIndexMod:
+    | typeof import('./search/searchIndex.js')
+    | null
+    | undefined;
+  const rankedSearch: RankedSearch = async (q, qopts) => {
+    let workspaceCwd: string | undefined;
+    try {
+      workspaceCwd = (await deps.daemon.capabilities()).workspaceCwd;
+    } catch {
+      return null;
+    }
+    if (!workspaceCwd) return null;
+    if (searchIndexMod === undefined) {
+      try {
+        searchIndexMod = await import('./search/searchIndex.js');
+      } catch {
+        // Native dep absent / load failed → permanently fall back to the scan.
+        searchIndexMod = null;
+      }
+    }
+    if (!searchIndexMod) return null;
+    const dbPath = join(resolveSearchIndexDir(workspaceCwd), 'index.db');
+    let idx: ReturnType<typeof searchIndexMod.SearchIndex.open> | undefined;
+    try {
+      idx = searchIndexMod.SearchIndex.open(dbPath);
+      // A never-built (empty) index must not silently return zero hits when the
+      // scan would find matches — fall back instead.
+      if (idx.count() === 0) return null;
+      return idx.query(q, qopts);
+    } catch {
+      return null;
+    } finally {
+      try {
+        idx?.close();
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
+
   app.get(
     '/rc/search',
     // SESSION_READ at the mount admits both owners and session-locked share
@@ -286,16 +336,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     // (cycle 76): a share is confined to its locked session, everyone else
     // needs OWNER.
     requireScope(SESSION_READ, audit),
-    createSearchRoute(async () => {
-      try {
-        const caps = await deps.daemon.capabilities();
-        return caps.workspaceCwd
-          ? resolveChatsDir(caps.workspaceCwd)
-          : undefined;
-      } catch {
-        return undefined;
-      }
-    }, audit),
+    createSearchRoute(
+      async () => {
+        try {
+          const caps = await deps.daemon.capabilities();
+          return caps.workspaceCwd
+            ? resolveChatsDir(caps.workspaceCwd)
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      audit,
+      { ranked: rankedSearch },
+    ),
   );
 
   let notifier: PushNotifier | undefined;

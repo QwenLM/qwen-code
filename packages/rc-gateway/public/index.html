@@ -190,6 +190,10 @@
       <div>
         <label>since <input id="search-since" type="datetime-local" /></label>
         <label>until <input id="search-until" type="datetime-local" /></label>
+        <label
+          title="BM25 relevance ranking over the prebuilt index (run `qwen-rc reindex` first); falls back to the scan if unavailable"
+          ><input id="search-rank" type="checkbox" /> rank (BM25)</label
+        >
       </div>
       <div id="search-results">(not searched)</div>
     </section>
@@ -1196,6 +1200,10 @@
           const until = $('search-until').value;
           if (since) params.set('since', new Date(since).toISOString());
           if (until) params.set('until', new Date(until).toISOString());
+          // Opt-in BM25 ranked mode (slice 2). The server reports the EFFECTIVE
+          // mode in body.mode — a requested rank that's unavailable falls back
+          // to the scan, so the footer reflects what actually ran.
+          if ($('search-rank').checked) params.set('rank', 'bm25');
           const res = await fetch('/rc/search?' + params.toString(), {
             headers: { Authorization: 'Bearer ' + token() },
           });
@@ -1227,6 +1235,7 @@
             ' hits in ' +
             (body.elapsedMs || 0) +
             'ms' +
+            (body.mode === 'bm25' ? ' (ranked)' : '') +
             (body.truncated ? ' (truncated)' : '');
           out.appendChild(footer);
           if (hits.length === 0) {

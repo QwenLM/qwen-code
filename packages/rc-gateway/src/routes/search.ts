@@ -10,10 +10,30 @@ import { OWNER } from '../scopes.js';
 import {
   searchTranscriptsDetailed,
   SearchTimeoutError,
+  type SearchResult,
 } from '../search/transcripts.js';
 
 /** Route-facing kind values; 'tool' maps to record type tool_result downstream. */
 const VALID_KINDS = ['user', 'assistant', 'tool', 'all'] as const;
+
+/**
+ * Opt-in BM25 ranked search (search slice 2). Returns ranked hits over the
+ * prebuilt FTS5 index, or `null` when ranking is UNAVAILABLE (native dep absent,
+ * no workspace, or an empty/never-built index) so the route transparently falls
+ * back to the live scan. Injected (never statically imported here) so the route
+ * module — and the gateway's static graph — never pulls in the native
+ * better-sqlite3; the provider does the lazy dynamic import itself.
+ */
+export type RankedSearch = (
+  q: string,
+  opts: {
+    kind?: string;
+    sessionId?: string;
+    limit?: number;
+    since?: number;
+    until?: number;
+  },
+) => Promise<SearchResult | null>;
 
 /** Default per-query scan budget (spec.md: 2 s). config.toml knob deferred. */
 const SEARCH_TIMEOUT_MS = 2000;
@@ -37,7 +57,7 @@ const SEARCH_TIMEOUT_MS = 2000;
 export function createSearchRoute(
   resolveDir: () => Promise<string | undefined>,
   audit?: AuditRecorder,
-  opts?: { timeoutMs?: number; now?: () => number },
+  opts?: { timeoutMs?: number; now?: () => number; ranked?: RankedSearch },
 ): RequestHandler {
   return async (req, res) => {
     // Authorization FIRST, before any query processing, so an unauthorized
@@ -135,11 +155,18 @@ export function createSearchRoute(
       return;
     }
 
+    // Opt-in BM25 ranked mode (search slice 2): ?rank=bm25. Effective `mode` in
+    // the response reflects what actually RAN — a requested rank that is
+    // unavailable transparently falls back to the scan and reports mode:'scan'.
+    const wantRank = req.query.rank === 'bm25';
+
     const dir = await resolveDir();
     if (!dir) {
       // No workspace → empty result, but keep the 200 body shape uniform with
-      // the scanned path (every 200 carries hits + truncated + elapsedMs).
-      res.status(200).json({ hits: [], truncated: false, elapsedMs: 0 });
+      // the scanned path (every 200 carries hits + truncated + elapsedMs + mode).
+      res
+        .status(200)
+        .json({ hits: [], truncated: false, elapsedMs: 0, mode: 'scan' });
       return;
     }
 
@@ -153,40 +180,71 @@ export function createSearchRoute(
     // an injected constant `now` yields elapsedMs 0 (the scanner reads it).
     const nowMs = opts?.now ?? Date.now;
     const startedAt = nowMs();
-    let result;
-    try {
-      result = await searchTranscriptsDetailed(dir, q, {
-        kind,
-        sessionId,
-        limit,
-        since: since.ms,
-        until: until.ms,
-        timeoutMs: opts?.timeoutMs ?? SEARCH_TIMEOUT_MS,
-        now: opts?.now,
-      });
-    } catch (err) {
-      if (err instanceof SearchTimeoutError) {
-        void audit?.record({
-          action: 'search_performed',
-          actorTokenId: req.rcClient?.id,
-          shareId: req.rcClient?.shareId,
-          shareLabel: req.rcClient?.shareLabel,
-          // Privacy: kind + timeout flag only — never the query text or a count.
-          detail: {
-            kind,
-            timedOut: true,
-            ...(lock !== undefined ? { sessionScoped: true } : {}),
-          },
+
+    // BM25 ranked attempt (opt-in). Best-effort: a provider that returns null
+    // (unavailable / empty index) or throws transparently falls back to the
+    // scan below — ranked search must never turn an answerable query into an
+    // error. NOTE: better-sqlite3 is synchronous, so a ranked query briefly
+    // blocks the event loop; acceptable for the single-owner localhost gateway
+    // (a worker-thread offload is the documented future path if a very large
+    // index makes the block matter).
+    let mode: 'scan' | 'bm25' = 'scan';
+    let result: SearchResult | undefined;
+    if (wantRank && opts?.ranked) {
+      try {
+        const ranked = await opts.ranked(q, {
+          kind,
+          sessionId,
+          limit,
+          since: since.ms,
+          until: until.ms,
         });
-        res
-          .status(503)
-          .json({ error: 'Search timed out', code: 'search_timeout' });
+        if (ranked) {
+          result = ranked;
+          mode = 'bm25';
+        }
+      } catch {
+        // fall through to the live scan
+      }
+    }
+
+    if (result === undefined) {
+      try {
+        result = await searchTranscriptsDetailed(dir, q, {
+          kind,
+          sessionId,
+          limit,
+          since: since.ms,
+          until: until.ms,
+          timeoutMs: opts?.timeoutMs ?? SEARCH_TIMEOUT_MS,
+          now: opts?.now,
+        });
+      } catch (err) {
+        if (err instanceof SearchTimeoutError) {
+          void audit?.record({
+            action: 'search_performed',
+            actorTokenId: req.rcClient?.id,
+            shareId: req.rcClient?.shareId,
+            shareLabel: req.rcClient?.shareLabel,
+            // Privacy: kind + timeout flag only — never the query text or count.
+            detail: {
+              kind,
+              timedOut: true,
+              ...(lock !== undefined ? { sessionScoped: true } : {}),
+            },
+          });
+          res
+            .status(503)
+            .json({ error: 'Search timed out', code: 'search_timeout' });
+          return;
+        }
+        if (!res.headersSent) {
+          res
+            .status(500)
+            .json({ error: 'Search failed', code: 'search_error' });
+        }
         return;
       }
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Search failed', code: 'search_error' });
-      }
-      return;
     }
 
     const elapsedMs = Math.max(0, Math.round(nowMs() - startedAt));
@@ -197,15 +255,21 @@ export function createSearchRoute(
       shareId: req.rcClient?.shareId,
       shareLabel: req.rcClient?.shareLabel,
       // Privacy: count + kind only — never the query text. timing is not audited.
+      // `rank` is recorded ONLY on a successful bm25 run, so the scan path's
+      // detail stays byte-identical to before.
       detail: {
         kind,
         resultCount: result.hits.length,
+        ...(mode === 'bm25' ? { rank: 'bm25' } : {}),
         ...(lock !== undefined ? { sessionScoped: true } : {}),
       },
     });
 
-    res
-      .status(200)
-      .json({ hits: result.hits, truncated: result.truncated, elapsedMs });
+    res.status(200).json({
+      hits: result.hits,
+      truncated: result.truncated,
+      elapsedMs,
+      mode,
+    });
   };
 }

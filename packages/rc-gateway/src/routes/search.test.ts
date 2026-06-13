@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -55,7 +55,7 @@ beforeEach(() => {
 
 async function mount(
   resolveDir: () => Promise<string | undefined>,
-  opts?: { timeoutMs?: number; now?: () => number },
+  opts?: Parameters<typeof createSearchRoute>[2],
 ): Promise<string> {
   const app = express();
   app.use(express.json());
@@ -138,9 +138,83 @@ describe('search route', () => {
       hits: unknown[];
       truncated: boolean;
       elapsedMs: number;
+      mode: string;
     };
-    // Uniform 200 shape with the scanned path (cycle 37).
-    expect(body).toEqual({ hits: [], truncated: false, elapsedMs: 0 });
+    // Uniform 200 shape with the scanned path (cycle 37; +mode in slice 2).
+    expect(body).toEqual({
+      hits: [],
+      truncated: false,
+      elapsedMs: 0,
+      mode: 'scan',
+    });
+  });
+
+  it('rank=bm25: uses the ranked provider and reports mode:"bm25" (skips the scan)', async () => {
+    const ranked = vi.fn(async () => ({
+      hits: [
+        {
+          sessionId: 'sess-1',
+          eventId: 'ranked-1',
+          kind: 'assistant',
+          ts: '2026-06-01T00:00:00.000Z',
+          snippet: 'ranked hit',
+        },
+      ],
+      truncated: false,
+    }));
+    const url = await mount(async () => dir, { ranked });
+    const res = await fetch(`${url}/rc/search?q=oauth&rank=bm25`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      hits: Array<{ eventId: string }>;
+      mode: string;
+    };
+    expect(body.mode).toBe('bm25');
+    expect(body.hits.map((h) => h.eventId)).toEqual(['ranked-1']); // ranked, not the scan's evt-1
+    expect(ranked).toHaveBeenCalledTimes(1);
+    // The bm25 run records rank:'bm25' in the audit; scan path stays unchanged.
+    const a = audit.calls.find((c) => c.action === 'search_performed');
+    expect(a!.detail).toEqual({ kind: 'all', resultCount: 1, rank: 'bm25' });
+  });
+
+  it('rank=bm25 falls back to the scan (mode:"scan") when the provider returns null', async () => {
+    const ranked = vi.fn(async () => null);
+    const url = await mount(async () => dir, { ranked });
+    const res = await fetch(`${url}/rc/search?q=oauth+flow&rank=bm25`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      hits: Array<{ eventId: string }>;
+      mode: string;
+    };
+    expect(body.mode).toBe('scan');
+    expect(body.hits[0].eventId).toBe('evt-1'); // the live scan answered
+    // scan-path audit detail is byte-identical (no rank key).
+    const a = audit.calls.find((c) => c.action === 'search_performed');
+    expect(a!.detail).toEqual({ kind: 'all', resultCount: 1 });
+  });
+
+  it('rank=bm25 falls back to the scan when the provider throws', async () => {
+    const ranked = vi.fn(async () => {
+      throw new Error('native blew up');
+    });
+    const url = await mount(async () => dir, { ranked });
+    const res = await fetch(`${url}/rc/search?q=oauth+flow&rank=bm25`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      hits: Array<{ eventId: string }>;
+      mode: string;
+    };
+    expect(body.mode).toBe('scan');
+    expect(body.hits[0].eventId).toBe('evt-1');
+  });
+
+  it('a plain query (no rank) never invokes the ranked provider and reports mode:"scan"', async () => {
+    const ranked = vi.fn(async () => null);
+    const url = await mount(async () => dir, { ranked });
+    const res = await fetch(`${url}/rc/search?q=oauth+flow`);
+    const body = (await res.json()) as { mode: string };
+    expect(body.mode).toBe('scan');
+    expect(ranked).not.toHaveBeenCalled();
   });
 
   it('503 search_timeout when the scan exceeds the per-query budget', async () => {
