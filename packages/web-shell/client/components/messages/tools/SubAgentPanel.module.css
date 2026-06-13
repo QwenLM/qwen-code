@@ -84,7 +84,14 @@
   overflow: hidden;
 }
 
-.streamToggle {
+/* Result and sub-tool list: scroll within the same cap as the live
+   stream so the enclosing panel never grows past a screen. */
+.scrollWindow {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.expandToggle {
   display: block;
   margin: 2px 0 0 auto;
   background: none;
@@ -95,7 +102,7 @@
   padding: 0 4px;
 }
 
-.streamToggle:hover {
+.expandToggle:hover {
   color: var(--text-dimmed);
 }
 
