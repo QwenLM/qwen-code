@@ -170,8 +170,27 @@ export async function ensureInstalled(opts: InstallOptions): Promise<string> {
   const tmpFile = join(computerUseTmp(opts.home), target.asset);
   const hash = createHash('sha256');
   const nodeStream = Readable.fromWeb(res.body as never);
-  nodeStream.on('data', (chunk: Buffer) => hash.update(chunk));
-  await pipeline(nodeStream, createWriteStream(tmpFile));
+  // Body-level idle watchdog. The headers timeout (fetchFirst) is cleared once
+  // headers arrive, so without this a source that sends headers then stalls
+  // mid-stream would hang the install forever. Reset on each chunk — slow but
+  // progressing is fine; 60s with no bytes means stalled → abort. (review #3)
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      nodeStream.destroy(new Error('download stalled: no data for 60s'));
+    }, 60_000);
+  };
+  nodeStream.on('data', (chunk: Buffer) => {
+    hash.update(chunk);
+    armIdle();
+  });
+  armIdle();
+  try {
+    await pipeline(nodeStream, createWriteStream(tmpFile));
+  } finally {
+    clearTimeout(idleTimer);
+  }
 
   // 3. Verify sha256 before trusting the bytes.
   const actualSha = hash.digest('hex');

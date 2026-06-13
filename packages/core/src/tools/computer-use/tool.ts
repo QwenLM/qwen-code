@@ -19,6 +19,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { ComputerUseClient } from './client.js';
 import type { ComputerUseToolName, ComputerUseToolSchema } from './schemas.js';
+import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
@@ -52,7 +53,7 @@ const INSTALL_REASON =
  *     browser's prefs + quits/relaunches it (more persistent than the one-shot
  *     execute_javascript). (review round 2)
  */
-const HIGH_RISK_TOOLS = new Set([
+const HIGH_RISK_TOOLS = new Set<ComputerUseToolName>([
   'kill_app',
   'launch_app',
   'start_recording',
@@ -65,11 +66,21 @@ const HIGH_RISK_PAGE_ACTIONS = new Set([
   'enable_javascript_apple_events',
 ]);
 
+// Fail fast at module load if a high-risk entry isn't a real tool name. The
+// Set<ComputerUseToolName> typing already rejects typos at compile time; this
+// also catches the name union drifting from the schema set at runtime. A typo
+// would otherwise silently disable the gate for that tool. (review round 3)
+for (const t of HIGH_RISK_TOOLS) {
+  if (!(t in COMPUTER_USE_SCHEMAS)) {
+    throw new Error(`HIGH_RISK_TOOLS contains unknown tool: ${t}`);
+  }
+}
+
 export function isHighRiskCall(
   upstreamName: string,
   params: Record<string, unknown>,
 ): boolean {
-  if (HIGH_RISK_TOOLS.has(upstreamName)) return true;
+  if (HIGH_RISK_TOOLS.has(upstreamName as ComputerUseToolName)) return true;
   return (
     upstreamName === 'page' &&
     HIGH_RISK_PAGE_ACTIONS.has(params['action'] as string)
@@ -162,17 +173,16 @@ class ComputerUseInvocation extends BaseToolInvocation<
     // 'edit'/'info'. AUTO still routes them through its classifier (this tool's
     // getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
     if (isHighRiskCall(this.upstreamName, this.params)) {
-      // The 'mcp' confirmation UI renders only server + tool name, not args —
-      // fold the args into the title so the gate's extra friction is also
-      // informative (the injected JS, --remote-debugging-port, recording dest,
-      // config mutation, or replay dir is exactly what the user must see before
-      // approving). (review round 2)
-      const base = `Allow high-risk Computer Use: ${this.upstreamName} ${safeJsonStringify(this.params)}`;
+      // NOTE: args are deliberately NOT folded into `title` — no mcp
+      // confirmation surface (TUI / non-interactive / ACP) renders the mcp
+      // title, so it would be dead text. The args reach the user via the
+      // tool-header line (getDescription()). The gate's job is forcing the
+      // confirmation (mcp type → not AUTO_EDIT-auto-approved). (review round 3)
       return {
         type: 'mcp',
         title: installApproved
-          ? base
-          : `${base} — first use also downloads the driver`,
+          ? `Allow high-risk Computer Use (${this.upstreamName})`
+          : `Allow high-risk Computer Use (${this.upstreamName}) — first use also downloads the driver`,
         serverName: 'cua-driver',
         toolName: this.upstreamName,
         toolDisplayName: `computer_use__${this.upstreamName}`,
