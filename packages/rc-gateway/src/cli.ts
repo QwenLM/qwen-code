@@ -60,7 +60,11 @@ import {
   resolveSearchIndexDir,
 } from './sessions/chatsPath.js';
 import { searchTranscriptsDetailed } from './search/transcripts.js';
-import { parseSearchArgs, formatSearchResults } from './search/searchCli.js';
+import {
+  parseSearchArgs,
+  formatSearchResults,
+  formatSearchResultsJson,
+} from './search/searchCli.js';
 
 export interface ServeOptions {
   gatewayPort?: number;
@@ -515,7 +519,13 @@ if (process.argv[2] === 'serve') {
     // different hits/order from the default scan; build the index with
     // `qwen-rc reindex` first. The NATIVE better-sqlite3 is loaded HERE via a
     // dynamic import, so `qwen serve` / the gateway never load the addon.
-    if (process.argv.includes('--rank')) {
+    // `--json` switches stdout to a stable JSON object; stderr hints (empty
+    // index / short-term floor) still go to stderr so stdout stays clean JSON.
+    const render = (result: import('./search/transcripts.js').SearchResult) =>
+      parsed.value.json
+        ? formatSearchResultsJson(result)
+        : formatSearchResults(result);
+    if (parsed.value.rank) {
       const { SearchIndex } = await loadSearchIndexModule();
       const dbPath = join(
         resolveSearchIndexDir(parsed.value.cwd ?? process.cwd()),
@@ -544,7 +554,7 @@ if (process.argv[2] === 'serve') {
           }
         }
         // eslint-disable-next-line no-console
-        console.log(formatSearchResults(result));
+        console.log(render(result));
       } finally {
         idx.close();
       }
@@ -558,7 +568,7 @@ if (process.argv[2] === 'serve') {
       parsed.value.opts,
     );
     // eslint-disable-next-line no-console
-    console.log(formatSearchResults(result));
+    console.log(render(result));
     process.exit(0);
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console

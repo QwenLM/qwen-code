@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSearchArgs, formatSearchResults } from './searchCli.js';
+import {
+  parseSearchArgs,
+  formatSearchResults,
+  formatSearchResultsJson,
+} from './searchCli.js';
 import type { SearchResult } from './transcripts.js';
 
 describe('parseSearchArgs', () => {
@@ -45,6 +49,17 @@ describe('parseSearchArgs', () => {
       since: Date.parse('2026-06-01T00:00:00.000Z'),
       until: Date.parse('2026-06-10T00:00:00.000Z'),
     });
+  });
+
+  it('defaults json/rank false and reads the bare --json / --rank flags', () => {
+    const off = parseSearchArgs(['oauth']);
+    expect(off.ok && off.value.json).toBe(false);
+    expect(off.ok && off.value.rank).toBe(false);
+    const on = parseSearchArgs(['oauth', '--json', '--rank']);
+    expect(on.ok && on.value.json).toBe(true);
+    expect(on.ok && on.value.rank).toBe(true);
+    // The flags must not leak into the positional query.
+    expect(on.ok && on.value.query).toBe('oauth');
   });
 
   it('rejects an invalid kind', () => {
@@ -112,5 +127,30 @@ describe('formatSearchResults', () => {
       ),
     );
     expect(out).toContain('1 hit(s) (truncated)');
+  });
+});
+
+describe('formatSearchResultsJson', () => {
+  it('emits a stable {hits, truncated} JSON object with the SearchHit fields', () => {
+    const result: SearchResult = {
+      hits: [
+        {
+          sessionId: 's1',
+          eventId: 'e1',
+          kind: 'assistant',
+          ts: '2026-06-01T00:00:00.000Z',
+          snippet: 'the oauth flow',
+        },
+      ],
+      truncated: true,
+    };
+    const parsed = JSON.parse(formatSearchResultsJson(result));
+    expect(parsed).toEqual(result);
+  });
+
+  it('emits an empty hits array (not "(no hits)") for no matches', () => {
+    expect(
+      JSON.parse(formatSearchResultsJson({ hits: [], truncated: false })),
+    ).toEqual({ hits: [], truncated: false });
   });
 });

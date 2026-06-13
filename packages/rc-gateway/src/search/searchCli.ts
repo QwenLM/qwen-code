@@ -12,12 +12,16 @@ export interface ParsedSearchArgs {
   /** Workspace cwd whose chats dir is searched (default process.cwd()). */
   cwd?: string;
   opts: Pick<SearchOptions, 'kind' | 'sessionId' | 'limit' | 'since' | 'until'>;
+  /** `--json`: emit machine-readable JSON on stdout instead of the text view. */
+  json: boolean;
+  /** `--rank`: BM25 ranked query over the prebuilt index (vs the live scan). */
+  rank: boolean;
 }
 
 const VALID_KINDS = ['user', 'assistant', 'tool', 'all'];
 
 const USAGE =
-  'usage: qwen-rc search <query…> [--cwd=<dir>] [--kind=user|assistant|tool|all] [--since=<iso>] [--until=<iso>] [--limit=<n>] [--session=<id>]';
+  'usage: qwen-rc search <query…> [--cwd=<dir>] [--kind=user|assistant|tool|all] [--since=<iso>] [--until=<iso>] [--limit=<n>] [--session=<id>] [--rank] [--json]';
 
 /**
  * Parse `qwen-rc search` argv (everything after `search`). Total/never-throws.
@@ -86,7 +90,26 @@ export function parseSearchArgs(
   const cwdRaw = flags.get('cwd');
   const cwd = cwdRaw !== undefined && cwdRaw.length > 0 ? cwdRaw : undefined;
 
-  return { ok: true, value: { query, cwd, opts } };
+  return {
+    ok: true,
+    value: {
+      query,
+      cwd,
+      opts,
+      json: flags.has('json'),
+      rank: flags.has('rank'),
+    },
+  };
+}
+
+/**
+ * Machine-readable rendering of search results for `--json`: a single stable
+ * JSON object `{ hits, truncated }` where each hit carries
+ * `{ sessionId, eventId, kind, ts, snippet }` (the same SearchHit fields the
+ * route returns). Pure — no trailing newline, the CLI adds one via console.log.
+ */
+export function formatSearchResultsJson(result: SearchResult): string {
+  return JSON.stringify({ hits: result.hits, truncated: result.truncated });
 }
 
 /**
