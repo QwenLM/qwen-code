@@ -143,6 +143,9 @@ const CONN_ROUTED_METHODS = new Set<string>([
   'session/resume',
   'session/list',
   'session/close',
+  'session/fork',
+  'session/set_mode',
+  'session/set_model',
   ...ALL_QWEN_VENDOR_METHODS,
 ]);
 
@@ -769,7 +772,16 @@ export class AcpDispatcher {
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
           conn.ownSession(sessionId);
-          this.replyConn(conn, id, restored.state ?? {});
+          // ACP standard: load/resume response includes configOptions + models + modes
+          const loadConfigOptions = await this.configOptionsFor(sessionId);
+          const loadModels = this.extractModelState(loadConfigOptions);
+          const loadModes = this.extractModeState(loadConfigOptions);
+          this.replyConn(conn, id, {
+            ...(restored.state ?? {}),
+            ...(loadConfigOptions ? { configOptions: loadConfigOptions } : {}),
+            ...(loadModels ? { models: loadModels } : {}),
+            ...(loadModes ? { modes: loadModes } : {}),
+          });
           return;
         }
 
@@ -831,6 +843,46 @@ export class AcpDispatcher {
             conn.closingSessions.delete(sessionId);
           }
           this.replyConn(conn, id, {});
+          return;
+        }
+
+        // ACP standard: session/fork — create a branched copy of an existing
+        // session. Maps to bridge.branchSession().
+        case 'session/fork': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            }
+            return;
+          }
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          const result = await this.bridge.branchSession(
+            sessionId,
+            {
+              name:
+                typeof params['name'] === 'string' ? params['name'] : undefined,
+            },
+            ctx,
+          );
+          if (conn.destroyed) {
+            this.killOrphanSession(result.sessionId);
+            return;
+          }
+          conn.getOrCreateSession(result.sessionId).clientId = result.clientId;
+          conn.ownSession(result.sessionId);
+          const configOptions = await this.configOptionsFor(result.sessionId);
+          const models = this.extractModelState(configOptions);
+          const modes = this.extractModeState(configOptions);
+          this.replyConn(conn, id, {
+            sessionId: result.sessionId,
+            ...(configOptions ? { configOptions } : {}),
+            ...(models ? { models } : {}),
+            ...(modes ? { modes } : {}),
+          });
           return;
         }
 
@@ -937,6 +989,70 @@ export class AcpDispatcher {
           // Response returns the updated config option set (per ACP).
           const configOptions = await this.configOptionsFor(sessionId);
           this.replySession(conn, sessionId, id, { configOptions });
+          return;
+        }
+
+        // ACP standard: session/set_mode — dedicated method for mode changes.
+        // Maps to the same bridge call as set_config_option with configId='mode'.
+        case 'session/set_mode': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const modeId = String(params['modeId'] ?? '');
+          if (!modeId || !APPROVAL_MODES.includes(modeId as ApprovalMode)) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `invalid modeId "${modeId}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                ),
+              );
+            }
+            return;
+          }
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.setSessionApprovalMode(
+            sessionId,
+            modeId as ApprovalMode,
+            {},
+            ctx,
+          );
+          this.replySession(conn, sessionId, id, {});
+          return;
+        }
+
+        // ACP standard (unstable): session/set_model — dedicated method for
+        // model changes. Maps to the same bridge call as set_config_option
+        // with configId='model'.
+        case 'session/set_model': {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const modelId = String(params['modelId'] ?? '');
+          if (!modelId) {
+            if (id !== undefined) {
+              this.replySession(
+                conn,
+                sessionId,
+                id,
+                undefined,
+                error(id, RPC.INVALID_PARAMS, '`modelId` is required'),
+              );
+            }
+            return;
+          }
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.setSessionModel(
+            sessionId,
+            { modelId } as unknown as Parameters<
+              HttpAcpBridge['setSessionModel']
+            >[1],
+            ctx,
+          );
+          this.replySession(conn, sessionId, id, {});
           return;
         }
 
