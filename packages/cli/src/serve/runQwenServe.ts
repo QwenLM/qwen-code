@@ -86,6 +86,13 @@ function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
 }
 
+function isNonNegativeIntegerOrInfinity(value: number): boolean {
+  return (
+    value === Number.POSITIVE_INFINITY ||
+    (Number.isFinite(value) && Number.isInteger(value) && value >= 0)
+  );
+}
+
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 function assertTimerDelayInRange(name: string, value: number): void {
@@ -653,6 +660,13 @@ export async function runQwenServe(
     }
     assertTimerDelayInRange('promptDeadlineMs', opts.promptDeadlineMs);
   }
+  if (opts.maxPendingPromptsPerSession !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
+      throw new TypeError(
+        `Invalid maxPendingPromptsPerSession: ${opts.maxPendingPromptsPerSession}. Must be a non-negative integer (0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
       throw new TypeError(
@@ -848,6 +862,9 @@ export async function runQwenServe(
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.maxPendingPromptsPerSession !== undefined
+        ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+        : {}),
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
         : {}),

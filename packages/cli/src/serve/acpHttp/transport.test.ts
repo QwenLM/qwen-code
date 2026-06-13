@@ -13,6 +13,7 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   InvalidClientIdError,
+  PromptQueueFullError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -149,11 +150,12 @@ class FakeBridge {
     return q.iterable;
   }
 
-  async sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
+  sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
     const q = this.queues.get(sessionId);
-    if (this.promptBehavior && q)
-      return this.promptBehavior(sessionId, q, signal);
-    return { stopReason: 'end_turn' };
+    if (this.promptBehavior && q) {
+      return Promise.resolve(this.promptBehavior(sessionId, q, signal));
+    }
+    return Promise.resolve({ stopReason: 'end_turn' });
   }
 
   respondToSessionPermission() {
@@ -1205,6 +1207,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{ error: { code: number } }>;
     expect(frame.error.code).toBe(-32602);
+  });
+
+  it('session/prompt queue cap error includes stable JSON-RPC data', async () => {
+    bridge.promptBehavior = () => {
+      throw new PromptQueueFullError(5, 5, 'sess-1');
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 46,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'prompt_queue_full',
+      sessionId: 'sess-1',
+      limit: 5,
+      pendingCount: 5,
+    });
   });
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {

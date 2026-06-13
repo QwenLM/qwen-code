@@ -52,6 +52,7 @@ import {
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  PromptQueueFullError,
   RestoreInProgressError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -87,6 +88,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import type { DaemonLogger } from './daemonLogger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
@@ -94,6 +96,18 @@ const baseOpts: ServeOptions = {
   port: 4170,
   mode: 'http-bridge',
 };
+
+function fakeDaemonLog(): DaemonLogger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    raw: vi.fn(),
+    getLogPath: () => '',
+    getDaemonId: () => 'test-daemon',
+    flush: vi.fn(async () => {}),
+  };
+}
 
 // Workspace fixtures must round-trip through `path.resolve` so the
 // expected values match the canonicalized form the route produces on
@@ -270,7 +284,7 @@ interface FakeBridgeOpts {
     req: PromptRequest,
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
-  ) => Promise<PromptResponse>;
+  ) => Promise<PromptResponse> | PromptResponse;
   cancelImpl?: (
     sessionId: string,
     req?: CancelNotification,
@@ -948,14 +962,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
-    async sendPrompt(sessionId, req, signal, context) {
+    sendPrompt(sessionId, req, signal, context) {
       promptCalls.push({
         sessionId,
         req,
         signal,
         ...(context ? { context } : {}),
       });
-      return promptImpl(sessionId, req, signal, context);
+      return Promise.resolve(promptImpl(sessionId, req, signal, context));
     },
     async cancelSession(sessionId, req, context) {
       cancelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
@@ -1581,6 +1595,39 @@ describe('createServeApp', () => {
         getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
       );
       expect(res.body.modelServices).toEqual([]);
+      expect(res.body.limits).toMatchObject({
+        maxPendingPromptsPerSession: 5,
+      });
+    });
+
+    it('reports disabled prompt queue cap as null in capabilities', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        maxPendingPromptsPerSession: 0,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.limits).toMatchObject({
+        maxPendingPromptsPerSession: null,
+      });
+    });
+
+    it('reports explicit prompt queue cap in capabilities', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        maxPendingPromptsPerSession: 12,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.limits).toMatchObject({
+        maxPendingPromptsPerSession: 12,
+      });
     });
 
     it('omits mcp_workspace_pool / mcp_pool_restart when mcpPoolActive=false (F2 #4175 commit 5)', async () => {
@@ -3127,6 +3174,38 @@ describe('createServeApp', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(202);
       expect(res.body.promptId).toBeDefined();
+    });
+
+    it('503 without promptId when bridge rejects prompt admission synchronously', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new PromptQueueFullError(5, 5, 'session-A');
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toMatchObject({
+        code: 'prompt_queue_full',
+        sessionId: 'session-A',
+        limit: 5,
+        pendingCount: 5,
+      });
+      expect(res.body.promptId).toBeUndefined();
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: queue full',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          limit: 5,
+          pendingCount: 5,
+        }),
+      );
     });
 
     it('passes an AbortSignal into bridge.sendPrompt', async () => {
@@ -6382,6 +6461,24 @@ describe('runQwenServe', () => {
           promptDeadlineMs: value,
         }),
       ).rejects.toThrow(/promptDeadlineMs/);
+    },
+  );
+
+  it.each([
+    ['negative', -5],
+    ['float', 1.5],
+    ['NaN', Number.NaN],
+  ])(
+    'rejects invalid maxPendingPromptsPerSession (%s) at boot',
+    async (_label, value) => {
+      await expect(
+        runQwenServe({
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          maxPendingPromptsPerSession: value,
+        }),
+      ).rejects.toThrow(/maxPendingPromptsPerSession/);
     },
   );
 

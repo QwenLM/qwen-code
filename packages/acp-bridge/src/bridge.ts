@@ -51,6 +51,7 @@ import {
   RestoreInProgressError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
+  PromptQueueFullError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -226,6 +227,8 @@ interface SessionEntry {
    * caller still observes the rejection on its own returned promise.
    */
   promptQueue: Promise<void>;
+  /** Accepted prompts that have not settled yet (queued + active). */
+  pendingPromptCount: number;
   /**
    * Per-session model-change FIFO. Prevents two concurrent
    * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
@@ -648,6 +651,8 @@ const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+// Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
  * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
@@ -750,8 +755,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
   // Bd1yh + Bd1z5: per-permission deadline + per-session pending cap.
-  // 0 / Infinity / non-finite (NaN, -1) all disable — same sentinel
-  // convention as maxSessions / maxConnections.
+  // Permission caps keep the legacy sentinel behavior; prompt caps are
+  // stricter because they are an admission-control surface.
   const permissionTimeoutRaw =
     opts.permissionResponseTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
   const permissionTimeoutMs =
@@ -764,6 +769,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
       ? maxPendingRaw
       : Infinity;
+  const maxPendingPromptsRaw =
+    opts.maxPendingPromptsPerSession ?? DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  let maxPendingPromptsPerSession: number;
+  if (
+    maxPendingPromptsRaw === 0 ||
+    maxPendingPromptsRaw === Number.POSITIVE_INFINITY
+  ) {
+    maxPendingPromptsPerSession = Infinity;
+  } else if (
+    !Number.isInteger(maxPendingPromptsRaw) ||
+    maxPendingPromptsRaw < 0
+  ) {
+    throw new TypeError(
+      `Invalid maxPendingPromptsPerSession: ${maxPendingPromptsRaw}. ` +
+        `Must be a non-negative integer (0 / Infinity = unlimited).`,
+    );
+  } else {
+    maxPendingPromptsPerSession = maxPendingPromptsRaw;
+  }
   // The bound path is the canonical form `spawnOrAttach` compares
   // incoming `workspaceCwd` against. The caller MUST pass an already-
   // canonical value (via `canonicalizeWorkspace`). `runQwenServe`
@@ -1977,6 +2001,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       connection: ci.connection,
       events,
       promptQueue: Promise.resolve(),
+      pendingPromptCount: 0,
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
       modelPublishGeneration: 0,
@@ -2654,7 +2679,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-    async sendPrompt(sessionId, req, signal, context) {
+    // Keep this method non-async: admission failures must throw before
+    // HTTP routes return 202.
+    sendPrompt(sessionId, req, signal, context) {
       opts.onDiagnosticLine?.(
         `qwen serve: bridge sendPrompt for session=${sessionId}`,
         'info',
@@ -2662,11 +2689,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const capturedContext = telemetry.captureContext();
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
-      if (!entry) throw new SessionNotFoundError(sessionId);
-      const originatorClientId = resolveTrustedClientId(
-        entry,
-        context?.clientId,
-      );
+      if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      let originatorClientId: string | undefined;
+      try {
+        originatorClientId = resolveTrustedClientId(entry, context?.clientId);
+      } catch (err) {
+        return Promise.reject(err);
+      }
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -2675,6 +2704,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (signal?.aborted) {
         throw new DOMException('Prompt aborted', 'AbortError');
       }
+      if (entry.pendingPromptCount >= maxPendingPromptsPerSession) {
+        throw new PromptQueueFullError(
+          maxPendingPromptsPerSession,
+          entry.pendingPromptCount,
+          sessionId,
+        );
+      }
+      entry.pendingPromptCount += 1;
+      let promptSlotReleased = false;
+      const releasePromptSlot = () => {
+        if (promptSlotReleased) return;
+        promptSlotReleased = true;
+        entry.pendingPromptCount = Math.max(0, entry.pendingPromptCount - 1);
+      };
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
@@ -2898,6 +2941,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
         () => undefined,
       );
+      result.finally(releasePromptSlot).catch(() => {});
       return result;
     },
 
