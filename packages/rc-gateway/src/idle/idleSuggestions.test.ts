@@ -101,6 +101,46 @@ describe('createIdleSuggestionHandler', () => {
     expect(audited).toEqual([]);
   });
 
+  it('per-session override false → no fire even when globally enabled (no tail read, no frame)', async () => {
+    const readTurns = vi.fn(async () => TURNS);
+    const chat = vi.fn(async () => '["x"]') as unknown as ChatTransport;
+    const { handler, events, audited } = harness({
+      config: { enabled: true },
+      over: { readTurns, chat, getSessionEnabled: () => false },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(readTurns).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(audited).toEqual([]);
+  });
+
+  it('per-session override true CANNOT widen past a global-off (egress stays operator-gated)', async () => {
+    const readTurns = vi.fn(async () => TURNS);
+    const chat = vi.fn(async () => '["x"]') as unknown as ChatTransport;
+    const { handler, events } = harness({
+      config: { enabled: false },
+      over: { readTurns, chat, getSessionEnabled: () => true },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(readTurns).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it('per-session override undefined → follows the global default (fires when enabled)', async () => {
+    const { handler, events } = harness({
+      config: { enabled: true },
+      over: { getSessionEnabled: () => undefined },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('idle_suggestions');
+  });
+
   it('does nothing (no frame, no audit, no model call) when there are no turns', async () => {
     const chat = vi.fn(async () => '["x"]') as unknown as ChatTransport;
     const { handler, events, audited } = harness({

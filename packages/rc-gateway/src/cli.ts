@@ -25,6 +25,8 @@ import {
   formatRoutingTest,
 } from './routing/test.js';
 import { createGatewayApp } from './server.js';
+import { IdleSessionToggles } from './idle/sessionToggles.js';
+import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
 import {
   resolveSuggestConfig,
@@ -114,6 +116,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // eslint-disable-next-line no-console
       (msg) => console.warn(msg),
     );
+  // Idle suggestions pre-wiring (built before createGatewayApp so the toggle
+  // store + status resolver can be injected): the per-session override store, the
+  // rolling-hour limiter, and the live idle.yaml config. `suggestCfg` (resolved
+  // model creds) decides whether idle is wired at all — when absent, the status
+  // route reports `available:false`. The idleStatus closure reads idleConfig +
+  // idleLimiter LIVE so a hot-reload / consumed budget is reflected immediately.
+  const idleToggles = new IdleSessionToggles();
+  const idleLimiter = new PushRateLimiter();
+  const idleConfig = await loadIdleConfig(
+    join(homedir(), '.qwen', 'rc', 'idle.yaml'),
+    // eslint-disable-next-line no-console
+    (msg) => console.warn(`idle: ${msg}`),
+  );
+  if (resolveIdleEnabled()) idleConfig.enabled = true;
+  const suggestCfg = resolveSuggestConfig();
+  const idleStatus: IdleStatusResolver = (sessionId) => {
+    if (!suggestCfg) return undefined; // idle not wired → available:false
+    return {
+      globalEnabled: idleConfig.enabled,
+      maxSuggestionsPerHour: idleConfig.maxSuggestionsPerHour,
+      remainingThisHour: idleLimiter.remaining(
+        sessionId,
+        idleConfig.maxSuggestionsPerHour,
+        Date.now(),
+      ),
+    };
+  };
   const { app, notifier, audit, ownerEvents } = createGatewayApp({
     daemon: handle.daemon,
     store,
@@ -122,6 +151,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     pushStore,
     snooze,
     routing,
+    idleToggles,
+    idleStatus,
   });
 
   // Load the policy fail-closed, layered over the same workspace cwd resolved
@@ -319,36 +350,29 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
   });
 
-  // Idle suggestions (proposal `add-idle-suggestions`, slices 2/3): build the
-  // gateway-own handler that fires on a session's active-prompt true→false edge
-  // WHENEVER a coherent model endpoint resolves — but the `enabled` flag (read
-  // live at fire time from idle.yaml) is the SOLE egress guard, OFF by default, so
-  // a workstation that merely has model creds in its env never ships transcript
+  // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
+  // handler that fires on a session's active-prompt true→false edge WHENEVER a
+  // coherent model endpoint resolves — but the `enabled` flag (read live at fire
+  // time from idle.yaml) is the SOLE egress guard, OFF by default, so a
+  // workstation that merely has model creds in its env never ships transcript
   // content to a model without the operator opting in. No coherent (key,host) →
   // no handler (a model call is impossible anyway). The handler never touches the
-  // daemon session (option B) and degrades to silence on any failure.
-  //
-  // Precedence: idle.yaml is the single fire-time source of truth for `enabled`;
-  // at boot we seed it from the file and, for cycle-90 back-compat, force it true
-  // when QWEN_RC_IDLE_SUGGESTIONS is set. (File hot-reload lands in a later slice
-  // and will override this live via the same `idleConfig` ref.)
-  const idleConfig = await loadIdleConfig(
-    join(homedir(), '.qwen', 'rc', 'idle.yaml'),
-    // eslint-disable-next-line no-console
-    (msg) => console.warn(`idle: ${msg}`),
-  );
-  if (resolveIdleEnabled()) idleConfig.enabled = true;
+  // daemon session (option B) and degrades to silence on any failure. The config,
+  // limiter, and toggle store were created above (so /suggest status can read
+  // them); here we wire the handler that consumes them.
   let onSessionIdle:
     | ((sessionId: string, workspaceCwd: string) => void)
     | undefined;
-  const suggestCfg = resolveSuggestConfig();
   if (suggestCfg) {
     onSessionIdle = createIdleSuggestionHandler({
       chat: createChatTransport(suggestCfg),
       bus: ownerEvents,
       audit,
       getConfig: () => idleConfig,
-      limiter: new PushRateLimiter(),
+      limiter: idleLimiter,
+      // Per-session `/suggest off` override (narrows only — never widens past the
+      // global egress gate above).
+      getSessionEnabled: (id) => idleToggles.get(id),
     });
     // eslint-disable-next-line no-console
     console.log(

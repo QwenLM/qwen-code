@@ -30,6 +30,21 @@ describe('PushRateLimiter', () => {
     expect(seventh).toEqual({ allowed: false, firstDrop: false }); // no re-audit
   });
 
+  it('remaining() reports unconsumed budget WITHOUT consuming a slot', () => {
+    const rl = new PushRateLimiter();
+    expect(rl.remaining('s1', 5, T0)).toBe(5); // untouched session → full cap
+    // Reading does not consume: a subsequent read is still full.
+    expect(rl.remaining('s1', 5, T0)).toBe(5);
+    rl.tryConsume('s1', 5, T0);
+    rl.tryConsume('s1', 5, T0 + 1);
+    expect(rl.remaining('s1', 5, T0 + 2)).toBe(3); // 5 - 2 consumed
+    // Clamped at 0 when over cap (never negative).
+    for (let i = 0; i < 10; i++) rl.tryConsume('s1', 5, T0 + 3 + i);
+    expect(rl.remaining('s1', 5, T0 + 20)).toBe(0);
+    // Aged-out instants free budget again.
+    expect(rl.remaining('s1', 5, T0 + HOUR + 100)).toBe(5);
+  });
+
   it('frees a slot once an instant ages out of the window', () => {
     const rl = new PushRateLimiter();
     expect(rl.tryConsume('s1', 1, T0).allowed).toBe(true);

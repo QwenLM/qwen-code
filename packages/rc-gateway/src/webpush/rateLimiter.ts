@@ -68,6 +68,19 @@ export class PushRateLimiter {
     return { allowed: true, firstDrop: false };
   }
 
+  /**
+   * Read-only count of how many more events fit under `maxPerHour` within the
+   * rolling hour ending at `nowMs`, WITHOUT consuming a slot. Used by the idle
+   * `/suggest status` endpoint to report `remainingThisHour`. Pure (clamped to
+   * `[0, maxPerHour]`; prunes a local copy so it never mutates the window).
+   */
+  remaining(subId: string, maxPerHour: number, nowMs: number): number {
+    const cutoff = nowMs - HOUR_MS;
+    const entry = this.subs.get(subId);
+    const live = entry ? entry.hits.filter((t) => t > cutoff).length : 0;
+    return Math.max(0, maxPerHour - live);
+  }
+
   /** Forget a subscription's window (e.g. on unsubscribe). */
   forget(subId: string): void {
     this.subs.delete(subId);

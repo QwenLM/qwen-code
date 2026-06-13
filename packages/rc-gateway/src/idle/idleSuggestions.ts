@@ -57,6 +57,14 @@ export interface IdleSuggestionDeps {
   resolveDir?: (cwd: string) => string;
   /** Read recent turns from a chats dir. Default: the bounded tail reader. */
   readTurns?: (chatsDir: string, sessionId: string) => Promise<TurnText[]>;
+  /**
+   * Per-session override accessor (the `/suggest on|off` toggle store). Returns
+   * `false` to DISABLE idle suggestions for a session, `true`/`undefined` to
+   * follow the global default. It can only NARROW: an override never widens past
+   * the global `enabled` egress gate (a write-scoped client must not be able to
+   * start transcript egress on a workstation whose operator hasn't opted in).
+   */
+  getSessionEnabled?: (sessionId: string) => boolean | undefined;
 }
 
 /**
@@ -81,9 +89,16 @@ export function createIdleSuggestionHandler(
   const now = deps.now ?? Date.now;
 
   return (sessionId: string, workspaceCwd: string): void => {
+    // Per-session opt-out (`/suggest off`): an explicit `false` disables this
+    // session regardless of the global default. Checked first so a disabled
+    // session has ZERO side effects. An override of `true`/undefined falls
+    // through to the global gate — it can NARROW but never widen.
+    if (deps.getSessionEnabled?.(sessionId) === false) return;
     // The ENABLED gate is the sole thing standing between an operator who merely
     // has model creds in their env and transcript egress — check it FIRST, before
     // any disk read or model call, so a disabled feature has ZERO side effects.
+    // A per-session `true` override can NEVER bypass this (egress stays operator-
+    // gated via idle.yaml; the toggle only narrows).
     if (!deps.getConfig().enabled) return;
     if (!workspaceCwd) return; // no resolvable chats dir → nothing to read.
     void (async () => {

@@ -21,6 +21,12 @@ import { createPairRedeemRoute } from './routes/pair.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute } from './routes/prompt.js';
 import { createForkRoute } from './routes/fork.js';
+import {
+  createIdleToggleRoute,
+  createIdleStatusRoute,
+  type IdleStatusResolver,
+} from './routes/idleToggle.js';
+import { IdleSessionToggles } from './idle/sessionToggles.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
@@ -83,6 +89,17 @@ export interface GatewayDeps {
    * opt-in). Falls back to the `QWEN_RC_COALESCE_MS` env when unset.
    */
   coalesceWindowMs?: number;
+  /**
+   * Per-session idle override store (the `/suggest on|off` toggle). The boot
+   * wiring (cli.ts) creates it so the idle handler's `getSessionEnabled` and the
+   * toggle route share one instance. Defaults to a fresh store when omitted.
+   */
+  idleToggles?: IdleSessionToggles;
+  /**
+   * Live idle runtime snapshot for the `/suggest status` route (cli.ts owns the
+   * config + rate-limiter). Omitted → status reports `available:false`.
+   */
+  idleStatus?: IdleStatusResolver;
 }
 
 export interface GatewayApp {
@@ -97,6 +114,13 @@ export interface GatewayApp {
    * handler emitting `idle_suggestions` when a session's active prompt finishes.
    */
   ownerEvents: OwnerEventBus;
+  /**
+   * Per-session idle-suggestion overrides backing POST
+   * /rc/session/:id/idle-suggest-toggle. Exposed so the boot wiring (cli.ts) can
+   * feed the idle handler's `getSessionEnabled` from the same store the route
+   * writes to.
+   */
+  idleToggles: IdleSessionToggles;
 }
 
 export function createGatewayApp(deps: GatewayDeps): GatewayApp {
@@ -117,6 +141,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Process-local activity tracker: feeds the notifier's working-device
   // suppression and is touched by recordActivity on the human-action POSTs.
   const workingDevice = new WorkingDeviceTracker();
+  // Per-session idle-suggestion overrides (the `/suggest on|off` toggle store).
+  // Injected by the boot wiring so the idle handler + toggle route share one
+  // instance; a fresh store otherwise (tests, idle-less deployments).
+  const idleToggles = deps.idleToggles ?? new IdleSessionToggles();
 
   // Single loader instance: holds the per-process collision-warned set so a
   // workspace>user name collision is audited at most once for the lifetime.
@@ -201,6 +229,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
       { audit },
     ),
+  );
+  // Per-session idle-suggestion toggle (`add-idle-suggestions` spec). WRITE scope
+  // + session-lock so a confined share token can only toggle its own session.
+  // No recordActivity: setting a preference is not "working on" the session, and
+  // marking the device working here would wrongly suppress a real permission push.
+  app.post(
+    '/rc/session/:id/idle-suggest-toggle',
+    requireScope(WRITE, audit),
+    enforceSessionLock(audit),
+    createIdleToggleRoute(idleToggles, audit),
+  );
+  // GET the same path reports EFFECTIVE idle state (`/suggest status`). SESSION_READ
+  // (a read) + session-lock so a confined share token sees only its own session.
+  app.get(
+    '/rc/session/:id/idle-suggest-toggle',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createIdleStatusRoute(idleToggles, deps.idleStatus ?? (() => undefined)),
   );
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.
@@ -395,5 +441,5 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  return { app, notifier, audit, ownerEvents };
+  return { app, notifier, audit, ownerEvents, idleToggles };
 }
