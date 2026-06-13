@@ -13,7 +13,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { createServeBridgeMcpServer } from '../../src/daemon-mcp/serve-bridge/createServeBridgeMcpServer.js';
-import { resolveSessionId, handler } from '../../src/daemon-mcp/serve-bridge/helpers.js';
+import {
+  resolveSessionId,
+  handler,
+} from '../../src/daemon-mcp/serve-bridge/helpers.js';
 import type {
   BridgeState,
   SessionEventStream,
@@ -496,7 +499,13 @@ describe('serve-bridge', () => {
       );
 
       const result = await agentsTool.handler(
-        { action: 'create', scope: 'global', name: 'x', description: 'x', system_prompt: 'x' },
+        {
+          action: 'create',
+          scope: 'global',
+          name: 'x',
+          description: 'x',
+          system_prompt: 'x',
+        },
         {},
       );
       expect(result.isError).toBe(true);
