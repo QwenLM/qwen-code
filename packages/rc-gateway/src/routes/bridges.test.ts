@@ -14,7 +14,11 @@ import {
   createRegisterBridgeRoute,
   createListBridgesRoute,
   createDeregisterBridgeRoute,
+  createBanSubActorRoute,
+  createLiftBanRoute,
+  createListBansRoute,
 } from './bridges.js';
+import { SubActorBanStore } from '../bridges/subActorBans.js';
 import { OWNER, BRIDGE, SESSION_READ } from '../scopes.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -236,5 +240,81 @@ describe('BridgeRegistry', () => {
     expect(r.remove('a')).toBe(true);
     expect(r.remove('a')).toBe(false);
     expect(r.list().map((x) => x.id)).toEqual(['b']);
+  });
+});
+
+describe('sub-actor ban routes', () => {
+  let bans: SubActorBanStore;
+  let banAudit: ReturnType<typeof fakeAudit>;
+  let banServer: Server | undefined;
+  let banBase: string;
+
+  beforeEach(() => {
+    bans = new SubActorBanStore();
+    banAudit = fakeAudit();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as { rcClient?: unknown }).rcClient = {
+        id: 'tkn-owner',
+        scopes: [OWNER, SESSION_READ],
+      };
+      next();
+    });
+    app.get('/rc/bridges/bans', createListBansRoute(bans));
+    app.post('/rc/bridges/:id/ban', createBanSubActorRoute(bans, banAudit));
+    app.delete(
+      '/rc/bridges/:id/ban/:subActor',
+      createLiftBanRoute(bans, banAudit),
+    );
+    return new Promise<void>((resolve) => {
+      banServer = app.listen(0, '127.0.0.1', () => {
+        banBase = `http://127.0.0.1:${(banServer!.address() as AddressInfo).port}`;
+        resolve();
+      });
+    });
+  });
+  afterEach(
+    () =>
+      new Promise<void>((r) => (banServer ? banServer.close(() => r()) : r())),
+  );
+
+  it('bans a sub-actor, lists it, and audits with the bridge id', async () => {
+    const ban = await fetch(`${banBase}/rc/bridges/telegram/ban`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ subActor: 'telegram:evan' }),
+    });
+    expect(ban.status).toBe(200);
+    expect(bans.isBanned('telegram:evan')).toBe(true);
+    const list = await (await fetch(`${banBase}/rc/bridges/bans`)).json();
+    expect(list.banned).toEqual(['telegram:evan']);
+    const rec = banAudit.calls.find((c) => c.action === 'sub_actor_banned');
+    expect(rec?.subActor).toBe('telegram:evan');
+    expect(rec?.target).toBe('telegram');
+  });
+
+  it('400s a malformed subActor', async () => {
+    const res = await fetch(`${banBase}/rc/bridges/telegram/ban`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ subActor: 'has space' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('lifts a ban (204) and 404s lifting an unknown one', async () => {
+    bans.ban('telegram:evan');
+    const lift = await fetch(
+      `${banBase}/rc/bridges/telegram/ban/telegram:evan`,
+      { method: 'DELETE' },
+    );
+    expect(lift.status).toBe(204);
+    expect(bans.isBanned('telegram:evan')).toBe(false);
+    const again = await fetch(
+      `${banBase}/rc/bridges/telegram/ban/telegram:evan`,
+      { method: 'DELETE' },
+    );
+    expect(again.status).toBe(404);
   });
 });

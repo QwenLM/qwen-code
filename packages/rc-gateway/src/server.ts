@@ -19,11 +19,13 @@ import {
   enforceSessionLock,
   resolveSubActor,
   enforceSubActorRateLimit,
+  enforceSubActorBan,
 } from './auth.js';
 import {
   SubActorRateLimiter,
   DEFAULT_SUB_ACTOR_CAP,
 } from './bridges/subActorRateLimiter.js';
+import { SubActorBanStore } from './bridges/subActorBans.js';
 import {
   OWNER,
   SESSION_READ,
@@ -48,6 +50,9 @@ import {
   createRegisterBridgeRoute,
   createListBridgesRoute,
   createDeregisterBridgeRoute,
+  createBanSubActorRoute,
+  createLiftBanRoute,
+  createListBansRoute,
 } from './routes/bridges.js';
 import { BridgeRegistry } from './bridges/registry.js';
 import { createLineageRoute } from './routes/lineage.js';
@@ -191,6 +196,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorCap,
     audit,
   );
+  // Owner-managed per-sub-actor bans (block one chat user without revoking the
+  // bridge token). In-memory; ban/lift are audited so they survive in the log.
+  const subActorBans = new SubActorBanStore();
+  const subActorBan = enforceSubActorBan(subActorBans);
 
   // Single loader instance: holds the per-process collision-warned set so a
   // workspace>user name collision is audited at most once for the lifetime.
@@ -253,6 +262,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(APPROVE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap votes per chat user
     createPermissionVoteRoute(deps.daemon, audit),
   );
@@ -261,6 +271,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap prompts per chat user
     createPromptRoute(deps.daemon, audit),
   );
@@ -317,6 +328,22 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/bridges/:id',
     requireScope(SESSION_READ, audit),
     createDeregisterBridgeRoute(bridgeRegistry, audit),
+  );
+  // Sub-actor bans (owner-only): ban/lift one chat user; list current bans.
+  app.get(
+    '/rc/bridges/bans',
+    requireScope(OWNER, audit),
+    createListBansRoute(subActorBans),
+  );
+  app.post(
+    '/rc/bridges/:id/ban',
+    requireScope(OWNER, audit),
+    createBanSubActorRoute(subActorBans, audit),
+  );
+  app.delete(
+    '/rc/bridges/:id/ban/:subActor',
+    requireScope(OWNER, audit),
+    createLiftBanRoute(subActorBans, audit),
   );
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.

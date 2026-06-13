@@ -9,6 +9,7 @@ import type { TokenStore } from './tokenStore.js';
 import { BRIDGE, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
 import type { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
+import type { SubActorBanStore } from './bridges/subActorBans.js';
 import './types.js';
 
 /** Max length of an asserted sub-actor id (bounds audit-row size). */
@@ -97,6 +98,28 @@ export function enforceSessionLock(audit?: AuditRecorder): RequestHandler {
         detail: { reason: 'session_locked', path: req.path },
       });
       res.status(403).json({ error: 'Session locked', code: 'session_locked' });
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Reject a banned sub-actor's writes (`add-bridge-protocol`). Applies ONLY when a
+ * sub-actor was asserted (bridge-mediated); a request with no sub-actor passes
+ * through. A banned sub-actor → 403 `sub_actor_banned`. Mount on write routes
+ * AFTER `resolveSubActor` and BEFORE the rate limiter (a banned user shouldn't
+ * even consume rate budget). The rejection is NOT audited per-hit (a banned bot
+ * could hammer) — the ban/lift actions are audited at creation instead. Never
+ * throws.
+ */
+export function enforceSubActorBan(bans: SubActorBanStore): RequestHandler {
+  return (req, res, next) => {
+    const sub = req.rcClient?.subActor;
+    if (sub && bans.isBanned(sub)) {
+      res
+        .status(403)
+        .json({ error: 'Sub-actor is banned', code: 'sub_actor_banned' });
       return;
     }
     next();

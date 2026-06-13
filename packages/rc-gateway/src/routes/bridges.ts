@@ -11,6 +11,8 @@ import type {
   BridgeRegistry,
   BridgeRegistration,
 } from '../bridges/registry.js';
+import type { SubActorBanStore } from '../bridges/subActorBans.js';
+import { parseSubActor } from '../auth.js';
 
 /** Stable bridge id: alphanumeric-led, safe id charset, bounded (audit-safe). */
 const BRIDGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
@@ -171,5 +173,72 @@ export function createDeregisterBridgeRoute(
       target: id,
     });
     res.status(204).end();
+  };
+}
+
+/**
+ * POST /rc/bridges/:id/ban { subActor } — owner bans one chat user from a bridge
+ * WITHOUT revoking the bridge's token (every other user keeps working). The
+ * banned sub-actor's subsequent writes are rejected by `enforceSubActorBan`. The
+ * bridge `:id` is audit context; the ban is keyed by the (service-namespaced)
+ * sub-actor id. 400 on a malformed sub-actor. Idempotent.
+ */
+export function createBanSubActorRoute(
+  bans: SubActorBanStore,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return (req, res) => {
+    const body = (req.body ?? {}) as { subActor?: unknown };
+    const sub = parseSubActor(
+      typeof body.subActor === 'string' ? body.subActor : undefined,
+    );
+    if (!sub) {
+      res
+        .status(400)
+        .json({ error: 'Invalid subActor', code: 'invalid_sub_actor' });
+      return;
+    }
+    bans.ban(sub);
+    void audit?.record({
+      action: 'sub_actor_banned',
+      actorTokenId: req.rcClient?.id,
+      subActor: sub,
+      target: req.params.id,
+    });
+    res
+      .status(200)
+      .json({ bridgeId: req.params.id, subActor: sub, banned: true });
+  };
+}
+
+/**
+ * DELETE /rc/bridges/:id/ban/:subActor — owner lifts a ban. 404 when the
+ * sub-actor wasn't banned. The `:id` is audit context (the ban is keyed by
+ * sub-actor). The `:subActor` path segment is validated to the same charset.
+ */
+export function createLiftBanRoute(
+  bans: SubActorBanStore,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return (req, res) => {
+    const sub = parseSubActor(req.params.subActor);
+    if (!sub || !bans.lift(sub)) {
+      res.status(404).json({ error: 'No such ban', code: 'ban_not_found' });
+      return;
+    }
+    void audit?.record({
+      action: 'sub_actor_unbanned',
+      actorTokenId: req.rcClient?.id,
+      subActor: sub,
+      target: req.params.id,
+    });
+    res.status(204).end();
+  };
+}
+
+/** GET /rc/bridges/bans — owner lists currently-banned sub-actors. */
+export function createListBansRoute(bans: SubActorBanStore): RequestHandler {
+  return (_req, res) => {
+    res.status(200).json({ banned: bans.list() });
   };
 }

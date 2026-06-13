@@ -57,7 +57,9 @@ export type AuditAction =
   | 'idle_toggle_set'
   | 'bridge_registered'
   | 'bridge_deregistered'
-  | 'sub_actor_rate_limited';
+  | 'sub_actor_rate_limited'
+  | 'sub_actor_banned'
+  | 'sub_actor_unbanned';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -104,6 +106,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'bridge_registered',
   'bridge_deregistered',
   'sub_actor_rate_limited',
+  'sub_actor_banned',
+  'sub_actor_unbanned',
 ];
 
 export interface AuditEntry {

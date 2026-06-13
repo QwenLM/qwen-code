@@ -17,9 +17,11 @@ import {
   resolveSubActor,
   parseSubActor,
   enforceSubActorRateLimit,
+  enforceSubActorBan,
 } from './auth.js';
 import { SESSION_READ, APPROVE, WRITE, BRIDGE } from './scopes.js';
 import { SubActorRateLimiter } from './bridges/subActorRateLimiter.js';
+import { SubActorBanStore } from './bridges/subActorBans.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -357,5 +359,42 @@ describe('enforceSubActorRateLimit middleware', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].subActor).toBe('telegram:evan');
     expect(rows[0].target).toBe('s1');
+  });
+});
+
+describe('enforceSubActorBan middleware', () => {
+  function bridgeReq(subActor: string | undefined): Request {
+    return {
+      rcClient: { id: 'tkn-bridge', scopes: [BRIDGE], subActor },
+      params: { id: 's1' },
+    } as unknown as Request;
+  }
+
+  it('403s a banned sub-actor', () => {
+    const bans = new SubActorBanStore();
+    bans.ban('telegram:evan');
+    const res = fakeRes();
+    let called = false;
+    enforceSubActorBan(bans)(bridgeReq('telegram:evan'), res, () => {
+      called = true;
+    });
+    expect(called).toBe(false);
+    expect(res._status).toBe(403);
+    expect(res._json).toMatchObject({ code: 'sub_actor_banned' });
+  });
+
+  it('passes a non-banned sub-actor and a request with no sub-actor', () => {
+    const bans = new SubActorBanStore();
+    bans.ban('telegram:troll');
+    let a = false;
+    enforceSubActorBan(bans)(bridgeReq('telegram:evan'), fakeRes(), () => {
+      a = true;
+    });
+    expect(a).toBe(true);
+    let b = false;
+    enforceSubActorBan(bans)(bridgeReq(undefined), fakeRes(), () => {
+      b = true;
+    });
+    expect(b).toBe(true);
   });
 });
