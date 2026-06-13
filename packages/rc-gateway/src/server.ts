@@ -19,7 +19,14 @@ import {
   enforceSessionLock,
   resolveSubActor,
 } from './auth.js';
-import { OWNER, SESSION_READ, APPROVE, WRITE, SHARE } from './scopes.js';
+import {
+  OWNER,
+  SESSION_READ,
+  APPROVE,
+  WRITE,
+  SHARE,
+  BRIDGE,
+} from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
@@ -32,6 +39,12 @@ import {
   type IdleStatusResolver,
 } from './routes/idleToggle.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
+import {
+  createRegisterBridgeRoute,
+  createListBridgesRoute,
+  createDeregisterBridgeRoute,
+} from './routes/bridges.js';
+import { BridgeRegistry } from './bridges/registry.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
@@ -150,6 +163,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Injected by the boot wiring so the idle handler + toggle route share one
   // instance; a fresh store otherwise (tests, idle-less deployments).
   const idleToggles = deps.idleToggles ?? new IdleSessionToggles();
+  // In-memory registry of live bridges (add-bridge-protocol). Advisory presence/
+  // capability metadata; a gateway restart drops it and bridges re-register.
+  const bridgeRegistry = new BridgeRegistry();
 
   // Single loader instance: holds the per-process collision-warned set so a
   // workspace>user name collision is audited at most once for the lifetime.
@@ -256,6 +272,24 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createIdleStatusRoute(idleToggles, idleStatusResolver),
+  );
+  // Bridge registry (add-bridge-protocol). Register/heartbeat is BRIDGE-scope;
+  // listing is owner-only; deregister is owner-or-self (authz inside the handler,
+  // so the mount only needs an authenticated token).
+  app.post(
+    '/rc/bridges',
+    requireScope(BRIDGE, audit),
+    createRegisterBridgeRoute(bridgeRegistry, audit),
+  );
+  app.get(
+    '/rc/bridges',
+    requireScope(OWNER, audit),
+    createListBridgesRoute(bridgeRegistry),
+  );
+  app.delete(
+    '/rc/bridges/:id',
+    requireScope(SESSION_READ, audit),
+    createDeregisterBridgeRoute(bridgeRegistry, audit),
   );
   // Read-only fork lineage chain. OWNER-scoped (NOT session-locked): the chain
   // enumerates ancestor session ids, which a confined share token must not see.
