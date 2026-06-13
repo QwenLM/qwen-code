@@ -34,6 +34,39 @@ export interface RoutingRuleMatch {
    * when `subscription.tokenId` is one of the listed ids (exact membership).
    */
   tokenIdsIn?: string | string[];
+  /**
+   * Event-global (cycle 96): matches when the event's URGENCY (derived from its
+   * kind — see {@link urgencyOf}) is at least this level. One of
+   * 'low' | 'medium' | 'high'. e.g. `urgencyAtLeast: high` matches only
+   * action-required events (permission.required); a `drop` rule using it sheds
+   * exactly that band. Derivable from `kind` alone, so it needs no event content.
+   */
+  urgencyAtLeast?: RoutingUrgency;
+}
+
+/** Routing urgency band, low→high. Derived from event kind (no content needed). */
+export type RoutingUrgency = 'low' | 'medium' | 'high';
+const URGENCY_LEVELS: readonly RoutingUrgency[] = ['low', 'medium', 'high'];
+
+/**
+ * Map an event kind to its urgency band. Action-required prompts are HIGH;
+ * everything else (completions, digests, …) is LOW. A closed map with a LOW
+ * default keeps this pure + content-free (the privacy-preserving notifier only
+ * has the kind). Extend here as new kinds gain a natural urgency.
+ */
+function urgencyOf(kind: string): RoutingUrgency {
+  return kind === 'permission.required' ? 'high' : 'low';
+}
+
+/** A present `urgencyAtLeast` matches when the kind's urgency ≥ the threshold. */
+function matchUrgencyAtLeast(
+  spec: RoutingUrgency | undefined,
+  kind: string,
+): boolean {
+  if (spec === undefined) return true;
+  return (
+    URGENCY_LEVELS.indexOf(urgencyOf(kind)) >= URGENCY_LEVELS.indexOf(spec)
+  );
 }
 
 /**
@@ -103,7 +136,13 @@ function isStringOrStringArray(v: unknown): v is string | string[] {
   );
 }
 
-const MATCH_HONORED = new Set(['kind', 'sessionTag', 'scopeIn', 'tokenIdsIn']);
+const MATCH_HONORED = new Set([
+  'kind',
+  'sessionTag',
+  'scopeIn',
+  'tokenIdsIn',
+  'urgencyAtLeast',
+]);
 const ROUTE_HONORED = new Set(['drop']);
 
 let warnedDeferred = false;
@@ -174,6 +213,18 @@ export function loadRoutingConfig(text: string): RoutingConfig {
         );
       }
       match.tokenIdsIn = matchRaw['tokenIdsIn'];
+    }
+    if (matchRaw['urgencyAtLeast'] !== undefined) {
+      const u = matchRaw['urgencyAtLeast'];
+      if (
+        typeof u !== 'string' ||
+        !URGENCY_LEVELS.includes(u as RoutingUrgency)
+      ) {
+        throw new RoutingError(
+          `rule[${i}].match.urgencyAtLeast must be one of low|medium|high`,
+        );
+      }
+      match.urgencyAtLeast = u as RoutingUrgency;
     }
 
     const route: { drop?: boolean } = {};
@@ -383,6 +434,8 @@ export function formatResolvedRouting(rules: ResolvedRoutingRule[]): string {
       if (m.scopeIn !== undefined) parts.push(`scopeIn=${fmtSpec(m.scopeIn)}`);
       if (m.tokenIdsIn !== undefined)
         parts.push(`tokenIdsIn=${fmtSpec(m.tokenIdsIn)}`);
+      if (m.urgencyAtLeast !== undefined)
+        parts.push(`urgencyAtLeast=${m.urgencyAtLeast}`);
       const match = parts.length > 0 ? parts.join(' ') : 'any';
       return `${source}  ${id}  match: ${match}  drop:${rule.route.drop === true}`;
     })
@@ -453,7 +506,8 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
       for (const r of globalDropRules) {
         if (
           matchKind(r.match.kind, ev.kind) &&
-          matchSessionTag(r.match.sessionTag, ev.sessionName)
+          matchSessionTag(r.match.sessionTag, ev.sessionName) &&
+          matchUrgencyAtLeast(r.match.urgencyAtLeast, ev.kind)
         ) {
           // `||` not `??`: a non-null return signals "matched", and the notifier
           // gates on truthiness — an empty-string id (`id: ""`) must still
@@ -468,6 +522,7 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
         if (
           matchKind(r.match.kind, ev.kind) &&
           matchSessionTag(r.match.sessionTag, ev.sessionName) &&
+          matchUrgencyAtLeast(r.match.urgencyAtLeast, ev.kind) &&
           matchScopeIn(r.match.scopeIn, sub.scopes) &&
           matchTokenIdsIn(r.match.tokenIdsIn, sub.tokenId)
         ) {

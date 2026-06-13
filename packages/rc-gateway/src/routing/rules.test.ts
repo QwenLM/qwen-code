@@ -413,3 +413,52 @@ rules:
     expect(m.firstDropForSubscription?.(PERM, sub('g', ['share']))).toBeNull();
   });
 });
+
+describe('compileRouting / urgencyAtLeast (cycle 96)', () => {
+  const matcher = (yaml: string) => compileRouting(loadRoutingConfig(yaml));
+
+  it('drops only events whose kind-derived urgency ≥ the threshold', () => {
+    const m = matcher(`
+rules:
+  - id: shed-high
+    match: { urgencyAtLeast: high }
+    route: { drop: true }
+`);
+    // permission.required is HIGH → dropped; task.completed is LOW → kept.
+    expect(m.firstDrop({ kind: 'permission.required' })).toBe('shed-high');
+    expect(m.firstDrop({ kind: 'task.completed' })).toBeNull();
+  });
+
+  it('urgencyAtLeast: low matches every kind (floor)', () => {
+    const m = matcher(`
+rules:
+  - id: shed-all
+    match: { urgencyAtLeast: low }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'permission.required' })).toBe('shed-all');
+    expect(m.firstDrop({ kind: 'task.completed' })).toBe('shed-all');
+  });
+
+  it('ANDs urgency with kind/sessionTag', () => {
+    const m = matcher(`
+rules:
+  - id: combo
+    match: { kind: permission.required, urgencyAtLeast: high }
+    route: { drop: true }
+`);
+    expect(m.firstDrop({ kind: 'permission.required' })).toBe('combo');
+    // kind mismatch → no drop even though it'd satisfy urgency on its own.
+    expect(m.firstDrop({ kind: 'task.completed' })).toBeNull();
+  });
+
+  it('rejects an invalid urgency level', () => {
+    expect(() =>
+      loadRoutingConfig(`
+rules:
+  - match: { urgencyAtLeast: critical }
+    route: { drop: true }
+`),
+    ).toThrow(RoutingError);
+  });
+});
