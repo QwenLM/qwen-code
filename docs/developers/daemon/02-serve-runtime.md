@@ -111,25 +111,25 @@
 
 ## 配置
 
-| 来源            | Key                                                                             | 效果                                                                    |
-| --------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Env             | `QWEN_SERVER_TOKEN`                                                             | Bearer token（trim 后）。                                               |
-| Env             | `QWEN_SERVE_NO_MCP_POOL=1`                                                      | 强制 `mcpPoolActive=false`。                                            |
-| Env             | `QWEN_SERVE_MCP_CLIENT_BUDGET` / `QWEN_SERVE_MCP_BUDGET_MODE`                   | 通过 `childEnvOverrides` 传给 ACP 子进程。                              |
-| Env             | `QWEN_SERVE_PROMPT_DEADLINE_MS` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS`           | prompt / SSE idle 超时默认值。                                          |
-| Env             | `QWEN_SERVE_RATE_LIMIT*`                                                        | rate-limit 开关、prompt / mutation / read 上限、窗口长度默认值。        |
-| Env             | `QWEN_SERVE_DEBUG=1`                                                            | 详细 stderr 日志（见 [`19-observability.md`](./19-observability.md)）。 |
-| 参数            | `--hostname`、`--port`                                                          | 监听绑定。                                                              |
-| 参数            | `--token`、`--require-auth`                                                     | Bearer token 与 loopback 强制认证。                                     |
-| 参数            | `--workspace`                                                                   | 覆盖 `process.cwd()`。                                                  |
-| 参数            | `--max-sessions`、`--max-connections`、`--event-ring-size`                      | bridge / Express 上限。                                                 |
-| 参数            | `--mcp-client-budget=N`、`--mcp-budget-mode={off,warn,enforce}`                 | 传给 ACP 子进程。                                                       |
-| 参数            | `--allow-origin`、`--allow-private-auth-base-url`                               | 浏览器 CORS allowlist 与本地/private auth provider 安装开关。           |
-| 参数            | `--prompt-deadline-ms`、`--writer-idle-timeout-ms`、`--channel-idle-timeout-ms` | prompt、SSE writer、ACP child idle 生命周期控制。                       |
-| 参数            | `--session-reap-interval-ms`、`--session-idle-timeout-ms`                       | disconnected session 回收控制。                                         |
-| 参数            | `--rate-limit*`                                                                 | per-tier HTTP rate limit。                                              |
-| `settings.json` | `policy.permissionStrategy`、`policy.consensusQuorum`                           | `MultiClientPermissionMediator` 的策略与法定人数。                      |
-| `settings.json` | `context.fileName`                                                              | bridge 的 `getCurrentGeminiMdFilename` 覆盖。                           |
+| 来源            | Key                                                                             | 效果                                                                                        |
+| --------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Env             | `QWEN_SERVER_TOKEN`                                                             | Bearer token（trim 后）。                                                                   |
+| Env             | `QWEN_SERVE_NO_MCP_POOL=1`                                                      | 强制 `mcpPoolActive=false`。                                                                |
+| ACP child env   | `QWEN_SERVE_MCP_CLIENT_BUDGET` / `QWEN_SERVE_MCP_BUDGET_MODE`                   | 由 `--mcp-client-budget` / `--mcp-budget-mode` 生成 `childEnvOverrides` 后传给 ACP 子进程。 |
+| Env             | `QWEN_SERVE_PROMPT_DEADLINE_MS` / `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS`           | prompt / SSE idle 超时默认值。                                                              |
+| Env             | `QWEN_SERVE_RATE_LIMIT*`                                                        | rate-limit 开关、prompt / mutation / read 上限、窗口长度默认值。                            |
+| Env             | `QWEN_SERVE_DEBUG=1`                                                            | 详细 stderr 日志（见 [`19-observability.md`](./19-observability.md)）。                     |
+| 参数            | `--hostname`、`--port`                                                          | 监听绑定。                                                                                  |
+| 参数            | `--token`、`--require-auth`                                                     | Bearer token 与 loopback 强制认证。                                                         |
+| 参数            | `--workspace`                                                                   | 覆盖 `process.cwd()`。                                                                      |
+| 参数            | `--max-sessions`、`--max-connections`、`--event-ring-size`                      | bridge / Express 上限。                                                                     |
+| 参数            | `--mcp-client-budget=N`、`--mcp-budget-mode={off,warn,enforce}`                 | 传给 ACP 子进程。                                                                           |
+| 参数            | `--allow-origin`、`--allow-private-auth-base-url`                               | 浏览器 CORS allowlist 与本地/private auth provider 安装开关。                               |
+| 参数            | `--prompt-deadline-ms`、`--writer-idle-timeout-ms`、`--channel-idle-timeout-ms` | prompt、SSE writer、ACP child idle 生命周期控制。                                           |
+| 参数            | `--session-reap-interval-ms`、`--session-idle-timeout-ms`                       | disconnected session 回收控制。                                                             |
+| 参数            | `--rate-limit*`                                                                 | per-tier HTTP rate limit。                                                                  |
+| `settings.json` | `policy.permissionStrategy`、`policy.consensusQuorum`                           | `MultiClientPermissionMediator` 的策略与法定人数。                                          |
+| `settings.json` | `context.fileName`                                                              | bridge 的 `getCurrentGeminiMdFilename` 覆盖。                                               |
 
 合并参考见 [`17-configuration.md`](./17-configuration.md)。
 

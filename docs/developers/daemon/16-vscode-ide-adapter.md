@@ -21,19 +21,25 @@ IDE 的 chat webview 通过本适配器消费 daemon 事件；权限请求以 VS
 
 ```ts
 class DaemonIdeConnection {
-  constructor(opts: DaemonIdeConnectionOptions);
-  connect(): Promise<void>;
+  connect(options: DaemonIdeConnectionOptions): Promise<void>;
   disconnect(): Promise<void>;
-  prompt(req): Promise<PromptResult>;
-  cancel(): Promise<void>;
-  respondToPermission(req): Promise<void>;
-  setModel(modelServiceId): Promise<void>;
+  sendPrompt(
+    req: { prompt: ContentBlock[] },
+    signal?: AbortSignal,
+  ): Promise<DaemonIdePromptResult>;
+  cancelSession(): Promise<void>;
+  setModel(modelId: string): Promise<DaemonIdeSetModelResult>;
 
-  onSessionUpdate(cb: (update) => void): Disposable;
-  onPermissionRequest(cb: (req) => void): Disposable;
-  onAskUserQuestion(cb: (q) => void): Disposable;
-  onEndTurn(cb: () => void): Disposable;
-  onDisconnected(cb: (reason) => void): Disposable;
+  onSessionUpdate: (data: SessionNotification) => void;
+  onPermissionRequest: (
+    data: RequestPermissionRequest,
+  ) => Promise<{ optionId?: string }>;
+  onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
+    optionId: string;
+    answers?: Record<string, string>;
+  }>;
+  onEndTurn: (reason?: string) => void;
+  onDisconnected: (code: number | null, signal: string | null) => void;
 }
 
 interface DaemonIdeConnectionOptions {

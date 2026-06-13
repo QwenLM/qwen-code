@@ -52,7 +52,7 @@
 
 ### 通过 `BridgeOptions.childEnvOverrides` 转发给 ACP child
 
-`runQwenServe` per-handle 构造，防止同进程两个 daemon 在 `process.env` 上 race：
+`runQwenServe` per-handle 构造，防止同进程两个 daemon 在 `process.env` 上 race。注意预算两项不是 `qwen serve` 父进程的 env fallback；CLI 路径必须通过 `--mcp-client-budget` / `--mcp-budget-mode` 生成这些 child env override：
 
 | Env                              | 作用                                                                                   |
 | -------------------------------- | -------------------------------------------------------------------------------------- |

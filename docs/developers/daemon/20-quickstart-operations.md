@@ -106,8 +106,8 @@ CLI 定义在 **`packages/cli/src/commands/serve.ts`**：
 | `QWEN_SERVER_TOKEN`                 | 等价 `--token`；`--token` 优先。boot 时 trim 一次（防 `cat token.txt` 留尾换行）                                                |
 | `QWEN_SERVE_DEBUG`                  | `1` / `true` / `on` / `yes`（不区分大小写）开 stderr 详细日志                                                                   |
 | `QWEN_SERVE_NO_MCP_POOL`            | `1` 完全禁工作区 MCP 池（回到 per-session `McpClientManager`，capabilities 不再广播 `mcp_workspace_pool` / `mcp_pool_restart`） |
-| `QWEN_SERVE_MCP_CLIENT_BUDGET`      | 等价 `--mcp-client-budget`，daemon 通过 `BridgeOptions.childEnvOverrides` 透传给 ACP 子进程                                     |
-| `QWEN_SERVE_MCP_BUDGET_MODE`        | 等价 `--mcp-budget-mode`，同样透传                                                                                              |
+| `QWEN_SERVE_MCP_CLIENT_BUDGET`      | ACP child 内部预算输入；CLI 启动时由 `--mcp-client-budget` 生成 `childEnvOverrides`，不是父进程 env fallback                    |
+| `QWEN_SERVE_MCP_BUDGET_MODE`        | ACP child 内部预算模式；CLI 启动时由 `--mcp-budget-mode` 生成 `childEnvOverrides`，不是父进程 env fallback                      |
 | `QWEN_SERVE_PROMPT_DEADLINE_MS`     | env fallback for `--prompt-deadline-ms`                                                                                         |
 | `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` | env fallback for `--writer-idle-timeout-ms`                                                                                     |
 | `QWEN_SERVE_MCP_POOL_TRANSPORTS`    | ACP child 读取，逗号分隔池化 transport allowlist；默认 `stdio,websocket`                                                        |
@@ -187,7 +187,8 @@ curl -s -X POST http://127.0.0.1:4170/session \
 curl -N \
   -H 'Accept: text/event-stream' \
   -H 'X-Qwen-Client-Id: curl-debug' \
-  'http://127.0.0.1:4170/session/<sid>/events?lastEventId=0'
+  -H 'Last-Event-ID: 0' \
+  'http://127.0.0.1:4170/session/<sid>/events'
 
 # 8. demo 页（浏览器）
 open http://127.0.0.1:4170/demo
@@ -348,7 +349,8 @@ curl -s http://127.0.0.1:4170/workspace/preflight | jq
 
 # tail SSE 看实时事件
 curl -N -H 'Accept: text/event-stream' \
-     'http://127.0.0.1:4170/session/<sid>/events?lastEventId=0'
+     -H 'Last-Event-ID: 0' \
+     'http://127.0.0.1:4170/session/<sid>/events'
 
 # 详细日志
 QWEN_SERVE_DEBUG=1 qwen serve

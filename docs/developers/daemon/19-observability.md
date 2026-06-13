@@ -64,10 +64,11 @@ curl -s http://127.0.0.1:4170/workspace/preflight | jq
 curl -N -H 'Accept: text/event-stream' \
      -H 'Authorization: Bearer XYZ' \
      -H 'X-Qwen-Client-Id: debug-tail' \
-     'http://127.0.0.1:4170/session/<sid>/events?lastEventId=0'
+     -H 'Last-Event-ID: 0' \
+     'http://127.0.0.1:4170/session/<sid>/events'
 ```
 
-`-N` 关 curl 输出 buffer。`lastEventId=0` 从头重放。
+`-N` 关 curl 输出 buffer。`Last-Event-ID: 0` 请求重放 ring 内 `id > 0` 的事件。
 
 ### 5. 这次权限为什么这么 resolve？
 
