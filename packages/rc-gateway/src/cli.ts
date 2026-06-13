@@ -33,6 +33,8 @@ import {
   resolveIdleEnabled,
   createIdleSuggestionHandler,
 } from './idle/idleSuggestions.js';
+import { loadIdleConfig } from './idle/config.js';
+import { PushRateLimiter } from './webpush/rateLimiter.js';
 import {
   loadLayeredPolicy,
   lintPolicyFile,
@@ -257,33 +259,45 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
   });
 
-  // Idle suggestions (proposal `add-idle-suggestions`, slice 2): when explicitly
-  // enabled AND a coherent model endpoint resolves, build the gateway-own handler
-  // that fires on a session's active-prompt true→false edge. OFF by default even
-  // when model creds are present (resolveIdleEnabled gate) so a workstation never
-  // starts shipping transcript content to a model without the operator opting in;
-  // no coherent (key,host) → inert. The handler never touches the daemon session
-  // (option B) and degrades to silence on any failure.
+  // Idle suggestions (proposal `add-idle-suggestions`, slices 2/3): build the
+  // gateway-own handler that fires on a session's active-prompt true→false edge
+  // WHENEVER a coherent model endpoint resolves — but the `enabled` flag (read
+  // live at fire time from idle.yaml) is the SOLE egress guard, OFF by default, so
+  // a workstation that merely has model creds in its env never ships transcript
+  // content to a model without the operator opting in. No coherent (key,host) →
+  // no handler (a model call is impossible anyway). The handler never touches the
+  // daemon session (option B) and degrades to silence on any failure.
+  //
+  // Precedence: idle.yaml is the single fire-time source of truth for `enabled`;
+  // at boot we seed it from the file and, for cycle-90 back-compat, force it true
+  // when QWEN_RC_IDLE_SUGGESTIONS is set. (File hot-reload lands in a later slice
+  // and will override this live via the same `idleConfig` ref.)
+  const idleConfig = await loadIdleConfig(
+    join(homedir(), '.qwen', 'rc', 'idle.yaml'),
+    // eslint-disable-next-line no-console
+    (msg) => console.warn(`idle: ${msg}`),
+  );
+  if (resolveIdleEnabled()) idleConfig.enabled = true;
   let onSessionIdle:
     | ((sessionId: string, workspaceCwd: string) => void)
     | undefined;
-  if (resolveIdleEnabled()) {
-    const suggestCfg = resolveSuggestConfig();
-    if (suggestCfg) {
-      onSessionIdle = createIdleSuggestionHandler({
-        chat: createChatTransport(suggestCfg),
-        bus: ownerEvents,
-        audit,
-      });
-      // eslint-disable-next-line no-console
-      console.log(`idle suggestions: enabled (model ${suggestCfg.model})`);
-    } else {
-      // eslint-disable-next-line no-console
-      console.warn(
-        'idle suggestions: requested (QWEN_RC_IDLE_SUGGESTIONS) but no coherent ' +
-          'model endpoint resolved — staying inert',
-      );
-    }
+  const suggestCfg = resolveSuggestConfig();
+  if (suggestCfg) {
+    onSessionIdle = createIdleSuggestionHandler({
+      chat: createChatTransport(suggestCfg),
+      bus: ownerEvents,
+      audit,
+      getConfig: () => idleConfig,
+      limiter: new PushRateLimiter(),
+    });
+    // eslint-disable-next-line no-console
+    console.log(
+      idleConfig.enabled
+        ? `idle suggestions: enabled (model ${suggestCfg.model}, ` +
+            `${idleConfig.maxSuggestionsPerHour}/hr)`
+        : 'idle suggestions: available but disabled ' +
+            '(set `enabled: true` in ~/.qwen/rc/idle.yaml)',
+    );
   }
 
   // Hold the gateway's own daemon subscriptions so push fires with no browser

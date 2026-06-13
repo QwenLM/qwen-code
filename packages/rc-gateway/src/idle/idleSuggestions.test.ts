@@ -10,7 +10,9 @@ import {
   resolveIdleEnabled,
 } from './idleSuggestions.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
+import { PushRateLimiter } from '../webpush/rateLimiter.js';
 import type { ChatTransport } from './chatTransport.js';
+import type { IdleConfig } from './config.js';
 import type { TurnText } from './suggester.js';
 import type { AuditEntry } from '../auditLog.js';
 
@@ -25,7 +27,10 @@ async function flush(): Promise<void> {
 }
 
 function harness(
-  over: Partial<Parameters<typeof createIdleSuggestionHandler>[0]> = {},
+  opts: {
+    config?: Partial<IdleConfig>;
+    over?: Partial<Parameters<typeof createIdleSuggestionHandler>[0]>;
+  } = {},
 ) {
   const events: OwnerEvent[] = [];
   const bus = new OwnerEventBus();
@@ -33,15 +38,22 @@ function harness(
   const audited: AuditEntry[] = [];
   const audit = { record: async (e: AuditEntry) => void audited.push(e) };
   const chat: ChatTransport = async () => '["Run the tests","Commit the fix"]';
+  const config: IdleConfig = {
+    enabled: true,
+    maxSuggestionsPerHour: 5,
+    maxSuggestions: 3,
+    ...opts.config,
+  };
   const handler = createIdleSuggestionHandler({
     chat,
     bus,
     audit,
+    getConfig: () => config,
     resolveDir: (cwd) => `/chats/${cwd}`,
     readTurns: async () => TURNS,
-    ...over,
+    ...opts.over,
   });
-  return { handler, events, audited };
+  return { handler, events, audited, config };
 }
 
 describe('resolveIdleEnabled', () => {
@@ -69,17 +81,30 @@ describe('createIdleSuggestionHandler', () => {
         suggestions: ['Run the tests', 'Commit the fix'],
       },
     ]);
-    // Audit carries only a count — never the suggestion text or transcript.
     expect(audited).toEqual([
       { action: 'idle_suggested', target: 'sess-1', detail: { count: 2 } },
     ]);
   });
 
+  it('DISABLED config → zero side effects: no tail read, no model call, no frame, no audit', async () => {
+    const readTurns = vi.fn(async () => TURNS);
+    const chat = vi.fn(async () => '["x"]') as unknown as ChatTransport;
+    const { handler, events, audited } = harness({
+      config: { enabled: false },
+      over: { readTurns, chat },
+    });
+    handler('sess-1', '/w');
+    await flush();
+    expect(readTurns).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(audited).toEqual([]);
+  });
+
   it('does nothing (no frame, no audit, no model call) when there are no turns', async () => {
     const chat = vi.fn(async () => '["x"]') as unknown as ChatTransport;
     const { handler, events, audited } = harness({
-      chat,
-      readTurns: async () => [],
+      over: { chat, readTurns: async () => [] },
     });
     handler('sess-1', '/w');
     await flush();
@@ -90,7 +115,7 @@ describe('createIdleSuggestionHandler', () => {
 
   it('emits no frame when the model reply parses to zero suggestions', async () => {
     const { handler, events, audited } = harness({
-      chat: async () => 'sorry, I cannot help',
+      over: { chat: async () => 'sorry, I cannot help' },
     });
     handler('sess-1', '/w');
     await flush();
@@ -100,7 +125,7 @@ describe('createIdleSuggestionHandler', () => {
 
   it('does nothing and never reads turns when workspaceCwd is empty', async () => {
     const readTurns = vi.fn(async () => TURNS);
-    const { handler, events } = harness({ readTurns });
+    const { handler, events } = harness({ over: { readTurns } });
     handler('sess-1', '');
     await flush();
     expect(events).toEqual([]);
@@ -109,8 +134,10 @@ describe('createIdleSuggestionHandler', () => {
 
   it('degrades to silence (no throw, no frame) when the tail reader throws', async () => {
     const { handler, events } = harness({
-      readTurns: async () => {
-        throw new Error('disk error');
+      over: {
+        readTurns: async () => {
+          throw new Error('disk error');
+        },
       },
     });
     expect(() => handler('sess-1', '/w')).not.toThrow();
@@ -120,8 +147,10 @@ describe('createIdleSuggestionHandler', () => {
 
   it('degrades to silence when the model transport throws', async () => {
     const { handler, events } = harness({
-      chat: async () => {
-        throw new Error('model down');
+      over: {
+        chat: async () => {
+          throw new Error('model down');
+        },
       },
     });
     handler('sess-1', '/w');
@@ -129,15 +158,49 @@ describe('createIdleSuggestionHandler', () => {
     expect(events).toEqual([]);
   });
 
-  it('honors max (passed through to the suggester/parser)', async () => {
+  it('uses maxSuggestions from config (passed through to the suggester/parser)', async () => {
     const { handler, events } = harness({
-      max: 1,
-      chat: async () => '["a","b","c"]',
+      config: { maxSuggestions: 1 },
+      over: { chat: async () => '["a","b","c"]' },
     });
     handler('sess-1', '/w');
     await flush();
     expect(events).toEqual([
       { type: 'idle_suggestions', sessionId: 'sess-1', suggestions: ['a'] },
+    ]);
+  });
+
+  it('rate-limits per session: over the hourly cap → skip generation + ONE deduped audit', async () => {
+    const limiter = new PushRateLimiter();
+    let clock = 1_000_000;
+    const chat = vi.fn(async () => '["a"]') as unknown as ChatTransport;
+    const { handler, events, audited } = harness({
+      config: { maxSuggestionsPerHour: 1 },
+      over: { limiter, now: () => clock, chat },
+    });
+
+    // First edge: under cap → fires.
+    handler('s', '/w');
+    await flush();
+    // Two more edges within the hour: over cap → skipped, generation not called again.
+    clock += 1000;
+    handler('s', '/w');
+    await flush();
+    clock += 1000;
+    handler('s', '/w');
+    await flush();
+
+    expect(events).toHaveLength(1); // only the first fired
+    expect(chat).toHaveBeenCalledTimes(1); // budget protected the model call
+    // One idle_suggested (the success) + exactly ONE rate-limited (firstDrop dedup).
+    expect(audited.filter((a) => a.action === 'idle_suggested')).toHaveLength(
+      1,
+    );
+    const limited = audited.filter(
+      (a) => a.action === 'idle_suggest_rate_limited',
+    );
+    expect(limited).toEqual([
+      { action: 'idle_suggest_rate_limited', target: 's' },
     ]);
   });
 });
