@@ -177,6 +177,7 @@
     </section>
     <section id="search">
       <strong>Search</strong> (transcripts; requires owner scope)
+      <span style="color: #888; font-size: 0.85rem">— ⌘K / Ctrl-K</span>
       <div>
         <input id="search-q" placeholder="oauth refresh AND error" />
         <select id="search-kind">
@@ -279,6 +280,10 @@
         <option value="zh-CN">Chinese</option>
         <option value="ja-JP">Japanese</option>
       </select>
+      <label
+        title="when dictation ends on a pause, send the prompt automatically"
+        ><input id="dictate-autosend" type="checkbox" /> auto-send</label
+      >
       <span
         id="dictate-interim"
         aria-live="polite"
@@ -1256,6 +1261,22 @@
       $('search-q').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') runSearch();
       });
+      // Command-palette shortcut: ⌘K / Ctrl-K jumps to the cross-session search
+      // box from anywhere (the keyboard-driven core of a command palette). Esc
+      // from the box returns focus to the body. Ignores the browser's own ⌘K
+      // only inside our page; preventDefault stops the address-bar focus.
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault();
+          const box = $('search-q');
+          box.scrollIntoView({ block: 'center' });
+          box.focus();
+          box.select();
+        }
+      });
+      $('search-q').addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') $('search-q').blur();
+      });
 
       // Create share link (cycle 64): owner mints a /ui/share/<token> link via
       // POST /rc/share, completing the round-trip with the cycle-62 guest page.
@@ -1781,10 +1802,12 @@
       };
 
       // Voice input (cycle 68): push-to-talk dictation into the composer via the
-      // browser SpeechRecognition API. Fill-only (NEVER auto-send). Recognition
-      // runs in the browser; only the final transcript reaches #prompt. Graceful
-      // degradation: when the API is absent (headless/Firefox) the button is
-      // disabled, so the composer never breaks.
+      // browser SpeechRecognition API. Fills #prompt with the final transcript;
+      // sending stays MANUAL unless the opt-in "auto-send" box is checked (cycle
+      // 99), which sends once dictation ends on a pause. Recognition runs in the
+      // browser; only the final transcript reaches #prompt. Graceful degradation:
+      // when the API is absent (headless/Firefox) the controls are disabled, so
+      // the composer never breaks.
       (function () {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         const dictate = $('dictate');
@@ -1793,6 +1816,7 @@
           dictate.disabled = true;
           dictate.title = 'voice input not supported in this browser';
           $('dictate-lang').disabled = true;
+          $('dictate-autosend').disabled = true;
           return;
         }
         let rec = null;
@@ -1813,6 +1837,10 @@
           rec.interimResults = true;
           rec.continuous = false;
           dictate.textContent = 'Stop';
+          // Per-session flags for the opt-in auto-send (cycle 99): only send when
+          // this dictation actually captured FINAL speech and did not error.
+          let gotFinal = false;
+          let errored = false;
           rec.onresult = (ev) => {
             let interim = '';
             let final = '';
@@ -1822,8 +1850,9 @@
               else interim += r[0].transcript;
             }
             if (final) {
+              gotFinal = true;
               const ta = $('prompt');
-              // Append final text (complement typing), never auto-send.
+              // Append final text (complement typing).
               ta.value = ta.value
                 ? ta.value + ' ' + final.trim()
                 : final.trim();
@@ -1837,10 +1866,20 @@
             interimEl.textContent = '';
           };
           rec.onerror = (e) => {
+            errored = true;
             setStatus('voice: ' + (e && e.error ? e.error : 'error'));
             reset();
           };
-          rec.onend = reset;
+          rec.onend = () => {
+            // Auto-send (opt-in) when dictation ends on a pause/stop AND we
+            // captured real speech AND no error fired. Reset first so the UI is
+            // idle when send() runs; send() itself guards on a watched session +
+            // non-empty prompt, so a no-op is harmless.
+            const shouldSend =
+              $('dictate-autosend').checked && gotFinal && !errored;
+            reset();
+            if (shouldSend) $('send').onclick();
+          };
           try {
             rec.start();
           } catch (e) {
