@@ -70,15 +70,18 @@ export class SearchTimeoutError extends Error {
   }
 }
 
-/** Maps the route-facing kind enum to the on-disk record type. */
-const KIND_MAP: Record<string, string> = {
+/**
+ * Maps the route-facing kind enum to the on-disk record type. Exported so the
+ * BM25 index (`./searchIndex.ts`) maps `kind` IDENTICALLY to this live scanner.
+ */
+export const KIND_MAP: Record<string, string> = {
   user: 'user',
   assistant: 'assistant',
   tool: 'tool_result',
 };
 
 /** Shape of a single JSONL transcript record (only the fields we read). */
-interface TranscriptRecord {
+export interface TranscriptRecord {
   uuid?: string;
   sessionId?: string;
   timestamp?: string;
@@ -112,8 +115,13 @@ const SNIPPET_MAX = 200;
 // against the real daemon by the fork e2e). `searchTranscripts` below takes the
 // already-resolved dir; it never derives a path itself.
 
-/** Concatenated searchable text of a record's message parts. */
-function recordText(rec: TranscriptRecord): string {
+/**
+ * Concatenated searchable text of a record's message parts. Exported so the
+ * BM25 index (`./searchIndex.ts`) indexes the EXACT text this scanner searches
+ * — the two then differ only by token-vs-substring matching and ranking, never
+ * by which content is searchable.
+ */
+export function recordText(rec: TranscriptRecord): string {
   const parts = rec.message?.parts ?? [];
   const out: string[] = [];
   for (const p of parts) {

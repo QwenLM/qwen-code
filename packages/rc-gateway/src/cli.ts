@@ -45,7 +45,10 @@ import {
   formatInsecurePolicyWarning,
 } from './policy/permissions.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE } from './scopes.js';
-import { resolveChatsDir } from './sessions/chatsPath.js';
+import {
+  resolveChatsDir,
+  resolveSearchIndexDir,
+} from './sessions/chatsPath.js';
 import { searchTranscriptsDetailed } from './search/transcripts.js';
 import { parseSearchArgs, formatSearchResults } from './search/searchCli.js';
 
@@ -293,6 +296,35 @@ async function readAllStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * Dynamically load the BM25 index module (the ONLY importer of the NATIVE,
+ * OPTIONAL `better-sqlite3`). When the optional dep is absent or its native
+ * build failed, exit 1 with an actionable hint instead of a cryptic stack — so
+ * `qwen serve` (which never loads this) installs and runs regardless.
+ */
+async function loadSearchIndexModule(): Promise<
+  typeof import('./search/searchIndex.js')
+> {
+  try {
+    return await import('./search/searchIndex.js');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    const msg = (err as Error).message ?? '';
+    if (
+      code === 'ERR_MODULE_NOT_FOUND' ||
+      code === 'MODULE_NOT_FOUND' ||
+      /better[-_]sqlite3/.test(msg)
+    ) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'ranked search needs the optional better-sqlite3 dependency — run: npm install better-sqlite3',
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
 // Entrypoint: `qwen-rc serve`
 if (process.argv[2] === 'serve') {
   runServe().catch((err) => {
@@ -424,6 +456,47 @@ if (process.argv[2] === 'serve') {
       process.exit(2);
       return;
     }
+    // `--rank`: a relevance-ranked (BM25) query over the prebuilt FTS5 index
+    // instead of the live substring scan. TOKEN/prefix matching — deliberately
+    // different hits/order from the default scan; build the index with
+    // `qwen-rc reindex` first. The NATIVE better-sqlite3 is loaded HERE via a
+    // dynamic import, so `qwen serve` / the gateway never load the addon.
+    if (process.argv.includes('--rank')) {
+      const { SearchIndex } = await loadSearchIndexModule();
+      const dbPath = join(
+        resolveSearchIndexDir(parsed.value.cwd ?? process.cwd()),
+        'index.db',
+      );
+      const idx = SearchIndex.open(dbPath);
+      try {
+        if (idx.count() === 0) {
+          // eslint-disable-next-line no-console
+          console.error('(index empty — run: qwen-rc reindex)');
+        }
+        const result = idx.query(parsed.value.query, parsed.value.opts);
+        // The trigram index can't match a term shorter than 3 chars (uniform
+        // across scripts, incl. 2-char CJK words). When that yields nothing,
+        // point the user at the default scan, which has no length floor.
+        if (result.hits.length === 0) {
+          const hasShort = parsed.value.query.split(/\s+/).some((t) => {
+            const chars = [...t].filter((c) => /[\p{L}\p{N}]/u.test(c));
+            return chars.length > 0 && chars.length < 3;
+          });
+          if (hasShort) {
+            // eslint-disable-next-line no-console
+            console.error(
+              '(--rank matches terms ≥3 chars; for shorter terms use the default scan)',
+            );
+          }
+        }
+        // eslint-disable-next-line no-console
+        console.log(formatSearchResults(result));
+      } finally {
+        idx.close();
+      }
+      process.exit(0);
+      return;
+    }
     const chatsDir = resolveChatsDir(parsed.value.cwd ?? process.cwd());
     const result = await searchTranscriptsDetailed(
       chatsDir,
@@ -436,6 +509,31 @@ if (process.argv[2] === 'serve') {
   })().catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error(`search: ${(err as Error).message}`);
+    process.exit(1);
+  });
+} else if (process.argv[2] === 'reindex') {
+  // `qwen-rc reindex [--cwd=<dir>]` — (re)build the BM25 full-text index for a
+  // workspace's transcripts (full drop+rebuild). The index db lives under the
+  // workspace's 0700 search-index dir. The NATIVE better-sqlite3 is loaded HERE
+  // via a dynamic import, so `qwen serve` / the gateway never load the addon.
+  void (async () => {
+    const cwdFlag = process.argv.slice(3).find((a) => a.startsWith('--cwd='));
+    const cwd = cwdFlag ? cwdFlag.slice('--cwd='.length) : process.cwd();
+    const { SearchIndex } = await loadSearchIndexModule();
+    const chatsDir = resolveChatsDir(cwd);
+    const dbPath = join(resolveSearchIndexDir(cwd), 'index.db');
+    const idx = SearchIndex.open(dbPath);
+    try {
+      const { files, records } = idx.reindex(chatsDir);
+      // eslint-disable-next-line no-console
+      console.log(`indexed ${records} record(s) from ${files} file(s)`);
+    } finally {
+      idx.close();
+    }
+    process.exit(0);
+  })().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error(`reindex: ${(err as Error).message}`);
     process.exit(1);
   });
 }

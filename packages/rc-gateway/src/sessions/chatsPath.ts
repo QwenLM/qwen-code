@@ -85,6 +85,26 @@ export function resolveChatsDir(
 }
 
 /**
+ * The directory holding this workspace's BM25 search index — a sibling of the
+ * `chats` dir under the same project segment, so it is keyed to the same
+ * `sanitizeCwd(cwd)` and two workspaces can never read each other's index. The
+ * index db (and any transient SQLite journal sibling) lives here; the index
+ * store creates this dir `0700` and the db file `0600` because the index is a
+ * new at-rest copy of raw transcript content (prompts, tool output).
+ */
+export function resolveSearchIndexDir(
+  cwd: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(
+    runtimeBaseDir(env),
+    'projects',
+    sanitizeCwd(cwd),
+    'search-index',
+  );
+}
+
+/**
  * Matches core's `SESSION_FILE_PATTERN` (minus the `.jsonl` suffix): 32–36
  * chars of hex + dashes. Used to reject path-traversal / malformed parent ids
  * before any path join.
