@@ -39,6 +39,8 @@ export interface DiscordButton {
   custom_id?: string;
   /** Present for Link-style buttons (the deeplink surface). */
   url?: string;
+  /** Set true when re-rendering a resolved request (greys the button out). */
+  disabled?: boolean;
 }
 
 /** A Discord ActionRow holding up to five buttons (we use at most two). */

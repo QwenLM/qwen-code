@@ -1,0 +1,215 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { BridgeClient, BridgeEvent } from '../client.js';
+import type { DiscordRestApi } from './restApi.js';
+import type { DiscordChannelStore } from './channelStore.js';
+import {
+  handleMessage,
+  handleSlashCommand,
+  handleComponent,
+  type DiscordDispatchDeps,
+  type NormalizedMessage,
+  type NormalizedSlashCommand,
+  type NormalizedComponent,
+} from './dispatch.js';
+import { renderPermissionRequest, type DiscordActionRow } from './render.js';
+
+/**
+ * The injected inbound transport. The runner only needs "start the gateway and
+ * push normalized events back to me" — the concrete `DiscordGateway` (which
+ * imports discord.js) implements this, so the runner's outbound/SSE logic stays
+ * unit-testable without a live socket or the discord.js dependency.
+ */
+export interface GatewayController {
+  start(signal: AbortSignal): Promise<void>;
+}
+
+/** Handlers the gateway invokes for each normalized inbound event. */
+export interface GatewayHandlers {
+  onMessage(m: NormalizedMessage): void;
+  onSlash(c: NormalizedSlashCommand): void;
+  onButton(c: NormalizedComponent): void;
+}
+
+export interface DiscordBridgeConfig {
+  client: BridgeClient;
+  rest: DiscordRestApi;
+  channels: DiscordChannelStore;
+  /** Builds the inbound gateway given the handlers (so the runner injects them). */
+  makeGateway: (handlers: GatewayHandlers) => GatewayController;
+  /** User-facing gateway URL for deeplinks (QWEN_DAEMON_URL). */
+  baseUrl: string;
+  /** Logger for boot/error lines (default no-op). */
+  log?: (msg: string) => void;
+}
+
+/** Where a rendered permission_request landed, so it can be edited on resolve. */
+interface SentRequest {
+  channelId: string;
+  messageId: string;
+  content: string;
+  components: DiscordActionRow[];
+}
+
+/**
+ * The Discord bridge runner (`add-discord-bridge`): the inbound gateway loop
+ * (discord.js, injected) feeds dispatch; an outbound SSE echo loop per bound
+ * session renders permission_request frames into channel messages and edits them
+ * (disabling the buttons) when resolved. It holds NO gateway internals — every
+ * daemon interaction goes through the injected {@link BridgeClient} over the
+ * loopback HTTP+SSE contract, so the whole bridge moves to a separate process by
+ * changing only config. Local ban cache mirrors gateway 403s.
+ *
+ * VERIFICATION CEILING: the outbound paths (deliverEvent render→send→edit) and
+ * subscription reconciliation ARE unit-tested with fakes. The live discord.js
+ * gateway connection (heartbeat, IDENTIFY, RESUME, INTERACTION_CREATE delivery)
+ * is delegated to discord.js and is NOT exercised here — there is no real Discord
+ * to test against in this environment.
+ */
+export class DiscordBridge {
+  private readonly cfg: DiscordBridgeConfig;
+  private readonly bans = new Set<string>();
+  private readonly subscribed = new Set<string>();
+  /** requestId → every channel message that rendered it (edited on resolve). */
+  private readonly sent = new Map<string, SentRequest[]>();
+  private readonly log: (msg: string) => void;
+
+  constructor(cfg: DiscordBridgeConfig) {
+    this.cfg = cfg;
+    this.log = cfg.log ?? (() => {});
+  }
+
+  private dispatchDeps(): DiscordDispatchDeps {
+    return {
+      bridge: this.cfg.client,
+      rest: this.cfg.rest,
+      channels: this.cfg.channels,
+      bans: this.bans,
+    };
+  }
+
+  /**
+   * Register the bridge, subscribe to already-bound sessions, then start the
+   * inbound gateway. Resolves when the gateway loop ends (signal aborts).
+   */
+  async start(signal: AbortSignal): Promise<void> {
+    const reg = await this.cfg.client.register({
+      id: 'discord',
+      displayName: 'Discord',
+      supportsActions: true,
+      supportsMarkdown: true,
+      maxMessageBytes: 2000,
+    });
+    this.log(
+      reg.ok
+        ? 'discord bridge: registered with the gateway'
+        : `discord bridge: registration returned ${reg.status} (continuing)`,
+    );
+    this.reconcileSubscriptions(signal);
+
+    const gateway = this.cfg.makeGateway({
+      onMessage: (m) => {
+        void handleMessage(m, this.dispatchDeps());
+      },
+      onSlash: (c) => {
+        // A successful /qwen attach binds a new session → subscribe to it.
+        void handleSlashCommand(c, this.dispatchDeps()).finally(() =>
+          this.reconcileSubscriptions(signal),
+        );
+      },
+      onButton: (c) => {
+        void handleComponent(c, this.dispatchDeps());
+      },
+    });
+    await gateway.start(signal);
+  }
+
+  /** Open an SSE echo subscription for every bound session not already watched. */
+  private reconcileSubscriptions(signal: AbortSignal): void {
+    for (const sessionId of this.cfg.channels.boundSessions()) {
+      if (this.subscribed.has(sessionId)) continue;
+      this.subscribed.add(sessionId);
+      void this.cfg.client
+        .subscribeEvents(
+          sessionId,
+          (ev) => this.deliverEvent(sessionId, ev),
+          signal,
+        )
+        .finally(() => this.subscribed.delete(sessionId));
+    }
+  }
+
+  /**
+   * Outbound: render permission_request frames to every bound channel and edit
+   * them (disabling the buttons + appending the outcome) when resolved. Other
+   * frames are ignored to keep channels quiet. Fire-and-forget sends (a failed
+   * send must not break the SSE loop). Exposed for unit testing.
+   */
+  deliverEvent(sessionId: string, ev: BridgeEvent): void {
+    if (ev.type === 'permission_request') {
+      void this.deliverPermissionRequest(sessionId, ev.data);
+    } else if (ev.type === 'permission_resolved') {
+      void this.deliverPermissionResolved(ev.data);
+    }
+  }
+
+  private async deliverPermissionRequest(
+    sessionId: string,
+    data: unknown,
+  ): Promise<void> {
+    const d = (data ?? {}) as Record<string, unknown>;
+    const requestId = typeof d['requestId'] === 'string' ? d['requestId'] : '';
+    const msg = renderPermissionRequest(data, { baseUrl: this.cfg.baseUrl });
+    for (const channelId of this.cfg.channels.channelsFor(sessionId)) {
+      const r = await this.cfg.rest.createMessage(
+        channelId,
+        msg.content,
+        msg.components,
+      );
+      const messageId =
+        r.ok && typeof (r.body as { id?: unknown })?.id === 'string'
+          ? (r.body as { id: string }).id
+          : undefined;
+      if (requestId && messageId) {
+        const list = this.sent.get(requestId) ?? [];
+        list.push({
+          channelId,
+          messageId,
+          content: msg.content,
+          components: msg.components,
+        });
+        this.sent.set(requestId, list);
+      }
+    }
+  }
+
+  private async deliverPermissionResolved(data: unknown): Promise<void> {
+    const d = (data ?? {}) as Record<string, unknown>;
+    const requestId = typeof d['requestId'] === 'string' ? d['requestId'] : '';
+    const targets = this.sent.get(requestId);
+    if (!targets) return;
+    this.sent.delete(requestId);
+    const outcome =
+      typeof d['outcome'] === 'string' ? (d['outcome'] as string) : 'resolved';
+    for (const t of targets) {
+      await this.cfg.rest.editMessage(
+        t.channelId,
+        t.messageId,
+        `${t.content}\n\nResolved: ${outcome}`,
+        disableRows(t.components),
+      );
+    }
+  }
+}
+
+/** Clone component rows with every button disabled (for the resolve edit). */
+function disableRows(rows: DiscordActionRow[]): DiscordActionRow[] {
+  return rows.map((row) => ({
+    type: row.type,
+    components: row.components.map((b) => ({ ...b, disabled: true })),
+  }));
+}

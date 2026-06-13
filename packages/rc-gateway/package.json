@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@qwen-code/sdk": "*",
+    "discord.js": "^14.16.3",
     "express": "^4.21.2",
     "web-push": "^3.6.7",
     "yaml": "^2.8.1"

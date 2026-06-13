@@ -29,6 +29,10 @@ import { BridgeClient } from './bridges/client.js';
 import { TelegramBotApi } from './bridges/telegram/botApi.js';
 import { TelegramChatStore } from './bridges/telegram/chatStore.js';
 import { TelegramBridge } from './bridges/telegram/runner.js';
+import { DiscordRestApi } from './bridges/discord/restApi.js';
+import { DiscordChannelStore } from './bridges/discord/channelStore.js';
+import { DiscordBridge } from './bridges/discord/runner.js';
+import { makeDiscordGateway } from './bridges/discord/gateway.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
@@ -518,12 +522,60 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     }
   }
 
+  // In-process Discord bridge (add-discord-bridge), opt-in. Same HYBRID as the
+  // Telegram bridge: in-process but loopback-contract-only with an OPERATOR-MINTED
+  // QWEN_BRIDGE_TOKEN, so it's sidecar-extractable by config alone. Per the
+  // operator's choice (spec D2), discord.js owns the stateful gateway protocol.
+  // Started only when bot token, application id, and bridge token are all present.
+  let discordAbort: AbortController | undefined;
+  const discordBotToken = process.env.DISCORD_BOT_TOKEN;
+  const discordAppId = process.env.DISCORD_APPLICATION_ID;
+  if (discordBotToken && discordAppId) {
+    const bridgeToken = process.env.QWEN_BRIDGE_TOKEN;
+    if (!bridgeToken) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'discord bridge: bot token set but QWEN_BRIDGE_TOKEN missing — mint a ' +
+          "bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
+          'QWEN_BRIDGE_TOKEN. Bridge NOT started.',
+      );
+    } else {
+      const loopbackUrl = `http://127.0.0.1:${port}`;
+      const runner = new DiscordBridge({
+        client: new BridgeClient({ baseUrl: loopbackUrl, token: bridgeToken }),
+        rest: new DiscordRestApi({
+          botToken: discordBotToken,
+          applicationId: discordAppId,
+        }),
+        channels: await DiscordChannelStore.open(
+          join(homedir(), '.qwen', 'rc', 'bridges', 'discord', 'channels.json'),
+        ),
+        makeGateway: makeDiscordGateway({
+          botToken: discordBotToken,
+          applicationId: discordAppId,
+          guildId: process.env.DISCORD_GUILD_ID,
+          // eslint-disable-next-line no-console
+          log: (m) => console.log(m),
+        }),
+        // Deeplinks must be user-reachable; prefer QWEN_DAEMON_URL when set.
+        baseUrl: process.env.QWEN_DAEMON_URL || loopbackUrl,
+        // eslint-disable-next-line no-console
+        log: (m) => console.log(m),
+      });
+      discordAbort = new AbortController();
+      void runner.start(discordAbort.signal);
+      // eslint-disable-next-line no-console
+      console.log('discord bridge: started (in-process, loopback contract)');
+    }
+  }
+
   const shutdown = async () => {
     for (const w of watchers) w.close();
     reloader?.stop();
     routingReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     telegramAbort?.abort();
+    discordAbort?.abort();
     if (pump) await pump.stop();
     await handle.stop();
     process.exit(0);
