@@ -143,7 +143,7 @@ export function normalizePendingPromptLimit(
   value: number | null | undefined,
 ): number {
   if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
-  if (value === null || value === 0 || value === Number.POSITIVE_INFINITY) {
+  if (value === null || value === 0 || value === Infinity) {
     return Infinity;
   }
   if (!Number.isInteger(value) || value < 0) {
@@ -392,20 +392,20 @@ export class DaemonClient {
   /** @internal */
   reservePromptSlot(sessionId: string, limit = this.promptLimit): () => void {
     if (limit === Infinity) return () => {};
-    const pendingCount = this.promptCounts[sessionId] ?? 0;
+    const promptCounts = this.promptCounts;
+    const pendingCount = promptCounts[sessionId] ?? 0;
     if (pendingCount >= limit) {
       throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
     }
-    this.promptCounts[sessionId] = pendingCount + 1;
-    let released = false;
+    promptCounts[sessionId] = pendingCount + 1;
+    let released: boolean | undefined;
     return () => {
       if (released) return;
       released = true;
-      const current = this.promptCounts[sessionId] ?? 0;
-      if (current <= 1) {
-        delete this.promptCounts[sessionId];
+      if ((promptCounts[sessionId] ?? 0) <= 1) {
+        delete promptCounts[sessionId];
       } else {
-        this.promptCounts[sessionId] = current - 1;
+        --promptCounts[sessionId]!;
       }
     };
   }
