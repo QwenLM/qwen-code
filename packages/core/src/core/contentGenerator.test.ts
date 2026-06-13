@@ -9,6 +9,7 @@ import {
   createContentGenerator,
   createContentGeneratorConfig,
   AuthType,
+  Protocol,
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -72,6 +73,7 @@ describe('createContentGenerator', () => {
         model: 'test-model',
         apiKey: 'test-api-key',
         authType: AuthType.USE_GEMINI,
+        protocol: Protocol.GEMINI,
       },
       mockConfig,
     );
@@ -108,6 +110,7 @@ describe('createContentGenerator', () => {
         model: 'test-model',
         apiKey: 'test-api-key',
         authType: AuthType.USE_GEMINI,
+        protocol: Protocol.GEMINI,
       },
       mockConfig,
     );
@@ -153,6 +156,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
           model: 'test-model',
           apiKey: 'test-key',
           authType: AuthType.USE_OPENAI,
+          protocol: Protocol.OPENAI,
         },
         mockConfig,
       );
@@ -177,6 +181,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
           model: 'test-model',
           apiKey: 'test-key',
           authType: AuthType.USE_OPENAI,
+          protocol: Protocol.OPENAI,
         },
         mockConfig,
       ),
@@ -193,6 +198,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
         {
           model: 'test-model',
           authType: AuthType.QWEN_OAUTH,
+          protocol: Protocol.QWEN_OAUTH,
         },
         mockConfig,
       );
