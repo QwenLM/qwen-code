@@ -1167,27 +1167,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
-  it('session/new forwards sessionScope; rejects invalid scope', async () => {
+  it('session/new always uses thread scope (ACP standard compliance)', async () => {
+    // ACP standard: session/new MUST create a new isolated session.
+    // sessionScope param is ignored; bridge always gets 'thread'.
     const connId = await initialize();
-    const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    // invalid scope → error on conn stream
     await post(connId, {
       jsonrpc: '2.0',
       id: 43,
       method: 'session/new',
-      params: { sessionScope: 'bogus' },
+      params: { sessionScope: 'single' }, // ignored
     });
-    const [bad] = (await got) as Array<{ error: { code: number } }>;
-    expect(bad.error.code).toBe(-32602);
-    // valid scope → forwarded to bridge
+    await new Promise((r) => setTimeout(r, 30));
+    expect(bridge.lastSpawnScope).toBe('thread');
+
+    // Even 'bogus' is ignored (not rejected) — param is simply not read
     const c2 = await initialize();
     await post(c2, {
       jsonrpc: '2.0',
       id: 44,
       method: 'session/new',
-      params: { sessionScope: 'thread' },
+      params: { sessionScope: 'bogus' },
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');

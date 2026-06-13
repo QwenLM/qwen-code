@@ -416,6 +416,62 @@ export class AcpDispatcher {
   }
 
   /**
+   * Extract ACP-standard `SessionModelState` from configOptions.
+   * ConfigOptions carry model info as `{ category: 'model', type: 'select',
+   * currentValue, options }`. Maps to `{ currentModelId, availableModels }`.
+   */
+  private extractModelState(
+    configOptions: unknown[] | undefined,
+  ): { currentModelId: string; availableModels: unknown[] } | undefined {
+    if (!configOptions) return undefined;
+    const modelOpt = configOptions.find(
+      (o) =>
+        typeof o === 'object' &&
+        o !== null &&
+        (o as Record<string, unknown>)['category'] === 'model',
+    ) as Record<string, unknown> | undefined;
+    if (!modelOpt) return undefined;
+    const currentModelId = String(modelOpt['currentValue'] ?? '');
+    const options = Array.isArray(modelOpt['options'])
+      ? modelOpt['options']
+      : [];
+    return {
+      currentModelId,
+      availableModels: options.map((opt: unknown) => {
+        const o = opt as Record<string, unknown>;
+        return { id: String(o['value'] ?? o['id'] ?? '') };
+      }),
+    };
+  }
+
+  /**
+   * Extract ACP-standard `SessionModeState` from configOptions.
+   * ConfigOptions carry mode info as `{ category: 'mode', type: 'select',
+   * currentValue, options }`. Maps to `{ currentModeId, availableModes }`.
+   */
+  private extractModeState(
+    configOptions: unknown[] | undefined,
+  ): { currentModeId: string; availableModes: unknown[] } | undefined {
+    if (!configOptions) return undefined;
+    const modeOpt = configOptions.find(
+      (o) =>
+        typeof o === 'object' &&
+        o !== null &&
+        (o as Record<string, unknown>)['category'] === 'mode',
+    ) as Record<string, unknown> | undefined;
+    if (!modeOpt) return undefined;
+    const currentModeId = String(modeOpt['currentValue'] ?? '');
+    const options = Array.isArray(modeOpt['options']) ? modeOpt['options'] : [];
+    return {
+      currentModeId,
+      availableModes: options.map((opt: unknown) => {
+        const o = opt as Record<string, unknown>;
+        return { id: String(o['value'] ?? o['id'] ?? '') };
+      }),
+    };
+  }
+
+  /**
    * Cancel a permission request the client abandoned (closed its stream /
    * connection before voting), so the bridge isn't left blocked. Invoked
    * by the connection-registry teardown path.
@@ -618,9 +674,16 @@ export class AcpDispatcher {
             this.killOrphanSession(session.sessionId);
             return;
           }
+          // Build ACP-standard models/modes from configOptions.
+          // configOptions carry model/mode as category-tagged entries;
+          // the standard also expects top-level models/modes objects.
+          const models = this.extractModelState(configOptions);
+          const modes = this.extractModeState(configOptions);
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
             ...(configOptions ? { configOptions } : {}),
+            ...(models ? { models } : {}),
+            ...(modes ? { modes } : {}),
           });
           return;
         }
