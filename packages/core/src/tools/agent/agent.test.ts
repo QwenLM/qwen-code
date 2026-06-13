@@ -169,6 +169,12 @@ describe('AgentTool', () => {
       getTeamManager: vi.fn().mockReturnValue(undefined),
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getModel: vi.fn().mockReturnValue('parent-model'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getSandbox: vi.fn().mockReturnValue(undefined),
+      getScreenReader: vi.fn().mockReturnValue(false),
+      getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
@@ -2743,6 +2749,15 @@ describe('AgentTool', () => {
           status: 'running',
           agentType: 'file-search',
           description: 'Search files',
+          persistedCliFlags: expect.objectContaining({
+            approvalMode: 'auto-edit',
+            bare: false,
+            sandbox: null,
+            screenReader: false,
+            model: 'parent-model',
+            maxSessionTurns: -1,
+            maxToolCalls: -1,
+          }),
         }),
       );
       // Finally block patches the sidecar to the terminal status —
@@ -2880,9 +2895,8 @@ describe('AgentTool', () => {
 
       await invocation.execute();
 
-      const createCalls = vi.mocked(
-        mockSubagentManager.createAgentHeadless,
-      ).mock.calls;
+      const createCalls = vi.mocked(mockSubagentManager.createAgentHeadless)
+        .mock.calls;
       const createdConfig = createCalls[createCalls.length - 1][1] as Config;
       expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
     });
