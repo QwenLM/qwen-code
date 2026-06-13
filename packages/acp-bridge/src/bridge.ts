@@ -299,6 +299,7 @@ interface SessionEntry {
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
   promptActive: boolean;
+  retryAllowed: boolean;
   /**
    * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
    * `cancelSession` route and the `sendPrompt` abort path (originator SSE
@@ -605,6 +606,7 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const code = extractErrorCode(err);
+  entry.retryAllowed = true;
   entry.events.publish({
     type: 'turn_error',
     data: {
@@ -631,6 +633,7 @@ const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -1984,6 +1987,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachCount: 0,
       spawnOwnerWantedKill: false,
       promptActive: false,
+      retryAllowed: false,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -2702,6 +2706,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (signal?.aborted) {
                   throw new DOMException('Prompt aborted', 'AbortError');
                 }
+                const requestedRetry =
+                  (req as unknown as { retry?: unknown }).retry === true;
+                const isRetry = requestedRetry && entry.retryAllowed;
+                entry.retryAllowed = false;
+                const promptRequest = (() => {
+                  const copy = {
+                    ...normalized,
+                  } as PromptRequest & { retry?: unknown };
+                  delete copy.retry;
+                  const meta =
+                    copy._meta && typeof copy._meta === 'object'
+                      ? { ...copy._meta }
+                      : {};
+                  delete meta[DAEMON_RETRY_META_KEY];
+                  if (isRetry) {
+                    meta[DAEMON_RETRY_META_KEY] = true;
+                  }
+                  if (Object.keys(meta).length > 0) {
+                    copy._meta = meta;
+                  } else {
+                    delete copy._meta;
+                  }
+                  return copy;
+                })();
                 entry.promptActive = true;
                 entry.sessionLastSeenAt = Date.now();
                 if (originatorClientId === undefined) {
@@ -2728,15 +2756,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // Multi-modal: one envelope per content block. Non-text blocks
                   // pass through verbatim (the agent's Core multimodal echo is a
                   // for now the common text path is the immediate fix.
+                  //
+                  // Retry: skip echo — the original user_message_chunk is already
+                  // in the transcript from the first attempt.
                   entry.cancelBroadcast = false;
-                  echoPromptToSessionBus(entry, normalized, originatorClientId);
+                  if (!isRetry) {
+                    echoPromptToSessionBus(
+                      entry,
+                      promptRequest,
+                      originatorClientId,
+                    );
+                  }
                 } catch (echoErr) {
                   entry.promptActive = false;
                   delete entry.activePromptOriginatorClientId;
                   throw echoErr;
                 }
                 const promptPromise = entry.connection
-                  .prompt(normalized)
+                  .prompt(promptRequest)
                   .finally(() => {
                     entry.promptActive = false;
                     entry.sessionLastSeenAt = Date.now();
