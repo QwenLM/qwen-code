@@ -105,8 +105,15 @@ export class MatrixRestApi {
   }
 
   /** Resolve the access token's MXID (startup fail-fast checks it matches). */
-  async whoami(): Promise<MatrixRestResult & { userId?: string }> {
-    const r = await this.call('GET', `/_matrix/client/v3/account/whoami`);
+  async whoami(
+    signal?: AbortSignal,
+  ): Promise<MatrixRestResult & { userId?: string }> {
+    const r = await this.call(
+      'GET',
+      `/_matrix/client/v3/account/whoami`,
+      undefined,
+      signal,
+    );
     const userId = (r.body as { user_id?: unknown })?.user_id;
     return typeof userId === 'string' ? { ...r, userId } : r;
   }

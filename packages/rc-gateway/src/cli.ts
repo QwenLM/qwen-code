@@ -598,7 +598,10 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       });
       // whoami fail-fast (in-process analog: log + don't start, never kill the
       // gateway). The configured MXID must match the access token's identity.
-      const who = await mxRest.whoami();
+      // Bounded by a 5s timeout so a hung homeserver can't wedge boot before the
+      // signal handlers register; on timeout `userId` is undefined → fail-open
+      // (the bridge starts) rather than blocking the gateway.
+      const who = await mxRest.whoami(AbortSignal.timeout(5000));
       if (who.userId && who.userId !== mxUserId) {
         // eslint-disable-next-line no-console
         console.warn(

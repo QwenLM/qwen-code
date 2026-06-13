@@ -131,18 +131,31 @@ export class MatrixBridge {
 
   private async syncLoop(signal: AbortSignal): Promise<void> {
     let since: string | undefined;
+    let backoff = RECONNECT_INITIAL_MS;
     while (!signal.aborted) {
       let sync: unknown;
       try {
         sync = await this.cfg.syncOnce(since, signal);
       } catch {
         if (signal.aborted) break;
-        await this.backoff(signal);
+        await this.backoff(signal, backoff);
+        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
         continue;
       }
       const initial = since === undefined; // first sync: load state, skip history
       const ex = extractSync(sync, this.ctx);
-      if (ex.nextBatch) since = ex.nextBatch;
+      // A `/sync` that doesn't advance (no next_batch) is a failure — `syncOnce`
+      // resolves (not rejects) on 401/429/network via the REST client, so without
+      // this guard the loop would busy-spin and hammer the homeserver on exactly
+      // the normal operational failures. Back off; a healthy sync resets it.
+      if (!ex.nextBatch) {
+        if (signal.aborted) break;
+        await this.backoff(signal, backoff);
+        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+        continue;
+      }
+      since = ex.nextBatch;
+      backoff = RECONNECT_INITIAL_MS;
 
       for (const roomId of ex.invites) {
         await this.cfg.rest.joinRoom(roomId);

@@ -172,6 +172,42 @@ describe('MatrixBridge runner — sync loop', () => {
     expect(notices[0].roomId).toBe('!enc:h');
   });
 
+  it('backs off between failed syncs instead of busy-spinning', async () => {
+    // No bound rooms → the SSE loop subscribes nothing, so `sleep` is called
+    // ONLY by the sync loop's backoff. syncOnce resolves {} forever (no
+    // next_batch, no abort) — the failure mode the cli wrapper never throws on.
+    const ac = new AbortController();
+    let syncCalls = 0;
+    let sleepCalls = 0;
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async () => {},
+    } as unknown as BridgeClient;
+    const rest = {
+      sendMessage: async () => ({ ok: true, status: 200, eventId: '$x' }),
+      joinRoom: async () => ({ ok: true, status: 200 }),
+    } as unknown as MatrixInbound;
+    const bridge = new MatrixBridge({
+      client,
+      rest,
+      rooms,
+      botUserId: '@qwenbot:home.example.com',
+      baseUrl: 'http://x',
+      syncOnce: async () => {
+        syncCalls++;
+        return {}; // never advances (no next_batch), never aborts
+      },
+      sleep: async () => {
+        sleepCalls++;
+        if (sleepCalls >= 3) ac.abort();
+      },
+    });
+    await bridge.start(ac.signal);
+    // It slept between each failed sync (didn't spin), and looped >1 time.
+    expect(sleepCalls).toBeGreaterThanOrEqual(3);
+    expect(syncCalls).toBeGreaterThanOrEqual(3);
+  });
+
   it('subscribes to already-bound sessions on start', async () => {
     await rooms.bind('!r:h', 'sess_q');
     const h = harness([]);
