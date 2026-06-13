@@ -287,6 +287,23 @@ function toRpcError(err: unknown): {
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
       return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+    case 'PromptQueueFullError': {
+      const promptErr = err as {
+        sessionId?: unknown;
+        limit?: unknown;
+        pendingCount?: unknown;
+      };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'prompt_queue_full',
+          sessionId: promptErr.sessionId,
+          limit: promptErr.limit,
+          pendingCount: promptErr.pendingCount,
+        },
+      };
+    }
     default:
       return {
         code: RPC.INTERNAL_ERROR,
