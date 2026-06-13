@@ -18,7 +18,7 @@ HTTP 文件路由（`GET /file`、`GET /file/bytes`、`POST /file/write`、`POST
 - 把用户传入的路径解析成 branded `ResolvedPath`，下游安全使用。
 - 拒绝 workspace 外的路径（`path_outside_workspace`）和 target 是 symlink 的路径（`symlink_escape`）。
 - 拒绝读超 `MAX_READ_BYTES` / 写超 `MAX_WRITE_BYTES` / 二进制文件（`binary_file`）。
-- workspace 不被信任时拒写 / edit（`untrusted_workspace`） —— 由 `assertTrustedForIntent(intent)` 闸。
+- workspace 不被信任时拒写 / edit（`untrusted_workspace`） —— 由 `assertTrustedForIntent(trusted, intent)` 闸。
 - 遵循 `.gitignore` / `.qwenignore` 模式（`shouldIgnore`）。
 - 原子 write-then-rename，保留目标 mode；新建文件默认 `0o600`。
 - 每次操作发 `fs.access` / `fs.denied` 审计事件。
@@ -73,7 +73,7 @@ interface BridgeFileSystem {
 1. **拒绝非常规文件** —— socket / pipe / char device / procfs / sysfs 即使 `stats.size === 0` 也能流无界数据。inline 路径抛错时带 `describeStatKind(stats)`。
 2. **缓冲大小上限** `READ_FILE_SIZE_CAP = 100 MiB`。否则一个针对 500 MB 日志的 `{ line: 1, limit: 10 }` 请求要花 500 MB RSS 才能返 10 行。
 
-适配器还更进一步：用 `WorkspaceFileSystem.writeTextOverwrite`（PR 18 原语）做 atomic tmp+rename、保留 mode、新建默认 `0o600`、symlink reject，整段在 per-path 锁内。这是**与 F1 前 inline proxy 的偏离** —— 老 proxy 解析 symlink 并写穿 target；现在的 agent 如果之前依赖通过 symlink 写 dotfile，要直接寻址解析后的路径。
+适配器还更进一步：用 `WorkspaceFileSystem.writeTextOverwrite`（PR 18 原语）做 atomic tmp+rename、保留 mode、新建默认 `0o600`、symlink reject，整段在 per-path 锁内。这是**与 F1 前 inline proxy 的偏离** —— 老 proxy 解析 symlink 并写穿 target；迁移时如果 agent 之前依赖通过 symlink 写 dotfile，要先把路径解析成真实 target 再直接寻址。
 
 ### FsError 在 ACP wire 上的保留
 
@@ -111,7 +111,7 @@ agent 的 RPC client 现在拿到 `data.errorKind`（封闭 `FsErrorKind` 值）
 
 ### 信任 gate
 
-`assertTrustedForIntent(intent)` 查 `Config.isTrustedFolder()`。read / list / stat / glob 总是允许（信任只对写起作用）。在不被信任的 workspace 上 write 意图抛 `FsError('untrusted_workspace', ..., status: 403)`。trust 信号通过 `WorkspaceFileSystemFactoryDeps.trusted: boolean` 注入 —— `runQwenServe` 传 `true`（operator 自己启动 daemon 即默认信任那 workspace）；`createServeApp` 直接嵌入默认 `false` 并 process 内告警一次（详见 [`02-serve-runtime.md`](./02-serve-runtime.md)）。
+`assertTrustedForIntent(trusted, intent)` 消费调用方注入的 trust boolean，不在 policy 层读取 `Config.isTrustedFolder()`。read / list / stat / glob 总是允许（信任只对写起作用）。在不被信任的 workspace 上 write 意图抛 `FsError('untrusted_workspace', ..., status: 403)`。trust 信号通过 `WorkspaceFileSystemFactoryDeps.trusted: boolean` 注入 —— `runQwenServe` 传 `true`（operator 自己启动 daemon 即默认信任那 workspace）；`createServeApp` 直接嵌入默认 `false` 并 process 内告警一次（详见 [`02-serve-runtime.md`](./02-serve-runtime.md)）。
 
 ## 流程
 
@@ -154,7 +154,7 @@ sequenceDiagram
     participant FSP as node:fs
 
     R->>FS: writeTextAtomic(ctx, path, content, opts)
-    FS->>FS: assertTrustedForIntent('write') → throw untrusted_workspace OR ok
+    FS->>FS: assertTrustedForIntent(trusted, 'write') → throw untrusted_workspace OR ok
     FS->>FS: resolveWithinWorkspace(path)
     FS->>POL: enforceWriteSize(content) → throw file_too_large OR ok
     FS->>FSP: lstat(path) → reject symlink
@@ -213,7 +213,7 @@ flowchart LR
 
 ## 注意 & 已知局限
 
-- **symlink 直接拒，不跟随**。与 F1 前 inline `BridgeClient.writeTextFile` proxy 的行为偏离。通过 symlink 写 dotfile 的 agent 要改成直接寻址解析后的路径。
+- **symlink 直接拒，不跟随**。与 F1 前 inline `BridgeClient.writeTextFile` proxy 的行为偏离。通过 symlink 写 dotfile 的 agent 要改成先解析真实路径，再直接寻址解析后的 target。
 - **`io_error` 与 `permission_denied` 严格区分**。不要混。监控按 errorKind 告警 —— 把 ENOSPC 折进 permission_denied 会让 `df -h` 问题误把安全 oncall 叫起来。
 - **新建文件默认 `0o600`，不是 umask 默认**。write 系统调用的 `mode` 参数绕过 umask。要写公开文件的 agent 必须显式覆盖 mode。
 - **`createServeApp` 默认 `trusted: false`** 嵌入方没注入 `fsFactory` 或 `bridge` 时静默拒 ACP 写为 `untrusted_workspace`。首次告警 stderr 打印一次，之后无提示。详见 [`02-serve-runtime.md`](./02-serve-runtime.md)。

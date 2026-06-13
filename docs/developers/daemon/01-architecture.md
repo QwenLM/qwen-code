@@ -140,6 +140,8 @@ flowchart TB
     UI --> EVT
 ```
 
+箭头方向表示编译期依赖：`serve/` 启动层依赖 `@qwen-code/acp-bridge`，bridge 包本身不反向 import `serve/`。HTTP、auth、filesystem adapter 留在 CLI 包里，ACP session 生命周期和权限协调留在 bridge 包里。
+
 记住三条信任边界：
 
 1. HTTP 入口边界：`serve/auth.ts` 中间件链。
