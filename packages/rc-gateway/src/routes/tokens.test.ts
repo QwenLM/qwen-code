@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { TokenStore } from '../tokenStore.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
 import { bearerResolve, requireScope } from '../auth.js';
-import { OWNER, SESSION_READ } from '../scopes.js';
+import { OWNER, SESSION_READ, APPROVE, WRITE, BRIDGE } from '../scopes.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -140,6 +140,65 @@ describe('/rc/tokens routes', () => {
       body: JSON.stringify({ scopes: [SESSION_READ] }),
     });
     expect(res.status).toBe(403);
+  });
+
+  it('POST: an OWNER can grant `bridge` (not held) and the token gets the expanded bundle', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    expect(owner).toBeDefined();
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ scopes: [BRIDGE], label: 'tg-bridge' }),
+    });
+    expect(res.status).toBe(200);
+    const { token, scopes, id } = (await res.json()) as {
+      token: string;
+      scopes: string[];
+      id: string;
+    };
+    // Expanded, deduped bundle — bridge marker retained, plus the functional trio.
+    expect([...scopes].sort()).toEqual(
+      [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
+    );
+    // The PERSISTED token carries the bundle (so flat includes()/scopesFor work).
+    expect(store.scopesFor(id)?.sort()).toEqual(
+      [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
+    );
+    expect(store.resolve(`Bearer ${token}`)).not.toBeNull();
+    // Audit reflects the granted (expanded) set, not the bare request.
+    const minted = audit.calls.find((c) => c.action === 'token_minted');
+    expect((minted?.detail as { scopes: string[] }).scopes.sort()).toEqual(
+      [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
+    );
+  });
+
+  it('POST: a NON-owner (write+approve, no owner) is refused `bridge` with 403', async () => {
+    // Even holding approve+write, you cannot mint a bridge token without owner.
+    const weak = await store.issue([WRITE, APPROVE, SESSION_READ], 'phone');
+    const url = await mount();
+    const res = await fetch(`${url}/rc/tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${weak.token}`,
+      },
+      body: JSON.stringify({ scopes: [BRIDGE] }),
+    });
+    // requireScope(OWNER) gates the route, so a non-owner is 403 before the
+    // grant logic — proving bridge is never reachable without owner.
+    expect(res.status).toBe(403);
+  });
+
+  it('an OWNER token does NOT itself carry the `bridge` marker (not implied by owner)', async () => {
+    const owner = await store.issue(
+      [OWNER, SESSION_READ, APPROVE, WRITE],
+      'owner',
+    );
+    expect(store.scopesFor(owner.id)).not.toContain(BRIDGE);
   });
 
   it('DELETE revokes a token (204) and evicts its registered streams', async () => {

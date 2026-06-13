@@ -7,7 +7,14 @@
 import type { RequestHandler } from 'express';
 import type { TokenStore } from '../tokenStore.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
-import { KNOWN_SCOPES, SESSION_READ, type RcScope } from '../scopes.js';
+import {
+  KNOWN_SCOPES,
+  SESSION_READ,
+  OWNER,
+  BRIDGE,
+  expandScopes,
+  type RcScope,
+} from '../scopes.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /** GET /rc/tokens → metadata list of issued tokens. */
@@ -38,7 +45,15 @@ export function createMintTokenRoute(
       return;
     }
     const callerScopes = req.rcClient?.scopes ?? [];
-    const ungrantable = requested.filter((s) => !callerScopes.includes(s));
+    // Normal rule: you can only grant a scope you hold. Exception: `bridge` is
+    // grantable by an OWNER caller even though owner does NOT hold `bridge` —
+    // the spec requires bridge be EXPLICIT (the caller must put it in the body)
+    // and NOT implied by owner (an owner token never silently gains the subActor-
+    // assertion capability). The route is owner-gated, so the owner check below
+    // is structurally guaranteed; we assert it anyway for defense-in-depth.
+    const canGrant = (s: RcScope): boolean =>
+      s === BRIDGE ? callerScopes.includes(OWNER) : callerScopes.includes(s);
+    const ungrantable = requested.filter((s) => !canGrant(s));
     if (ungrantable.length > 0) {
       res.status(403).json({
         error: `Cannot grant scope(s) you do not hold: ${ungrantable.join(', ')}`,
@@ -46,14 +61,19 @@ export function createMintTokenRoute(
       });
       return;
     }
-    const { id, token } = await store.issue(requested, label);
+    // Materialize the concrete bundle (a `bridge` request also carries
+    // session:read+approve+write) so every flat `includes()`/`scopesFor` check
+    // works unchanged, and report the EXPANDED set so the response/audit reflect
+    // the token's real capability.
+    const granted = expandScopes(requested);
+    const { id, token } = await store.issue(granted, label);
     void audit?.record({
       action: 'token_minted',
       actorTokenId: req.rcClient?.id,
       target: id,
-      detail: { scopes: requested },
+      detail: { scopes: granted },
     });
-    res.status(200).json({ id, token, scopes: requested });
+    res.status(200).json({ id, token, scopes: granted });
   };
 }
 

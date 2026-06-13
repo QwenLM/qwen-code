@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import type { PairingService } from '../pairing.js';
 import type { TokenStore } from '../tokenStore.js';
 import type { AuditRecorder } from '../auditLog.js';
+import { expandScopes } from '../scopes.js';
 
 /** POST /rc/pair/redeem { code, label } → { id, token, scopes }. */
 export function createPairRedeemRoute(
@@ -26,12 +27,16 @@ export function createPairRedeemRoute(
         .json({ error: 'Invalid pairing code', code: 'invalid_pairing_code' });
       return;
     }
-    const { id, token } = await store.issue(grant.grantScopes, label);
+    // Materialize the concrete bundle so a (future) bridge-scope pairing code
+    // yields a token with session:read+approve+write too. A no-op for codes
+    // without `bridge` (e.g. the boot owner code).
+    const granted = expandScopes(grant.grantScopes);
+    const { id, token } = await store.issue(granted, label);
     void audit?.record({
       action: 'pairing_redeemed',
       target: id,
-      detail: { scopes: grant.grantScopes },
+      detail: { scopes: granted },
     });
-    res.status(200).json({ id, token, scopes: grant.grantScopes });
+    res.status(200).json({ id, token, scopes: granted });
   };
 }

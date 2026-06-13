@@ -25,7 +25,14 @@ import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
 import { createGatewayApp } from './server.js';
 import type { PushNotifier } from './webpush/notifier.js';
-import { OWNER, SESSION_READ, APPROVE, WRITE, SHARE } from './scopes.js';
+import {
+  OWNER,
+  SESSION_READ,
+  APPROVE,
+  WRITE,
+  SHARE,
+  BRIDGE,
+} from './scopes.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -124,6 +131,31 @@ describe('gateway app', () => {
     expect(events.status).toBe(200);
     const text = await events.text();
     expect(text).toContain('"text":"one"');
+  });
+
+  it('a bridge-scope token can stream a session (the bundle includes session:read)', async () => {
+    // add-bridge-protocol slice 1: a `bridge` grant expands to the concrete
+    // {bridge, session:read, approve, write} bundle, so a bridge can subscribe
+    // to the very stream it bridges — 200, not 403.
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([BRIDGE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'tg-bridge' }),
+    });
+    expect(redeem.status).toBe(200);
+    const { token, scopes } = (await redeem.json()) as {
+      token: string;
+      scopes: string[];
+    };
+    expect([...scopes].sort()).toEqual(
+      [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
+    );
+    const events = await fetch(`${url}/rc/session/sess-1/events`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(events.status).toBe(200); // session:read satisfied by the bundle
   });
 
   it('rejects an invalid pairing code with 400', async () => {
