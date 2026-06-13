@@ -45,12 +45,19 @@ export interface RouteEntry {
  */
 export const ROUTE_TABLE: readonly RouteEntry[] = [
   // POST /session → session/new
+  // ACP standard: session/new always creates an isolated session.
+  // Strip non-standard params (sessionScope) — the server enforces
+  // 'thread' regardless, so passing it is harmless but misleading.
   {
     httpMethod: 'POST',
     pattern: /^\/session\/?$/,
     mapping: {
       method: 'session/new',
-      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+      extractParams: (_s, body) => {
+        if (!isRecord(body)) return {};
+        const { sessionScope: _, ...rest } = body as Record<string, unknown>;
+        return rest;
+      },
     },
   },
   // POST /session/:id/prompt → session/prompt

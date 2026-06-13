@@ -594,30 +594,14 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
-          // Forward sessionScope like REST (bridge supports single|thread).
-          const rawScope = params['sessionScope'];
-          if (
-            rawScope !== undefined &&
-            rawScope !== 'single' &&
-            rawScope !== 'thread'
-          ) {
-            if (id !== undefined) {
-              conn.sendConn(
-                error(
-                  id,
-                  RPC.INVALID_PARAMS,
-                  '`sessionScope` must be "single" or "thread"',
-                ),
-              );
-            }
-            return;
-          }
+          // ACP standard: session/new MUST create a new isolated session.
+          // Always use sessionScope 'thread' regardless of client params.
+          // The REST surface (POST /session) supports 'single' for
+          // backward compat, but the ACP endpoint follows the standard.
           const session = await this.bridge.spawnOrAttach({
             workspaceCwd: cwd,
             clientId: conn.clientId,
-            ...(rawScope !== undefined
-              ? { sessionScope: rawScope as 'single' | 'thread' }
-              : {}),
+            sessionScope: 'thread',
           });
           // Teardown raced the spawn: the connection was destroyed while the
           // bridge call was in flight, so nothing will tear this session down.
