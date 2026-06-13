@@ -142,3 +142,32 @@
 .tools .panel {
   border-left-width: 2px;
 }
+
+/*
+ * Per-sub-tool hover time. Deliberately a *separate* class pair from the
+ * message-level MessageTimestamp (.row/.tip): the Tools list nests inside a
+ * message that is already wrapped by MessageTimestamp, and reusing the same
+ * hover rule across both layers couples them. These scoped names keep the
+ * sub-tool tooltip independent of the surrounding message's time tooltip.
+ */
+.toolTimeRow {
+  position: relative;
+}
+
+.toolTimeRow > .toolTimeTip {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 5;
+  color: var(--text-dimmed);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.toolTimeRow:hover > .toolTimeTip {
+  opacity: 1;
+}

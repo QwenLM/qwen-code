@@ -13,6 +13,7 @@ import { useWebShellCustomization } from '../../../customization';
 // each other's exports at render time — never in top-level code.
 import { ToolLine } from '../ToolGroup';
 import { Markdown } from '../Markdown';
+import { formatTimestamp } from '../../MessageTimestamp';
 import {
   formatDurationMs,
   formatElapsed,
@@ -70,11 +71,40 @@ function isTaskExecution(raw: unknown): raw is TaskExecution {
   );
 }
 
+/**
+ * Reveals a single sub-tool's wall-clock start time on hover in its top-right
+ * corner, mirroring how the main transcript surfaces each message's time —
+ * but via a scoped class pair (not MessageTimestamp) so the nested tooltip
+ * stays independent of the enclosing message's own time tooltip.
+ */
+function SubToolTime({
+  timestamp,
+  children,
+}: {
+  timestamp?: number;
+  children: ReactNode;
+}) {
+  if (timestamp === undefined) return <>{children}</>;
+  return (
+    <div className={styles.toolTimeRow}>
+      {children}
+      <span className={styles.toolTimeTip} aria-hidden="true">
+        {formatTimestamp(timestamp)}
+      </span>
+    </div>
+  );
+}
+
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
-  if (tool.subTools || tool.subContent) return <SubAgentPanel tool={tool} />;
   // Same row as the main transcript: one-line summary, expandable to
   // the full output / diff / file content where the tool has any.
-  return <ToolLine tool={tool} />;
+  const body =
+    tool.subTools || tool.subContent ? (
+      <SubAgentPanel tool={tool} />
+    ) : (
+      <ToolLine tool={tool} />
+    );
+  return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
