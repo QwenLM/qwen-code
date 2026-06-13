@@ -92,16 +92,27 @@ async function fetchFirst(
   let lastErr: unknown;
   for (const url of urls) {
     try {
-      // Per-URL timeout so a stalled mirror (e.g. OSS firewalled outside CN —
-      // TCP connects but never responds) fails over to the next source in ~30s
-      // instead of hanging on undici's multi-minute default. (review round 1)
-      const res = await fetchImpl(url, {
-        redirect: 'follow',
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (res.ok && res.body) return { url, res };
-      await res.body?.cancel();
-      lastErr = new Error(`HTTP ${res.status} for ${url}`);
+      // 30s timeout on obtaining the RESPONSE/headers only — a stalled mirror
+      // (TCP connects but never responds) fails over in ~30s. Cleared the
+      // moment headers arrive so the body download is NOT capped: a ~20MB
+      // binary over a slow/throttled CN→GitHub link routinely needs more than
+      // 30s, and capping the whole transfer would abort it mid-stream — the
+      // exact failure the mirror + fallback exist to avoid. (review round 2)
+      const controller = new AbortController();
+      const headersTimeout = setTimeout(() => {
+        controller.abort(new Error(`headers timeout after 30s for ${url}`));
+      }, 30_000);
+      try {
+        const res = await fetchImpl(url, {
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        if (res.ok && res.body) return { url, res };
+        await res.body?.cancel();
+        lastErr = new Error(`HTTP ${res.status} for ${url}`);
+      } finally {
+        clearTimeout(headersTimeout);
+      }
     } catch (err) {
       lastErr = err;
       onProgress?.(`Source unreachable, trying fallback…`);

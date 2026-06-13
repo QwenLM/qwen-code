@@ -44,9 +44,12 @@ export const CUA_DRIVER_VERSION = '0.5.2';
  * where GitHub release downloads are slow/blocked). Assets live under
  * `<base>/cua-driver-rs/v<version>/<asset>`, mirrored from the upstream
  * trycua/cua release by the "Sync cua-driver to Aliyun OSS" workflow
- * (.github/workflows/sync-cua-driver-to-oss.yml) — a manual workflow_dispatch
- * run on each CUA_DRIVER_VERSION bump. Until a version is mirrored there, the
- * GitHub fallback (GITHUB_RELEASE_BASE) serves it transparently.
+ * (.github/workflows/sync-cua-driver-to-oss.yml), which auto-triggers on pushes
+ * to main that touch this file — a CUA_DRIVER_VERSION bump auto-mirrors the new
+ * release (a checksums.txt guard no-ops when already mirrored); manual
+ * workflow_dispatch covers first-time / forced re-mirror. Until a version is
+ * mirrored there, the GitHub fallback (GITHUB_RELEASE_BASE) serves it
+ * transparently.
  *
  * Hosted on the shared `qwen-code-assets` bucket (same one the CLI's own
  * release/installation assets use), under a `computer-use` namespace.

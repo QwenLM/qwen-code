@@ -401,10 +401,14 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       'launch_app',
       'start_recording',
       'set_config',
+      'replay_trajectory',
     ]) {
       expect(isHighRiskCall(name, {})).toBe(true);
     }
     expect(isHighRiskCall('page', { action: 'execute_javascript' })).toBe(true);
+    expect(
+      isHighRiskCall('page', { action: 'enable_javascript_apple_events' }),
+    ).toBe(true);
   });
 
   it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
@@ -420,14 +424,17 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
   });
 
-  it('high-risk tools surface as mcp type so AUTO_EDIT cannot auto-approve them', async () => {
+  it('high-risk tools surface as mcp type with args folded into the title', async () => {
     // 'mcp' is excluded from isAutoEditApproved's (edit|info) allow-list, so
-    // AUTO_EDIT shows the dialog instead of silently approving kill_app.
+    // AUTO_EDIT shows the dialog instead of silently approving. The mcp UI does
+    // not render args, so they're folded into the title (review round 2).
     const tool = new ComputerUseTool('kill_app', COMPUTER_USE_SCHEMAS.kill_app);
     const details = await tool
       .build({ pid: 123 })
       .getConfirmationDetails(new AbortController().signal);
     expect(details.type).toBe('mcp');
+    expect(details.title).toContain('kill_app');
+    expect(details.title).toContain('123'); // args (pid) visible in the title
   });
 
   it('ordinary tools keep info type (auto-approved in AUTO_EDIT as before)', async () => {

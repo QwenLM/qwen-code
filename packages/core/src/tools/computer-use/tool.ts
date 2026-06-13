@@ -35,21 +35,34 @@ const INSTALL_REASON =
 
 /**
  * Tools / params that perform irreversible or sensitive actions and must NOT be
- * silently auto-approved in AUTO_EDIT mode (review round 1). They surface a
- * confirmation in AUTO_EDIT; AUTO still routes them through its classifier
- * (getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
- *   - kill_app        force-kills a PID
- *   - launch_app      launches arbitrary apps (incl. with CDP debug ports)
- *   - start_recording captures the screen to disk
- *   - set_config      mutates driver configuration
- *   - page + action 'execute_javascript' runs arbitrary JS in the user's
+ * silently auto-approved in AUTO_EDIT mode. They surface a confirmation in
+ * AUTO_EDIT; AUTO still routes them through its classifier (getDefaultPermission
+ * stays 'ask'); YOLO still auto-approves everything.
+ *   - kill_app          force-kills a PID
+ *   - launch_app        launches arbitrary apps (incl. with CDP debug ports)
+ *   - start_recording   captures the screen to disk
+ *   - set_config        mutates driver configuration
+ *   - replay_trajectory re-invokes every recorded tool call in a dir via the
+ *     same dispatch path — it replays arbitrary actions (kill_app, launch_app,
+ *     page execute_javascript, …). Gating the wrapper is the only chokepoint we
+ *     have; the replayed sub-actions run inside cua-driver. (review round 2)
+ *   - page action 'execute_javascript'           — arbitrary JS in the user's
  *     logged-in browser (cookie / credential exfiltration)
+ *   - page action 'enable_javascript_apple_events' — permanently patches the
+ *     browser's prefs + quits/relaunches it (more persistent than the one-shot
+ *     execute_javascript). (review round 2)
  */
 const HIGH_RISK_TOOLS = new Set([
   'kill_app',
   'launch_app',
   'start_recording',
   'set_config',
+  'replay_trajectory',
+]);
+
+const HIGH_RISK_PAGE_ACTIONS = new Set([
+  'execute_javascript',
+  'enable_javascript_apple_events',
 ]);
 
 export function isHighRiskCall(
@@ -57,7 +70,10 @@ export function isHighRiskCall(
   params: Record<string, unknown>,
 ): boolean {
   if (HIGH_RISK_TOOLS.has(upstreamName)) return true;
-  return upstreamName === 'page' && params['action'] === 'execute_javascript';
+  return (
+    upstreamName === 'page' &&
+    HIGH_RISK_PAGE_ACTIONS.has(params['action'] as string)
+  );
 }
 
 class ComputerUseInvocation extends BaseToolInvocation<
@@ -146,11 +162,17 @@ class ComputerUseInvocation extends BaseToolInvocation<
     // 'edit'/'info'. AUTO still routes them through its classifier (this tool's
     // getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
     if (isHighRiskCall(this.upstreamName, this.params)) {
+      // The 'mcp' confirmation UI renders only server + tool name, not args —
+      // fold the args into the title so the gate's extra friction is also
+      // informative (the injected JS, --remote-debugging-port, recording dest,
+      // config mutation, or replay dir is exactly what the user must see before
+      // approving). (review round 2)
+      const base = `Allow high-risk Computer Use: ${this.upstreamName} ${safeJsonStringify(this.params)}`;
       return {
         type: 'mcp',
         title: installApproved
-          ? `Allow high-risk Computer Use (${this.upstreamName})`
-          : `Allow high-risk Computer Use (${this.upstreamName}) — first use also downloads the driver`,
+          ? base
+          : `${base} — first use also downloads the driver`,
         serverName: 'cua-driver',
         toolName: this.upstreamName,
         toolDisplayName: `computer_use__${this.upstreamName}`,
