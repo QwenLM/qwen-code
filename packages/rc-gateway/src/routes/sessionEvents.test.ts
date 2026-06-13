@@ -15,7 +15,7 @@ import { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { TokenStore } from '../tokenStore.js';
 import { bearerResolve } from '../auth.js';
-import { SHARE, SESSION_READ } from '../scopes.js';
+import { SHARE, SESSION_READ, BRIDGE } from '../scopes.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +85,80 @@ describe('session-events proxy', () => {
     const frames = await readFrames(res);
     expect(frames.map((f) => f.id)).toEqual(['1', '2']);
     expect(frames[0].data).toContain('"text":"one"');
+  });
+
+  it('enriches a permission_request frame with bridgeHints; leaves others untouched', async () => {
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'one' } },
+        {
+          id: 2,
+          type: 'permission_request',
+          data: {
+            requestId: 'r1',
+            toolCall: { name: 'run_shell', args: { cmd: 'ls' } },
+          },
+        },
+        {
+          id: 3,
+          type: 'permission_request',
+          data: {
+            requestId: 'r2',
+            toolCall: { name: 'set_env', args: { apiKey: 'sk-secret' } },
+          },
+        },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+    const res = await fetch(`${url}/rc/session/sess-1/events`);
+    const frames = await readFrames(res);
+    const parsed = frames.map((f) => JSON.parse(f.data));
+    // Non-permission frame: no bridgeHints added.
+    expect(parsed[0].data.bridgeHints).toBeUndefined();
+    // Clean tool-call → renderable.
+    expect(parsed[1].data.bridgeHints).toEqual({ renderable: true });
+    // Secret-looking args → not renderable.
+    expect(parsed[2].data.bridgeHints).toEqual({
+      renderable: false,
+      reason: 'possible_secret',
+    });
+    // Original fields are preserved.
+    expect(parsed[2].data.requestId).toBe('r2');
+  });
+
+  it('tags attach/detach presence with kind:bridge for a bridge token, kind:client otherwise', async () => {
+    // Mount with an injected rcClient so the route sees a bridge's scopes.
+    async function mountWithClient(
+      daemon: DaemonClient,
+      scopes: string[],
+      audit: AuditRecorder,
+    ): Promise<string> {
+      const app = express();
+      app.use((req, _res, next) => {
+        (req as { rcClient?: unknown }).rcClient = { id: 'tkn', scopes };
+        next();
+      });
+      app.get(
+        '/rc/session/:id/events',
+        createSessionEventsRoute(daemon, new ConnectionRegistry(), audit),
+      );
+      const s: Server = await new Promise((resolve) => {
+        const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
+      });
+      gateway = s;
+      return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    }
+
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mountWithClient(daemon, [BRIDGE, SESSION_READ], audit);
+    await readFrames(await fetch(`${url}/rc/session/sess-1/events`));
+    const attached = audit.calls.find((c) => c.action === 'session_attached');
+    const detached = audit.calls.find((c) => c.action === 'session_detached');
+    expect(attached?.detail).toEqual({ kind: 'bridge' });
+    expect(detached?.detail).toEqual({ kind: 'bridge' });
   });
 
   it('forwards Last-Event-ID upstream to the daemon', async () => {
