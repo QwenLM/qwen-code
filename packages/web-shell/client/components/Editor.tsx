@@ -6,7 +6,7 @@ import {
   useCallback,
   useState,
 } from 'react';
-import { EditorView, keymap, placeholder } from '@codemirror/view';
+import { EditorView, keymap, placeholder, tooltips } from '@codemirror/view';
 import { EditorState, Compartment, Prec } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
@@ -268,6 +268,70 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
   useEffect(() => {
     if (!containerRef.current) return;
+
+    // Create a tooltip portal div on document.body so autocomplete
+    // dropdowns escape any ancestor `overflow: hidden` (e.g. the host
+    // app's container). We sync the current theme class and computed CSS
+    // variables so the portal keeps the same colors after theme changes.
+    const tooltipPortal = document.createElement('div');
+    tooltipPortal.setAttribute('data-web-shell-tooltip-portal', '');
+    tooltipPortal.style.position = 'fixed';
+    tooltipPortal.style.inset = '0';
+    tooltipPortal.style.zIndex = 'var(--web-shell-tooltip-z-index)';
+    tooltipPortal.style.pointerEvents = 'none';
+    const THEME_RE = /\b\S*theme(?:Dark|Light)\S*/gi;
+    const syncTheme = () => {
+      let el: Element | null = containerRef.current;
+      let themeClass: string | null = null;
+      if (containerRef.current) {
+        const computedStyle = getComputedStyle(containerRef.current);
+        for (let i = 0; i < computedStyle.length; i += 1) {
+          const name = computedStyle[i];
+          if (name.startsWith('--')) {
+            tooltipPortal.style.setProperty(
+              name,
+              computedStyle.getPropertyValue(name),
+            );
+          }
+        }
+        if (
+          !computedStyle.getPropertyValue('--web-shell-tooltip-z-index').trim()
+        ) {
+          tooltipPortal.style.setProperty(
+            '--web-shell-tooltip-z-index',
+            '1000',
+          );
+        }
+      }
+      while (el) {
+        const match = el.className?.match?.(THEME_RE);
+        if (match) {
+          themeClass = match[0];
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (themeClass) {
+        // Keep only the theme class on the portal - old theme class
+        // from a previous sync is replaced atomically.
+        tooltipPortal.className = themeClass;
+      }
+    };
+    syncTheme();
+    document.body.appendChild(tooltipPortal);
+
+    // Observe class changes on every ancestor up to (and including)
+    // the themed one, so light↔dark switches propagate to the portal.
+    const observer = new MutationObserver(syncTheme);
+    let el: Element | null = containerRef.current;
+    while (el) {
+      observer.observe(el, {
+        attributes: true,
+        attributeFilter: ['class', 'style'],
+      });
+      if (el.className?.match?.(THEME_RE)) break;
+      el = el.parentElement;
+    }
 
     const submitText = (view: EditorView, textOverride?: string) => {
       const rawText = (textOverride ?? view.state.doc.toString()).trim();
@@ -592,16 +656,34 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           activateOnTyping: true,
           icons: false,
           optionClass: (completion) =>
-            completion.type === 'skill'
-              ? 'cm-skill-completion'
-              : completion.type === 'file'
-                ? 'cm-file-completion'
+            completion.type === 'file'
+              ? 'cm-file-completion'
+              : completion.info
+                ? 'cm-command-info-completion'
                 : '',
           aboveCursor: true,
+          positionInfo: (_view, list, option, info, space) => {
+            const infoHeight = info.bottom - info.top;
+            const spaceBelow = space.bottom - list.bottom;
+            const placeBelow =
+              spaceBelow >= infoHeight || spaceBelow > list.top;
+            const side = placeBelow ? 'top' : 'bottom';
+            const offset = placeBelow
+              ? option.bottom - list.top
+              : list.bottom - option.top;
+            return {
+              style: `${side}: ${offset}px`,
+              class: 'cm-completionInfo-right-narrow',
+            };
+          },
           activateOnCompletion: (completion) =>
             typeof completion.apply === 'string' &&
             completion.apply.endsWith(' '),
         }),
+        // Render tooltips (including autocomplete panel) inside a portal
+        // div on document.body so host-app containers with
+        // `overflow: hidden` cannot clip the dropdown.
+        tooltips({ parent: tooltipPortal }),
         placeholderCompartment.of(placeholder('')),
         EditorView.lineWrapping,
         editableCompartment.of(EditorView.editable.of(true)),
@@ -723,79 +805,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             borderLeftColor: 'var(--accent-color, #4a9eff)',
             borderLeftWidth: '2px',
           },
-          '.cm-tooltip-autocomplete': {
-            background: 'var(--bg-secondary, #161616)',
-            border: '1px solid var(--border-color, #2a2a2a)',
-            borderRadius: '6px',
-            overflow: 'hidden',
-          },
-          '.cm-tooltip-autocomplete ul': {
-            fontFamily: 'var(--font-mono, monospace)',
-            fontSize: '13px',
-          },
-          '.cm-tooltip-autocomplete ul li': {
-            display: 'flex',
-            alignItems: 'baseline',
-            minWidth: '0',
-            padding: '4px 10px',
-            color: 'var(--text-primary, #e4e4e4)',
-            overflow: 'hidden',
-          },
-          '.cm-tooltip-autocomplete ul li[aria-selected]': {
-            background: 'var(--bg-tertiary, #1e1e1e)',
-            color: 'var(--accent-color, #4a9eff)',
-          },
-          '.cm-tooltip-autocomplete completion-section': {
-            display: 'block',
-            height: '0',
-            margin: '6px 10px 3px',
-            padding: '0',
-            borderBottom: '1px solid var(--border-color, #2a2a2a)',
-          },
-          '.cm-tooltip-autocomplete completion-section:first-of-type': {
-            display: 'none',
-          },
-          '.cm-completionLabel': {
-            fontFamily: 'var(--font-mono, monospace)',
-            flexShrink: '0',
-            minWidth: '14ch',
-            maxWidth: '28ch',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          },
-          '.cm-completionDetail': {
-            flex: '1 1 auto',
-            minWidth: '0',
-            fontStyle: 'normal',
-            color: 'var(--text-dimmed, #666)',
-            marginLeft: '8px',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          },
-          '.cm-tooltip-autocomplete ul li.cm-file-completion .cm-completionLabel':
-            {
-              flex: '1 1 auto',
-              minWidth: '0',
-              maxWidth: 'none',
-            },
-          '.cm-tooltip-autocomplete ul li.cm-skill-completion': {
-            alignItems: 'flex-start',
-          },
-          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionLabel':
-            {
-              alignSelf: 'center',
-            },
-          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionDetail':
-            {
-              whiteSpace: 'normal',
-              display: '-webkit-box',
-              WebkitLineClamp: '2',
-              WebkitBoxOrient: 'vertical',
-              lineHeight: '1.35',
-              maxHeight: '2.7em',
-            },
         }),
       ],
     });
@@ -811,6 +820,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     return () => {
       view.destroy();
       viewRef.current = null;
+      observer.disconnect();
+      tooltipPortal.remove();
     };
   }, []);
 
@@ -849,6 +860,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     });
     view.focus();
   }, [draftText, draftVersion]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || completionStatus(view.state) !== 'active') return;
+    closeCompletion(view);
+    window.setTimeout(() => {
+      if (viewRef.current === view) {
+        startCompletion(view);
+      }
+    }, 0);
+  }, [language]);
 
   useEffect(() => {
     const view = viewRef.current;
