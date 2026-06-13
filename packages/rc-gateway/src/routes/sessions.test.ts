@@ -117,7 +117,13 @@ describe('GET /rc/sessions', () => {
       sessions: Array<{ sessionId: string; title?: string }>;
     };
     expect(body.sessions).toEqual([
-      { sessionId: ROOT, title: 'Refactor the auth flow', forks: [] },
+      // titleSource defaults to 'manual' when the record omits it (cycle 95).
+      {
+        sessionId: ROOT,
+        title: 'Refactor the auth flow',
+        titleSource: 'manual',
+        forks: [],
+      },
     ]);
     // Privacy: the title (user content) is NEVER in the audit.
     expect(JSON.stringify(audit.calls[0].detail)).not.toContain('Refactor');

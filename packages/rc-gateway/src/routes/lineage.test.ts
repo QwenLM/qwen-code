@@ -107,6 +107,30 @@ describe('GET /rc/session/:id/lineage', () => {
     expect(JSON.stringify(audit.calls[0].detail)).not.toContain(PARENT);
   });
 
+  it('enriches chain nodes with their custom_title (cycle 95)', async () => {
+    await writeTranscript(PARENT);
+    await writeTranscript(FORK, PARENT);
+    // Append a title record to PARENT only; FORK stays untitled.
+    await writeFile(
+      join(chatsDir, `${PARENT}.jsonl`),
+      JSON.stringify({
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle: 'Root work', titleSource: 'manual' },
+        sessionId: PARENT,
+      }) + '\n',
+      { flag: 'a' },
+    );
+    const base = await mount({ audit: fakeAudit(), cwd: CWD });
+    const res = await fetch(`${base}/rc/session/${FORK}/lineage`);
+    expect(await res.json()).toEqual({
+      sessionId: FORK,
+      // FORK has no title key; PARENT carries its title.
+      chain: [{ sessionId: FORK }, { sessionId: PARENT, title: 'Root work' }],
+      truncated: false,
+    });
+  });
+
   it('returns a single-node chain for a root session', async () => {
     await writeTranscript(PARENT);
     const audit = fakeAudit();

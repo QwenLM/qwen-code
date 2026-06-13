@@ -872,9 +872,12 @@
             s.parentSessionId && !byId.has(s.parentSessionId)
               ? ' (forked from ' + s.parentSessionId + ', not listed)'
               : '';
-          // Show the human title (cycle 85) when set; textContent-safe (the
-          // whole tree string is rendered via textContent at the call site).
-          const title = s.title ? ' — ' + s.title : '';
+          // Show the human title (cycle 85) when set, with an "(auto)" marker
+          // for an auto-generated title vs a manual /rename (cycle 95);
+          // textContent-safe (the whole tree string renders via textContent).
+          const title = s.title
+            ? ' — ' + s.title + (s.titleSource === 'auto' ? ' (auto)' : '')
+            : '';
           lines.push(
             '  '.repeat(depth) +
               (depth ? '└ ' : '') +

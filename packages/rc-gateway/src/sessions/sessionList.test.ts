@@ -12,6 +12,7 @@ import {
   assembleListing,
   readFirstRecord,
   readSessionTitle,
+  readSessionTitleInfo,
   listSessions,
   MAX_LIST_SESSIONS,
   type SessionEntry,
@@ -286,8 +287,81 @@ describe('listSessions titles (cycle 85)', () => {
     );
     const { sessions } = await listSessions(dir);
     expect(sessions).toEqual([
-      { sessionId: ID(1), title: 'Named one', forks: [] },
+      // titleSource defaults to 'manual' when the record omits it (cycle 95).
+      {
+        sessionId: ID(1),
+        title: 'Named one',
+        titleSource: 'manual',
+        forks: [],
+      },
       { sessionId: ID(2), forks: [] },
     ]);
+  });
+
+  it('threads titleSource:"auto" through to the listing item', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ sessionId: ID(1), type: 'user' }) +
+        '\n' +
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Auto named', titleSource: 'auto' },
+          sessionId: ID(1),
+        }) +
+        '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions).toEqual([
+      { sessionId: ID(1), title: 'Auto named', titleSource: 'auto', forks: [] },
+    ]);
+  });
+});
+
+describe('readSessionTitleInfo (titleSource)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-titleinfo-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const write = (id: string, payload: Record<string, unknown>) =>
+    writeFile(
+      join(dir, `${id}.jsonl`),
+      JSON.stringify({
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: payload,
+        sessionId: 's',
+      }) + '\n',
+    );
+
+  it('returns the title + manual/auto source', async () => {
+    await write(ID(1), { customTitle: 'M', titleSource: 'manual' });
+    expect(await readSessionTitleInfo(dir, ID(1))).toEqual({
+      title: 'M',
+      titleSource: 'manual',
+    });
+    await write(ID(2), { customTitle: 'A', titleSource: 'auto' });
+    expect(await readSessionTitleInfo(dir, ID(2))).toEqual({
+      title: 'A',
+      titleSource: 'auto',
+    });
+  });
+
+  it('defaults titleSource to "manual" when absent or unrecognized', async () => {
+    await write(ID(1), { customTitle: 'No source' });
+    expect((await readSessionTitleInfo(dir, ID(1)))?.titleSource).toBe(
+      'manual',
+    );
+    await write(ID(2), { customTitle: 'Weird', titleSource: 'bogus' });
+    expect((await readSessionTitleInfo(dir, ID(2)))?.titleSource).toBe(
+      'manual',
+    );
+  });
+
+  it('returns null for a missing / untitled session', async () => {
+    expect(await readSessionTitleInfo(dir, ID(9))).toBeNull();
   });
 });

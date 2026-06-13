@@ -9,6 +9,8 @@ import type { ForkRecord } from './forkTranscript.js';
 /** One node in a lineage chain — just the session id (no name/event stored). */
 export interface LineageNode {
   sessionId: string;
+  /** Human title (core `custom_title`), when set. Enriched by the route. */
+  title?: string;
 }
 
 /**

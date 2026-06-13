@@ -9,6 +9,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir, isValidSessionId } from '../sessions/chatsPath.js';
 import { readParentRecords } from '../sessions/forkStore.js';
 import { walkLineage } from '../sessions/lineage.js';
+import { readSessionTitle } from '../sessions/sessionList.js';
 
 /**
  * GET /rc/session/:id/lineage — the fork lineage chain of a session, from the
@@ -57,6 +58,14 @@ export function createLineageRoute(
           code: 'session_not_found',
         });
         return;
+      }
+
+      // Enrich each node with its human title (bounded tail read, never throws),
+      // so the lineage chain renders names instead of bare ids — same source of
+      // truth as /rc/sessions. Best-effort: a missing title just omits the field.
+      for (const node of result.chain) {
+        const title = await readSessionTitle(chatsDir, node.sessionId);
+        if (title) node.title = title;
       }
 
       // Privacy: depth + truncated flag only — never the session ids themselves.

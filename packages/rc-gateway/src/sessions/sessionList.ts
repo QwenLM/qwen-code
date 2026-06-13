@@ -17,6 +17,8 @@ export interface SessionListItem {
   parentSessionId?: string;
   /** Human title (core `custom_title`), when set. Omitted otherwise. */
   title?: string;
+  /** How the title was set: 'manual' | 'auto'. Omitted when there is no title. */
+  titleSource?: 'manual' | 'auto';
   /** Child session ids PRESENT in this listing that forked from this one. */
   forks: string[];
 }
@@ -127,6 +129,27 @@ export async function readSessionTitle(
   id: string,
   opts: { maxBytes?: number } = {},
 ): Promise<string | null> {
+  return (await readSessionTitleInfo(chatsDir, id, opts))?.title ?? null;
+}
+
+/** A session's human title plus how it was set: 'manual' (a /rename or /branch)
+ * or 'auto' (auto-generated). Mirrors core's `systemPayload.titleSource`. */
+export interface SessionTitleInfo {
+  title: string;
+  titleSource: 'manual' | 'auto';
+}
+
+/**
+ * The richer companion to {@link readSessionTitle}: returns the most-recent
+ * `custom_title` record's title AND its `titleSource` ('manual'|'auto';
+ * defaulting to 'manual' when the field is absent/unrecognized, matching a
+ * hand-written rename). Same bounded EOF tail-scan, same never-throws contract.
+ */
+export async function readSessionTitleInfo(
+  chatsDir: string,
+  id: string,
+  opts: { maxBytes?: number } = {},
+): Promise<SessionTitleInfo | null> {
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   let handle;
   try {
@@ -162,7 +185,7 @@ export async function readSessionTitle(
       try {
         const rec = JSON.parse(line) as {
           subtype?: unknown;
-          systemPayload?: { customTitle?: unknown };
+          systemPayload?: { customTitle?: unknown; titleSource?: unknown };
         };
         const title = rec.systemPayload?.customTitle;
         if (
@@ -170,7 +193,9 @@ export async function readSessionTitle(
           typeof title === 'string' &&
           title.length > 0
         ) {
-          return title;
+          const titleSource =
+            rec.systemPayload?.titleSource === 'auto' ? 'auto' : 'manual';
+          return { title, titleSource };
         }
       } catch {
         // Non-JSON / partial line → keep scanning earlier lines.
@@ -190,6 +215,8 @@ export interface SessionEntry {
   parentSessionId: string | null;
   /** Human title (core `custom_title`), when set. */
   title?: string;
+  /** How the title was set: 'manual' | 'auto'. */
+  titleSource?: 'manual' | 'auto';
 }
 
 /**
@@ -213,6 +240,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
       sessionId: e.sessionId,
       ...(isRoot ? {} : { parentSessionId: e.parentSessionId as string }),
       ...(e.title ? { title: e.title } : {}),
+      ...(e.title && e.titleSource ? { titleSource: e.titleSource } : {}),
       forks: [],
     });
   }
@@ -275,11 +303,11 @@ export async function listSessions(
       parent = null;
     }
     // Title is best-effort enrichment (never throws) — a bounded tail read.
-    const title = await readSessionTitle(chatsDir, id);
+    const info = await readSessionTitleInfo(chatsDir, id);
     entries.push({
       sessionId: id,
       parentSessionId: parent,
-      ...(title ? { title } : {}),
+      ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
     });
   }
 
