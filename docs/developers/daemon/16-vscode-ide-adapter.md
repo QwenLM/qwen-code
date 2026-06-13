@@ -10,7 +10,7 @@ IDE 的 chat webview 通过本适配器消费 daemon 事件；权限请求以 VS
 
 - 从 loopback 校验过的 `baseUrl` 构造 `DaemonClient` + `DaemonSessionClient`。
 - 把 session client 的 SSE 事件按回调派发（`onSessionUpdate`、`onPermissionRequest`、`onAskUserQuestion`、`onEndTurn`、`onDisconnected`）。
-- 构造时强制 **loopback only**（IDE 应当只与同主机 daemon 通话）。
+- `connect(options)` 时强制 **loopback only**（IDE 应当只与同主机 daemon 通话）。
 - 把 daemon 事件桥接到 webview 的 `postMessage`，chat 面板保持同步。
 - 通过 VSCode 原生 quick-pick UI 呈现权限请求。
 - 把 `connect()` 串行化，避免宿主快速 double-call 时 race。
@@ -23,10 +23,7 @@ IDE 的 chat webview 通过本适配器消费 daemon 事件；权限请求以 VS
 class DaemonIdeConnection {
   connect(options: DaemonIdeConnectionOptions): Promise<void>;
   disconnect(): Promise<void>;
-  sendPrompt(
-    req: { prompt: ContentBlock[] },
-    signal?: AbortSignal,
-  ): Promise<DaemonIdePromptResult>;
+  sendPrompt(prompt: string | ContentBlock[]): Promise<DaemonIdePromptResult>;
   cancelSession(): Promise<void>;
   setModel(modelId: string): Promise<DaemonIdeSetModelResult>;
 
@@ -45,21 +42,19 @@ class DaemonIdeConnection {
 interface DaemonIdeConnectionOptions {
   baseUrl: string; // 必须 loopback（127.0.0.1 / localhost / [::1]）
   token?: string;
-  workspaceCwd: string;
+  workspaceCwd?: string;
   modelServiceId?: string;
   lastEventId?: number;
+  sessionFactory?: DaemonIdeSessionFactory;
 }
 ```
 
 ### Loopback 校验
 
-构造时（`daemonIdeConnection.ts` 的 `DaemonIdeConnection`）：
+`connect(options)` 时（`daemonIdeConnection.ts` 的 `connectInternal()`）：
 
 ```ts
-const parsed = new URL(opts.baseUrl);
-if (!isLoopbackHost(parsed.hostname)) {
-  throw new Error('DaemonIdeConnection: baseUrl must be loopback (...)');
-}
+const baseUrl = validateDaemonBaseUrl(options.baseUrl);
 ```
 
 这是 **客户端硬约束**，与 daemon 自己的 `hostAllowlist`（见 [`12-auth-security.md`](./12-auth-security.md)）不同。IDE companion 永远不连远程 daemon —— 即便 operator 配了远程。理由：VSCode 的威胁模型假设 workspace 与 daemon 共享同一宿主（文件系统信任等）。
@@ -72,16 +67,16 @@ if (!isLoopbackHost(parsed.hostname)) {
 
 connection 跑一个 SSE 消费者（`for await` over `session.events()`），按 type 路由：
 
-| daemon event / source                                                                        | IDE 回调 / 动作                                                    |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `session_update`                                                                             | `onSessionUpdate`                                                  |
-| 普通 `permission_request`                                                                    | `onPermissionRequest`，随后 `respondToPermission()`                |
-| `permission_request` 且 `toolCall.kind === 'ask_user_question'`、`rawInput.questions` 是数组 | `onAskUserQuestion`，随后把 `answers` 透传给 daemon                |
-| `session_died`，且 payload 的 `sessionId` 匹配当前 session                                   | `onDisconnected(reason)`                                           |
-| SSE 自然结束 / stream 失败 / 手动 `disconnect()`                                             | `onDisconnected('stream_ended' / 'daemon_error' / 'disconnected')` |
-| 其他 daemon event                                                                            | debug 级日志，当前不触发 IDE 回调                                  |
+| daemon event / source                                                                        | IDE 回调 / 动作                                                          |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `session_update`                                                                             | `onSessionUpdate`                                                        |
+| 普通 `permission_request`                                                                    | `onPermissionRequest`，随后 `respondToPermission()`                      |
+| `permission_request` 且 `toolCall.kind === 'ask_user_question'`、`rawInput.questions` 是数组 | `onAskUserQuestion`，随后把 `answers` 透传给 daemon                      |
+| `session_died`，且 payload 的 `sessionId` 匹配当前 session                                   | `onDisconnected(null, reason)`                                           |
+| SSE 自然结束 / stream 失败 / 手动 `disconnect()`                                             | `onDisconnected(null, 'stream_ended' / 'daemon_error' / 'disconnected')` |
+| 其他 daemon event                                                                            | debug 级日志，当前不触发 IDE 回调                                        |
 
-`onEndTurn` 不是 SSE 事件分发结果；`prompt()` 等待 daemon HTTP prompt 响应后用 `response.stopReason` 调它，非 abort 异常路径调 `onEndTurn('error')`。
+`onEndTurn` 不是 SSE 事件分发结果；`sendPrompt()` 等待 daemon HTTP prompt 响应后用 `response.stopReason` 调它，非 abort 异常路径调 `onEndTurn('error')`。
 
 ### Webview 桥接
 
@@ -104,9 +99,9 @@ sequenceDiagram
     participant SDK as DaemonSessionClient
     participant D as Daemon
 
-    H->>C: new DaemonIdeConnection({baseUrl, token, workspaceCwd})
+    H->>C: new DaemonIdeConnection()
+    H->>C: connect({baseUrl, token, workspaceCwd, lastEventId})
     C->>C: validate loopback host
-    H->>C: connect()
     C->>F: factory({baseUrl, token, workspaceCwd, lastEventId})
     F->>SDK: DaemonClient + DaemonSessionClient.createOrAttach
     SDK->>D: POST /session
@@ -159,13 +154,13 @@ sequenceDiagram
     D-->>SDK: session_died (or other terminal)
     SDK-->>C: DaemonEvent
     C->>C: shut down pump
-    C-->>H: onDisconnected(reason)
-    H->>C: connect() (user-driven retry; resume lastEventId)
+    C-->>H: onDisconnected(null, reason)
+    H->>C: connect({baseUrl, token, workspaceCwd, lastEventId})
 ```
 
 ## 状态与生命周期
 
-- 构造同步；**无网络 IO**，要等 `connect()`。
+- 实例化同步；**无网络 IO**，要等 `connect(options)`。
 - `connect()` 通过内部队列幂等；二次调串行化。
 - `disconnect()` 通过 `AbortController` 中止 SSE iterator 并清回调。
 - `lastEventId` 在 disconnect 时从 SDK `DaemonSessionClient` 抓出来，下次 `connect()` 可再传以重放。
@@ -178,18 +173,18 @@ sequenceDiagram
 
 ## 配置
 
-| 旋钮                                         | 位置                | 效果                                                    |
-| -------------------------------------------- | ------------------- | ------------------------------------------------------- |
-| `baseUrl`                                    | 构造                | daemon URL；必须 loopback                               |
-| `token`                                      | 构造                | Bearer token（通过 SDK 盖）                             |
-| `workspaceCwd`                               | 构造                | `POST /session` 用；必须与 daemon 绑定的 workspace 一致 |
-| `modelServiceId`                             | 构造 / `setModel()` | 初始 model                                              |
-| `lastEventId`                                | 构造                | 恢复游标（一般从宿主状态恢复）                          |
-| VSCode 设置 `qwen.ide.daemonUrl`（或等价键） | 工作区设置          | operator 配的 daemon URL                                |
+| 旋钮                                         | 位置                              | 效果                                                  |
+| -------------------------------------------- | --------------------------------- | ----------------------------------------------------- |
+| `baseUrl`                                    | `connect(options)`                | daemon URL；必须 loopback                             |
+| `token`                                      | `connect(options)`                | Bearer token（通过 SDK 盖）                           |
+| `workspaceCwd`                               | `connect(options)`                | `POST /session` 用；需与 daemon 绑定的 workspace 一致 |
+| `modelServiceId`                             | `connect(options)` / `setModel()` | 初始 model                                            |
+| `lastEventId`                                | `connect(options)`                | 恢复游标（一般从宿主状态恢复）                        |
+| VSCode 设置 `qwen.ide.daemonUrl`（或等价键） | 工作区设置                        | operator 配的 daemon URL                              |
 
 ## 注意 & 已知局限
 
-- **Loopback only —— 构造时硬拒**。想让 IDE 指向远程 daemon 的 operator 需要 SSH port-forward / 本地代理；适配器永远不连非 loopback URL。
+- **Loopback only —— `connect(options)` 时硬拒**。想让 IDE 指向远程 daemon 的 operator 需要 SSH port-forward / 本地代理；适配器永远不连非 loopback URL。
 - **老 `AcpConnectionState` 路径仍是 IDE companion 的主路径**（stdio child）。本适配器是 Mode-B 迁移的同级传输；迁移阻塞项与计划中的 `BridgeFileSystem` 一致工作见 [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md)。
 - **HTTP 上暂无反向 RPC / 编辑器原生能力 surface**。需要 agent 回调 IDE 的功能（只读 buffer 访问、diff 预览集成）目前只在 stdio 路径有。
 - **Webview ↔ connection 耦合由宿主拥有**，不在本适配器。不要把 webview 专属逻辑塞进 `DaemonIdeConnection`。
