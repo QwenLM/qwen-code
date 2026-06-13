@@ -17,6 +17,18 @@
       "import": "./dist/daemon/index.js",
       "require": "./dist/daemon/index.cjs"
     },
+    "./daemon/AcpWsTransport": {
+      "import": "./src/daemon/AcpWsTransport.js"
+    },
+    "./daemon/AcpHttpTransport": {
+      "import": "./src/daemon/AcpHttpTransport.js"
+    },
+    "./daemon/AutoReconnectTransport": {
+      "import": "./src/daemon/AutoReconnectTransport.js"
+    },
+    "./daemon/negotiateTransport": {
+      "import": "./src/daemon/negotiateTransport.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

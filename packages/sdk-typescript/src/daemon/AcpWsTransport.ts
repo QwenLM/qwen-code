@@ -15,266 +15,12 @@ import {
   denormalizeAcpNotification,
   type JsonRpcNotification,
 } from './AcpEventDenormalizer.js';
-
-// ---------------------------------------------------------------------------
-// URL-to-JSON-RPC mapping
-// ---------------------------------------------------------------------------
-
-interface RouteMapping {
-  method: string;
-  /** Extract JSON-RPC params from URL path segments + request body. */
-  extractParams: (
-    segments: string[],
-    body: unknown,
-    httpMethod: string,
-  ) => Record<string, unknown>;
-  /**
-   * True for notifications (no response expected). The transport will
-   * NOT wait for a JSON-RPC response from the server.
-   */
-  notification?: boolean;
-}
-
-/**
- * Map of `METHOD PATH_PATTERN` to JSON-RPC method + params extractor.
- * Path segments are split by `/` after stripping the base URL prefix.
- *
- * Pattern conventions:
- *   - `:param` = named path param (consumed positionally)
- *   - `*`      = rest wildcard
- */
-const ROUTE_TABLE: ReadonlyArray<{
-  httpMethod: string;
-  pattern: RegExp;
-  mapping: RouteMapping;
-}> = [
-  // POST /session → session/new
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/?$/,
-    mapping: {
-      method: 'session/new',
-      extractParams: (_s, body) => (isRecord(body) ? body : {}),
-    },
-  },
-  // POST /session/:id/prompt → session/prompt
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/prompt$/,
-    mapping: {
-      method: 'session/prompt',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/cancel → session/cancel (notification)
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/cancel$/,
-    mapping: {
-      method: 'session/cancel',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-      notification: true,
-    },
-  },
-  // DELETE /session/:id → session/close
-  {
-    httpMethod: 'DELETE',
-    pattern: /^\/session\/([^/]+)\/?$/,
-    mapping: {
-      method: 'session/close',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-    },
-  },
-  // POST /session/:id/load → session/load
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/load$/,
-    mapping: {
-      method: 'session/load',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/resume → session/resume
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/resume$/,
-    mapping: {
-      method: 'session/resume',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/permission/:reqId → JSON-RPC response
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/permission\/([^/]+)$/,
-    mapping: {
-      method: 'session/permission',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        requestId: segs[1],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // Also handle permission at /permission/:reqId (without session prefix)
-  {
-    httpMethod: 'POST',
-    pattern: /^\/permission\/([^/]+)$/,
-    mapping: {
-      method: 'session/permission',
-      extractParams: (segs, body) => ({
-        requestId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/model → session/set_config_option
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/model$/,
-    mapping: {
-      method: 'session/set_config_option',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // GET /capabilities → use initialize result (handled specially)
-  {
-    httpMethod: 'GET',
-    pattern: /^\/capabilities\/?$/,
-    mapping: {
-      method: '_capabilities',
-      extractParams: () => ({}),
-    },
-  },
-  // GET /health
-  {
-    httpMethod: 'GET',
-    pattern: /^\/health\/?$/,
-    mapping: {
-      method: '_qwen/health',
-      extractParams: () => ({}),
-    },
-  },
-  // GET /workspace/* → _qwen/workspace/*
-  {
-    httpMethod: 'GET',
-    pattern: /^\/workspace\/(.+)$/,
-    mapping: {
-      method: '_qwen/workspace',
-      extractParams: (segs, _body, _httpMethod) => ({
-        path: segs[0],
-      }),
-    },
-  },
-  // POST /workspace/* → _qwen/workspace/*
-  {
-    httpMethod: 'POST',
-    pattern: /^\/workspace\/(.+)$/,
-    mapping: {
-      method: '_qwen/workspace',
-      extractParams: (segs, body) => ({
-        path: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // PATCH /session/:id/metadata → session/metadata
-  {
-    httpMethod: 'PATCH',
-    pattern: /^\/session\/([^/]+)\/metadata$/,
-    mapping: {
-      method: 'session/metadata',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/heartbeat
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/heartbeat$/,
-    mapping: {
-      method: 'session/heartbeat',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/recap
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/recap$/,
-    mapping: {
-      method: 'session/recap',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/btw
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/btw$/,
-    mapping: {
-      method: 'session/btw',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/shell
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/shell$/,
-    mapping: {
-      method: 'session/shell',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/approval-mode
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/approval-mode$/,
-    mapping: {
-      method: 'session/approval_mode',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  // POST /session/:id/branch
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/branch$/,
-    mapping: {
-      method: 'session/branch',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-];
+import {
+  matchRoute,
+  synthesizeResponse,
+  jsonRpcErrorToHttpStatus,
+  isRecord,
+} from './acpTransportUtils.js';
 
 // ---------------------------------------------------------------------------
 // JSON-RPC message types
@@ -300,6 +46,16 @@ interface PendingRequest {
   signal?: AbortSignal;
   sessionId?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Maximum queued events per generator before drop-oldest. */
+const MAX_GENERATOR_QUEUE_SIZE = 256;
+
+/** Default timeout for the initialize handshake (ms). */
+const INIT_TIMEOUT_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // AcpWsTransport
@@ -341,7 +97,7 @@ export class AcpWsTransport implements DaemonTransport {
 
   /** Cached `initialize` result for `GET /capabilities`. */
   private initResult: unknown = undefined;
-  private initPromise: Promise<void> | null = null;
+  private initPromise: Promise<void> | undefined = undefined;
 
   readonly type = 'acp-ws' as const;
   readonly supportsReplay = false;
@@ -440,6 +196,8 @@ export class AcpWsTransport implements DaemonTransport {
     this._activeGenerators.add(genAbort);
 
     // Create a queue that the notification listener pushes into.
+    // Capped at MAX_GENERATOR_QUEUE_SIZE with drop-oldest to prevent
+    // unbounded memory growth if the consumer is slow.
     const queue: DaemonEvent[] = [];
     let resolve: (() => void) | null = null;
     let done = false;
@@ -457,6 +215,10 @@ export class AcpWsTransport implements DaemonTransport {
         ) {
           return;
         }
+      }
+      // Drop oldest if queue is full.
+      if (queue.length >= MAX_GENERATOR_QUEUE_SIZE) {
+        queue.shift();
       }
       queue.push(event);
       if (resolve) {
@@ -556,18 +318,42 @@ export class AcpWsTransport implements DaemonTransport {
       return;
     }
 
-    this.initPromise = this.connect();
+    // Reset on failure so the next call retries instead of parking
+    // on a permanently rejected promise.
+    this.initPromise = this.connect().catch((err) => {
+      this.initPromise = undefined;
+      throw err;
+    });
     await this.initPromise;
   }
 
   private async connect(): Promise<void> {
     return new Promise<void>((resolveConnect, rejectConnect) => {
-      const wsUrl = this.token
-        ? `${this.wsUrl}?token=${encodeURIComponent(this.token)}`
-        : this.wsUrl;
-
-      const ws = new WebSocket(wsUrl);
+      // Pass token via Authorization header on the upgrade request
+      // instead of embedding it in the URL query string. The
+      // WebSocket constructor accepts (url, protocols, options) in
+      // Node.js. We pass an empty protocols array and supply headers
+      // in the third argument.
+      const ws = this.token
+        ? new (WebSocket as unknown as new (
+            url: string,
+            protocols: string[],
+            opts: { headers: Record<string, string> },
+          ) => WebSocket)(this.wsUrl, [], {
+            headers: { Authorization: `Bearer ${this.token}` },
+          })
+        : new WebSocket(this.wsUrl);
       this.ws = ws;
+
+      // Timeout for the initialize handshake.
+      const initTimeout = setTimeout(() => {
+        ws.close(1002, 'Initialize timeout');
+        rejectConnect(
+          new DaemonTransportClosedError(
+            `WebSocket initialize timed out after ${INIT_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, INIT_TIMEOUT_MS);
 
       ws.onopen = () => {
         this._connected = true;
@@ -583,10 +369,14 @@ export class AcpWsTransport implements DaemonTransport {
         };
         this.pending.set(initId, {
           resolve: (response) => {
+            clearTimeout(initTimeout);
             this.initResult = response.result;
             resolveConnect();
           },
-          reject: (err) => rejectConnect(err),
+          reject: (err) => {
+            clearTimeout(initTimeout);
+            rejectConnect(err);
+          },
         });
         ws.send(JSON.stringify(initReq));
       };
@@ -618,11 +408,11 @@ export class AcpWsTransport implements DaemonTransport {
           msg['jsonrpc'] === '2.0'
         ) {
           const notification = msg as unknown as JsonRpcNotification;
-          const event = denormalizeAcpNotification(notification);
-          if (event) {
+          const daemonEvent = denormalizeAcpNotification(notification);
+          if (daemonEvent) {
             for (const listener of this.notificationListeners) {
               try {
-                listener(event);
+                listener(daemonEvent);
               } catch {
                 /* swallow listener errors */
               }
@@ -636,6 +426,7 @@ export class AcpWsTransport implements DaemonTransport {
         // connection refused / unreachable. Reject the connect
         // promise so the caller doesn't hang forever.
         if (!this._connected) {
+          clearTimeout(initTimeout);
           rejectConnect(
             new DaemonTransportClosedError('WebSocket connection failed'),
           );
@@ -643,9 +434,10 @@ export class AcpWsTransport implements DaemonTransport {
       };
 
       ws.onclose = (event) => {
+        clearTimeout(initTimeout);
         this._connected = false;
         this.ws = null;
-        this.initPromise = null;
+        this.initPromise = undefined;
 
         const closeError = new DaemonTransportClosedError(
           `WebSocket closed: ${event.code} ${event.reason}`,
@@ -738,51 +530,4 @@ export class AcpWsTransport implements DaemonTransport {
       this.ws!.send(JSON.stringify(req));
     });
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function matchRoute(
-  path: string,
-  httpMethod: string,
-): { mapping: RouteMapping; segments: string[] } | null {
-  for (const route of ROUTE_TABLE) {
-    if (route.httpMethod !== httpMethod) continue;
-    const m = path.match(route.pattern);
-    if (m) {
-      // Groups 1..N are the captured segments.
-      const segments = Array.from(m).slice(1).map(decodeURIComponent);
-      return { mapping: route.mapping, segments };
-    }
-  }
-  return null;
-}
-
-function synthesizeResponse(status: number, body: unknown): Response {
-  const bodyStr = body !== null ? JSON.stringify(body) : '';
-  const headers: Record<string, string> = {};
-  if (bodyStr) {
-    headers['content-type'] = 'application/json';
-  }
-  return new Response(bodyStr || null, { status, headers });
-}
-
-function jsonRpcErrorToHttpStatus(code: number): number {
-  // JSON-RPC error code → HTTP status mapping.
-  // -32600 = invalid request → 400
-  // -32601 = method not found → 404
-  // -32602 = invalid params → 400
-  // -32603 = internal error → 500
-  // -32700 = parse error → 400
-  if (code === -32601) return 404;
-  if (code === -32600 || code === -32602 || code === -32700) return 400;
-  if (code === -32603) return 500;
-  // Application-specific error codes. Use 500 as default.
-  return code >= -32099 && code <= -32000 ? 500 : 500;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

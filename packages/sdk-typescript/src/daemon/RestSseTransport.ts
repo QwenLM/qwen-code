@@ -11,7 +11,7 @@ import type {
   DaemonTransportSubscribeOptions,
 } from './DaemonTransport.js';
 import { DaemonTransportClosedError } from './DaemonTransport.js';
-import { DaemonHttpError } from './DaemonClient.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import { parseSseStream } from './sse.js';
 
 /**

@@ -20,23 +20,24 @@ export {
   type SubscribeOptions,
 } from './DaemonClient.js';
 // Transport abstraction layer
-export {
-  DaemonTransportClosedError,
-  negotiateTransport,
-} from './DaemonTransport.js';
+export { DaemonTransportClosedError } from './DaemonTransport.js';
 export type {
   DaemonTransport,
   DaemonTransportFetchOptions,
   DaemonTransportSubscribeOptions,
   DaemonTransportType,
-  NegotiateTransportOptions,
 } from './DaemonTransport.js';
 export { RestSseTransport } from './RestSseTransport.js';
+// negotiateTransport lives in its own file to break the static import
+// chain from this barrel → ACP transports, keeping the browser bundle
+// under budget.  Import it directly:
+//   import { negotiateTransport } from '@qwen-code/sdk/daemon/negotiateTransport';
+export type { NegotiateTransportOptions } from './negotiateTransport.js';
 // ACP transports: import directly from their modules to avoid browser bundle bloat.
-//   import { AcpWsTransport } from '@anthropic-ai/sdk/daemon/AcpWsTransport';
-//   import { AcpHttpTransport } from '@anthropic-ai/sdk/daemon/AcpHttpTransport';
-//   import { AutoReconnectTransport } from '@anthropic-ai/sdk/daemon/AutoReconnectTransport';
-//   import { denormalizeAcpNotification, filterEventsBySession } from '@anthropic-ai/sdk/daemon/AcpEventDenormalizer';
+//   import { AcpWsTransport } from '@qwen-code/sdk/daemon/AcpWsTransport';
+//   import { AcpHttpTransport } from '@qwen-code/sdk/daemon/AcpHttpTransport';
+//   import { AutoReconnectTransport } from '@qwen-code/sdk/daemon/AutoReconnectTransport';
+//   import { negotiateTransport } from '@qwen-code/sdk/daemon/negotiateTransport';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {

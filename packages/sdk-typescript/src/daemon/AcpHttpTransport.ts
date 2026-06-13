@@ -13,6 +13,14 @@ import type {
 import { DaemonTransportClosedError } from './DaemonTransport.js';
 import { parseSseStream } from './sse.js';
 import type { JsonRpcNotification } from './AcpEventDenormalizer.js';
+import {
+  matchRoute,
+  synthesizeResponse,
+  jsonRpcErrorToHttpStatus,
+  isRecord,
+  composeAbortSignals,
+  mergeHeaders,
+} from './acpTransportUtils.js';
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -31,232 +39,6 @@ interface JsonRpcResponse {
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
 }
-
-// ---------------------------------------------------------------------------
-// URL-to-JSON-RPC mapping
-// ---------------------------------------------------------------------------
-
-interface RouteMapping {
-  method: string;
-  extractParams: (
-    segments: string[],
-    body: unknown,
-    httpMethod: string,
-  ) => Record<string, unknown>;
-  notification?: boolean;
-}
-
-/** Same route table as AcpWsTransport — factored identically. */
-const ROUTE_TABLE: ReadonlyArray<{
-  httpMethod: string;
-  pattern: RegExp;
-  mapping: RouteMapping;
-}> = [
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/?$/,
-    mapping: {
-      method: 'session/new',
-      extractParams: (_s, body) => (isRecord(body) ? body : {}),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/prompt$/,
-    mapping: {
-      method: 'session/prompt',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/cancel$/,
-    mapping: {
-      method: 'session/cancel',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-      notification: true,
-    },
-  },
-  {
-    httpMethod: 'DELETE',
-    pattern: /^\/session\/([^/]+)\/?$/,
-    mapping: {
-      method: 'session/close',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/load$/,
-    mapping: {
-      method: 'session/load',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/resume$/,
-    mapping: {
-      method: 'session/resume',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/permission\/([^/]+)$/,
-    mapping: {
-      method: 'session/permission',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        requestId: segs[1],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/permission\/([^/]+)$/,
-    mapping: {
-      method: 'session/permission',
-      extractParams: (segs, body) => ({
-        requestId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/model$/,
-    mapping: {
-      method: '_qwen/session/set_config_option',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'GET',
-    pattern: /^\/capabilities\/?$/,
-    mapping: {
-      method: '_capabilities',
-      extractParams: () => ({}),
-    },
-  },
-  {
-    httpMethod: 'GET',
-    pattern: /^\/health\/?$/,
-    mapping: {
-      method: '_qwen/health',
-      extractParams: () => ({}),
-    },
-  },
-  {
-    httpMethod: 'GET',
-    pattern: /^\/workspace\/(.+)$/,
-    mapping: {
-      method: '_qwen/workspace',
-      extractParams: (segs) => ({ path: segs[0] }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/workspace\/(.+)$/,
-    mapping: {
-      method: '_qwen/workspace',
-      extractParams: (segs, body) => ({
-        path: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'PATCH',
-    pattern: /^\/session\/([^/]+)\/metadata$/,
-    mapping: {
-      method: '_qwen/session/metadata',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/heartbeat$/,
-    mapping: {
-      method: '_qwen/session/heartbeat',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/recap$/,
-    mapping: {
-      method: '_qwen/session/recap',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/btw$/,
-    mapping: {
-      method: '_qwen/session/btw',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/shell$/,
-    mapping: {
-      method: '_qwen/session/shell',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/approval-mode$/,
-    mapping: {
-      method: '_qwen/session/approval_mode',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/branch$/,
-    mapping: {
-      method: '_qwen/session/branch',
-      extractParams: (segs, body) => ({
-        sessionId: segs[0],
-        ...(isRecord(body) ? body : {}),
-      }),
-    },
-  },
-];
 
 // ---------------------------------------------------------------------------
 // AcpHttpTransport
@@ -280,24 +62,11 @@ export class AcpHttpTransport implements DaemonTransport {
 
   private _disposed = false;
   private _initialized = false;
-  private initPromise: Promise<void> | null = null;
+  private initPromise: Promise<void> | undefined = undefined;
   private nextId = 1;
   private initResult: unknown = undefined;
   /** Connection id returned by the ACP initialize handshake. */
   private connectionId: string | undefined;
-
-  /**
-   * Connection-scoped SSE stream. Receives JSON-RPC responses
-   * correlated by id, and notifications pushed to listeners.
-   */
-  private sseAbort: AbortController | null = null;
-  private readonly pendingRequests = new Map<
-    number,
-    {
-      resolve: (value: JsonRpcResponse) => void;
-      reject: (reason: Error) => void;
-    }
-  >();
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
@@ -354,7 +123,7 @@ export class AcpHttpTransport implements DaemonTransport {
     // For notifications, send via POST /acp and return 204.
     if (mapping.notification) {
       const params = mapping.extractParams(segments, body, httpMethod);
-      await this.sendNotification(mapping.method, params);
+      await this.sendNotification(mapping.method, params, init.headers);
       return synthesizeResponse(204, null);
     }
 
@@ -364,6 +133,7 @@ export class AcpHttpTransport implements DaemonTransport {
       mapping.method,
       params,
       init.signal ?? undefined,
+      init.headers,
     );
 
     if (response.error) {
@@ -489,16 +259,6 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this._disposed) return;
     this._disposed = true;
     this._initialized = false;
-
-    for (const [, pending] of this.pendingRequests) {
-      pending.reject(new DaemonTransportClosedError());
-    }
-    this.pendingRequests.clear();
-
-    if (this.sseAbort) {
-      this.sseAbort.abort();
-      this.sseAbort = null;
-    }
   }
 
   // -- Internal ----------------------------------------------------------
@@ -509,7 +269,12 @@ export class AcpHttpTransport implements DaemonTransport {
       await this.initPromise;
       return;
     }
-    this.initPromise = this.initialize();
+    // Reset on failure so the next call retries instead of parking
+    // on a permanently rejected promise.
+    this.initPromise = this.initialize().catch((err) => {
+      this.initPromise = undefined;
+      throw err;
+    });
     await this.initPromise;
   }
 
@@ -582,6 +347,7 @@ export class AcpHttpTransport implements DaemonTransport {
   private async sendNotification(
     method: string,
     params: Record<string, unknown>,
+    callerHeaders?: HeadersInit,
   ): Promise<void> {
     const notification: JsonRpcNotification = {
       jsonrpc: '2.0',
@@ -589,15 +355,18 @@ export class AcpHttpTransport implements DaemonTransport {
       params,
     };
 
-    const headers: Record<string, string> = {
+    const transportHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
     };
     if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+      transportHeaders['Authorization'] = `Bearer ${this.token}`;
     }
     if (this.connectionId) {
-      headers['Acp-Connection-Id'] = this.connectionId;
+      transportHeaders['Acp-Connection-Id'] = this.connectionId;
     }
+
+    // Merge caller headers (from init.headers) with transport headers.
+    const headers = mergeHeaders(transportHeaders, callerHeaders);
 
     await this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
@@ -610,6 +379,7 @@ export class AcpHttpTransport implements DaemonTransport {
     method: string,
     params: Record<string, unknown>,
     signal?: AbortSignal,
+    callerHeaders?: HeadersInit,
   ): Promise<JsonRpcResponse> {
     const req: JsonRpcRequest = {
       jsonrpc: '2.0',
@@ -618,15 +388,18 @@ export class AcpHttpTransport implements DaemonTransport {
       params,
     };
 
-    const headers: Record<string, string> = {
+    const transportHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
     };
     if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+      transportHeaders['Authorization'] = `Bearer ${this.token}`;
     }
     if (this.connectionId) {
-      headers['Acp-Connection-Id'] = this.connectionId;
+      transportHeaders['Acp-Connection-Id'] = this.connectionId;
     }
+
+    // Merge caller headers with transport headers.
+    const headers = mergeHeaders(transportHeaders, callerHeaders);
 
     const res = await this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
@@ -652,78 +425,4 @@ export class AcpHttpTransport implements DaemonTransport {
 
     return (await res.json()) as JsonRpcResponse;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function matchRoute(
-  path: string,
-  httpMethod: string,
-): { mapping: RouteMapping; segments: string[] } | null {
-  for (const route of ROUTE_TABLE) {
-    if (route.httpMethod !== httpMethod) continue;
-    const m = path.match(route.pattern);
-    if (m) {
-      const segments = Array.from(m).slice(1).map(decodeURIComponent);
-      return { mapping: route.mapping, segments };
-    }
-  }
-  return null;
-}
-
-function synthesizeResponse(status: number, body: unknown): Response {
-  const bodyStr = body !== null ? JSON.stringify(body) : '';
-  const headers: Record<string, string> = {};
-  if (bodyStr) {
-    headers['content-type'] = 'application/json';
-  }
-  return new Response(bodyStr || null, { status, headers });
-}
-
-function jsonRpcErrorToHttpStatus(code: number): number {
-  if (code === -32601) return 404;
-  if (code === -32600 || code === -32602 || code === -32700) return 400;
-  if (code === -32603) return 500;
-  return 500;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
-  const anyFn = (
-    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
-  ).any;
-  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
-
-  const ctrl = new AbortController();
-  const cleanups: Array<() => void> = [];
-  const detachAll = () => {
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop();
-      try {
-        fn?.();
-      } catch {
-        /* swallow */
-      }
-    }
-  };
-  for (const s of signals) {
-    if (s.aborted) {
-      ctrl.abort(s.reason);
-      detachAll();
-      return ctrl.signal;
-    }
-    const onAbort = () => {
-      ctrl.abort(s.reason);
-      detachAll();
-    };
-    s.addEventListener('abort', onAbort, { once: true });
-    cleanups.push(() => s.removeEventListener('abort', onAbort));
-  }
-  ctrl.signal.addEventListener('abort', detachAll, { once: true });
-  return ctrl.signal;
 }

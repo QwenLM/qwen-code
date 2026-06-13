@@ -9,6 +9,7 @@ import {
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import type { DaemonTransport } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import type {
@@ -213,21 +214,11 @@ function readTokenFromEnv(): string | undefined {
   }
 }
 
-/**
- * Thrown for any non-2xx daemon response. `status` and `body` are surfaced
- * so callers can branch on the standard daemon HTTP semantics (404 missing
- * session, 401 bad token, 400 malformed body, 500 agent failure).
- */
-export class DaemonHttpError extends Error {
-  readonly status: number;
-  readonly body: unknown;
-  constructor(status: number, body: unknown, message: string) {
-    super(message);
-    this.name = 'DaemonHttpError';
-    this.status = status;
-    this.body = body;
-  }
-}
+// Re-export DaemonHttpError from its dedicated module so existing
+// `import { DaemonHttpError } from './DaemonClient.js'` continues to
+// work. The class itself lives in DaemonHttpError.ts to break the
+// import chain from RestSseTransport → DaemonClient (browser bundle).
+export { DaemonHttpError } from './DaemonHttpError.js';
 
 /**
  * SDK-side representation of the daemon's `prompt_queue_full` condition.

@@ -48,6 +48,9 @@ export class AutoReconnectTransport implements DaemonTransport {
   private readonly factory?: TransportFactory;
   private _disposed = false;
 
+  /** Mutex: only one reconnect attempt at a time. */
+  private reconnecting: Promise<void> | undefined;
+
   readonly supportsReplay: boolean;
 
   constructor(opts: {
@@ -122,6 +125,16 @@ export class AutoReconnectTransport implements DaemonTransport {
   // -- Internal ----------------------------------------------------------
 
   private async reconnect(): Promise<void> {
+    // Mutex: if a reconnect is already in progress, wait for it
+    // instead of starting a concurrent attempt (reconnect storm).
+    if (this.reconnecting) return this.reconnecting;
+    this.reconnecting = this._doReconnect().finally(() => {
+      this.reconnecting = undefined;
+    });
+    return this.reconnecting;
+  }
+
+  private async _doReconnect(): Promise<void> {
     // Dispose the old transport.
     try {
       this.inner.dispose();

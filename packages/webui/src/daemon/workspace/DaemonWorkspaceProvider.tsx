@@ -104,6 +104,7 @@ export function DaemonWorkspaceProvider({
 
     return () => {
       disposed = true;
+      client.dispose();
     };
   }, [client, getCapabilities]);
 
