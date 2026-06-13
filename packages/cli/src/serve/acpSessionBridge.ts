@@ -82,6 +82,7 @@ export {
   RestoreInProgressError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
+  PromptQueueFullError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -99,6 +100,8 @@ export {
   CancelSentinelCollisionError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {

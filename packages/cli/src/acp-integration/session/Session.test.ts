@@ -199,6 +199,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    setTitleRecordedCallback: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
@@ -265,6 +266,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       rewindRecording: vi.fn(),
+      setTitleRecordedCallback: vi.fn(),
     };
 
     mockToolRegistry = {
@@ -3120,6 +3122,7 @@ describe('Session', () => {
       it('runs automatic compression before cron-fired ACP prompt sends', async () => {
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             callback({ prompt: 'scheduled prompt' });
           }),
@@ -3170,6 +3173,7 @@ describe('Session', () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             cronCallback = callback;
             callback({ prompt: 'scheduled prompt' });

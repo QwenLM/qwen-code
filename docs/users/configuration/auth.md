@@ -50,7 +50,7 @@ Alibaba Cloud Coding Plan is available in two regions:
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command and select **Alibaba Cloud Coding Plan**. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
 
-After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max, glm-4.7, and kimi-k2.5).
+After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max-2026-01-23, glm-5, glm-4.7, kimi-k2.5, and MiniMax-M2.5).
 
 ### Headless or scripted setup
 

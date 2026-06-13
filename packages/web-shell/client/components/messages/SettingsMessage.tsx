@@ -7,22 +7,54 @@ import {
   useState,
   type CSSProperties,
 } from 'react';
-import {
-  useSettings,
-  type DaemonSettingDescriptor,
+import type {
+  DaemonSettingDescriptor,
+  DaemonSettingUpdateResult,
+  DaemonWorkspaceSettingsStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
-import { useI18n } from '../../i18n';
+import {
+  WEB_SHELL_LANGUAGES,
+  languageLabel,
+  languageSettingToWebShellLanguage,
+  useI18n,
+  type WebShellLanguage,
+} from '../../i18n';
+import {
+  WEB_SHELL_THEMES,
+  WebShellThemeId,
+  THEME_SETTING_KEY,
+  LANGUAGE_SETTING_KEY,
+  themeSettingToWebShellTheme,
+  webShellThemeToSettingValue,
+  type WebShellTheme,
+} from '../../themeContext';
 import styles from './SettingsMessage.module.css';
 
 export const SETTINGS_ACTIVE_EVENT = 'web-shell:settings-panel-active';
 
 interface SettingsMessageProps {
+  settingsState: SettingsMessageSettingsState;
   onClose: () => void;
+  onLanguageChange: (language: WebShellLanguage) => void;
   onSubDialog: (settingKey: string) => void;
+  onThemeChange: (theme: WebShellTheme) => void;
 }
 
-const SUB_DIALOG_KEYS = new Set(['ui.theme', 'fastModel']);
+export interface SettingsMessageSettingsState {
+  status: DaemonWorkspaceSettingsStatus | undefined;
+  settings: DaemonSettingDescriptor[];
+  loading: boolean;
+  error: Error | undefined;
+  reload: () => Promise<DaemonWorkspaceSettingsStatus | undefined>;
+  setValue: (
+    scope: 'workspace',
+    key: string,
+    value: unknown,
+  ) => Promise<DaemonSettingUpdateResult>;
+}
+
+const SUB_DIALOG_KEYS = new Set(['fastModel']);
 
 type Scope = 'user' | 'workspace';
 
@@ -31,6 +63,55 @@ type Translator = (
   vars?: Record<string, string | number>,
 ) => string;
 
+function translateSettingText(
+  t: Translator,
+  key: string,
+  fallback: string,
+): string {
+  const translated = t(key);
+  return translated === key ? fallback : translated;
+}
+
+function formatSettingCategory(category: string, t: Translator): string {
+  return translateSettingText(t, `settings.category.${category}`, category);
+}
+
+export function formatSettingLabel(
+  setting: DaemonSettingDescriptor,
+  t: Translator,
+): string {
+  return translateSettingText(
+    t,
+    `settings.label.${setting.key}`,
+    setting.label,
+  );
+}
+
+function formatSettingDescription(
+  setting: DaemonSettingDescriptor,
+  t: Translator,
+): string | undefined {
+  if (!setting.description) return undefined;
+  return translateSettingText(
+    t,
+    `settings.description.${setting.key}`,
+    setting.description,
+  );
+}
+
+function formatSettingOption(
+  setting: DaemonSettingDescriptor,
+  value: unknown,
+  label: string,
+  t: Translator,
+): string {
+  return translateSettingText(
+    t,
+    `settings.option.${setting.key}.${String(value)}`,
+    label,
+  );
+}
+
 function formatValue(
   setting: DaemonSettingDescriptor,
   scope: Scope,
@@ -38,13 +119,23 @@ function formatValue(
 ): string {
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
+  if (setting.key === THEME_SETTING_KEY) {
+    const theme = themeSettingToWebShellTheme(effective, WebShellThemeId.Dark);
+    return t(`theme.${theme}`);
+  }
+  if (setting.key === LANGUAGE_SETTING_KEY) {
+    const language = languageSettingToWebShellLanguage(effective);
+    return language ? languageLabel(language) : String(effective);
+  }
   if (setting.type === 'boolean')
     return effective === true
       ? t('settings.value.on')
       : t('settings.value.off');
   if (setting.type === 'enum' && setting.options) {
     const opt = setting.options.find((o) => o.value === effective);
-    return opt?.label ?? String(effective);
+    return opt
+      ? formatSettingOption(setting, opt.value, opt.label, t)
+      : String(effective);
   }
   const s = String(effective);
   return s.length > 24 ? s.slice(0, 21) + '...' : s;
@@ -104,7 +195,10 @@ interface CategoryGroup {
   items: DaemonSettingDescriptor[];
 }
 
-function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
+function groupByCategory(
+  settings: DaemonSettingDescriptor[],
+  t: Translator,
+): CategoryGroup[] {
   const map = new Map<string, DaemonSettingDescriptor[]>();
   for (const s of settings) {
     let group = map.get(s.category);
@@ -115,7 +209,7 @@ function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
     group.push(s);
   }
   return Array.from(map.entries()).map(([category, items]) => ({
-    category,
+    category: formatSettingCategory(category, t),
     items,
   }));
 }
@@ -155,13 +249,14 @@ export function nextSettingIdx(
 }
 
 export function SettingsMessage({
+  settingsState,
   onClose,
+  onLanguageChange,
   onSubDialog,
+  onThemeChange,
 }: SettingsMessageProps) {
   const { t } = useI18n();
-  const { status, settings, loading, error, reload, setValue } = useSettings({
-    autoLoad: true,
-  });
+  const { status, settings, loading, error, reload, setValue } = settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -170,6 +265,10 @@ export function SettingsMessage({
     key: string;
     draft: string;
   } | null>(null);
+  type SubPanel = null | 'theme' | 'language';
+  const [subPanel, setSubPanel] = useState<SubPanel>(null);
+  const [selectedThemeIdx, setSelectedThemeIdx] = useState(0);
+  const [selectedLanguageIdx, setSelectedLanguageIdx] = useState(0);
   const panelIdRef = useRef(`settings-${Math.random().toString(36).slice(2)}`);
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -181,16 +280,25 @@ export function SettingsMessage({
   }, [onClose]);
 
   const rows = useMemo(
-    () => flattenGroups(groupByCategory(settings)),
-    [settings],
+    () => flattenGroups(groupByCategory(settings, t)),
+    [settings, t],
   );
   const [restartPending, setRestartPending] = useState(false);
 
   const selectedRow = rows[selectedIdx];
   const selectedDescription =
-    selectedRow?.type === 'setting'
-      ? selectedRow.setting?.description
+    selectedRow?.type === 'setting' && selectedRow.setting
+      ? formatSettingDescription(selectedRow.setting, t)
       : undefined;
+  const showInitialLoading = loading && !status;
+  const themeSetting = settings.find((s) => s.key === THEME_SETTING_KEY);
+  const themeValue = themeSettingToWebShellTheme(
+    themeSetting?.values.effective,
+  );
+  const languageSetting = settings.find((s) => s.key === LANGUAGE_SETTING_KEY);
+  const languageValue = languageSettingToWebShellLanguage(
+    languageSetting?.values.effective,
+  );
 
   // Marquee state for an overflowing description: distance to travel and a
   // duration that keeps the glide speed constant regardless of text length.
@@ -298,18 +406,51 @@ export function SettingsMessage({
   }, [selectedIdx]);
 
   useEffect(() => {
+    if (subPanel !== 'theme') return;
+    const el = listRef.current?.children[selectedThemeIdx] as
+      | HTMLElement
+      | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [selectedThemeIdx, subPanel]);
+
+  useEffect(() => {
+    if (subPanel !== 'language') return;
+    const el = listRef.current?.children[selectedLanguageIdx] as
+      | HTMLElement
+      | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [selectedLanguageIdx, subPanel]);
+
+  useEffect(() => {
     if (editMode) {
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [editMode]);
+
+  useEffect(() => {
+    if (subPanel !== 'theme') return;
+    const idx = themeValue ? WEB_SHELL_THEMES.indexOf(themeValue) : -1;
+    setSelectedThemeIdx(idx >= 0 ? idx : 0);
+  }, [subPanel, themeValue]);
+
+  useEffect(() => {
+    if (subPanel !== 'language') return;
+    const idx = languageValue ? WEB_SHELL_LANGUAGES.indexOf(languageValue) : -1;
+    setSelectedLanguageIdx(idx >= 0 ? idx : 0);
+  }, [subPanel, languageValue]);
 
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
       setValue('workspace', key, value)
-        .then((result) => {
-          if (result?.requiresRestart) {
+        .then(async (result) => {
+          try {
+            await reload();
+          } catch {
+            // reload failure is non-fatal — the value was already saved
+          }
+          if (result?.requiresRestart && key !== LANGUAGE_SETTING_KEY) {
             setRestartPending(true);
             setMessage(t('settings.requiresRestart'));
           }
@@ -319,7 +460,7 @@ export function SettingsMessage({
         })
         .finally(() => setBusyKey(null));
     },
-    [restartPending, setValue, t],
+    [reload, restartPending, setValue, t],
   );
 
   const handleAction = useCallback(
@@ -328,6 +469,14 @@ export function SettingsMessage({
       setEditMode(null);
       if (scope !== 'workspace') {
         setMessage(t('settings.readOnly'));
+        return;
+      }
+      if (setting.key === THEME_SETTING_KEY) {
+        setSubPanel('theme');
+        return;
+      }
+      if (setting.key === LANGUAGE_SETTING_KEY) {
+        setSubPanel('language');
         return;
       }
       if (SUB_DIALOG_KEYS.has(setting.key)) {
@@ -397,6 +546,71 @@ export function SettingsMessage({
         return;
       }
 
+      if (subPanel === 'theme') {
+        if (e.key === 'Escape') {
+          claim();
+          setSubPanel(null);
+          return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'j') {
+          claim();
+          setSelectedThemeIdx((i) =>
+            Math.min(i + 1, WEB_SHELL_THEMES.length - 1),
+          );
+          return;
+        }
+        if (e.key === 'ArrowUp' || e.key === 'k') {
+          claim();
+          setSelectedThemeIdx((i) => Math.max(i - 1, 0));
+          return;
+        }
+        if ((e.key === 'Enter' || e.key === ' ') && !busyKey) {
+          claim();
+          const value = WEB_SHELL_THEMES[selectedThemeIdx];
+          if (value) {
+            setSubPanel(null);
+            onThemeChange(value);
+            handleSetValue(
+              THEME_SETTING_KEY,
+              webShellThemeToSettingValue(value),
+            );
+          }
+          return;
+        }
+        return;
+      }
+
+      if (subPanel === 'language') {
+        if (e.key === 'Escape') {
+          claim();
+          setSubPanel(null);
+          return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'j') {
+          claim();
+          setSelectedLanguageIdx((i) =>
+            Math.min(i + 1, WEB_SHELL_LANGUAGES.length - 1),
+          );
+          return;
+        }
+        if (e.key === 'ArrowUp' || e.key === 'k') {
+          claim();
+          setSelectedLanguageIdx((i) => Math.max(i - 1, 0));
+          return;
+        }
+        if ((e.key === 'Enter' || e.key === ' ') && !busyKey) {
+          claim();
+          const value = WEB_SHELL_LANGUAGES[selectedLanguageIdx];
+          if (value) {
+            setSubPanel(null);
+            onLanguageChange(value);
+            onClose();
+          }
+          return;
+        }
+        return;
+      }
+
       if (e.key === 'Escape') {
         claim();
         onClose();
@@ -430,7 +644,21 @@ export function SettingsMessage({
         }
       }
     },
-    [busyKey, editMode, handleAction, handleEditSubmit, onClose, reload, rows],
+    [
+      busyKey,
+      editMode,
+      handleAction,
+      handleEditSubmit,
+      handleSetValue,
+      subPanel,
+      onClose,
+      onLanguageChange,
+      reload,
+      rows,
+      selectedLanguageIdx,
+      selectedThemeIdx,
+      onThemeChange,
+    ],
   );
 
   const scopeLabel =
@@ -441,111 +669,185 @@ export function SettingsMessage({
   return (
     <div ref={panelRef} className={styles.panel} data-keyboard-scope>
       <div className={styles.header}>
-        <span className={styles.title}>{t('settings.title')}</span>
+        <span className={styles.title}>
+          {subPanel === 'theme'
+            ? `${t('settings.title')} / ${t('theme.title')}`
+            : subPanel === 'language'
+              ? `${t('settings.title')} / ${t('language.set')}`
+              : t('settings.title')}
+        </span>
         <span className={styles.secondary}>{scopeLabel}</span>
       </div>
 
-      {(message || loading) && (
+      {(message || showInitialLoading) && (
         <div className={styles.hint}>{message || t('settings.loading')}</div>
       )}
 
-      <div
-        className={styles.list}
-        ref={listRef}
-        role="listbox"
-        aria-label={t('settings.title')}
-      >
-        {!loading && rows.length === 0 && (
-          <div className={styles.empty}>{t('settings.empty')}</div>
-        )}
-        {rows.map((row, i) => {
-          if (row.type === 'header') {
-            return (
-              <div
-                key={`cat-${row.category}`}
-                role="presentation"
-                className={styles.category}
-              >
-                {row.category}
-              </div>
-            );
-          }
-
-          const setting = row.setting!;
-          const isSelected = i === selectedIdx;
-          const isEditing = editMode?.key === setting.key;
-          const isSubDialog = SUB_DIALOG_KEYS.has(setting.key);
-          const hasScopeValue = scopeHasValue(setting, scope);
-          const hintKey = scopeHintKey(setting, scope);
-
-          return (
+      <div className={styles.list} ref={listRef} role="listbox">
+        {subPanel === 'theme' ? (
+          WEB_SHELL_THEMES.map((themeName, index) => (
             <div
-              key={setting.key}
+              key={themeName}
               role="option"
-              aria-selected={isSelected}
-              className={`${styles.item} ${isSelected ? styles.selected : ''}`}
+              aria-selected={index === selectedThemeIdx}
+              className={`${styles.item} ${
+                index === selectedThemeIdx ? styles.selected : ''
+              }`}
               onClick={() => {
                 if (busyKey) return;
-                setSelectedIdx(i);
-                handleAction(setting);
+                setSelectedThemeIdx(index);
+                setSubPanel(null);
+                onThemeChange(themeName);
+                handleSetValue(
+                  THEME_SETTING_KEY,
+                  webShellThemeToSettingValue(themeName),
+                );
               }}
-              // Hover feedback is pure CSS (.item:hover) and deliberately does
-              // NOT move the selection: arrow keys own the pointer + accent
-              // label, the mouse only adds a background highlight. This keeps
-              // mouse and keyboard from fighting when the list scrolls under a
-              // resting cursor.
             >
               <div className={styles.row}>
-                <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
-                <span className={styles.label}>
-                  {setting.label}
-                  {/* Cross-scope hint inline after the label, same as the
-                      native CLI — never a separate row. */}
-                  {hintKey && (
-                    <span className={styles.scopeHint}>
-                      {' '}
-                      {t(hintKey, {
-                        scope: t(
-                          scope === 'workspace'
-                            ? 'settings.scope.user'
-                            : 'settings.scope.workspace',
-                        ),
-                      })}
-                    </span>
-                  )}
+                <span className={styles.pointer}>
+                  {index === selectedThemeIdx ? '›' : ' '}
                 </span>
+                <span className={styles.label}>{t(`theme.${themeName}`)}</span>
                 <span className={styles.value}>
-                  {busyKey === setting.key
-                    ? '...'
-                    : `${formatValue(setting, scope, t)}${hasScopeValue ? '*' : ''}${setting.requiresRestart ? ' ⟳' : ''}${isSubDialog ? ' ▸' : ''}`}
+                  {themeName === themeValue ? '✓' : ''}
                 </span>
               </div>
-              {isEditing && editMode && (
-                <div className={styles.editWrap}>
-                  <input
-                    ref={inputRef}
-                    className={styles.editInput}
-                    type={setting.type === 'number' ? 'number' : 'text'}
-                    value={editMode.draft}
-                    onChange={(e) =>
-                      setEditMode({ key: editMode.key, draft: e.target.value })
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleEditSubmit();
-                      }
-                      if (e.key === 'Escape') {
-                        e.preventDefault();
-                        setEditMode(null);
-                      }
-                    }}
-                  />
-                </div>
-              )}
             </div>
-          );
-        })}
+          ))
+        ) : subPanel === 'language' ? (
+          WEB_SHELL_LANGUAGES.map((languageName, index) => (
+            <div
+              key={languageName}
+              role="option"
+              aria-selected={index === selectedLanguageIdx}
+              className={`${styles.item} ${
+                index === selectedLanguageIdx ? styles.selected : ''
+              }`}
+              onClick={() => {
+                if (busyKey) return;
+                setSelectedLanguageIdx(index);
+                setSubPanel(null);
+                onLanguageChange(languageName);
+                onClose();
+              }}
+            >
+              <div className={styles.row}>
+                <span className={styles.pointer}>
+                  {index === selectedLanguageIdx ? '›' : ' '}
+                </span>
+                <span className={styles.label}>
+                  {languageLabel(languageName)}
+                </span>
+                <span className={styles.value}>
+                  {languageName === languageValue ? '✓' : ''}
+                </span>
+              </div>
+            </div>
+          ))
+        ) : (
+          <>
+            {!loading && rows.length === 0 && (
+              <div className={styles.empty}>{t('settings.empty')}</div>
+            )}
+            {rows.map((row, i) => {
+              if (row.type === 'header') {
+                return (
+                  <div
+                    key={`cat-${row.category}`}
+                    role="presentation"
+                    className={styles.category}
+                  >
+                    {row.category}
+                  </div>
+                );
+              }
+
+              const setting = row.setting!;
+              const isSelected = i === selectedIdx;
+              const isEditing = editMode?.key === setting.key;
+              const isSubDialog =
+                SUB_DIALOG_KEYS.has(setting.key) ||
+                setting.key === THEME_SETTING_KEY ||
+                setting.key === LANGUAGE_SETTING_KEY;
+              const hasScopeValue = scopeHasValue(setting, scope);
+              const hintKey = scopeHintKey(setting, scope);
+
+              return (
+                <div
+                  key={setting.key}
+                  role="option"
+                  aria-selected={isSelected}
+                  className={`${styles.item} ${isSelected ? styles.selected : ''}`}
+                  onClick={() => {
+                    if (busyKey) return;
+                    setSelectedIdx(i);
+                    handleAction(setting);
+                  }}
+                  // Hover feedback is pure CSS (.item:hover) and deliberately does
+                  // NOT move the selection: arrow keys own the pointer + accent
+                  // label, the mouse only adds a background highlight. This keeps
+                  // mouse and keyboard from fighting when the list scrolls under a
+                  // resting cursor.
+                >
+                  <div className={styles.row}>
+                    <span className={styles.pointer}>
+                      {isSelected ? '›' : ' '}
+                    </span>
+                    <span className={styles.label}>
+                      {formatSettingLabel(setting, t)}
+                      {/* Cross-scope hint inline after the label, same as the
+                      native CLI — never a separate row. */}
+                      {hintKey && (
+                        <span className={styles.scopeHint}>
+                          {' '}
+                          {t(hintKey, {
+                            scope: t(
+                              scope === 'workspace'
+                                ? 'settings.scope.user'
+                                : 'settings.scope.workspace',
+                            ),
+                          })}
+                        </span>
+                      )}
+                    </span>
+                    <span className={styles.value}>
+                      {busyKey === setting.key
+                        ? '...'
+                        : `${formatValue(setting, scope, t)}${hasScopeValue ? '*' : ''}${isSubDialog ? ' ▸' : ''}`}
+                    </span>
+                  </div>
+                  {isEditing && editMode && (
+                    <div className={styles.editWrap}>
+                      <input
+                        ref={inputRef}
+                        className={styles.editInput}
+                        type={setting.type === 'number' ? 'number' : 'text'}
+                        value={editMode.draft}
+                        onChange={(e) =>
+                          setEditMode({
+                            key: editMode.key,
+                            draft: e.target.value,
+                          })
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleEditSubmit();
+                          }
+                          if (e.key === 'Escape') {
+                            e.preventDefault();
+                            setEditMode(null);
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
 
       {/* Always rendered (nbsp placeholder) and clamped to one line, so the
@@ -582,7 +884,11 @@ export function SettingsMessage({
       </div>
 
       <div className={styles.footer}>
-        {editMode ? t('settings.footer.edit') : t('settings.footer')}
+        {editMode
+          ? t('settings.footer.edit')
+          : subPanel
+            ? t('settings.footer.theme')
+            : t('settings.footer')}
       </div>
     </div>
   );

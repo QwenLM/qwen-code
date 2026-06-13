@@ -14,6 +14,7 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
+import { FileReadCache } from '../services/fileReadCache.js';
 
 vi.mock('glob', { spy: true });
 
@@ -84,6 +85,7 @@ vi.mock('child_process', async (importOriginal) => {
 describe('GrepTool', () => {
   let tempRootDir: string;
   let grepTool: GrepTool;
+  let fileReadCache: FileReadCache;
   const abortSignal = new AbortController().signal;
 
   const mockConfig = {
@@ -99,6 +101,11 @@ describe('GrepTool', () => {
   beforeEach(async () => {
     Object.assign(mockConfig, {
       getTruncateToolOutputThreshold: () => 25000,
+    });
+    fileReadCache = new FileReadCache();
+    Object.assign(mockConfig, {
+      getFileReadCache: () => fileReadCache,
+      getFileReadCacheDisabled: () => false,
     });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     grepTool = new GrepTool(mockConfig);
@@ -214,6 +221,23 @@ describe('GrepTool', () => {
         path.join(tempRootDir, 'fileA.txt'),
         path.join(tempRootDir, 'sub', 'fileC.txt'),
       ]);
+
+      const fileAStats = await fs.stat(path.join(tempRootDir, 'fileA.txt'));
+      const fileCStats = await fs.stat(
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      );
+      const fileARead = fileReadCache.check(fileAStats);
+      const fileCRead = fileReadCache.check(fileCStats);
+      expect(fileARead.state).toBe('fresh');
+      expect(fileCRead.state).toBe('fresh');
+      if (fileARead.state === 'fresh') {
+        expect(fileARead.entry.lastReadWasFull).toBe(false);
+        expect(fileARead.entry.lastReadCacheable).toBe(true);
+      }
+      if (fileCRead.state === 'fresh') {
+        expect(fileCRead.entry.lastReadWasFull).toBe(false);
+        expect(fileCRead.entry.lastReadCacheable).toBe(true);
+      }
     });
 
     it('normalizes CRLF fallback grep output without dropping result paths', () => {

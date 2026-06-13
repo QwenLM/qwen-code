@@ -96,6 +96,27 @@ describe('BundledSkillLoader', () => {
     expect(commands[0]?.argumentHint).toBe('[topic]');
   });
 
+  it('should default bundled skills to user-invocable slash commands', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(true);
+  });
+
+  it('should propagate userInvocable from bundled skills to slash commands', async () => {
+    const skill = makeSkill({ userInvocable: false });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0]?.userInvocable).toBe(false);
+    expect(commands[0]?.modelInvocable).toBe(true);
+  });
+
   it('should load bundled skills as slash commands', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);

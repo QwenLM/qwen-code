@@ -74,6 +74,14 @@ function getModelKey(model: ModelMessageModel): string {
   ].join('\0');
 }
 
+function getModelSelectId(
+  model: ModelMessageModel,
+  isFastMode: boolean,
+): string {
+  if (!isFastMode) return model.id;
+  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
+}
+
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailRow}>
@@ -165,9 +173,9 @@ export function ModelMessage({
   const handleSelect = useCallback(() => {
     const model = availableModels[selectedIdx];
     if (!model) return;
-    onSelect(model.id);
+    onSelect(getModelSelectId(model, isFastMode));
     onClose();
-  }, [availableModels, onClose, onSelect, selectedIdx]);
+  }, [availableModels, isFastMode, onClose, onSelect, selectedIdx]);
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
@@ -234,7 +242,7 @@ export function ModelMessage({
               aria-selected={selected}
               className={`${styles.row} ${selected ? styles.selected : ''}`}
               onClick={() => {
-                onSelect(model.id);
+                onSelect(getModelSelectId(model, isFastMode));
                 onClose();
               }}
               // Hover feedback is pure CSS (.row:hover) and deliberately does

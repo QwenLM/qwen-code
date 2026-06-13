@@ -8,7 +8,9 @@ import type { DaemonClient } from './DaemonClient.js';
 import {
   isNonBlockingAccepted,
   matchTurnEvent,
+  normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
   type SubscribeOptions,
@@ -55,6 +57,13 @@ export interface DaemonSessionClientOptions {
   lastEventId?: number;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /**
+   * Local per-session prompt cap. The counter is shared with the parent
+   * `DaemonClient`; other session clients using the same parent instance
+   * contend on the same count. Set to `null`, `0`, or `Infinity` to disable
+   * the local guard. Server-side admission still applies.
+   */
+  maxPendingPromptsPerSession?: number | null;
 }
 
 export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
@@ -84,6 +93,7 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  private readonly promptLimit: number;
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -101,6 +111,10 @@ export class DaemonSessionClient {
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.promptLimit =
+      opts.maxPendingPromptsPerSession === undefined
+        ? opts.client.maxPendingPromptsPerSession
+        : normalizePendingPromptLimit(opts.maxPendingPromptsPerSession);
   }
 
   /**
@@ -226,6 +240,7 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
+    signal?.throwIfAborted();
     if (!this.subscriptionActive) {
       return await this.client.prompt(
         this.sessionId,
@@ -235,35 +250,58 @@ export class DaemonSessionClient {
       );
     }
 
-    const accepted = await this.client.promptNonBlocking(
+    const releaseAdmission = this.client.reservePromptSlot(
       this.sessionId,
-      req,
-      signal,
-      this.clientId,
+      this.promptLimit,
     );
-    if (!isNonBlockingAccepted(accepted)) {
-      return accepted;
+    let accepted: NonBlockingPromptAccepted | PromptResult;
+    try {
+      accepted = await this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+      if (!isNonBlockingAccepted(accepted)) {
+        releaseAdmission();
+        return accepted;
+      }
+      if (!this.subscriptionActive) {
+        throw Error('SSE stream ended');
+      }
+    } catch (err) {
+      releaseAdmission();
+      throw err;
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
       const onAbort = () => {
-        if (this._pendingPrompts.delete(accepted.promptId)) {
+        const pending = this._pendingPrompts.get(accepted.promptId);
+        if (pending && this._pendingPrompts.delete(accepted.promptId)) {
           this.client.cancel(this.sessionId, this.clientId).catch(() => {});
-          reject(signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+          pending.reject(
+            signal!.reason ?? new DOMException('Aborted', 'AbortError'),
+          );
         }
       };
       const cleanup = () => signal?.removeEventListener('abort', onAbort);
       this._pendingPrompts.set(accepted.promptId, {
         resolve: (r) => {
           cleanup();
+          releaseAdmission();
           resolve(r);
         },
         reject: (e) => {
           cleanup();
+          releaseAdmission();
           reject(e);
         },
       });
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      } else {
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }
     });
   }
 
@@ -329,6 +367,12 @@ export class DaemonSessionClient {
     });
   }
 
+  /**
+   * Execute a direct daemon-side shell command for this session. Requires the
+   * daemon to opt in to direct session shell and bearer auth; this wrapper
+   * automatically forwards the client id bound when the session was created
+   * or attached.
+   */
   async shellCommand(
     command: string,
     signal?: AbortSignal,
@@ -450,10 +494,7 @@ export class DaemonSessionClient {
     const acquire = () => {
       if (started) return;
       if (this.subscriptionActive) {
-        throw new Error(
-          'Another event subscription is already active on this session. ' +
-            'Reuse the existing AsyncGenerator or create a separate DaemonSessionClient.',
-        );
+        throw new Error('subscription active');
       }
       this.subscriptionActive = true;
       started = true;
@@ -553,7 +594,7 @@ function validateLastEventId(
 ): number | undefined {
   if (lastEventId === undefined) return undefined;
   if (!Number.isInteger(lastEventId) || lastEventId < 0) {
-    throw new TypeError('lastEventId must be a finite non-negative integer');
+    throw new TypeError('invalid lastEventId');
   }
   return lastEventId;
 }

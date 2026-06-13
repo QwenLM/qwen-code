@@ -214,6 +214,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 **Key Principle:** Start with a reasonable plan based on available information, then adapt as you learn. Users prefer seeing progress quickly rather than waiting for perfect understanding.
 
 - Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
+- When you see a <persisted-output> tag in a tool result, the full output was saved to disk because it was too large. Use the read_file tool to access the complete content if the preview is insufficient.
 
 ## New Applications
 

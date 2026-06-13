@@ -20,6 +20,10 @@ export interface DaemonProtocolVersions {
   supported: string[];
 }
 
+export interface DaemonCapabilitiesLimits {
+  maxPendingPromptsPerSession?: number | null;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -39,6 +43,11 @@ export interface DaemonCapabilities {
    * `session_events`). Never gate UI off `mode`.
    */
   features: string[];
+  /**
+   * Numeric daemon limits. `null` means the daemon advertises the limit as
+   * disabled; absence means an older daemon did not advertise it.
+   */
+  limits?: DaemonCapabilitiesLimits;
   modelServices: string[];
   /**
    * Absolute canonical workspace path this daemon is bound to
@@ -1141,6 +1150,15 @@ export type DaemonMcpRestartResult =
       restarted: false;
       skipped: true;
       reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    }
+  | {
+      serverName: string;
+      entries: Array<{
+        entryIndex: number;
+        restarted: boolean;
+        durationMs?: number;
+        reason?: string;
+      }>;
     };
 
 export type DaemonMcpManageAction =

@@ -56,19 +56,25 @@ export const skillsCommand: SlashCommand = {
     // single normalization pass instead of drifting independently.
     const disabled =
       context.services.config?.getDisabledSkillNames() ?? new Set<string>();
-    const visibleSkills = skills.filter(
+    const userInvocableSkills = skills.filter(
+      (skill) => skill.userInvocable !== false,
+    );
+    const visibleSkills = userInvocableSkills.filter(
       (s) => !disabled.has(s.name.toLowerCase()),
     );
     if (visibleSkills.length === 0) {
+      const text =
+        skills.length > 0 && userInvocableSkills.length === 0
+          ? t('All skills are marked as non-user-invocable.')
+          : userInvocableSkills.length === 0
+            ? t('No skills are currently available.')
+            : t(
+                'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
+              );
       context.ui.addItem(
         {
           type: MessageType.INFO,
-          text:
-            skills.length === 0
-              ? t('No skills are currently available.')
-              : t(
-                  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
-                ),
+          text,
         },
         Date.now(),
       );

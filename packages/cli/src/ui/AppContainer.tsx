@@ -154,6 +154,7 @@ import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
+import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -2291,6 +2292,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
   const {
+    isMcpApprovalDialogOpen,
+    currentMcpApproval,
+    pendingMcpApprovals,
+    mcpApprovalRemaining,
+    handleMcpApprovalSelect,
+  } = useMcpApproval(config);
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener();
@@ -2312,6 +2320,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowIdePrompt ||
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
+    isMcpApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -3302,6 +3311,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3430,6 +3443,10 @@ export const AppContainer = (props: AppContainerProps) => {
       shouldShowCommandMigrationNudge,
       commandMigrationTomlFiles,
       isFolderTrustDialogOpen,
+      isMcpApprovalDialogOpen,
+      currentMcpApproval,
+      pendingMcpApprovals,
+      mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -3538,6 +3555,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -3623,6 +3641,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
+      handleMcpApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,

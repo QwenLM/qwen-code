@@ -54,6 +54,11 @@ export interface ServeOptions {
    */
   maxSessions?: number;
   /**
+   * Per-session cap on accepted prompts that have not settled yet.
+   * Defaults to 5. `0` or `Infinity` disables the cap.
+   */
+  maxPendingPromptsPerSession?: number;
+  /**
    * Listener-level TCP connection cap (`server.maxConnections`).
    * Defaults to 256 — bounds the raw socket count regardless of
    * session count, so a slow / phantom SSE client can't pin the
@@ -112,6 +117,11 @@ export interface ServeOptions {
    * irrespective of this flag.
    */
   requireAuth?: boolean;
+  /**
+   * Opt in to direct session shell execution. The effective policy also
+   * requires a configured bearer token and a session-bound client id.
+   */
+  enableSessionShell?: boolean;
   /**
    * Cap on live MCP clients spawned inside the
    * ACP child for the bound workspace. When set, the daemon
@@ -243,6 +253,13 @@ export interface CapabilitiesEnvelope {
      * which one is currently in effect.
      */
     permission?: PermissionPolicy;
+  };
+  /**
+   * Active daemon resource limits. Additive to v=1; older daemons may omit it.
+   * `null` means the operator explicitly disabled that cap.
+   */
+  limits?: {
+    maxPendingPromptsPerSession?: number | null;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

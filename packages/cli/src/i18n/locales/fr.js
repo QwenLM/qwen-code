@@ -868,8 +868,6 @@ export default {
     "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'Cannot fork before the first conversation turn.':
     'Impossible de créer un fork avant le premier tour de conversation.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'La commande /fork nécessite le feature gate fork. Définissez QWEN_CODE_ENABLE_FORK_SUBAGENT=1 pour l’activer.',
   'The agent tool is unavailable; cannot fork.':
     "L'outil agent est indisponible ; impossible de créer un fork.",
   'Failed to launch fork: {{error}}': 'Échec du lancement du fork : {{error}}',
@@ -1491,6 +1489,28 @@ export default {
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
   'Current tasks': 'Tâches actuelles',
+  'Background tasks': 'Tâches en arrière-plan',
+  'No tasks currently running': 'Aucune tâche en cours',
+  'No entry to show.': 'Aucune entrée à afficher.',
+  'needs approval': 'nécessite une approbation',
+  'Background agent needs approval':
+    "L'agent en arrière-plan nécessite une approbation",
+  'Approve or deny the request above':
+    'Approuvez ou refusez la demande ci-dessus',
+  Running: 'En cours',
+  Paused: 'En pause',
+  Completed: 'Terminé',
+  Failed: 'Échec',
+  Stopped: 'Arrêté',
+  Shell: 'Shell',
+  Monitor: 'Moniteur',
+  Command: 'Commande',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidation de la mémoire',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} session)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} sessions)',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',

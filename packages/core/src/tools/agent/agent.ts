@@ -22,6 +22,7 @@ import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
   PromptConfig,
@@ -95,6 +96,7 @@ import {
   attachJsonlTranscriptWriter,
   patchAgentMeta,
   writeAgentMeta,
+  type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
@@ -245,6 +247,16 @@ export function resolveSubagentApprovalMode(
     return approvalModeToPermissionMode(parentApprovalMode);
   }
 
+  // The subagent-only `bubble` mode is not an ApprovalMode enum member; it
+  // resolves to Default run behavior (tool calls require confirmation). The
+  // background launch path is what turns deny into surface-to-parent. Handle
+  // it explicitly rather than relying on approvalModeToPermissionMode's
+  // `default:` fall-through, so adding a real ApprovalMode.BUBBLE later can't
+  // silently change this.
+  if (agentApprovalMode === BUBBLE_APPROVAL_MODE) {
+    return PermissionMode.Default;
+  }
+
   // Agent definition's mode applies if set
   if (agentApprovalMode) {
     const resolved = approvalModeToPermissionMode(
@@ -368,6 +380,57 @@ export interface ApprovalModeOverrideHandle {
   cleanup: () => void;
 }
 
+export interface ApprovalModeOverrideOptions {
+  persistedCliFlags?: AgentPersistedCliFlags;
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function applyPersistedCliFlagOverrides(
+  override: Config,
+  flags: AgentPersistedCliFlags | undefined,
+): void {
+  if (!flags) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  if (flags.bare !== undefined) {
+    ov.getBareMode = () => flags.bare;
+  }
+  if (hasOwn(flags, 'sandbox')) {
+    const sandbox = flags.sandbox ?? undefined;
+    ov.getSandbox = () => sandbox;
+  }
+  if (flags.screenReader !== undefined) {
+    ov.getScreenReader = () => flags.screenReader;
+  }
+  if (flags.model !== undefined) {
+    ov.getModel = () => flags.model;
+  }
+  if (flags.maxSessionTurns !== undefined) {
+    ov.getMaxSessionTurns = () => flags.maxSessionTurns;
+  }
+  if (flags.maxToolCalls !== undefined) {
+    ov.getMaxToolCalls = () => flags.maxToolCalls;
+  }
+}
+
+function capturePersistedCliFlags(
+  config: Config,
+  resolvedApprovalMode: ApprovalMode,
+): AgentPersistedCliFlags {
+  return {
+    approvalMode: resolvedApprovalMode,
+    bare: config.getBareMode(),
+    sandbox: config.getSandbox() ?? null,
+    screenReader: config.getScreenReader(),
+    model: config.getModel(),
+    maxSessionTurns: config.getMaxSessionTurns(),
+    maxToolCalls: config.getMaxToolCalls(),
+  };
+}
+
 /**
  * Creates a Config override with a different approval mode.
  *
@@ -400,10 +463,12 @@ export interface ApprovalModeOverrideHandle {
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
+  options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
   let cleanup: () => void = () => {};
@@ -1729,8 +1794,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      // When subagent_type is omitted and fork is enabled (opt-in +
-      // interactive), use fork. Otherwise fall back to general-purpose.
+      // When subagent_type is omitted and fork is available in an interactive
+      // session, use fork. Otherwise fall back to general-purpose.
       const isFork =
         !this.params.subagent_type && isForkSubagentEnabled(this.config);
       const effectiveSubagentType =
@@ -2114,13 +2179,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
 
-        // Background agents have no UI, so interactive permission prompts must be
-        // auto-denied rather than auto-approved (YOLO). PermissionRequest hooks
-        // still run and can override. Use Object.create so the resolved approval
-        // mode override (e.g. subagent-level `approvalMode: auto-edit`) is preserved.
+        // Background agents have no inline UI, so a tool call that still needs
+        // confirmation is by default auto-denied rather than auto-approved
+        // (YOLO). PermissionRequest hooks still run and can override. When the
+        // agent's definition uses `approvalMode: bubble` AND the session is
+        // interactive, we instead let the normal approval path open (emitting
+        // TOOL_WAITING_APPROVAL) and surface the prompt in the parent session's
+        // Background tasks UI — see `registry.bridgeApprovalEvents` below.
+        // Non-interactive sessions can't answer, so they keep auto-deny.
+        // (`bubble` resolves to `default` run behavior, so the resolved mode
+        // already requires confirmation — this only flips deny → surface.)
+        const shouldBubble = Boolean(
+          subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
+            this.config.isInteractive(),
+        );
+        // Use Object.create so the resolved approval mode override (e.g.
+        // subagent-level `approvalMode: auto-edit`) is preserved.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const bgConfig = Object.create(agentConfig) as any;
-        bgConfig.getShouldAvoidPermissionPrompts = () => true;
+        bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
         // Register in the background task registry only AFTER init succeeds — if
         // construction throws, a pre-registered phantom 'running' entry would hang
@@ -2283,6 +2360,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
@@ -2325,6 +2406,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+
+        // Bridge permission prompts to the parent session's Background tasks
+        // UI when bubbling is enabled. No-op subscription otherwise (the
+        // scheduler auto-denies before any TOOL_WAITING_APPROVAL fires), but
+        // we only wire it when enabled to keep the emitter free of dead
+        // listeners.
+        const cleanupApprovalBridge = shouldBubble
+          ? registry.bridgeApprovalEvents(hookOpts.agentId, bgEmitter)
+          : undefined;
 
         const cleanupOwnedMonitorNotifications =
           this.registerOwnedMonitorNotifications(
@@ -2499,6 +2589,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupApprovalBridge?.();
             cleanupOwnedMonitorNotifications();
             cleanupJsonl?.();
             // Release the per-subagent ToolRegistry now that the
@@ -2821,6 +2912,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,

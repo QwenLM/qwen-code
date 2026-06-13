@@ -360,6 +360,9 @@ export function slashCompletionSource(
               }
             : {}),
           detail: n.description || undefined,
+          ...(isSkillList && n.description
+            ? { info: `/${n.name}\n\n${n.description}` }
+            : {}),
           apply: `${command} `,
         };
       });
@@ -391,9 +394,14 @@ export function slashCompletionSource(
       .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
     const options = filteredCommands.map((c): Completion => {
       const command = `/${c.name}`;
+      const category = getCommandDisplayCategory(c);
+      const showCommandInfo = category === 'custom' || category === 'skill';
       return {
         label: command,
         detail: c.description || undefined,
+        ...(showCommandInfo && c.description
+          ? { info: `${command}\n\n${c.description}` }
+          : {}),
         apply: `${command} `,
         section: getCommandSection(c, translate, categoryOrder),
       };

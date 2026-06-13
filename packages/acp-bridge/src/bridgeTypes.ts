@@ -218,8 +218,13 @@ export interface AcpSessionBridge {
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same
-   * session FIFO-serialize through a per-session queue. Throws
-   * `SessionNotFoundError` when the id is unknown.
+   * session FIFO-serialize through a per-session queue.
+   *
+   * Admission contract: implementations must not be `async`. Admission
+   * failures such as `PromptQueueFullError` and pre-aborted signals throw
+   * synchronously so HTTP routes can reject before returning 202. Deferred
+   * failures such as `SessionNotFoundError` may be returned as rejected
+   * promises.
    */
   sendPrompt(
     sessionId: string,
@@ -482,7 +487,10 @@ export interface AcpSessionBridge {
    * Execute a shell command directly on the daemon (no LLM involvement).
    * Streams output through the session's SSE bus and injects the
    * command+result into the LLM's chat history via extMethod.
-   * Throws `SessionNotFoundError` for unknown ids.
+   * Throws `SessionShellDisabledError` when direct shell is not enabled,
+   * `SessionShellClientRequiredError` when no session-bound client id is
+   * provided, `InvalidClientIdError` when the client id is not bound to the
+   * session, and `SessionNotFoundError` for unknown ids.
    */
   executeShellCommand(
     sessionId: string,

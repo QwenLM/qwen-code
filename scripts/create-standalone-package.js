@@ -44,6 +44,9 @@ const DIST_REQUIRED_PATHS = [
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
+  // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
+  'fzfWorker.js',
   'chunks',
   'vendor',
   'bundled',

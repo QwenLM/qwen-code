@@ -13,9 +13,12 @@ import {
   MCPServerStatus,
   createTransport,
   ExtensionManager,
+  isGatedMcpScope,
 } from '@qwen-code/qwen-code-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
+import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 
 const COLOR_GREEN = '\u001b[32m';
 const COLOR_YELLOW = '\u001b[33m';
@@ -32,7 +35,14 @@ async function getMcpServersFromConfig(): Promise<
   });
   await extensionManager.refreshCache();
   const extensions = extensionManager.getLoadedExtensions();
-  const mcpServers = { ...(settings.merged.mcpServers || {}) };
+  // Assemble settings + project `.mcp.json` in precedence order (#4615);
+  // loading is a pure read — never connects. Extensions fill remaining gaps
+  // below, matching `Config.getMcpServers` (extension servers never shadow a
+  // configured one).
+  const mcpServers: Record<string, MCPServerConfig> = assembleMcpServers(
+    settings.merged.mcpServers,
+    process.cwd(),
+  );
   for (const extension of extensions) {
     if (extension.isActive) {
       Object.entries(extension.config.mcpServers || {}).forEach(
@@ -103,8 +113,39 @@ export async function listMcpServers(): Promise<void> {
 
   writeStdoutLine('Configured MCP servers:\n');
 
+  const cwd = process.cwd();
+  // Lazily loaded only when a gated (project/workspace) server is present, so
+  // the common no-gated-server case never touches the approvals store.
+  let approvals: ReturnType<typeof loadMcpApprovals> | undefined;
+
   for (const serverName of serverNames) {
     const server = mcpServers[serverName];
+
+    let serverInfo = `${serverName}: `;
+    if (server.httpUrl) {
+      serverInfo += `${server.httpUrl} (http)`;
+    } else if (server.url) {
+      serverInfo += `${server.url} (sse)`;
+    } else if (server.command) {
+      serverInfo += `${server.command} ${server.args?.join(' ') || ''} (stdio)`;
+    }
+
+    // Gated (project `.mcp.json` / workspace `.qwen/settings.json`) servers that
+    // are not approved are listed WITHOUT connecting — inspecting an untrusted
+    // config must stay side-effect-free (#4615). Only approved / non-gated
+    // servers get a live connection test.
+    if (isGatedMcpScope(server.scope)) {
+      approvals ??= loadMcpApprovals();
+      const state = approvals.getState(cwd, serverName, server);
+      if (state !== 'approved') {
+        const statusText =
+          state === 'rejected' ? 'Rejected' : 'Pending approval';
+        writeStdoutLine(
+          `${COLOR_YELLOW}●${RESET_COLOR} ${serverInfo} - ${statusText}`,
+        );
+        continue;
+      }
+    }
 
     const status = await getServerStatus(serverName, server);
 
@@ -124,15 +165,6 @@ export async function listMcpServers(): Promise<void> {
         statusIndicator = COLOR_RED + '✗' + RESET_COLOR;
         statusText = 'Disconnected';
         break;
-    }
-
-    let serverInfo = `${serverName}: `;
-    if (server.httpUrl) {
-      serverInfo += `${server.httpUrl} (http)`;
-    } else if (server.url) {
-      serverInfo += `${server.url} (sse)`;
-    } else if (server.command) {
-      serverInfo += `${server.command} ${server.args?.join(' ') || ''} (stdio)`;
     }
 
     writeStdoutLine(`${statusIndicator} ${serverInfo} - ${statusText}`);
