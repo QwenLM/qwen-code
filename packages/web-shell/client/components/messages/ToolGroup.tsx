@@ -154,6 +154,10 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
 const MAX_BASH_LINE_CHARS = 150;
 const MAX_READ_LINES = 25;
 
+// A description longer than this is likely ellipsised on a normal-width row, so
+// the row becomes expandable to re-flow the full text into a wrapped block.
+const DESCRIPTION_EXPAND_THRESHOLD = 60;
+
 export function resolveShellOutputMaxLines(
   settings: readonly DaemonSettingDescriptor[],
 ): number {
@@ -411,6 +415,10 @@ function getAgentDisplayInfo(
 }
 
 function shouldAutoExpand(tool: ACPToolCall): boolean {
+  // Once a tool completes successfully, collapse it to its one-line summary so
+  // the transcript stays scannable; the user can click to reopen it. Failures
+  // stay expanded so the error output remains visible without an extra click.
+  if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
   if (name === 'write_file' || name === 'writefile') return true;
@@ -462,6 +470,27 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
       description={info.description}
       elapsed={info.elapsed}
     />
+  );
+}
+
+function isDescriptionExpandable(description: string): boolean {
+  return (
+    description.length > DESCRIPTION_EXPAND_THRESHOLD ||
+    description.includes('\n')
+  );
+}
+
+function ToggleChevron({
+  expandable,
+  expanded,
+}: {
+  expandable: boolean;
+  expanded: boolean;
+}) {
+  return (
+    <span className={styles.lineToggle} aria-hidden="true">
+      {expandable ? (expanded ? '▾' : '▸') : ''}
+    </span>
   );
 }
 
@@ -611,6 +640,14 @@ export const ToolLine = memo(function ToolLine({
     return () => clearInterval(id);
   }, [isRunningAgent]);
 
+  // Collapse a regular tool to its one-line summary once it completes
+  // successfully. Agents are excluded — they keep whatever expand state the
+  // user chose, driven from their own panel — and failures stay open so the
+  // error output remains visible.
+  useEffect(() => {
+    if (!isAgent && tool.status === 'completed') setExpanded(false);
+  }, [isAgent, tool.status]);
+
   if (isAgent) {
     if (hasApproval && onConfirm) {
       return (
@@ -712,10 +749,16 @@ export const ToolLine = memo(function ToolLine({
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, tool.endTime);
-  const expandable = hasExpandableContent(tool);
 
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
+  // A row expands when it has detail output (bash/diff/read content) or when
+  // its description is long enough to be ellipsised. When a long description is
+  // expanded we move it out of the header into a wrapped block below, so the
+  // header drops its single-line copy.
+  const descExpandable = !isTodo && isDescriptionExpandable(description);
+  const expandable = !isTodo && (hasExpandableContent(tool) || descExpandable);
+  const relocateDescription = expanded && descExpandable;
 
   if (hasApproval && onConfirm) {
     return (
@@ -731,6 +774,7 @@ export const ToolLine = memo(function ToolLine({
         className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
         onClick={expandable ? () => setExpanded(!expanded) : undefined}
       >
+        <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
         <ToolHeaderExtra
@@ -738,13 +782,16 @@ export const ToolLine = memo(function ToolLine({
             kind: getToolHeaderKind(tool),
             tool,
             displayName,
-            description,
+            description: relocateDescription ? '' : description,
             elapsed,
             workspaceCwd,
           }}
         />
       </div>
       {isTodo && <TodoWriteContent tool={tool} />}
+      {relocateDescription && (
+        <div className={styles.lineFullArg}>{description}</div>
+      )}
       {!isTodo && !expanded && result && (
         <div className={styles.lineOutput}>{result}</div>
       )}

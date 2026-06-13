@@ -27,28 +27,69 @@ afterEach(() => {
   }
 });
 
-function makeShellTool(output: string): ACPToolCall {
+function makeShellTool(
+  output: string,
+  status: ACPToolCall['status'] = 'completed',
+): ACPToolCall {
   return {
     callId: 'call-shell-1',
     toolName: 'Shell',
-    status: 'completed',
+    status,
     rawOutput: { output },
   };
 }
 
-function renderShellTool(output: string): HTMLElement {
+function renderTool(tool: ACPToolCall): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <ToolGroup tools={[makeShellTool(output)]} />
+        <ToolGroup tools={[tool]} />
       </I18nProvider>,
     );
   });
   mounted.push({ root, container });
   return container;
+}
+
+function renderShellTool(output: string): HTMLElement {
+  const container = renderTool(makeShellTool(output));
+  // Completed tools collapse to a one-line summary by default; open the row so
+  // the assertions below can inspect the bash-output view.
+  const chevron = [...container.querySelectorAll('span')].find(
+    (s) => s.textContent === '▸',
+  );
+  if (chevron?.parentElement) click(chevron.parentElement);
+  return container;
+}
+
+function makeShellCommandTool(command: string): ACPToolCall {
+  return {
+    callId: 'call-shell-cmd',
+    toolName: 'run_shell_command',
+    status: 'completed',
+    args: { command },
+    rawOutput: { output: 'done' },
+  };
+}
+
+function makeAgentTool(status: ACPToolCall['status']): ACPToolCall {
+  return {
+    callId: 'agent-1',
+    toolName: 'task',
+    status,
+    args: { description: 'agentDescMarker' },
+    subTools: [
+      {
+        callId: 'agent-1-sub-1',
+        toolName: 'Read',
+        status: 'completed',
+        args: { file_path: '/ws/SubToolMarker.ts' },
+      },
+    ],
+  };
 }
 
 function getExpandButton(container: HTMLElement): HTMLButtonElement {
@@ -122,5 +163,112 @@ describe('shell tool output expand toggle', () => {
     expect(pre?.textContent).not.toContain('line2');
     expect(button.textContent).toBe('▼ Show all (8 lines)');
     expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('tool description expand toggle', () => {
+  it('keeps a finished command collapsed but reveals it in full on expand', () => {
+    const command = `npm run build && npm run test && npm run lint -- ${'x'.repeat(
+      80,
+    )}`;
+    const container = renderTool(makeShellCommandTool(command));
+
+    // Completed → collapsed: chevron points right. The full command (no longer
+    // hard-capped at one line's worth of characters) is present in the header.
+    expect(container.textContent).toContain('▸');
+    expect(container.textContent).toContain(command);
+
+    const chevron = [...container.querySelectorAll('span')].find(
+      (s) => s.textContent === '▸',
+    );
+    click(chevron!.parentElement!);
+
+    // Expanded → chevron flips and the full command is reflowed below.
+    expect(container.textContent).toContain('▾');
+    expect(container.textContent).toContain(command);
+  });
+});
+
+describe('auto-collapse on finish', () => {
+  it('collapses a completed tool to its summary by default', () => {
+    const container = renderTool(makeShellTool('a\nb\nc\nd'));
+    // The expanded bash <pre> is not rendered until the user opens the row.
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.textContent).toContain('▸');
+  });
+
+  it('keeps a running tool expanded so streaming output stays visible', () => {
+    const container = renderTool(
+      makeShellTool('streaming output', 'in_progress'),
+    );
+    expect(container.querySelector('pre')?.textContent).toContain('streaming');
+  });
+
+  it('keeps a failed tool expanded so the error stays visible', () => {
+    const container = renderTool(
+      makeShellTool('error: boom\n  at step 1', 'failed'),
+    );
+    expect(container.querySelector('pre')?.textContent).toContain('boom');
+  });
+
+  it('auto-collapses a running tool when it transitions to completed', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    const output = 'line1\nline2\nline3\nline4';
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ToolGroup tools={[makeShellTool(output, 'in_progress')]} />
+        </I18nProvider>,
+      );
+    });
+    // Running → expanded: the bash output is visible.
+    expect(container.querySelector('pre')).not.toBeNull();
+
+    // Same callId, now finished → the row collapses on its own.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ToolGroup tools={[makeShellTool(output, 'completed')]} />
+        </I18nProvider>,
+      );
+    });
+    expect(container.querySelector('pre')).toBeNull();
+  });
+
+  it('does not collapse an agent the user expanded when it completes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    const render = (status: ACPToolCall['status']) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolGroup tools={[makeAgentTool(status)]} />
+          </I18nProvider>,
+        );
+      });
+
+    render('in_progress');
+    // Agents start collapsed: the sub-tool panel is hidden.
+    expect(container.textContent).not.toContain('SubToolMarker');
+
+    // Expand by clicking the agent's summary row.
+    const summaryLabel = [...container.querySelectorAll('span')].find(
+      (s) => s.textContent === 'task:',
+    );
+    expect(summaryLabel).toBeTruthy();
+    click(summaryLabel!.parentElement!);
+    expect(container.textContent).toContain('SubToolMarker');
+
+    // Completion must NOT yank the panel shut: the collapse-on-finish effect
+    // is scoped to non-agent tools.
+    render('completed');
+    expect(container.textContent).toContain('SubToolMarker');
   });
 });
