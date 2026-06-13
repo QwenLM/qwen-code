@@ -309,7 +309,7 @@ describe('RestSseTransport', () => {
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
       const gen = transport.subscribeEvents('s1');
-      await expect(gen.next()).rejects.toThrow('SSE response has no body');
+      await expect(gen.next()).rejects.toThrow('No SSE body');
     });
 
     it('parses SSE frames into DaemonEvents', async () => {
