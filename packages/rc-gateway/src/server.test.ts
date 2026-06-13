@@ -591,6 +591,60 @@ describe('gateway app', () => {
     expect((await res.json()).stopReason).toBe('end_turn');
   });
 
+  it("a bridge prompt with X-RC-SubActor stamps the audit row's subActor", async () => {
+    const { url, pairing, auditPath } = await boot();
+    const { code } = pairing.mint([BRIDGE]); // expands to the bridge bundle
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'tg-bridge' }),
+    });
+    const bridgeToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bridgeToken}`,
+        'X-RC-SubActor': 'telegram:evan',
+      },
+      body: JSON.stringify({ prompt: 'hi' }),
+    });
+    expect(res.status).toBe(200);
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'prompt_sent'),
+    );
+    const sent = rows.find((x) => x.action === 'prompt_sent');
+    expect(sent?.subActor).toBe('telegram:evan');
+  });
+
+  it('a NON-bridge write token cannot stamp subActor (header ignored)', async () => {
+    const { url, pairing, auditPath } = await boot();
+    const { code } = pairing.mint([SESSION_READ, WRITE]); // no bridge
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'writer' }),
+    });
+    const writeToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/session/s1/prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${writeToken}`,
+        'X-RC-SubActor': 'telegram:victim', // spoof attempt
+      },
+      body: JSON.stringify({ prompt: 'hi' }),
+    });
+    expect(res.status).toBe(200);
+    const rows = await pollAudit(auditPath, (r) =>
+      r.some((x) => x.action === 'prompt_sent'),
+    );
+    const sent = rows.find((x) => x.action === 'prompt_sent');
+    expect(sent?.subActor).toBeUndefined();
+  });
+
   it('403s the fork route for a token lacking write', async () => {
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]); // no write

@@ -61,6 +61,7 @@ export function createPermissionVoteRoute(
     void audit?.record({
       action: 'permission_voted',
       actorTokenId: req.rcClient?.id,
+      subActor: req.rcClient?.subActor,
       target: sessionId,
       shareId: req.rcClient?.shareId,
       shareLabel: req.rcClient?.shareLabel,

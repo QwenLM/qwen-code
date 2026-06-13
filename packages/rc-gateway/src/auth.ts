@@ -6,9 +6,51 @@
 
 import type { RequestHandler } from 'express';
 import type { TokenStore } from './tokenStore.js';
-import type { RcScope } from './scopes.js';
+import { BRIDGE, type RcScope } from './scopes.js';
 import type { AuditRecorder } from './auditLog.js';
 import './types.js';
+
+/** Max length of an asserted sub-actor id (bounds audit-row size). */
+const SUB_ACTOR_MAX = 128;
+/**
+ * A sub-actor id must start alphanumeric and use only a safe id charset
+ * (`<svc>:<user-id>` shapes like `telegram:evan`, `discord:12345`). The charset
+ * deliberately EXCLUDES whitespace and control characters so an asserted value
+ * can never inject a newline into a JSONL audit line or smuggle markup into a
+ * client that renders it.
+ */
+const SUB_ACTOR_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
+
+/**
+ * Parse + validate an `X-RC-SubActor` header value. Returns the trimmed id, or
+ * `null` when absent/empty/too-long/ill-formed. PURE.
+ */
+export function parseSubActor(raw: string | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (v.length === 0 || v.length > SUB_ACTOR_MAX) return null;
+  return SUB_ACTOR_RE.test(v) ? v : null;
+}
+
+/**
+ * Resolve an asserted sub-actor (the underlying human behind a bridge) onto
+ * `req.rcClient.subActor`. SECURITY: a sub-actor is attached ONLY when the
+ * resolved token holds the `bridge` scope AND the header value is valid — a
+ * regular client sending `X-RC-SubActor` is silently ignored, so no client can
+ * forge "acting for someone else" in the audit log. Mount AFTER `bearerResolve`.
+ * Never rejects (a bad/absent header just yields no attribution); total.
+ */
+export function resolveSubActor(): RequestHandler {
+  return (req, _res, next) => {
+    const client = req.rcClient;
+    if (client && client.scopes.includes(BRIDGE)) {
+      // Header `X-RC-SubActor` lowercases on the wire to `x-rc-subactor`.
+      const sub = parseSubActor(req.header('x-rc-subactor'));
+      if (sub) client.subActor = sub;
+    }
+    next();
+  };
+}
 
 /** Resolve the bearer token to `req.rcClient`, or 401 (+ audit auth_failed). */
 export function bearerResolve(

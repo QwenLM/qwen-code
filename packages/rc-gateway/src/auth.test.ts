@@ -10,8 +10,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Request, Response } from 'express';
 import { TokenStore } from './tokenStore.js';
-import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
-import { SESSION_READ, APPROVE } from './scopes.js';
+import {
+  bearerResolve,
+  requireScope,
+  enforceSessionLock,
+  resolveSubActor,
+  parseSubActor,
+} from './auth.js';
+import { SESSION_READ, APPROVE, WRITE, BRIDGE } from './scopes.js';
 import type { AuditEntry, AuditRecorder } from './auditLog.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -227,5 +233,72 @@ describe('auth middleware', () => {
       called = true;
     });
     expect(called).toBe(true);
+  });
+});
+
+/** A fake Express req carrying rcClient + a case-insensitive header lookup. */
+function subReq(
+  scopes: string[] | undefined,
+  header: string | undefined,
+): Request {
+  const headers: Record<string, string> = {};
+  if (header !== undefined) headers['x-rc-subactor'] = header;
+  return {
+    rcClient: scopes ? { id: 'b1', scopes } : undefined,
+    header: (n: string) => headers[n.toLowerCase()],
+  } as unknown as Request;
+}
+
+describe('parseSubActor', () => {
+  it('accepts a well-formed <svc>:<id>', () => {
+    expect(parseSubActor('telegram:evan')).toBe('telegram:evan');
+    expect(parseSubActor('discord:123456789')).toBe('discord:123456789');
+    expect(parseSubActor('  matrix:@a.b_c  ')).toBe('matrix:@a.b_c'); // trimmed
+  });
+  it('rejects empty / whitespace / overlong', () => {
+    expect(parseSubActor(undefined)).toBeNull();
+    expect(parseSubActor('')).toBeNull();
+    expect(parseSubActor('   ')).toBeNull();
+    expect(parseSubActor('a'.repeat(129))).toBeNull();
+  });
+  it('rejects injection / unsafe charset (newline, spaces, leading punct)', () => {
+    expect(parseSubActor('a\nb')).toBeNull();
+    expect(parseSubActor('has space')).toBeNull();
+    expect(parseSubActor(':leading')).toBeNull();
+    expect(parseSubActor('<script>')).toBeNull();
+  });
+});
+
+describe('resolveSubActor middleware', () => {
+  it('attaches subActor for a BRIDGE token with a valid header', () => {
+    const req = subReq([BRIDGE, SESSION_READ], 'telegram:evan');
+    let called = false;
+    resolveSubActor()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+    expect(req.rcClient?.subActor).toBe('telegram:evan');
+  });
+
+  it('IGNORES the header for a non-bridge token (no attribution spoofing)', () => {
+    const req = subReq([APPROVE, WRITE, SESSION_READ], 'telegram:evan');
+    resolveSubActor()(req, fakeRes(), () => {});
+    expect(req.rcClient?.subActor).toBeUndefined();
+  });
+
+  it('leaves subActor unset for a bridge token with an invalid header', () => {
+    const req = subReq([BRIDGE], 'bad value\n');
+    resolveSubActor()(req, fakeRes(), () => {});
+    expect(req.rcClient?.subActor).toBeUndefined();
+  });
+
+  it('is a no-op (and calls next) when unauthenticated', () => {
+    const req = subReq(undefined, 'telegram:evan');
+    let called = false;
+    resolveSubActor()(req, fakeRes(), () => {
+      called = true;
+    });
+    expect(called).toBe(true);
+    expect(req.rcClient).toBeUndefined();
   });
 });

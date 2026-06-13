@@ -64,6 +64,7 @@ export function createPromptRoute(
     void audit?.record({
       action: 'prompt_sent',
       actorTokenId: req.rcClient?.id,
+      subActor: req.rcClient?.subActor,
       target: sessionId,
       detail: { stopReason: result.stopReason, blocks: blocks.length },
     });

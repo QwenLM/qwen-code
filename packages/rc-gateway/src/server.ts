@@ -13,7 +13,12 @@ import type { TokenStore } from './tokenStore.js';
 import type { PairingService } from './pairing.js';
 import type { VapidStore } from './webpush/vapid.js';
 import type { PushStore } from './pushStore.js';
-import { bearerResolve, requireScope, enforceSessionLock } from './auth.js';
+import {
+  bearerResolve,
+  requireScope,
+  enforceSessionLock,
+  resolveSubActor,
+} from './auth.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE, SHARE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog, type AuditRecorder } from './auditLog.js';
@@ -193,6 +198,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit));
+  // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
+  // only honored for bridge-scope tokens. Must follow bearerResolve.
+  app.use(resolveSubActor());
   app.get(
     '/rc/session/:id/events',
     requireScope(SESSION_READ, audit),

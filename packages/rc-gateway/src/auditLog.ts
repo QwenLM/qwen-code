@@ -113,6 +113,14 @@ export interface AuditEntry {
   shareId?: string;
   /** The operator-chosen share label, denormalized so it survives token expiry. */
   shareLabel?: string;
+  /**
+   * The underlying human a BRIDGE token acted on behalf of (e.g. `telegram:evan`),
+   * asserted via `X-RC-SubActor` and resolved only for bridge tokens. Lets the
+   * audit answer "who actually pressed the button", not just "which bridge".
+   * Flows onto the `/rc/events` SSE frame automatically (the frame serializes the
+   * whole record).
+   */
+  subActor?: string;
   /** Small extras (granted scopes, required scope, request path). No secrets. */
   detail?: Record<string, unknown>;
 }
