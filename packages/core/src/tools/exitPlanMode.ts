@@ -174,6 +174,19 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
   }
 
+  private buildRejectedGateDisplay(
+    message: string,
+    plan: string,
+    details: string,
+  ): ToolResult['returnDisplay'] {
+    return {
+      type: 'plan_summary',
+      message,
+      plan: `${plan.trimEnd()}\n\n---\n\n${details}`,
+      rejected: true,
+    };
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     const { plan, originalRequest, researchSummary, resolutionSummary } =
       this.params;
@@ -242,29 +255,56 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
               'Gate approved' + (notes ? `\n\n${notes}` : ''),
             );
           }
-          case 'blocked':
+          case 'blocked': {
+            const llmContent = formatBlockedResponse(decision);
+            const message = `Plan gate: blocked (${decision.findings.length} finding(s))`;
             return {
-              llmContent: formatBlockedResponse(decision),
-              returnDisplay: `Plan gate: blocked (${decision.findings.length} finding(s))`,
-            };
-          case 'needs_user':
-            gateState.needsUserPending = true;
-            return {
-              llmContent: formatNeedsUserResponse(decision),
-              returnDisplay: `Plan gate: needs user input (${decision.questions.length} question(s))`,
-            };
-          case 'cap_escalation': {
-            gateState.capEscalationPending = true;
-            return {
-              llmContent: formatCapEscalationResponse(decision),
-              returnDisplay: `Plan gate: cap reached with ${decision.blockingFindings.length} blocking finding(s)`,
+              llmContent,
+              returnDisplay: this.buildRejectedGateDisplay(
+                message,
+                plan,
+                llmContent,
+              ),
             };
           }
-          case 'unavailable':
+          case 'needs_user': {
+            gateState.needsUserPending = true;
+            const llmContent = formatNeedsUserResponse(decision);
+            const message = `Plan gate: needs user input (${decision.questions.length} question(s))`;
             return {
-              llmContent: formatUnavailableResponse(decision),
-              returnDisplay: `Plan gate: unavailable — ${decision.reason}`,
+              llmContent,
+              returnDisplay: this.buildRejectedGateDisplay(
+                message,
+                plan,
+                llmContent,
+              ),
             };
+          }
+          case 'cap_escalation': {
+            gateState.capEscalationPending = true;
+            const llmContent = formatCapEscalationResponse(decision);
+            const message = `Plan gate: cap reached with ${decision.blockingFindings.length} blocking finding(s)`;
+            return {
+              llmContent,
+              returnDisplay: this.buildRejectedGateDisplay(
+                message,
+                plan,
+                llmContent,
+              ),
+            };
+          }
+          case 'unavailable': {
+            const llmContent = formatUnavailableResponse(decision);
+            const message = `Plan gate: unavailable - ${decision.reason}`;
+            return {
+              llmContent,
+              returnDisplay: this.buildRejectedGateDisplay(
+                message,
+                plan,
+                llmContent,
+              ),
+            };
+          }
           default: {
             const _exhaustive: never = decision;
             return {
