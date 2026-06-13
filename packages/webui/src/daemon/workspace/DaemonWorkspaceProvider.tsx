@@ -27,6 +27,10 @@ const DaemonWorkspaceContext = createContext<
   DaemonWorkspaceContextValue | undefined
 >(undefined);
 
+// Module-level sentinel for deferred-disposal StrictMode guard.
+// See the useEffect cleanup in DaemonWorkspaceProvider for details.
+let pendingDisposeClient: DaemonClient | undefined;
+
 export type {
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
@@ -87,6 +91,13 @@ export function DaemonWorkspaceProvider({
     setError(undefined);
     setCapabilities(undefined);
 
+    // Cancel any pending deferred disposal from a previous cleanup (handles
+    // React StrictMode double-invocation: the first cleanup schedules a
+    // disposal microtask, but the synchronous second mount cancels it).
+    if (pendingDisposeClient === client) {
+      pendingDisposeClient = undefined;
+    }
+
     let disposed = false;
     void getCapabilities()
       .then((caps) => {
@@ -104,7 +115,17 @@ export function DaemonWorkspaceProvider({
 
     return () => {
       disposed = true;
-      client.dispose();
+      // Defer disposal by one microtask. In StrictMode the synchronous
+      // re-mount cancels disposal before the microtask fires, preserving
+      // the memoized client. On real unmount or client replacement no
+      // cancellation occurs and disposal proceeds.
+      pendingDisposeClient = client;
+      queueMicrotask(() => {
+        if (pendingDisposeClient === client) {
+          pendingDisposeClient = undefined;
+          client.dispose();
+        }
+      });
     };
   }, [client, getCapabilities]);
 
