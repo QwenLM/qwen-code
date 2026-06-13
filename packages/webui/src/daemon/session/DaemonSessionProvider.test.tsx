@@ -140,6 +140,7 @@ const sdkMocks = vi.hoisted(() => {
     getWorkspaceAgent = getWorkspaceAgent;
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
+    dispose = vi.fn();
   }
 
   function takeSession(client: unknown): MockSession {

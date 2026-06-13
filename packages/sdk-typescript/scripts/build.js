@@ -20,7 +20,10 @@ import esbuild from 'esbuild';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 116 * 1024;
+// Budget includes the DaemonTransport interface + DaemonTransportClosedError +
+// RestSseTransport (default transport, constructed by DaemonClient).
+// Bumped from 116KB to 118KB for the transport abstraction layer (~1.5KB).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 118 * 1024;
 
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
