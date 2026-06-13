@@ -24,6 +24,20 @@ sidecar later by changing only its configuration.
 - Edits the original message (disabling the buttons, appending the outcome) when
   the request resolves.
 
+### Not yet built (deferred)
+
+This delivery is the **approval surface**, matching the Telegram bridge. The
+following spec requirements are intentionally deferred and are **not** present:
+
+- **`session_update` streaming** (mirroring the agent's running output into the
+  channel, with the 2000-char safe-split). The bridge keeps channels quiet —
+  only `permission_request` is rendered.
+- **Threads on long streams** (design D4). With no `session_update` streaming
+  there is nothing to thread.
+- Registration declares `supportsMarkdown: true` rather than the spec's
+  `"limited"` plus `supportsThreads`/`supportsEdits` (the shared `BridgeClient`
+  registration shape is boolean-only today).
+
 ## Setup
 
 ### 1. Create a Discord application + bot
