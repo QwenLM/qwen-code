@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../adapters/types';
 import {
+  findDisplayItemIndex,
   getDisplayItemVirtualKey,
   groupParallelAgents,
   shouldUseVirtualScroll,
@@ -253,5 +254,43 @@ describe('shouldUseVirtualScroll', () => {
   it('accepts a custom threshold', () => {
     expect(shouldUseVirtualScroll(50, 50)).toBe(false);
     expect(shouldUseVirtualScroll(51, 50)).toBe(true);
+  });
+});
+
+describe('findDisplayItemIndex', () => {
+  it('finds a row by message id', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeUserMessage('u2'),
+    ]);
+    expect(findDisplayItemIndex(items, 'g1')).toBe(1);
+    expect(findDisplayItemIndex(items, 'missing')).toBe(-1);
+  });
+
+  it('falls back to the call id when the message id was merged away', () => {
+    // Simulates compact mode, where consecutive tool groups collapse into
+    // the first group's message id.
+    const merged: Message = {
+      id: 'g1',
+      role: 'tool_group',
+      tools: [
+        { callId: 'call-a', toolName: 'Read', status: 'completed' },
+        { callId: 'call-b', toolName: 'TodoWrite', status: 'completed' },
+      ],
+    };
+    const items = groupParallelAgents([makeUserMessage('u1'), merged]);
+    expect(findDisplayItemIndex(items, 'g2', 'call-b')).toBe(1);
+    expect(findDisplayItemIndex(items, 'g2', 'call-x')).toBe(-1);
+  });
+
+  it('finds tool calls grouped into a parallel agents row', () => {
+    const items = groupParallelAgents([
+      makeAgentToolGroup('a1'),
+      makeAgentToolGroup('a2'),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0].type).toBe('parallel_agents');
+    expect(findDisplayItemIndex(items, 'a2', 'call-a2')).toBe(0);
   });
 });

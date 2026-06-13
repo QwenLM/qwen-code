@@ -13,7 +13,7 @@ import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
 import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
-import { extractTodosFromToolCall } from '../../utils/todos';
+import { extractTodosFromToolCall, getTodoStatusIcon } from '../../utils/todos';
 import {
   formatDurationMs,
   formatElapsed,
@@ -302,7 +302,7 @@ function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
             key={todo.id || i}
             className={`${styles.todoItem} ${getTodoClass(todo.status)}`}
           >
-            {getTodoIcon(todo.status)} {todo.content}
+            {getTodoStatusIcon(todo.status)} {todo.content}
           </div>
         ))}
       </div>
@@ -341,17 +341,6 @@ function getTodoClass(status: TodoItem['status']): string {
       return styles.todoActive;
     case 'pending':
       return styles.todoPending;
-  }
-}
-
-function getTodoIcon(status: TodoItem['status']): string {
-  switch (status) {
-    case 'completed':
-      return '●';
-    case 'in_progress':
-      return '◐';
-    case 'pending':
-      return '○';
   }
 }
 

@@ -19,3 +19,18 @@
   background: var(--border-color);
   border-radius: 3px;
 }
+
+.rowFlash {
+  border-radius: 8px;
+  animation: row-flash 1.6s ease-out;
+}
+
+@keyframes row-flash {
+  0%,
+  30% {
+    background: color-mix(in srgb, var(--accent-color) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
