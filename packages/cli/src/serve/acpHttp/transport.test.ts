@@ -11,9 +11,9 @@ import type { AddressInfo } from 'node:net';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { PromptQueueFullError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   InvalidClientIdError,
+  PromptQueueFullError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';

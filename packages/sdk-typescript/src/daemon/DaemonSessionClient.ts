@@ -58,9 +58,10 @@ export interface DaemonSessionClientOptions {
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
   /**
-   * Session-local cap for prompts accepted through the long-lived
-   * subscription path. Defaults to the bound DaemonClient's limit.
-   * `null`, `0`, and `Infinity` disable the local cap.
+   * Local per-session prompt cap. The counter is shared with the parent
+   * `DaemonClient`; other session clients using the same parent instance
+   * contend on the same count. Set to `null`, `0`, or `Infinity` to disable
+   * the local guard. Server-side admission still applies.
    */
   maxPendingPromptsPerSession?: number | null;
 }

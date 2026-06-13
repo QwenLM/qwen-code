@@ -2675,6 +2675,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    // Keep this method non-async: admission failures must throw before
+    // HTTP routes return 202.
     sendPrompt(sessionId, req, signal, context) {
       opts.onDiagnosticLine?.(
         `qwen serve: bridge sendPrompt for session=${sessionId}`,

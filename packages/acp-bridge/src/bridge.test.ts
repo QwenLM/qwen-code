@@ -2570,6 +2570,43 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each([[0], [Infinity]])(
+      'does not cap pending prompts when maxPendingPromptsPerSession is %s',
+      async (maxPendingPromptsPerSession) => {
+        let releaseFirst: (() => void) | undefined;
+        const factory: ChannelFactory = async () =>
+          makeChannel({
+            promptImpl: async (p) => {
+              const text =
+                (p.prompt[0] as { text?: string } | undefined)?.text ?? '';
+              if (text === 'hold') {
+                await new Promise<void>((resolve) => {
+                  releaseFirst = resolve;
+                });
+              }
+              return { stopReason: 'end_turn' };
+            },
+          }).channel;
+        const bridge = makeBridge({
+          channelFactory: factory,
+          maxPendingPromptsPerSession,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        const accepted = Array.from({ length: 6 }, (_, i) =>
+          bridge.sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: i === 0 ? 'hold' : `queued-${i}` }],
+          }),
+        );
+
+        await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+        releaseFirst!();
+        await expect(Promise.all(accepted)).resolves.toHaveLength(6);
+        await bridge.shutdown();
+      },
+    );
+
     it('releases a pending prompt slot after a failed prompt settles', async () => {
       let releaseFirst: (() => void) | undefined;
       let calls = 0;
@@ -4367,6 +4404,25 @@ describe('createAcpSessionBridge', () => {
       // Explicit zero or Infinity remain valid "unlimited" sentinels.
       expect(() => makeBridge({ maxSessions: 0 })).not.toThrow();
       expect(() => makeBridge({ maxSessions: Infinity })).not.toThrow();
+    });
+
+    it.each([
+      ['negative', -5],
+      ['float', 1.5],
+      ['NaN', Number.NaN],
+    ])('rejects invalid maxPendingPromptsPerSession (%s)', (_label, value) => {
+      expect(() => makeBridge({ maxPendingPromptsPerSession: value })).toThrow(
+        /maxPendingPromptsPerSession/,
+      );
+    });
+
+    it('accepts disabled maxPendingPromptsPerSession sentinels', () => {
+      expect(() =>
+        makeBridge({ maxPendingPromptsPerSession: 0 }),
+      ).not.toThrow();
+      expect(() =>
+        makeBridge({ maxPendingPromptsPerSession: Infinity }),
+      ).not.toThrow();
     });
   });
 

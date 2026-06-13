@@ -11,6 +11,7 @@ import {
   DaemonPendingPromptLimitError,
   abortTimeout,
   composeAbortSignals,
+  normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
 import {
   DaemonCapabilityMissingError,
@@ -105,6 +106,26 @@ function recordingFetch(
 }
 
 describe('DaemonClient', () => {
+  describe('normalizePendingPromptLimit', () => {
+    it('defaults undefined to 5', () => {
+      expect(normalizePendingPromptLimit(undefined)).toBe(5);
+    });
+
+    it.each([[null], [0], [Infinity]])('disables cap for %s', (value) => {
+      expect(normalizePendingPromptLimit(value)).toBe(Infinity);
+    });
+
+    it('passes through positive integers', () => {
+      expect(normalizePendingPromptLimit(7)).toBe(7);
+    });
+
+    it.each([[-1], [1.5], [Number.NaN]])('throws for %s', (value) => {
+      expect(() => normalizePendingPromptLimit(value)).toThrow(
+        /bad maxPendingPromptsPerSession/,
+      );
+    });
+  });
+
   describe('health', () => {
     it('GETs /health and returns the body', async () => {
       const { fetch, calls } = recordingFetch(() =>

@@ -88,6 +88,7 @@ import type {
   ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import type { DaemonLogger } from './daemonLogger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
@@ -95,6 +96,18 @@ const baseOpts: ServeOptions = {
   port: 4170,
   mode: 'http-bridge',
 };
+
+function fakeDaemonLog(): DaemonLogger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    raw: vi.fn(),
+    getLogPath: () => '',
+    getDaemonId: () => 'test-daemon',
+    flush: vi.fn(async () => {}),
+  };
+}
 
 // Workspace fixtures must round-trip through `path.resolve` so the
 // expected values match the canonicalized form the route produces on
@@ -3169,7 +3182,8 @@ describe('createServeApp', () => {
           throw new PromptQueueFullError(5, 5, 'session-A');
         },
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
       const res = await request(app)
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -3184,6 +3198,14 @@ describe('createServeApp', () => {
         pendingCount: 5,
       });
       expect(res.body.promptId).toBeUndefined();
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: queue full',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          limit: 5,
+          pendingCount: 5,
+        }),
+      );
     });
 
     it('passes an AbortSignal into bridge.sendPrompt', async () => {

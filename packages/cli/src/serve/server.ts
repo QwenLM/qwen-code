@@ -2249,6 +2249,15 @@ export function createServeApp(
       );
     } catch (err) {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (daemonLog && err instanceof PromptQueueFullError) {
+        daemonLog.warn('prompt admission rejected: queue full', {
+          sessionId,
+          promptId,
+          ...(clientId !== undefined ? { clientId } : {}),
+          limit: err.limit,
+          pendingCount: err.pendingCount,
+        });
+      }
       sendBridgeError(res, err, {
         route: 'POST /session/:id/prompt',
         sessionId,

@@ -221,6 +221,10 @@ export class DaemonHttpError extends Error {
   }
 }
 
+/**
+ * SDK-side representation of the daemon's `prompt_queue_full` condition.
+ * Mirrors the bridge-side `PromptQueueFullError` wire data.
+ */
 export class DaemonPendingPromptLimitError extends Error {
   declare readonly sessionId: string;
   declare readonly limit: number;
@@ -393,9 +397,10 @@ export class DaemonClient {
       throw new DaemonPendingPromptLimitError(sessionId, limit, pendingCount);
     }
     this.promptCounts[sessionId] = pendingCount + 1;
-    let releaseCount = 1;
+    let released = false;
     return () => {
-      if (releaseCount-- <= 0) return;
+      if (released) return;
+      released = true;
       const current = this.promptCounts[sessionId] ?? 0;
       if (current <= 1) {
         delete this.promptCounts[sessionId];
@@ -1902,6 +1907,10 @@ export class DaemonClient {
    * the temporary 202 fallback.
    *
    * Falls back to `prompt()` for legacy 200 daemons.
+   *
+   * Note: this method does not enforce the local pending-prompt cap.
+   * Callers that need early-fail behavior should use {@link prompt} or
+   * reserve a slot before calling this method.
    */
   async promptNonBlocking(
     sessionId: string,
