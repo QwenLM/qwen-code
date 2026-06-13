@@ -20,7 +20,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { MessageList } from './components/MessageList';
+import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
@@ -117,13 +117,8 @@ import {
 } from './components/messages/GoalStatusMessage';
 import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
-import type {
-  ACPToolCall,
-  Message,
-  PermissionRequest,
-  TodoItem,
-} from './adapters/types';
-import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
+import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
+import { getFloatingTodos } from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import {
   WebShellCustomizationProvider,
@@ -457,31 +452,6 @@ function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
   return parts.join('|');
 }
 
-function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
-  let todos: TodoItem[] | undefined;
-
-  for (const message of messages) {
-    if (message.role === 'plan') {
-      if (hasActiveTodos(message.todos)) {
-        todos = message.todos;
-      } else {
-        todos = [];
-      }
-      continue;
-    }
-    if (message.role !== 'tool_group') continue;
-
-    for (const tool of message.tools) {
-      const nextTodos = extractTodosFromToolCall(tool);
-      if (nextTodos) {
-        todos = hasActiveTodos(nextTodos) ? nextTodos : [];
-      }
-    }
-  }
-
-  return todos ?? [];
-}
-
 function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
@@ -671,20 +641,49 @@ export function App({
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = pendingApproval;
   const shouldHideComposer = pendingApproval !== null;
-  const rawFloatingTodos = useMemo(
+  const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
   );
   const floatingTodos = useStableArray(
-    rawFloatingTodos,
+    floatingTodosState.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
   );
+  const floatingTodosAllCompleted = floatingTodosState.allCompleted;
+  // The all-completed list is only shown as a transient "all done" moment
+  // when the panel was already visible live in this client; on session
+  // restore (catch-up replay) a historical finished list stays hidden.
+  // State is adjusted during render (not in an effect) so the
+  // active → completed transition doesn't unmount the panel for a frame.
+  const [todoPanelMode, setTodoPanelMode] = useState<
+    'hidden' | 'active' | 'completed'
+  >('hidden');
+  const nextTodoPanelMode =
+    connection.catchingUp || floatingTodos.length === 0
+      ? 'hidden'
+      : !floatingTodosAllCompleted
+        ? 'active'
+        : todoPanelMode === 'hidden'
+          ? 'hidden'
+          : 'completed';
+  if (nextTodoPanelMode !== todoPanelMode) {
+    setTodoPanelMode(nextTodoPanelMode);
+  }
+  const showFloatingTodos = nextTodoPanelMode !== 'hidden';
   const backgroundTaskActivityKey = useMemo(
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
+  const messageListRef = useRef<MessageListHandle>(null);
+  const handleLocateFloatingTodos = useCallback(() => {
+    if (!floatingTodosState.sourceMessageId) return;
+    messageListRef.current?.scrollToMessage(
+      floatingTodosState.sourceMessageId,
+      floatingTodosState.sourceCallId ?? undefined,
+    );
+  }, [floatingTodosState.sourceMessageId, floatingTodosState.sourceCallId]);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
   const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
   activeGoalRef.current = activeGoal;
@@ -2313,13 +2312,14 @@ export function App({
             <CompactModeContext.Provider value={compactMode}>
               <div
                 className={
-                  floatingTodos.length > 0
+                  showFloatingTodos
                     ? `${styles.content} ${styles.contentHasMessages}`
                     : styles.content
                 }
                 style={dialogOpen ? { visibility: 'hidden' } : undefined}
               >
                 <MessageList
+                  ref={messageListRef}
                   messages={displayMessages}
                   pendingApproval={pendingApproval}
                   onConfirm={handleConfirm}
@@ -2447,9 +2447,16 @@ export function App({
                 : styles.footer
             }
           >
-            {floatingTodos.length > 0 && !tasksPanelMessage && (
+            {showFloatingTodos && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
-                <TodoPanel todos={floatingTodos} />
+                <TodoPanel
+                  todos={floatingTodos}
+                  onLocateSource={
+                    floatingTodosState.sourceMessageId
+                      ? handleLocateFloatingTodos
+                      : undefined
+                  }
+                />
               </div>
             )}
             {!shouldHideComposer && (
