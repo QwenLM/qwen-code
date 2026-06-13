@@ -27,7 +27,7 @@ export type {
   DaemonTransportSubscribeOptions,
   DaemonTransportType,
 } from './DaemonTransport.js';
-export { RestSseTransport } from './RestSseTransport.js';
+export type { RestSseTransport } from './RestSseTransport.js';
 // negotiateTransport + ACP transport classes live in their own files to
 // break the static import chain from this barrel, keeping the browser
 // bundle under budget.  Monorepo consumers import from source paths:
