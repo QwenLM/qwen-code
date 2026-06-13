@@ -1125,15 +1125,17 @@ export function App({
       const command = `/language ui ${nextLanguage}`;
       handleLanguageChange(nextLanguage);
       const refreshSettings = () => {
-        sessionActions.refreshCommands();
-        reloadWorkspaceSettings();
+        return Promise.all([
+          sessionActions.refreshCommands(),
+          reloadWorkspaceSettings(),
+        ]);
       };
       if (streamingStateRef.current !== 'idle') {
         enqueuePrompt(command, undefined, refreshSettings);
         return;
       }
       sendPrompt(command)
-        .then(() => Promise.all([refreshSettings()]))
+        .then(refreshSettings)
         .catch((error: unknown) => {
           handleLanguageChange(previousLanguage);
           reportError(error, 'Failed to sync /language command');
@@ -1239,12 +1241,14 @@ export function App({
       }
       if (block?.kind !== 'debug') break;
     }
-    retryableTurnErrorIdRef.current = retryableTurnErrorId;
-    setShowRetryHint(
+    const canRetry =
+      connected &&
       retryableTurnErrorId !== null &&
-        retryableTurnErrorId !== retriedTurnErrorIdRef.current,
-    );
-  }, [blocks]);
+      retryableTurnErrorId !== retriedTurnErrorIdRef.current &&
+      lastSubmittedPromptRef.current.length > 0;
+    retryableTurnErrorIdRef.current = canRetry ? retryableTurnErrorId : null;
+    setShowRetryHint(canRetry);
+  }, [blocks, connected]);
 
   useEffect(() => {
     onStreamingStateChange?.(streamingState);
@@ -2186,6 +2190,7 @@ export function App({
   const handleRetry = useCallback(() => {
     if (
       showRetryHintRef.current &&
+      connected &&
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
       lastSubmittedPromptRef.current
@@ -2203,7 +2208,7 @@ export function App({
     } else {
       store.dispatch([{ type: 'status', text: t('retry.none') }]);
     }
-  }, [sendPrompt, reportError, store, t]);
+  }, [connected, sendPrompt, reportError, store, t]);
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {

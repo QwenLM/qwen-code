@@ -2846,69 +2846,6 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('hydrates displayName from persisted session title on load', async () => {
-      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-      const runtimeDir = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-server-load-title-'),
-      );
-      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
-      const sessionId = '550e8400-e29b-41d4-a716-446655440001';
-      const chatsDir = path.join(
-        new Storage(WS_BOUND).getProjectDir(),
-        'chats',
-      );
-      await fsp.mkdir(chatsDir, { recursive: true });
-      const userRecord = {
-        uuid: `${sessionId}-user-1`,
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-05-17T12:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: WS_BOUND,
-      };
-      const titleRecord = {
-        uuid: `${sessionId}-title-1`,
-        parentUuid: userRecord.uuid,
-        sessionId,
-        timestamp: '2026-05-17T12:01:00.000Z',
-        type: 'system',
-        subtype: 'custom_title',
-        cwd: WS_BOUND,
-        systemPayload: { customTitle: 'Persisted name' },
-      };
-      await fsp.writeFile(
-        path.join(chatsDir, `${sessionId}.jsonl`),
-        `${JSON.stringify(userRecord)}\n${JSON.stringify(titleRecord)}\n`,
-        'utf8',
-      );
-
-      try {
-        const bridge = fakeBridge();
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { bridge, boundWorkspace: WS_BOUND },
-        );
-        const res = await request(app)
-          .post(`/session/${sessionId}/load`)
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({});
-
-        expect(res.status).toBe(200);
-        expect(res.body.state).toMatchObject({
-          displayName: 'Persisted name',
-        });
-      } finally {
-        if (previousRuntimeDir === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-        }
-        await fsp.rm(runtimeDir, { recursive: true, force: true });
-      }
-    });
-
     it('passes client identity headers through to load/resume bridge calls', async () => {
       for (const action of ['load', 'resume'] as const) {
         const bridge = fakeBridge();

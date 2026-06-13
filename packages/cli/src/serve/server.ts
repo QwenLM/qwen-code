@@ -1940,20 +1940,6 @@ export function createServeApp(
                 workspaceCwd: cwd,
                 ...(clientId !== undefined ? { clientId } : {}),
               });
-        const persistedDisplayName = (() => {
-          try {
-            return new SessionService(cwd).getSessionTitle(sessionId);
-          } catch {
-            return undefined;
-          }
-        })();
-        if (
-          persistedDisplayName &&
-          !(session.state as { displayName?: string }).displayName
-        ) {
-          (session.state as { displayName?: string }).displayName =
-            persistedDisplayName;
-        }
         if (daemonLog) {
           daemonLog.info(
             `session ${action}${session.attached ? ' (attached)' : ''}`,

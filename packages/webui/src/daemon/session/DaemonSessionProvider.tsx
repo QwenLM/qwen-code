@@ -40,9 +40,9 @@ import {
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
-  getReplayTokenCount,
   getSessionDisplayName,
   getReplayTokenUsage,
+  getTokenCountFromUsage,
   mapProviderStatus,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
@@ -428,14 +428,12 @@ export function DaemonSessionProvider({
             shouldInjectReplaySnapshot =
               nextSession.replaySnapshot.compactedReplay.length > 0 ||
               nextSession.replaySnapshot.liveJournal.length > 0;
-            replayTokenUsage = getReplayTokenUsage([
+            const replayEvents = [
               ...nextSession.replaySnapshot.compactedReplay,
               ...nextSession.replaySnapshot.liveJournal,
-            ]);
-            replayTokenCount = getReplayTokenCount([
-              ...nextSession.replaySnapshot.compactedReplay,
-              ...nextSession.replaySnapshot.liveJournal,
-            ]);
+            ];
+            replayTokenUsage = getReplayTokenUsage(replayEvents);
+            replayTokenCount = getTokenCountFromUsage(replayTokenUsage);
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;

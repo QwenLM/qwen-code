@@ -1880,6 +1880,30 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('marks turn_error blocks as retryable system errors', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        source: 'turn_error' as const,
+        text: 'Request failed',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Request failed',
+        variant: 'error',
+        retryable: true,
+      },
+    ]);
+  });
+
   it('converts debug blocks to system messages with info variant', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {

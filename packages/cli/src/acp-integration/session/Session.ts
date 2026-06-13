@@ -151,6 +151,8 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -718,7 +720,7 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort();
+      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
     }
 
@@ -983,7 +985,11 @@ export class Session implements SessionContext {
             // history (no dangling user message from the failed attempt).
             // Also skip recordUserMessage to avoid duplicating the user
             // turn in the JSONL transcript.
-            const isRetry = (params as { retry?: boolean }).retry === true;
+            const isRetry =
+              (params as { retry?: boolean }).retry === true ||
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RETRY_META_KEY
+              ] === true;
             if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
@@ -1200,13 +1206,14 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
-                  // Cancel-triggered abort: the LLM fetch was interrupted by
-                  // cancelSession or a new prompt arriving. Treat as a normal
-                  // cancellation rather than an error — this prevents the
-                  // AbortError from propagating through ACP serialization
-                  // where it would lose its DOMException type and surface
-                  // as a spurious turn_error ("Request was aborted.").
-                  if (pendingSend.signal.aborted) {
+                  // Only explicit user cancellation maps to a normal
+                  // cancelled turn. Other aborts/errors should surface so
+                  // infra failures are not hidden as successful cancels.
+                  if (
+                    pendingSend.signal.aborted &&
+                    pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+                    this.#isAbortError(error)
+                  ) {
                     return { stopReason: 'cancelled' };
                   }
 

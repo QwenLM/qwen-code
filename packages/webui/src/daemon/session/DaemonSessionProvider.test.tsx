@@ -665,6 +665,40 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('passes retry prompts through the daemon action', async () => {
+    const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
+    const session = createMockSession({
+      prompt,
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = actions;
+    if (!providerActions) throw new Error('actions were not initialized');
+
+    await act(async () => {
+      await providerActions.sendPrompt('retry this', {
+        optimisticUserMessage: false,
+        retry: true,
+      });
+    });
+
+    expect(prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'retry this' }],
+        retry: true,
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
   it('submits permission selections with optional answers', async () => {
     const respondToSessionPermission = vi.fn(async () => true);
     const session = createMockSession({

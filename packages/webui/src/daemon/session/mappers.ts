@@ -136,7 +136,7 @@ export function updateConnectionFromDaemonEvent(
       setConnection((current) => ({
         ...current,
         tokenUsage,
-        tokenCount: getTokenCount(tokenUsage),
+        tokenCount: getTokenCountFromUsage(tokenUsage),
       }));
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
@@ -205,7 +205,20 @@ export function getCurrentMode(
 export function getReplayTokenCount(
   events: readonly DaemonEvent[],
 ): number | undefined {
-  return getTokenCount(getReplayTokenUsage(events));
+  return getTokenCountFromUsage(getReplayTokenUsage(events));
+}
+
+export function getTokenCountFromUsage(
+  usage: DaemonTokenUsage | undefined,
+): number | undefined {
+  const preferred = usage?.inputTokens ?? usage?.totalTokens;
+  if (preferred !== undefined && preferred > 0) return preferred;
+  if (!usage) return undefined;
+  const total = Object.values(usage).reduce(
+    (sum, value) => sum + (typeof value === 'number' ? value : 0),
+    0,
+  );
+  return total > 0 ? total : undefined;
 }
 
 export function getReplayTokenUsage(
@@ -241,14 +254,9 @@ function getUsageTokenUsage(
     ...mapTokenUsageNumber(usage, 'thoughtTokens'),
     ...mapTokenUsageNumber(usage, 'cachedReadTokens'),
   };
-  return getTokenCount(tokenUsage) !== undefined ? tokenUsage : undefined;
-}
-
-function getTokenCount(
-  usage: DaemonTokenUsage | undefined,
-): number | undefined {
-  const count = usage?.inputTokens ?? usage?.totalTokens;
-  return count !== undefined && count > 0 ? count : undefined;
+  return getTokenCountFromUsage(tokenUsage) !== undefined
+    ? tokenUsage
+    : undefined;
 }
 
 function mapTokenUsageNumber(
