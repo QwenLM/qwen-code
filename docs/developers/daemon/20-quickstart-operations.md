@@ -151,7 +151,7 @@ settings 读 I/O 失败（损坏 JSON 等）回退默认；`InvalidPolicyConfigE
 | `--hostname [::1]:8080`                                                | `Invalid --hostname … brackets indicate an IPv6 literal but the value isn't a clean [addr] form` |
 | `--max-connections` NaN / 负值                                         | `Must be >= 0`                                                                                   |
 | `--event-ring-size > 1_000_000`                                        | bridge 构造时抛                                                                                  |
-| `--allow-origin '*'` 没 token                                          | `Refusing --allow-origin '*' without a bearer token`                                             |
+| `--allow-origin '*'` 没 token                                          | `Refusing to start with --allow-origin '*' but no bearer token configured`                       |
 | `--prompt-deadline-ms` / `--writer-idle-timeout-ms` 非正整数           | `Must be a positive integer`                                                                     |
 | `policy.permissionStrategy` 未知值 / `policy.consensusQuorum` 非正整数 | `InvalidPolicyConfigError`                                                                       |
 

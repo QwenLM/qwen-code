@@ -62,13 +62,14 @@ flowchart LR
     DC --> HA
     HA --> LOG["access-log middleware<br/>(DaemonLogger)"]
     LOG --> BA["bearerAuth"]
-    BA --> JSON["express.json<br/>(body parser)"]
+    BA --> RL["rate-limit middleware<br/>(when enabled)"]
+    RL --> JSON["express.json<br/>(body parser)"]
     JSON --> TEL["daemonTelemetryMiddleware<br/>(OTel span)"]
     TEL --> MG["per-route: mutationGate<br/>(opt-in strict)"]
     MG --> HANDLER["route handler"]
 ```
 
-`mutationGate` 是 per-route 中间件工厂（`createMutationGate` 返回 `mutate()`），各路由在注册时调 `mutate()` 或 `mutate({strict: true})` 接入。它不是全局 `app.use()` 中间件。access-log 在 `bearerAuth` **之前**注册，这样 401 拒绝也会被日志捕获。
+`mutationGate` 是 per-route 中间件工厂（`createMutationGate` 返回 `mutate()`），各路由在注册时调 `mutate()` 或 `mutate({strict: true})` 接入。它不是全局 `app.use()` 中间件。access-log 在 `bearerAuth` **之前**注册，这样 401 拒绝也会被日志捕获。rate-limit 在 `bearerAuth` 之后、`express.json()` 之前注册：只计已通过 auth 的请求，并在解析大 body 前尽早 429。
 
 ### `bearerAuth`
 

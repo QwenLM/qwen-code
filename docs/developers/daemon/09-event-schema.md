@@ -134,6 +134,10 @@ wire 格式见 [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)，本文
 - `lastSessionUpdate?: DaemonSessionUpdateData` — 最近的 `session_update`。
 - `lastModelSwitchFailure?: DaemonModelSwitchFailedData` — 由 `model_switch_failed`。
 - `terminalEvent?` — 终态帧原始事件。
+- `streamError?: DaemonStreamErrorData` — 最近的 `stream_error` payload。
+- `unrecognizedKnownEventCount`、`lastUnrecognizedKnownEvent?` — `asKnownDaemonEvent` 识别但 reducer 尚未建专用状态的事件。
+- `droppedPermissionRequestCount`、`lastDroppedPermissionRequestId?` — 结构不合法、无法进入 pending map 的权限请求。
+- `unmatchedPermissionResolutionCount`、`lastUnmatchedPermissionResolutionId?` — 没有匹配 pending request 的权限 resolution。
 - `slowClientWarningCount`、`lastSlowClientWarning?` — 由 `slow_client_warning`。
 - `mcpBudgetWarningCount`、`lastMcpBudgetWarning?` — 由 `mcp_budget_warning`。
 - `mcpChildRefusedBatchCount`、`lastMcpChildRefusedBatch?` — 由 `mcp_child_refused_batch`。

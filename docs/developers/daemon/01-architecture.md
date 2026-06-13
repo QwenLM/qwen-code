@@ -152,16 +152,20 @@ flowchart TB
 sequenceDiagram
     autonumber
     participant C as Client (SDK)
-    participant MW as Middleware<br/>(CORS→host→bearer→mutationGate)
+    participant MW as Middleware<br/>(CORS→host→log→bearer→rate-limit→JSON→telemetry)
     participant R as Route handler
     participant BR as AcpBridge
     participant BC as BridgeClient
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: denyBrowserOriginCors
+    MW->>MW: deny/allow Origin CORS
     MW->>MW: hostAllowlist (DNS rebinding guard)
+    MW->>MW: access-log hook (if daemonLog enabled)
     MW->>MW: bearerAuth (constant-time compare)
+    MW->>MW: rateLimit (when enabled)
+    MW->>MW: express.json body parser
+    MW->>MW: daemonTelemetryMiddleware
     MW->>MW: mutationGate (strict on mutating routes)
     MW->>R: req validated
     R->>BR: bridge.sendPrompt(sessionId, body, clientId)

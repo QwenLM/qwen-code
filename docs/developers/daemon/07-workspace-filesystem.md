@@ -127,7 +127,6 @@ sequenceDiagram
 
     R->>FS: readText(ctx, path, opts)
     FS->>FS: resolveWithinWorkspace(path) → ResolvedPath OR throw
-    FS->>FS: shouldIgnore? → throw / skip
     FS->>FSP: stat(path)
     FSP-->>FS: stats
     FS->>FS: reject if not regular file (describeStatKind)
@@ -137,9 +136,12 @@ sequenceDiagram
     FS->>POL: detectBinary(buffer)
     POL-->>FS: isBinary?
     FS->>FS: reject if binary; sha256 hash; truncate to line window
+    FS->>FS: shouldIgnore? → annotate meta.matchedIgnore
     FS->>FS: audit fs.access
     FS-->>R: { content, sha256, truncated?, meta }
 ```
+
+`readText` 不会因为 ignore 规则跳过或拒绝读取；它正常读取后只把命中的 ignore 分类写进 `meta.matchedIgnore`。`list` / `glob` 才会在 `includeIgnored` 未开启时过滤掉 ignored 结果。
 
 ### 写
 

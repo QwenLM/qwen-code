@@ -66,14 +66,16 @@ if (!isLoopbackHost(parsed.hostname)) {
 
 connection 跑一个 SSE 消费者（`for await` over `session.events()`），按 type 路由：
 
-| daemon event                                                       | IDE 回调                                 |
-| ------------------------------------------------------------------ | ---------------------------------------- |
-| `session_update`（多数子类型）                                     | `onSessionUpdate`                        |
-| `session_update`（ask-user-question 变体）                         | `onAskUserQuestion`                      |
-| `session_update`（end-turn 标记）                                  | `onEndTurn`                              |
-| `permission_request`                                               | `onPermissionRequest`                    |
-| `session_died`、`session_closed`、`client_evicted`、`stream_error` | `onDisconnected`（终态）                 |
-| 其他（model、MCP、mutation、auth）                                 | 目前 no-op 或仅记日志，未来 webview 暴露 |
+| daemon event / source                                                                        | IDE 回调 / 动作                                                    |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `session_update`                                                                             | `onSessionUpdate`                                                  |
+| 普通 `permission_request`                                                                    | `onPermissionRequest`，随后 `respondToPermission()`                |
+| `permission_request` 且 `toolCall.kind === 'ask_user_question'`、`rawInput.questions` 是数组 | `onAskUserQuestion`，随后把 `answers` 透传给 daemon                |
+| `session_died`，且 payload 的 `sessionId` 匹配当前 session                                   | `onDisconnected(reason)`                                           |
+| SSE 自然结束 / stream 失败 / 手动 `disconnect()`                                             | `onDisconnected('stream_ended' / 'daemon_error' / 'disconnected')` |
+| 其他 daemon event                                                                            | debug 级日志，当前不触发 IDE 回调                                  |
+
+`onEndTurn` 不是 SSE 事件分发结果；`prompt()` 等待 daemon HTTP prompt 响应后用 `response.stopReason` 调它，非 abort 异常路径调 `onEndTurn('error')`。
 
 ### Webview 桥接
 

@@ -91,7 +91,7 @@ selectApprovalMode(state);
 selectToolProgress(state, toolCallId);
 selectSubagentChildBlocks(state, parentBlockId);
 isSubagentChildBlock(block);
-formatBlockTimestamp(block.clientReceivedAt);
+formatBlockTimestamp(block);
 formatMissedRange(state); // state_resync_required 后的 "you missed X" 文案
 ```
 
