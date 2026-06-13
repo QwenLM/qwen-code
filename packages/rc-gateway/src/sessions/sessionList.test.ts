@@ -220,6 +220,20 @@ describe('readSessionTitle', () => {
     expect(await readSessionTitle(dir, ID(1))).toBe('just a header');
   });
 
+  it('rejects a non-title record whose TEXT contains the custom_title substring', async () => {
+    // The cheap indexOf pre-filter matches, but the subtype guard rejects it.
+    const decoy = JSON.stringify({
+      type: 'user',
+      sessionId: 's',
+      message: { parts: [{ text: 'talking about the custom_title feature' }] },
+    });
+    await writeLines(ID(1), [decoy]);
+    expect(await readSessionTitle(dir, ID(1))).toBeNull();
+    // A real title alongside the decoy is still found.
+    await writeLines(ID(2), [decoy, titleRec('the real one')]);
+    expect(await readSessionTitle(dir, ID(2))).toBe('the real one');
+  });
+
   it('returns null when there is no custom_title record', async () => {
     await writeLines(ID(1), [msgRec(0), msgRec(1)]);
     expect(await readSessionTitle(dir, ID(1))).toBeNull();
