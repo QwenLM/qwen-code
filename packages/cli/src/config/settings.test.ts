@@ -450,6 +450,7 @@ describe('Settings Loading and Merging', () => {
         },
         model: {
           name: 'gemini-pro',
+          id: 'gemini-pro',
         },
         mcpServers: {
           'legacy-server-1': {
@@ -797,7 +798,10 @@ describe('Settings Loading and Merging', () => {
       const writtenContent = JSON.parse(writeCall[1] as string);
 
       // Model should remain as an object, not double-nested
-      expect(writtenContent.model).toEqual({ name: 'qwen-coder' });
+      expect(writtenContent.model).toEqual({
+        name: 'qwen-coder',
+        id: 'qwen-coder',
+      });
       // autoAccept should be migrated to tools.autoAccept
       expect(writtenContent.tools?.autoAccept).toBe(false);
       // Version field should be added

@@ -275,13 +275,20 @@ describe('<ModelDialog />', () => {
     // Select a non-OAuth model (USE_OPENAI)
     await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
 
-    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
-      baseUrl: undefined,
-    });
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      { id: 'gpt-4', baseUrl: undefined },
+      {},
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.id',
+      'gpt-4',
+    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      'gpt-4',
+      'GPT-4',
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -371,8 +378,8 @@ describe('<ModelDialog />', () => {
 
       expect(switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
-        'MiniMax-M3',
-        { baseUrl: 'https://api.minimaxi.com/v1' },
+        { id: 'MiniMax-M3', baseUrl: 'https://api.minimaxi.com/v1' },
+        {},
       );
     } finally {
       if (previousMinimaxKey === undefined) {

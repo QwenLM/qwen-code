@@ -6697,10 +6697,9 @@ Other open files:
       );
 
       // Verify that getResolvedModel was called with the fast model ID
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        expect.any(String),
-        'fast-model',
-      );
+      expect(getResolvedModel).toHaveBeenCalledWith(expect.any(String), {
+        id: 'fast-model',
+      });
 
       // The main content generator is used as fallback (since creating a new
       // one fails in test env without auth). In production, a dedicated
@@ -6825,10 +6824,9 @@ Other open files:
       ).resolves.toBeDefined();
 
       // getResolvedModel was called to look up the model
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        expect.any(String),
-        'unknown-model',
-      );
+      expect(getResolvedModel).toHaveBeenCalledWith(expect.any(String), {
+        id: 'unknown-model',
+      });
 
       // The main content generator is used as fallback
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
@@ -6954,10 +6952,11 @@ Other open files:
               ]
             : [],
       );
-      const getResolvedModel = vi.fn((authType: AuthType, model: string) =>
-        authType === AuthType.USE_OPENAI && model === 'fast-model'
-          ? mockResolvedModel
-          : undefined,
+      const getResolvedModel = vi.fn(
+        (authType: AuthType, opts: { id?: string }) =>
+          authType === AuthType.USE_OPENAI && opts.id === 'fast-model'
+            ? mockResolvedModel
+            : undefined,
       );
 
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
@@ -6984,11 +6983,9 @@ Other open files:
 
       // The model-id resolver found the configured OpenAI owner, so
       // ModelsConfig is queried directly with that authType.
-      expect(getResolvedModel).toHaveBeenNthCalledWith(
-        1,
-        AuthType.USE_OPENAI,
-        'fast-model',
-      );
+      expect(getResolvedModel).toHaveBeenNthCalledWith(1, AuthType.USE_OPENAI, {
+        id: 'fast-model',
+      });
       // Generator was created using the resolved model's config
       expect(createContentGenerator).toHaveBeenCalled();
     });

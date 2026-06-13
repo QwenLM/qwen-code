@@ -609,17 +609,19 @@ describe('BaseLlmClient', () => {
 
     it('builds a per-model generator when model differs and is registered under another authType', async () => {
       // Main authType is QWEN_OAUTH; fast model only resolves under USE_ANTHROPIC.
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.QWEN_OAUTH) return undefined;
-        if (authType === AuthType.USE_ANTHROPIC && model === fastModel) {
-          return {
-            authType: AuthType.USE_ANTHROPIC,
-            envKey: 'ANTHROPIC_API_KEY',
-            baseUrl: 'https://api.anthropic.com',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModel.mockImplementation(
+        (authType: string, opts: { id: string }) => {
+          if (authType === AuthType.QWEN_OAUTH) return undefined;
+          if (authType === AuthType.USE_ANTHROPIC && opts.id === fastModel) {
+            return {
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: 'https://api.anthropic.com',
+            };
+          }
+          return undefined;
+        },
+      );
 
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
@@ -759,16 +761,18 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson accepts authType-qualified selectors and sends the bare model id', async () => {
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
-          return {
-            id: 'shared-model',
-            authType: AuthType.USE_OPENAI,
-            envKey: 'OPENAI_API_KEY',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModel.mockImplementation(
+        (authType: string, opts: { id: string }) => {
+          if (authType === AuthType.USE_OPENAI && opts.id === 'shared-model') {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'OPENAI_API_KEY',
+            };
+          }
+          return undefined;
+        },
+      );
       fastGenerateContent.mockResolvedValue(
         createMockResponseWithFunctionCall({ ok: true }),
       );
@@ -786,10 +790,9 @@ describe('BaseLlmClient', () => {
         promptId: 'test',
       });
 
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'shared-model',
-      );
+      expect(getResolvedModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, {
+        id: 'shared-model',
+      });
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
         'shared-model',
@@ -803,16 +806,18 @@ describe('BaseLlmClient', () => {
 
     it('generateJson resolves fast selectors through the configured fast model', async () => {
       crossProviderConfig.getFastModel.mockReturnValue('openai:shared-model');
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
-          return {
-            id: 'shared-model',
-            authType: AuthType.USE_OPENAI,
-            envKey: 'OPENAI_API_KEY',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModel.mockImplementation(
+        (authType: string, opts: { id: string }) => {
+          if (authType === AuthType.USE_OPENAI && opts.id === 'shared-model') {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'OPENAI_API_KEY',
+            };
+          }
+          return undefined;
+        },
+      );
       fastGenerateContent.mockResolvedValue(
         createMockResponseWithFunctionCall({ ok: true }),
       );
@@ -830,10 +835,9 @@ describe('BaseLlmClient', () => {
         promptId: 'test',
       });
 
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'shared-model',
-      );
+      expect(getResolvedModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, {
+        id: 'shared-model',
+      });
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
         'shared-model',

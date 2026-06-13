@@ -307,6 +307,18 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3-coder-plus',
+          label: 'Qwen3 Coder Plus',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'qwen3-coder-flash',
+          label: 'Qwen3 Coder Flash',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
     } as unknown as Config;
 
     mockClient = {
@@ -658,13 +670,18 @@ describe('Session', () => {
 
       expect(mockConfig.switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
-        'qwen3-coder-plus',
+        { id: 'qwen3-coder-plus' },
         undefined,
       );
       expect(mockSettings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
-        'model.name',
+        'model.id',
         'qwen3-coder-plus',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'Qwen3 Coder Plus',
       );
       expect(mockSettings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
@@ -726,7 +743,7 @@ describe('Session', () => {
 
       expect(mockConfig.switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
-        'qwen3-coder-flash',
+        { id: 'qwen3-coder-flash' },
         undefined,
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
