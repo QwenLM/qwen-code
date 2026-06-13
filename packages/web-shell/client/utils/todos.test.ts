@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message, TodoItem } from '../adapters/types';
-import { getFloatingTodos, getTodoWindow } from './todos';
+import { getFloatingTodos, getTodoStatusIcon, getTodoWindow } from './todos';
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
   return { id, content: `task ${id}`, status };
@@ -114,6 +114,26 @@ describe('getFloatingTodos', () => {
       planMessage('p1', []),
     ]);
     expect(state.todos).toHaveLength(0);
+  });
+
+  it('returns a completed list from a plan with all-completed todos', () => {
+    // Unlike the old App.tsx helper (which cleared the panel for an
+    // all-completed plan), the list is retained so the "all done" moment can
+    // render; App's todoPanelMode then decides whether to show it.
+    const state = getFloatingTodos([
+      planMessage('p1', [todo('1', 'completed'), todo('2', 'completed')]),
+    ]);
+    expect(state.todos).toHaveLength(2);
+    expect(state.allCompleted).toBe(true);
+    expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getTodoStatusIcon', () => {
+  it('maps each status to its glyph', () => {
+    expect(getTodoStatusIcon('completed')).toBe('●');
+    expect(getTodoStatusIcon('in_progress')).toBe('◐');
+    expect(getTodoStatusIcon('pending')).toBe('○');
   });
 });
 

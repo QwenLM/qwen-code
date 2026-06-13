@@ -151,6 +151,8 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -718,7 +720,7 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort();
+      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
     }
 
@@ -979,10 +981,23 @@ export class Session implements SessionContext {
               ),
             );
 
-            // record user message for session management
-            this.config
-              .getChatRecordingService()
-              ?.recordUserMessage(promptText);
+            // Retry: strip orphaned user entries so the model sees a clean
+            // history (no dangling user message from the failed attempt).
+            // Also skip recordUserMessage to avoid duplicating the user
+            // turn in the JSONL transcript.
+            const isRetry =
+              (params as { retry?: boolean }).retry === true ||
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_RETRY_META_KEY
+              ] === true;
+            if (isRetry) {
+              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+            } else {
+              // record user message for session management
+              this.config
+                .getChatRecordingService()
+                ?.recordUserMessage(promptText);
+            }
 
             // Check if the input contains a slash command
             // Extract text from the first text block if present
@@ -1191,6 +1206,17 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Only explicit user cancellation maps to a normal
+                  // cancelled turn. Other aborts/errors should surface so
+                  // infra failures are not hidden as successful cancels.
+                  if (
+                    pendingSend.signal.aborted &&
+                    pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+                    this.#isAbortError(error)
+                  ) {
+                    return { stopReason: 'cancelled' };
+                  }
+
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
                   // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);

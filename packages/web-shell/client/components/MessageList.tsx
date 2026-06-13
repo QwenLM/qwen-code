@@ -42,12 +42,15 @@ interface MessageListProps {
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
+  shellOutputMaxLines: number;
   /**
    * When true, scroll the tail content into view the moment it first appears
    * even if the user had scrolled up. Opt-in per caller so unrelated inline
    * panels don't yank the reader to the bottom. Defaults to false.
    */
   autoScrollTailIntoView?: boolean;
+  showRetryHint?: boolean;
+  onRetryClick?: () => void;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -333,7 +336,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
+      shellOutputMaxLines,
       autoScrollTailIntoView = false,
+      showRetryHint = false,
+      onRetryClick,
     },
     ref,
   ) {
@@ -501,15 +507,31 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         if (itemIndex < 0) return false;
         const rowIndex = itemIndex + headerOffset;
         // Explicit navigation away from the tail — pause follow so the
-        // auto-scroll driver doesn't yank the viewport straight back down.
+        // auto-scroll driver doesn't yank the viewport straight back down,
+        // and engage the same cooldown scrollToBottom uses so the scroll
+        // events this triggers short-circuit handleScroll. Without it, Rule 3
+        // (near-bottom → resume follow) would re-enable follow whenever the
+        // target sits near the bottom, and the next streaming height change
+        // would pull the viewport back to the tail. An instant (non-smooth)
+        // scroll keeps that cooldown window short and deterministic.
         shouldFollow.current = false;
+        scrollCooldownCount.current += 1;
+        const gen = scrollCooldownCount.current;
+        scrollCooldown.current = true;
         if (useVirtualScroll) {
           virtualizer.scrollToIndex(rowIndex, { align: 'center' });
         } else {
           containerRef.current
             ?.querySelector(`[data-index="${rowIndex}"]`)
-            ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            ?.scrollIntoView({ block: 'center' });
         }
+        // Release once the scroll has settled (the virtualizer may re-scroll
+        // a frame or two later after measuring the target row).
+        setTimeout(() => {
+          if (scrollCooldownCount.current === gen) {
+            scrollCooldown.current = false;
+          }
+        }, 150);
         const key = getItemKey(rowIndex);
         setFlashKey(null);
         requestAnimationFrame(() => setFlashKey(key));
@@ -671,6 +693,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             onShowContextDetail={onShowContextDetail}
             workspaceCwd={workspaceCwd}
             isLatest={itemIndex === displayItems.length - 1}
+            showRetryHint={showRetryHint}
+            onRetryClick={onRetryClick}
+            shellOutputMaxLines={shellOutputMaxLines}
           />
         );
       },
@@ -688,6 +713,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         headerOffset,
         displayItems,
         workspaceCwd,
+        showRetryHint,
+        onRetryClick,
+        shellOutputMaxLines,
       ],
     );
 

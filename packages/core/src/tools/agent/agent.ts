@@ -96,6 +96,7 @@ import {
   attachJsonlTranscriptWriter,
   patchAgentMeta,
   writeAgentMeta,
+  type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
@@ -379,6 +380,57 @@ export interface ApprovalModeOverrideHandle {
   cleanup: () => void;
 }
 
+export interface ApprovalModeOverrideOptions {
+  persistedCliFlags?: AgentPersistedCliFlags;
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function applyPersistedCliFlagOverrides(
+  override: Config,
+  flags: AgentPersistedCliFlags | undefined,
+): void {
+  if (!flags) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  if (flags.bare !== undefined) {
+    ov.getBareMode = () => flags.bare;
+  }
+  if (hasOwn(flags, 'sandbox')) {
+    const sandbox = flags.sandbox ?? undefined;
+    ov.getSandbox = () => sandbox;
+  }
+  if (flags.screenReader !== undefined) {
+    ov.getScreenReader = () => flags.screenReader;
+  }
+  if (flags.model !== undefined) {
+    ov.getModel = () => flags.model;
+  }
+  if (flags.maxSessionTurns !== undefined) {
+    ov.getMaxSessionTurns = () => flags.maxSessionTurns;
+  }
+  if (flags.maxToolCalls !== undefined) {
+    ov.getMaxToolCalls = () => flags.maxToolCalls;
+  }
+}
+
+function capturePersistedCliFlags(
+  config: Config,
+  resolvedApprovalMode: ApprovalMode,
+): AgentPersistedCliFlags {
+  return {
+    approvalMode: resolvedApprovalMode,
+    bare: config.getBareMode(),
+    sandbox: config.getSandbox() ?? null,
+    screenReader: config.getScreenReader(),
+    model: config.getModel(),
+    maxSessionTurns: config.getMaxSessionTurns(),
+    maxToolCalls: config.getMaxToolCalls(),
+  };
+}
+
 /**
  * Creates a Config override with a different approval mode.
  *
@@ -411,10 +463,12 @@ export interface ApprovalModeOverrideHandle {
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
+  options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
   let cleanup: () => void = () => {};
@@ -2306,6 +2360,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
@@ -2854,6 +2912,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          persistedCliFlags: capturePersistedCliFlags(
+            this.config,
+            resolvedApprovalMode,
+          ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,

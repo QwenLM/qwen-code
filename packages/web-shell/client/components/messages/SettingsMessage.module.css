@@ -37,6 +37,8 @@
   gap: 2px;
   max-height: min(360px, calc(100vh - 260px));
   overflow-y: auto;
+  padding-right: 14px;
+  scrollbar-gutter: stable;
 }
 
 .category {

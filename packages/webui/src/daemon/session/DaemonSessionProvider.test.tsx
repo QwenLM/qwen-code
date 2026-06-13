@@ -665,6 +665,40 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('passes retry prompts through the daemon action', async () => {
+    const prompt = vi.fn(async () => ({ stopReason: 'end_turn' }));
+    const session = createMockSession({
+      prompt,
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = actions;
+    if (!providerActions) throw new Error('actions were not initialized');
+
+    await act(async () => {
+      await providerActions.sendPrompt('retry this', {
+        optimisticUserMessage: false,
+        retry: true,
+      });
+    });
+
+    expect(prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'retry this' }],
+        retry: true,
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
   it('submits permission selections with optional answers', async () => {
     const respondToSessionPermission = vi.fn(async () => true);
     const session = createMockSession({
@@ -792,6 +826,16 @@ describe('DaemonSessionProvider', () => {
         yield {
           id: 24,
           v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'ui.theme',
+            scope: 'workspace',
+            value: 'Qwen Dark',
+          },
+        };
+        yield {
+          id: 25,
+          v: 1,
           type: 'mcp_server_restarted',
           data: {
             serverName: 'chrome-devtools',
@@ -817,6 +861,7 @@ describe('DaemonSessionProvider', () => {
       memoryVersion: 1,
       agentsVersion: 1,
       toolsVersion: 1,
+      settingsVersion: 1,
       mcpVersion: 1,
       initVersion: 0,
       authVersion: 0,
@@ -1829,6 +1874,10 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(connection?.tokenCount).toBe(23_000);
+    expect(connection?.tokenUsage).toEqual({
+      inputTokens: 23_000,
+      totalTokens: 25_000,
+    });
   });
 
   it('keeps the in-memory tokenCount across SSE re-subscribe when replay has no usage', async () => {
@@ -1886,6 +1935,10 @@ describe('DaemonSessionProvider', () => {
     // the live count.
     expect(events).toHaveBeenCalledTimes(2);
     expect(connection?.tokenCount).toBe(7_000);
+    expect(connection?.tokenUsage).toEqual({
+      inputTokens: 7_000,
+      totalTokens: 7_500,
+    });
   });
 
   it('resets tokenCount when reconnect attaches a different session without replay usage', async () => {
@@ -1932,6 +1985,10 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     expect(connection?.tokenCount).toBe(7_000);
+    expect(connection?.tokenUsage).toEqual({
+      inputTokens: 7_000,
+      totalTokens: 7_500,
+    });
 
     firstEvents.close();
     await act(async () => {
@@ -1941,6 +1998,7 @@ describe('DaemonSessionProvider', () => {
 
     expect(connection).toMatchObject({ sessionId: 'session-usage-b' });
     expect(connection?.tokenCount).toBe(0);
+    expect(connection?.tokenUsage).toBeUndefined();
   });
 
   it('bumps workspace event signals from replay snapshot events', async () => {
@@ -2696,6 +2754,45 @@ describe('DaemonSessionProvider', () => {
       // attempt #2). This is the contrast case with the 401 test above.
       expect(createAttempts).toBeGreaterThanOrEqual(2);
       expect(connection?.status).not.toBe('error');
+    },
+  );
+
+  it.each([404, 410])(
+    'leaves missing sessions disconnected on %d when requested',
+    async (status) => {
+      let createAttempts = 0;
+      sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementation(
+        async () => {
+          createAttempts += 1;
+          throw Object.assign(new Error('session gone'), { status });
+        },
+      );
+
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        missingSessionBehavior: 'disconnect',
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await wait(30);
+        await flushPromises();
+      });
+
+      expect(createAttempts).toBe(1);
+      expect(connection).toMatchObject({
+        status: 'disconnected',
+        error: 'session gone',
+      });
+      expect(connection?.sessionId).toBeUndefined();
     },
   );
 
@@ -3786,7 +3883,7 @@ describe('DaemonSessionProvider', () => {
               content: { type: 'text', text: 'before error' },
             },
           },
-        };
+        } satisfies DaemonEvent;
         throw new Error('network timeout');
       }
       // Second call: delta resume succeeds with new content
@@ -3800,7 +3897,7 @@ describe('DaemonSessionProvider', () => {
             content: { type: 'text', text: ' after resume' },
           },
         },
-      };
+      } satisfies DaemonEvent;
       await new Promise<void>((resolve) => {
         if (opts.signal?.aborted) {
           resolve();

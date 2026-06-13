@@ -146,6 +146,8 @@ export type {
   DaemonConnectionState,
   /** Connection lifecycle: `'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'`. */
   DaemonConnectionStatus,
+  /** Latest main-conversation token usage reported by the daemon. */
+  DaemonTokenUsage,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
   /** Classified notice category for host-owned UI routing. */
