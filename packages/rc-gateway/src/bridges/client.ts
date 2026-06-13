@@ -1,0 +1,180 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * A bridge's client of the gateway over the PUBLIC loopback contract
+ * (`add-bridge-protocol`). This is the seam that keeps an in-process bridge
+ * extractable to a separate-process sidecar: it talks ONLY HTTP+SSE to a
+ * configured `baseUrl` with a configured bridge `token` — it never imports or
+ * calls a gateway internal (no TokenStore, no daemon client, no OwnerEventBus).
+ * To move the bridge to its own process you change only `baseUrl`/`token`.
+ *
+ * The token is OPERATOR-PROVIDED (minted once via `POST /rc/tokens {scopes:
+ * ['bridge']}` and passed as config/env) — the gateway never auto-mints and
+ * hands one over, preserving the owner-explicit-grant property of the scope.
+ */
+
+/** A parsed SSE frame from `/rc/session/:id/events`. */
+export interface BridgeEvent {
+  id?: number;
+  type?: string;
+  data?: unknown;
+}
+
+/** Outcome of a write (prompt/vote): surfaces the HTTP status for back-pressure. */
+export interface WriteResult {
+  ok: boolean;
+  status: number;
+  /** Seconds to back off, when the gateway rate-limited (429). */
+  retryAfterSec?: number;
+  /** Parsed JSON body when present. */
+  body?: unknown;
+}
+
+export interface BridgeClientConfig {
+  /** The gateway base URL (e.g. http://127.0.0.1:4170). Loopback in-process. */
+  baseUrl: string;
+  /** A `bridge`-scope token (qwk_*), operator-minted and supplied as config. */
+  token: string;
+  /** Injectable fetch (tests). Defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+export class BridgeClient {
+  private readonly baseUrl: string;
+  private readonly token: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(cfg: BridgeClientConfig) {
+    this.baseUrl = cfg.baseUrl.replace(/\/+$/, '');
+    this.token = cfg.token;
+    this.fetchImpl = cfg.fetchImpl ?? fetch;
+  }
+
+  private authHeaders(subActor?: string): Record<string, string> {
+    const h: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+    };
+    if (subActor) h['X-RC-SubActor'] = subActor;
+    return h;
+  }
+
+  /** Register / heartbeat this bridge's capabilities (POST /rc/bridges). */
+  async register(reg: {
+    id: string;
+    displayName: string;
+    supportsActions?: boolean;
+    supportsMarkdown?: boolean;
+    maxMessageBytes?: number;
+  }): Promise<WriteResult> {
+    return this.postJson('/rc/bridges', reg);
+  }
+
+  /** Send a prompt on behalf of a chat user (POST /rc/session/:id/prompt). */
+  async sendPrompt(
+    sessionId: string,
+    prompt: string,
+    subActor: string,
+  ): Promise<WriteResult> {
+    return this.postJson(
+      `/rc/session/${encodeURIComponent(sessionId)}/prompt`,
+      { prompt },
+      subActor,
+    );
+  }
+
+  /** Vote on a permission request on behalf of a chat user. */
+  async vote(
+    sessionId: string,
+    requestId: string,
+    outcome: 'allow_once' | 'cancelled',
+    subActor: string,
+    optionId?: string,
+  ): Promise<WriteResult> {
+    const body: Record<string, unknown> = { outcome };
+    if (optionId !== undefined) body['optionId'] = optionId;
+    return this.postJson(
+      `/rc/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      body,
+      subActor,
+    );
+  }
+
+  private async postJson(
+    path: string,
+    body: unknown,
+    subActor?: string,
+  ): Promise<WriteResult> {
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        ...this.authHeaders(subActor),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const parsed = await res.json().catch(() => undefined);
+    const result: WriteResult = { ok: res.ok, status: res.status };
+    if (res.status === 429) {
+      const ra = Number(res.headers.get('retry-after'));
+      if (Number.isFinite(ra) && ra > 0) result.retryAfterSec = ra;
+    }
+    if (parsed !== undefined) result.body = parsed;
+    return result;
+  }
+
+  /**
+   * Subscribe to a session's event stream (GET /rc/session/:id/events) and invoke
+   * `onEvent` for each parsed SSE frame (including `bridgeHints` on
+   * permission_request). Resolves when the stream ends or `signal` aborts; never
+   * throws on a normal abort. The caller owns reconnection.
+   */
+  async subscribeEvents(
+    sessionId: string,
+    onEvent: (ev: BridgeEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(
+        `${this.baseUrl}/rc/session/${encodeURIComponent(sessionId)}/events`,
+        { headers: this.authHeaders(), signal },
+      );
+    } catch {
+      return; // network/abort before headers → caller may reconnect
+    }
+    if (!res.ok || !res.body) return;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split('\n\n');
+        buf = blocks.pop() ?? ''; // keep the trailing partial block
+        for (const block of blocks) {
+          const frame = parseFrame(block);
+          if (frame) onEvent(frame);
+        }
+      }
+    } catch {
+      // Aborted or stream error → stop; caller decides whether to reconnect.
+    }
+  }
+}
+
+/** Parse one SSE block ("id: N\ndata: {...}") into a frame, or null. */
+function parseFrame(block: string): BridgeEvent | null {
+  const dataLine = block.split('\n').find((l) => l.startsWith('data:'));
+  if (!dataLine) return null;
+  try {
+    return JSON.parse(dataLine.slice(5).trim()) as BridgeEvent;
+  } catch {
+    return null;
+  }
+}
