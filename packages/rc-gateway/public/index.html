@@ -661,6 +661,11 @@
                 );
                 continue;
               }
+              // The owner bus is multiplexed: this is the AUDIT feed, so ignore
+              // non-audit frames (e.g. idle_suggestions) rather than rendering
+              // them as garbage "undefined undefined" rows. A dedicated consumer
+              // for idle_suggestions arrives in a later slice.
+              if (frame.type && frame.type !== 'audit') continue;
               const rec = frame.record || frame;
               const parts = [rec.ts, rec.action];
               if (rec.actorTokenId) parts.push('by=' + rec.actorTokenId);
