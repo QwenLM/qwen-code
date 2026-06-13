@@ -847,8 +847,6 @@ export default {
     "No es pot crear una bifurcació mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'Cannot fork before the first conversation turn.':
     'No es pot crear una bifurcació abans del primer torn de conversa.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'L’ordre /fork requereix el feature gate de fork. Definiu QWEN_CODE_ENABLE_FORK_SUBAGENT=1 per activar-lo.',
   'The agent tool is unavailable; cannot fork.':
     "L'eina d'agent no està disponible; no es pot crear una bifurcació.",
   'Failed to launch fork: {{error}}':

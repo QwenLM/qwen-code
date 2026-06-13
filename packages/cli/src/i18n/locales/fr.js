@@ -868,8 +868,6 @@ export default {
     "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'Cannot fork before the first conversation turn.':
     'Impossible de créer un fork avant le premier tour de conversation.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'La commande /fork nécessite le feature gate fork. Définissez QWEN_CODE_ENABLE_FORK_SUBAGENT=1 pour l’activer.',
   'The agent tool is unavailable; cannot fork.':
     "L'outil agent est indisponible ; impossible de créer un fork.",
   'Failed to launch fork: {{error}}': 'Échec du lancement du fork : {{error}}',
