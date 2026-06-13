@@ -413,6 +413,252 @@ describe('SessionService', () => {
       expect(loaded?.lastCompletedUuid).toBe('b2');
     });
 
+    it('keeps the latest file history snapshot for a prompt id', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const firstSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's1',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'old-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const updatedSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 's2',
+        parentUuid: 's1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'updated-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        firstSnapshotRecord,
+        updatedSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'updated-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('ignores file history snapshots on a rewound inactive branch', async () => {
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const staleSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'stale-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'stale-backup',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      const rewindRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'rewind',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      };
+      const survivingSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'surviving-snapshot',
+        parentUuid: 'rewind',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:01:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'surviving-backup',
+                  version: 2,
+                  backupTime: '2026-06-13T00:01:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        staleSnapshotRecord,
+        rewindRecord,
+        survivingSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'surviving-backup',
+              version: 2,
+              backupTime: new Date('2026-06-13T00:01:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
+    it('leaves file history snapshots undefined when none are recorded', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toBeUndefined();
+    });
+
+    it('skips malformed file history snapshot records and keeps later valid ones', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+
+      const malformedSnapshotRecord = {
+        ...recordB1,
+        uuid: 'bad-snapshot',
+        parentUuid: 'b1',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'bad',
+              timestamp: 'not-enough-fields',
+            },
+          ],
+        },
+      } as unknown as ChatRecord;
+      const validSnapshotRecord: ChatRecord = {
+        ...recordB1,
+        uuid: 'good-snapshot',
+        parentUuid: 'bad-snapshot',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        message: undefined,
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'p1',
+              timestamp: '2026-06-13T00:00:00.000Z',
+              trackedFileBackups: {
+                'a.txt': {
+                  backupFileName: 'backup-a',
+                  version: 1,
+                  backupTime: '2026-06-13T00:00:01.000Z',
+                },
+              },
+            },
+          ],
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        malformedSnapshotRecord,
+        validSnapshotRecord,
+      ]);
+
+      const loaded = await sessionService.loadSession(sessionIdB);
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: 'backup-a',
+              version: 1,
+              backupTime: new Date('2026-06-13T00:00:01.000Z'),
+              failed: undefined,
+            },
+          },
+        },
+      ]);
+    });
+
     it('should return undefined when session file is empty', async () => {
       vi.mocked(jsonl.read).mockResolvedValue([]);
 

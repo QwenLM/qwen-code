@@ -1834,10 +1834,9 @@ export class GeminiClient {
       }
 
       if (messageType !== SendMessageType.Retry) {
-        // Snapshot on every non-retry turn. ToolResult turns run right after
-        // tool execution, so their snapshot captures edits that a prior
-        // UserQuery turn scheduled. Without this, a resumed session only sees
-        // the UserQuery-time snapshot (empty) and loses tool-driven edits.
+        // Attribution snapshots are recorded on every non-retry turn. File
+        // history snapshots are created only at UserQuery boundaries; later
+        // tool edits update that latest snapshot through trackEdit().
         this.config
           .getChatRecordingService()
           ?.recordAttributionSnapshot(
