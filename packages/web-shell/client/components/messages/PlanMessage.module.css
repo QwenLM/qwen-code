@@ -24,10 +24,10 @@
 }
 
 .num {
-  width: 24px;
   flex-shrink: 0;
   text-align: right;
   color: var(--text-dimmed);
+  font-variant-numeric: tabular-nums;
 }
 
 .marker {
@@ -42,7 +42,7 @@
 
 .inProgress .marker,
 .inProgress .content {
-  color: var(--success-color);
+  color: var(--accent-color);
 }
 
 .completed .marker {
