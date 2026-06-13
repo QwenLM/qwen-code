@@ -517,6 +517,46 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.validate(schema, params)).toBeNull();
       expect(params.time).toBe(5);
     });
+
+    it('should not coerce decimal string for integer-only schema', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+        },
+        required: ['count'],
+      };
+      const params = { count: '5.5' };
+      // Should NOT coerce — let validation fail so LLM self-corrects
+      expect(SchemaValidator.validate(schema, params)).not.toBeNull();
+      expect(params.count).toBe('5.5');
+    });
+
+    it('should coerce decimal string when number is accepted via anyOf', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          value: { anyOf: [{ type: 'integer' }, { type: 'number' }] },
+        },
+        required: ['value'],
+      };
+      const params = { value: '5.5' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.value).toBe(5.5);
+    });
+
+    it('should coerce numeric strings inside arrays of integers', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          ports: { type: 'array', items: { type: 'integer' } },
+        },
+        required: ['ports'],
+      };
+      const params = { ports: ['8080', '3000'] };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.ports).toEqual([8080, 3000]);
+    });
   });
 
   describe('JSON Schema version support', () => {

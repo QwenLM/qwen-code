@@ -322,7 +322,10 @@ function fixNumericValues(
     const trimmed = value.trim();
     if (!/^-?\d+(\.\d+)?$/.test(trimmed)) continue;
 
-    const parsed = wantsInteger ? parseInt(trimmed, 10) : parseFloat(trimmed);
+    const hasDecimal = trimmed.includes('.');
+    if (wantsInteger && !wantsNumber && hasDecimal) continue;
+
+    const parsed = wantsNumber ? parseFloat(trimmed) : parseInt(trimmed, 10);
     if (Number.isFinite(parsed)) {
       data[key] = parsed;
     }
