@@ -31,6 +31,11 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Execute]: 'execute',
   [Kind.Think]: 'think',
   [Kind.Fetch]: 'fetch',
+  // TODO(acp-sdk): drop the `as ToolKind` cast once @agentclientprotocol/sdk
+  // adds 'agent' to its ToolKind union + zToolKind schema. We emit 'agent'
+  // (not 'other') on purpose: the webui consumes this kind over the acpHttp
+  // SSE bridge and relies on it for the dedicated permission dialog. The
+  // JSONRPC path Zod-rejects 'agent' until the SDK ships it — accepted, see PR.
   [Kind.Agent]: 'agent' as ToolKind,
   [Kind.Other]: 'other',
 };
