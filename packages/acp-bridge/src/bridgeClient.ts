@@ -431,10 +431,27 @@ export class BridgeClient implements Client {
       }
       params = a2ui.sanitizedParams;
     }
+    // History replay re-emits each persisted record carrying its ORIGINAL
+    // wall-clock time as an epoch-ms `timestamp` nested in `update._meta` (set
+    // by the message/tool emitters). Lift it to the envelope-level
+    // `serverTimestamp` so `EventBus.publish` preserves it instead of stamping
+    // publish-time `Date.now()` — otherwise a resumed session renders every
+    // historical message at the resume moment instead of when it was sent.
+    // Live updates without such a timestamp pass no envelope `_meta` and keep
+    // the EventBus `Date.now()` fallback unchanged.
+    const updateMeta = (params.update as { _meta?: Record<string, unknown> })
+      ._meta;
+    const originalTs =
+      updateMeta?.['serverTimestamp'] ?? updateMeta?.['timestamp'];
+    const serverTimestamp =
+      typeof originalTs === 'number' && Number.isFinite(originalTs)
+        ? originalTs
+        : undefined;
     events.publish({
       type: 'session_update',
       data: params,
       ...originator,
+      ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
   }
 
