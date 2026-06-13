@@ -996,6 +996,13 @@ export class AcpDispatcher {
         // Maps to the same bridge call as set_config_option with configId='mode'.
         case 'session/set_mode': {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            return;
+          }
           if (!this.requireOwned(conn, sessionId, id)) return;
           const modeId = String(params['modeId'] ?? '');
           if (!modeId || !APPROVAL_MODES.includes(modeId as ApprovalMode)) {
@@ -1030,6 +1037,13 @@ export class AcpDispatcher {
         // with configId='model'.
         case 'session/set_model': {
           const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`sessionId` is required'),
+              );
+            return;
+          }
           if (!this.requireOwned(conn, sessionId, id)) return;
           const modelId = String(params['modelId'] ?? '');
           if (!modelId) {
@@ -1047,9 +1061,7 @@ export class AcpDispatcher {
           const ctx = this.sessionCtx(conn, sessionId, loopback);
           await this.bridge.setSessionModel(
             sessionId,
-            { modelId } as unknown as Parameters<
-              HttpAcpBridge['setSessionModel']
-            >[1],
+            { modelId, sessionId },
             ctx,
           );
           this.replySession(conn, sessionId, id, {});
