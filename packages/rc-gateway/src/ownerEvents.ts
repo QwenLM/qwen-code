@@ -8,10 +8,19 @@ import type { AuditRecord } from './auditLog.js';
 
 /**
  * A frame broadcast on the owner-level event stream. A discriminated union so
- * future producers (e.g. a bespoke routing frame) can add variants without
- * breaking consumers; this slice ships only the audit-record variant.
+ * producers can add variants without breaking consumers (clients switch on
+ * `type` and ignore unknown frames). The `/rc/events` route JSON-stringifies the
+ * whole frame, so a new variant flows through with no route change.
+ *
+ *  - `audit`: a durably-appended audit record (the live security feed; cycle 49).
+ *  - `idle_suggestions`: gateway-generated next-step suggestions emitted when a
+ *    session's active prompt finishes (proposal `add-idle-suggestions`, slice 2).
+ *    `suggestions` is a small list of short imperative strings — NEVER transcript
+ *    text, only the model's distilled next-step phrases.
  */
-export type OwnerEvent = { type: 'audit'; record: AuditRecord };
+export type OwnerEvent =
+  | { type: 'audit'; record: AuditRecord }
+  | { type: 'idle_suggestions'; sessionId: string; suggestions: string[] };
 
 export type OwnerEventHandler = (event: OwnerEvent) => void;
 

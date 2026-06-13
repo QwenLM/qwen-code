@@ -41,6 +41,17 @@ export interface SessionEventPumpOptions {
    * offered to it; an auto-handled (voted) event is NOT pushed to the notifier.
    */
   enforcer?: PolicyEnforcer;
+  /**
+   * Optional idle handler (proposal `add-idle-suggestions`, slice 2). Called ONCE
+   * per session whenever its `hasActivePrompt` transitions true→false across poll
+   * ticks — the daemon's authoritative "the agent just went idle" edge (the
+   * bridge sets `hasActivePrompt = activePromptOriginatorClientId !== undefined`,
+   * so it is true for the whole prompt turn INCLUDING tool calls; the falling edge
+   * is genuine idle, never a mid-tool gap). Invoked synchronously inside a
+   * try/catch and expected to be fire-and-forget — it must never block or throw
+   * into reconcile.
+   */
+  onSessionIdle?: (sessionId: string, workspaceCwd: string) => void;
 }
 
 /** Per-session subscription loop state. */
@@ -73,8 +84,18 @@ export class SessionEventPump {
   ) => string | undefined;
   private readonly onDispatch?: (sessionId: string, event: DaemonEvent) => void;
   private readonly enforcer?: PolicyEnforcer;
+  private readonly onSessionIdle?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => void;
 
   private readonly loops = new Map<string, Loop>();
+  /**
+   * Last-observed active-prompt state per session, for true→false edge detection
+   * (idle suggestions). Tracked only when `onSessionIdle` is wired; cleared on
+   * session-drop and `stop()` so it never outlives the loops.
+   */
+  private readonly activePrompt = new Map<string, boolean>();
   private workspaceCwd = '';
   private stopped = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -92,6 +113,7 @@ export class SessionEventPump {
     this.sessionName = opts.sessionName;
     this.onDispatch = opts.onDispatch;
     this.enforcer = opts.enforcer;
+    this.onSessionIdle = opts.onSessionIdle;
   }
 
   /** Resolves once the first reconcile has run. Never throws. */
@@ -135,12 +157,37 @@ export class SessionEventPump {
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
       if (!this.loops.has(s.sessionId)) this.spawnLoop(s);
+      this.detectIdleEdge(s);
     }
     for (const [id, loop] of this.loops) {
       if (!ids.has(id)) {
         loop.active = false;
         loop.ctrl.abort();
         this.loops.delete(id);
+        this.activePrompt.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Track this session's active-prompt state and fire {@link onSessionIdle} once
+   * on a true→false transition (the agent just went idle). The FIRST observation
+   * only seeds the state — a session first seen idle, or first seen mid-prompt,
+   * never fires until we actually witness the falling edge — so startup doesn't
+   * emit a suggestion storm for every pre-existing session. No-op when no idle
+   * handler is wired (so the map stays empty and there's zero overhead).
+   */
+  private detectIdleEdge(s: DaemonSessionSummary): void {
+    if (!this.onSessionIdle) return;
+    const now = s.hasActivePrompt === true;
+    const prev = this.activePrompt.get(s.sessionId);
+    this.activePrompt.set(s.sessionId, now);
+    if (prev === true && now === false) {
+      try {
+        this.onSessionIdle(s.sessionId, s.workspaceCwd);
+      } catch {
+        // Idle suggestions are best-effort enrichment; a throwing handler must
+        // never break the reconcile loop or push delivery.
       }
     }
   }
@@ -209,5 +256,6 @@ export class SessionEventPump {
       loop.ctrl.abort();
     }
     this.loops.clear();
+    this.activePrompt.clear();
   }
 }

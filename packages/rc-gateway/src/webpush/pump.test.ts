@@ -275,4 +275,77 @@ describe('SessionEventPump', () => {
     expect(onDispatchSeen[0].event.id).toBe(42);
     expect(onDispatchSeen[0].id).toBe('s1');
   });
+
+  describe('idle-edge detection (onSessionIdle)', () => {
+    it('fires once with (sessionId, workspaceCwd) on a hasActivePrompt true→false transition', async () => {
+      const idle: Array<{ id: string; cwd: string }> = [];
+      const sessions = [
+        { sessionId: 's1', workspaceCwd: '/w', hasActivePrompt: true },
+      ];
+      stub = await startStubDaemon({ workspaceCwd: '/w', sessions });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      pump = new SessionEventPump(daemon, fakeNotifier([]), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onSessionIdle: (id, cwd) => idle.push({ id, cwd }),
+      });
+      await pump.start();
+
+      // Seeded as active across at least one tick, no edge yet.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(idle.length).toBe(0);
+
+      // The prompt finishes → next poll sees the falling edge → fire ONCE.
+      sessions[0].hasActivePrompt = false;
+      expect(await waitFor(() => idle.length >= 1)).toBe(true);
+      expect(idle[0]).toEqual({ id: 's1', cwd: '/w' });
+
+      // Stays idle across further ticks → no repeat fire.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(idle.length).toBe(1);
+    });
+
+    it('does NOT fire for a session first observed already idle (no false startup storm)', async () => {
+      const idle: string[] = [];
+      stub = await startStubDaemon({
+        workspaceCwd: '/w',
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/w', hasActivePrompt: false },
+        ],
+      });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      pump = new SessionEventPump(daemon, fakeNotifier([]), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onSessionIdle: (id) => idle.push(id),
+      });
+      await pump.start();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(idle).toEqual([]);
+    });
+
+    it('a throwing idle handler never breaks reconcile (loops still tracked)', async () => {
+      const sessions = [
+        { sessionId: 's1', workspaceCwd: '/w', hasActivePrompt: true },
+      ];
+      stub = await startStubDaemon({ workspaceCwd: '/w', sessions });
+      const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+      pump = new SessionEventPump(daemon, fakeNotifier([]), {
+        pollMs: 20,
+        reconnectMs: 0,
+        sleep: async () => {},
+        onSessionIdle: () => {
+          throw new Error('handler boom');
+        },
+      });
+      await pump.start();
+      await new Promise((r) => setTimeout(r, 60));
+      sessions[0].hasActivePrompt = false;
+      // The throw is swallowed; the pump keeps polling and stops cleanly.
+      await new Promise((r) => setTimeout(r, 80));
+      await pump.stop(); // must not throw
+    });
+  });
 });
