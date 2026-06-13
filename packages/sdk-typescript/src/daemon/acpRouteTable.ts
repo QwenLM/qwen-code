@@ -43,7 +43,7 @@ export interface RouteEntry {
  *   - `:param` = named path param (consumed positionally)
  *   - `*`      = rest wildcard
  */
-export const ROUTE_TABLE: ReadonlyArray<RouteEntry> = [
+export const ROUTE_TABLE: readonly RouteEntry[] = [
   // POST /session → session/new
   {
     httpMethod: 'POST',
