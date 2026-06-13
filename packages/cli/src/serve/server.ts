@@ -237,7 +237,7 @@ export async function listWorkspaceSessionsForResponse(
       workspaceCwd: item.cwd,
       createdAt: item.startTime,
       updatedAt: new Date(item.mtime).toISOString(),
-      displayName: item.customTitle ?? item.prompt,
+      displayName: item.customTitle || item.prompt,
       clientCount: 0,
       hasActivePrompt: false,
     });
@@ -276,9 +276,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }

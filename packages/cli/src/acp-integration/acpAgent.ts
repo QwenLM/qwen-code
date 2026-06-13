@@ -5433,12 +5433,21 @@ class QwenAgent implements Agent {
             'Invalid or missing displayName',
           );
         }
+        if (displayName.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const source =
           titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
         const recording = session.getConfig().getChatRecordingService();
-        const ok = recording?.recordCustomTitle(displayName, source) ?? false;
-        if (ok) await recording!.flush();
+        let ok = false;
+        if (recording) {
+          ok = recording.recordCustomTitle(displayName, source);
+          await recording.flush();
+        }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
@@ -6313,7 +6322,7 @@ class QwenAgent implements Agent {
               throw err;
             }
 
-            return { newSessionId, title };
+            return { newSessionId, title, displayName: title };
           },
         );
       }
