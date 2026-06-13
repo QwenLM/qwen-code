@@ -1041,9 +1041,9 @@ export const useGeminiStream = (
           item.durationMs = Date.now() - thoughtStartTimeRef.current;
         }
         addItem(item, userMessageTimestamp);
-        setPendingThoughtItem(null);
-        thoughtStartTimeRef.current = null;
       }
+      setPendingThoughtItem(null);
+      thoughtStartTimeRef.current = null;
     },
     [addItem, pendingThoughtItemRef, setPendingThoughtItem],
   );
