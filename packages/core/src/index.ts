@@ -111,6 +111,7 @@ export {
   buildSkillLlmContent,
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
+export { atomicWriteFile } from './utils/atomicFileWrite.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -270,6 +271,7 @@ export type {
   OAuthAuthorizationServerMetadata,
   OAuthProtectedResourceMetadata,
 } from './mcp/oauth-utils.js';
+export { hashMcpServerConfig } from './mcp/configHash.js';
 
 // ============================================================================
 // Telemetry
