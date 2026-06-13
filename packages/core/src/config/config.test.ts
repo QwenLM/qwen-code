@@ -454,6 +454,39 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  it('drops stale file history callbacks after session switch', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+    });
+    const recordFileHistorySnapshot = vi.fn();
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const oldFileHistoryService = config.getFileHistoryService();
+      await oldFileHistoryService.makeSnapshot('p1');
+      config.startNewSession('new-session-id');
+      await oldFileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
   describe('FileReadCache isolation', () => {
     it('returns a distinct cache for child Configs created via Object.create', () => {
       // Subagent / scoped-agent / fork construction all use

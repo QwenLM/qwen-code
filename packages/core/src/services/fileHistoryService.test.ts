@@ -111,6 +111,26 @@ describe('FileHistoryService', () => {
       expect(recordSnapshot).toHaveBeenCalledTimes(1);
     });
 
+    it('does not record when the snapshot is removed while backup is in flight', async () => {
+      const recordSnapshot = vi.fn();
+      const recordingService = new FileHistoryService(
+        'test-session',
+        true,
+        projectDir,
+        recordSnapshot,
+      );
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await recordingService.makeSnapshot('p1');
+      const edit = recordingService.trackEdit(file);
+      recordingService.restoreFromSnapshots([]);
+      await edit;
+
+      expect(recordSnapshot).not.toHaveBeenCalled();
+      expect(recordingService.getSnapshots()).toEqual([]);
+    });
+
     it('records again when a second file is tracked in the same snapshot', async () => {
       const recordedSnapshots: FileHistorySnapshot[] = [];
       const recordSnapshot = vi.fn((snapshot: FileHistorySnapshot) => {

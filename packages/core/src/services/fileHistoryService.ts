@@ -625,11 +625,16 @@ export class FileHistoryService {
       const batch = names.slice(i, i + BATCH_SIZE);
       const results = await Promise.all(
         batch.map(async (name) => {
+          let backupPath: string;
           try {
-            return await pathExists(resolveBackupPath(name, this.sessionId));
-          } catch {
+            backupPath = resolveBackupPath(name, this.sessionId);
+          } catch (e) {
+            debugLogger.error(
+              `FileHistory: rejected backupFileName during validation: ${name}: ${e}`,
+            );
             return false;
           }
+          return await pathExists(backupPath);
         }),
       );
       for (let j = 0; j < batch.length; j++) {

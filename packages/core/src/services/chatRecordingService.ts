@@ -1416,7 +1416,6 @@ export class ChatRecordingService {
   private appendSerializedFileHistorySnapshotBatch(
     snapshots: SerializedFileHistorySnapshot[],
   ): void {
-    if (snapshots.length === 0) return;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
