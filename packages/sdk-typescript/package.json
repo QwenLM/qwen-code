@@ -18,16 +18,20 @@
       "require": "./dist/daemon/index.cjs"
     },
     "./daemon/AcpWsTransport": {
-      "import": "./src/daemon/AcpWsTransport.js"
+      "import": "./src/daemon/AcpWsTransport.ts",
+      "types": "./src/daemon/AcpWsTransport.ts"
     },
     "./daemon/AcpHttpTransport": {
-      "import": "./src/daemon/AcpHttpTransport.js"
+      "import": "./src/daemon/AcpHttpTransport.ts",
+      "types": "./src/daemon/AcpHttpTransport.ts"
     },
     "./daemon/AutoReconnectTransport": {
-      "import": "./src/daemon/AutoReconnectTransport.js"
+      "import": "./src/daemon/AutoReconnectTransport.ts",
+      "types": "./src/daemon/AutoReconnectTransport.ts"
     },
     "./daemon/negotiateTransport": {
-      "import": "./src/daemon/negotiateTransport.js"
+      "import": "./src/daemon/negotiateTransport.ts",
+      "types": "./src/daemon/negotiateTransport.ts"
     },
     "./package.json": "./package.json"
   },

@@ -58,6 +58,35 @@ describe('denormalizeAcpNotification', () => {
     });
   });
 
+  it('converts session/update with nested update.sessionUpdate (current daemon format)', () => {
+    // This is the shape the daemon actually sends:
+    //   { method: "session/update", params: { sessionId, update: { sessionUpdate: "<type>", ...data } } }
+    const notification: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'assistant.text.delta',
+          content: { text: 'Hello' },
+          _meta: { serverTimestamp: 12345 },
+        },
+      },
+    };
+    const event = denormalizeAcpNotification(notification);
+    expect(event).toBeDefined();
+    expect(event!.type).toBe('assistant.text.delta');
+    // data is the update object with sessionId merged in.
+    expect(event!.data).toEqual({
+      sessionUpdate: 'assistant.text.delta',
+      content: { text: 'Hello' },
+      _meta: { serverTimestamp: 12345 },
+      sessionId: 's1',
+    });
+    // _meta is extracted from the update object.
+    expect(event!._meta).toEqual({ serverTimestamp: 12345 });
+  });
+
   it('returns undefined for session/update without a type field', () => {
     const notification: JsonRpcNotification = {
       jsonrpc: '2.0',

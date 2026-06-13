@@ -56,16 +56,58 @@ export function denormalizeAcpNotification(
 ): DaemonEvent | undefined {
   const params = notification.params ?? {};
 
-  // Primary path: session/update carries the event type inside params.
+  // Primary path: session/update carries the event payload inside
+  // params.update.sessionUpdate.  The daemon's `translateEvent` sends:
+  //   { method: "session/update", params: { sessionId, update: { sessionUpdate: "<type>", ...fields } } }
+  // The `update` object (or `update.sessionUpdate` string for the type)
+  // is the canonical event data.
   if (notification.method === 'session/update') {
-    const type = params['type'];
-    if (typeof type !== 'string' || type.length === 0) return undefined;
+    const rawUpdate = isRecord(params['update']) ? params['update'] : undefined;
+
+    // New format (current daemon): type at update.sessionUpdate, data
+    // is the update object itself.
+    // Legacy format: type at params.type, data at params.data.
+    const type = rawUpdate
+      ? typeof rawUpdate['sessionUpdate'] === 'string'
+        ? rawUpdate['sessionUpdate']
+        : undefined
+      : typeof params['type'] === 'string'
+        ? params['type']
+        : undefined;
+    if (!type || type.length === 0) return undefined;
+
+    // Build the event data payload. For the new format, spread the
+    // update object and inject sessionId so the WS transport's
+    // per-session filter (event.data.sessionId) works. For the
+    // legacy format, use params.data or fall back to params itself.
+    let data: unknown;
+    if (rawUpdate) {
+      const d: Record<string, unknown> = { ...rawUpdate };
+      if (typeof params['sessionId'] === 'string') {
+        d['sessionId'] = params['sessionId'];
+      }
+      data = d;
+    } else {
+      data = params['data'] ?? params;
+    }
+
+    // _meta may live inside the update object or at params level.
+    const meta = rawUpdate
+      ? isRecord(rawUpdate['_meta'])
+        ? rawUpdate['_meta']
+        : isRecord(params['_meta'])
+          ? params['_meta']
+          : undefined
+      : isRecord(params['_meta'])
+        ? params['_meta']
+        : undefined;
+
     return {
       id: nextSyntheticId++,
       v: 1,
       type,
-      data: params['data'] ?? params,
-      _meta: isRecord(params['_meta']) ? params['_meta'] : undefined,
+      data,
+      _meta: meta,
       originatorClientId:
         typeof params['originatorClientId'] === 'string'
           ? params['originatorClientId']

@@ -329,20 +329,18 @@ export class AcpWsTransport implements DaemonTransport {
 
   private async connect(): Promise<void> {
     return new Promise<void>((resolveConnect, rejectConnect) => {
-      // Pass token via Authorization header on the upgrade request
-      // instead of embedding it in the URL query string. The
-      // WebSocket constructor accepts (url, protocols, options) in
-      // Node.js. We pass an empty protocols array and supply headers
-      // in the third argument.
-      const ws = this.token
-        ? new (WebSocket as unknown as new (
-            url: string,
-            protocols: string[],
-            opts: { headers: Record<string, string> },
-          ) => WebSocket)(this.wsUrl, [], {
-            headers: { Authorization: `Bearer ${this.token}` },
-          })
-        : new WebSocket(this.wsUrl);
+      // Pass token via Authorization header on the upgrade request.
+      // Node >=22 supports an options object as the second argument:
+      //   new WebSocket(url, { headers: { ... } })
+      // The DOM typings only declare (url, protocols?) so we cast
+      // through `unknown` to pass the Node-specific options bag.
+      const wsOptions = this.token
+        ? { headers: { Authorization: `Bearer ${this.token}` } }
+        : undefined;
+      const ws = new (WebSocket as unknown as new (
+        url: string,
+        opts?: { headers?: Record<string, string> },
+      ) => WebSocket)(this.wsUrl, wsOptions);
       this.ws = ws;
 
       // Timeout for the initialize handshake.

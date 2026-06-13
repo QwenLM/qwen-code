@@ -311,17 +311,20 @@ export class AcpHttpTransport implements DaemonTransport {
       throw new Error(`ACP initialize error: ${response.error.message}`);
     }
 
-    // Extract connectionId from the initialize result (_meta.qwen.connectionId).
+    // Extract connectionId: try the response header first (canonical),
+    // then the JSON body at agentCapabilities._meta.qwen.connectionId,
+    // then the legacy path _meta.qwen.connectionId.
     const result = response.result;
-    if (isRecord(result)) {
-      const meta = result['_meta'];
-      if (isRecord(meta)) {
-        const qwen = meta['qwen'];
-        if (isRecord(qwen) && typeof qwen['connectionId'] === 'string') {
-          this.connectionId = qwen['connectionId'];
-        }
-      }
-    }
+    const headerConnId = res.headers.get('acp-connection-id');
+    this.connectionId =
+      (headerConnId || undefined) ??
+      extractConnectionId(result, [
+        'agentCapabilities',
+        '_meta',
+        'qwen',
+        'connectionId',
+      ]) ??
+      extractConnectionId(result, ['_meta', 'qwen', 'connectionId']);
 
     this.initResult = result;
     this._initialized = true;
@@ -425,4 +428,21 @@ export class AcpHttpTransport implements DaemonTransport {
 
     return (await res.json()) as JsonRpcResponse;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk an object along a key path and return the leaf value if it's a
+ * string, otherwise `undefined`.
+ */
+function extractConnectionId(obj: unknown, path: string[]): string | undefined {
+  let cur: unknown = obj;
+  for (const key of path) {
+    if (!isRecord(cur)) return undefined;
+    cur = cur[key];
+  }
+  return typeof cur === 'string' ? cur : undefined;
 }
