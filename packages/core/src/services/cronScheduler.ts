@@ -359,7 +359,11 @@ export class CronScheduler {
                 }
                 // Already loaded and watching — reload once with missed-task
                 // handling for one-shots that went stale while no owner ran.
-                void this.loadFileTasks(true);
+                // Separate promise from the outer .catch chain, so guard its
+                // own rejection — an unhandled one crashes Node >=22.
+                void this.loadFileTasks(true).catch((err) => {
+                  debugLogger.warn(`Cron takeover reload failed: ${err}`);
+                });
               }
             })
             .catch((err) => {
@@ -507,6 +511,17 @@ export class CronScheduler {
     for (const task of tasks) {
       if (this.pendingRemoval.has(task.id)) continue;
       const existing = this.jobs.get(task.id);
+      // Bound what a project-controlled file can install, mirroring the
+      // create()-time MAX_JOBS limit. Updating an already-loaded job is
+      // always allowed (it doesn't grow the map); only brand-new ids are
+      // capped, so a hand-edited or force-committed file with hundreds of
+      // entries can't balloon the map and the 1s tick loop.
+      if (!existing && this.jobs.size >= MAX_JOBS) {
+        debugLogger.warn(
+          `Durable task ${task.id} skipped — MAX_JOBS (${MAX_JOBS}) reached.`,
+        );
+        continue;
+      }
       const job = durableTaskToJob(task, existing);
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);

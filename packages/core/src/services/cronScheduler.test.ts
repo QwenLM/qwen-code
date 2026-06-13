@@ -717,6 +717,40 @@ describe('CronScheduler', () => {
       expect(fired).toHaveLength(0);
     });
 
+    it('takes over via the lock probe after the owner releases the lock', async () => {
+      // The 5s probe is the sole failover mechanism — exercise the timer
+      // path, not a manual lock swap. Fake timers drive the interval; fs
+      // and Date stay real enough (frozen at real now) for firing logic.
+      vi.useFakeTimers();
+      try {
+        await lockAsOtherSession(); // live foreign lock → we start non-owner
+        await writeCronTasks(tmpDir, [diskTask('probe-job')]);
+        await scheduler.enableDurable('session-1');
+
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+
+        // Non-owner: the durable job is loaded but the tick must not fire it.
+        scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+        expect(fired).toHaveLength(0);
+
+        // Owner dies — its lock vanishes, so the next probe can acquire.
+        await fs.unlink(getLockFilePath(tmpDir));
+        await vi.advanceTimersByTimeAsync(5_000 + 50); // one probe interval
+
+        // The probe acquired the lock and flipped this session to owner.
+        const lock = JSON.parse(
+          await fs.readFile(getLockFilePath(tmpDir), 'utf-8'),
+        );
+        expect(lock.sessionId).toBe('session-1');
+        // Now an owner, the durable job fires.
+        scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
+        expect(fired.map((j) => j.id)).toContain('probe-job');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('non-owner deletes durable tasks from disk', async () => {
       await lockAsOtherSession();
       await writeCronTasks(tmpDir, [diskTask('foreign2')]);

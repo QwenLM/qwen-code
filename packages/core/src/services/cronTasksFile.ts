@@ -8,7 +8,10 @@ import * as path from 'node:path';
 import { Mutex } from 'async-mutex';
 
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { QWEN_DIR } from '../utils/paths.js';
+
+const debugLogger = createDebugLogger('CRON_TASKS_FILE');
 
 export interface DurableCronTask {
   id: string;
@@ -36,7 +39,10 @@ const UPDATE_LOCK_TIMEOUT_MS = 3_000;
 let updateStaleSeq = 0;
 
 // In-process serialization: a per-file mutex so concurrent calls from this
-// session never interleave (and never contend on the file lock).
+// session never interleave (and never contend on the file lock). One entry
+// per project root, never evicted — bounded by the number of project roots
+// a single process touches, which in CLI usage is one. Not a leak worth a
+// cleanup hook at this lifetime.
 const updateMutexes = new Map<string, Mutex>();
 
 function getUpdateMutex(filePath: string): Mutex {
@@ -84,7 +90,21 @@ export async function readCronTasks(
       `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
     );
   }
-  return parsed.filter(isValidTask);
+  const valid = parsed.filter(isValidTask);
+  // A single malformed entry in an otherwise-valid array is dropped here,
+  // and the next update persists the filtered list — silently losing what
+  // the user hand-edited. Can't carry unknown shapes through the typed
+  // pipeline yet (tracked as follow-up), so at least surface the drop.
+  if (valid.length !== parsed.length) {
+    debugLogger.warn(
+      `Dropped ${parsed.length - valid.length} invalid task entr${
+        parsed.length - valid.length === 1 ? 'y' : 'ies'
+      } from ${filePath}; a later write will persist without ${
+        parsed.length - valid.length === 1 ? 'it' : 'them'
+      }.`,
+    );
+  }
+  return valid;
 }
 
 export async function writeCronTasks(
