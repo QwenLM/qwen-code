@@ -66,6 +66,7 @@ describe('getToolDisplayLabel', () => {
 
   it('capitalizes generic label mappings that still fall through generic rendering', () => {
     expect(getToolDisplayLabel({ kind: 'task' })).toBe('Task');
+    expect(getToolDisplayLabel({ kind: 'agent' })).toBe('Agent');
     expect(getToolDisplayLabel({ kind: 'skill' })).toBe('Skill');
     expect(getToolDisplayLabel({ kind: 'exit_plan_mode' })).toBe(
       'ExitPlanMode',
