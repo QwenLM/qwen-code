@@ -36,6 +36,8 @@ export type AuditAction =
   | 'push_rate_limited'
   | 'routing_snoozed'
   | 'routing_unsnoozed'
+  | 'routing_reloaded'
+  | 'routing_reload_failed'
   | 'push_prefs_updated'
   | 'share_created'
   | 'share_revoked'
@@ -76,6 +78,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'push_rate_limited',
   'routing_snoozed',
   'routing_unsnoozed',
+  'routing_reloaded',
+  'routing_reload_failed',
   'push_prefs_updated',
   'share_created',
   'share_revoked',

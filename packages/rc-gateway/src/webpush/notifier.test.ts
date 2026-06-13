@@ -495,6 +495,46 @@ describe('PushNotifier', () => {
     expect(sent[0].payload.kind).toBe('permission.required');
   });
 
+  it('setRouting hot-swaps the matcher (hot-reload): a later notify drops under the new rules', async () => {
+    const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
+    await store.add(approver.id, {
+      endpoint: 'https://push.example.com/approver',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    // Start with NO routing → the first notify delivers.
+    const notifier = new PushNotifier(tokens, store, sender);
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+    expect(sent).toHaveLength(1);
+
+    // Hot-swap in a drop-everything matcher → the next notify is suppressed.
+    notifier.setRouting({ firstDrop: () => 'silence-prompts' });
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r2' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+    expect(sent).toHaveLength(1); // unchanged — the 2nd was dropped
+
+    // Swap back to undefined → delivery resumes.
+    notifier.setRouting(undefined);
+    await notifier.notify(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r3' },
+      },
+      { sessionId: 's1', sessionName: 'demo' },
+    );
+    expect(sent).toHaveLength(2);
+  });
+
   it('snooze takes precedence over a routing drop rule (gate order)', async () => {
     const approver = await tokens.issue([SESSION_READ, APPROVE], 'approver');
     await store.add(approver.id, {

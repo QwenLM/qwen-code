@@ -47,7 +47,7 @@ export class PushNotifier {
     private readonly snooze?: SnoozeStore,
     private readonly audit?: AuditRecorder,
     private readonly workingDevice?: WorkingDeviceTracker,
-    private readonly routing?: RoutingMatcher,
+    private routing?: RoutingMatcher,
     private readonly rateLimiter?: PushRateLimiter,
     private readonly coalescer?: PushCoalescer,
     private readonly digest?: PushDigest,
@@ -55,6 +55,16 @@ export class PushNotifier {
 
   /** Edge-detector for the end-of-quiet-window digest flush (D4, cycle 75). */
   private readonly quietWatcher = new QuietDigestWatcher();
+
+  /**
+   * Hot-swap the routing matcher (notification-routing hot-reload). The swap is a
+   * single synchronous field assignment; `notify` captures the matcher reference
+   * ONCE at the top of a fan-out, so an event in flight when a reload lands keeps
+   * evaluating under the rules it began with (spec: per-event atomicity).
+   */
+  setRouting(routing: RoutingMatcher | undefined): void {
+    this.routing = routing;
+  }
 
   /** Per-subscription summary of pushes suppressed during quiet hours (D4 read). */
   digestSummary(): DigestSummary[] {
@@ -118,6 +128,11 @@ export class PushNotifier {
   ): Promise<void> {
     const payload = buildPayload(event, ctx);
     if (!payload) return;
+    // Capture the routing matcher ONCE: a hot-reload (setRouting) landing mid
+    // fan-out must not swap the rules an in-flight event evaluates under
+    // (per-event atomicity — spec "an in-flight event begun before reload
+    // completes under the rules it began with").
+    const routing = this.routing;
     // Routing gate: a snooze suppresses the WHOLE fan-out once, before any
     // send (snooze is event-global, not per-subscription). The /test path
     // (notifyToken) is deliberately NOT gated.
@@ -134,7 +149,7 @@ export class PushNotifier {
     // snooze — event-global, before any per-subscription work. Suppress-only:
     // a rule can never cause a push the gates below would have blocked. The
     // /test path (notifyToken) is NOT gated.
-    const dropRuleId = this.routing?.firstDrop({
+    const dropRuleId = routing?.firstDrop({
       kind: payload.kind,
       sessionName: ctx.sessionName,
     });
@@ -168,7 +183,7 @@ export class PushNotifier {
         // "why no push" surfaces the explicit operator decision first. Same
         // reason token as the global drop, discriminated by subscriptionId.
         // Optional method → a matcher without it performs no per-sub drop.
-        const perSubDrop = this.routing?.firstDropForSubscription?.(
+        const perSubDrop = routing?.firstDropForSubscription?.(
           { kind: payload.kind, sessionName: ctx.sessionName },
           { tokenId: r.tokenId, scopes },
         );

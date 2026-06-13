@@ -376,6 +376,30 @@ export async function loadLayeredRoutingMatcher(
   return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
 }
 
+/**
+ * STRICT variant of {@link loadLayeredRoutingMatcher} for HOT-RELOAD: a malformed
+ * file at EITHER layer THROWS ({@link RoutingError}/YAML/fs error) instead of
+ * being logged-and-ignored. A reload must RETAIN the previously-compiled ruleset
+ * on a parse error (spec: "Parse failure preserves prior rules" + emits
+ * `routing_reload_failed`) — silently dropping a bad layer would instead WIDEN
+ * the fan-out (fewer drops) on a half-typed save, the opposite of the spec. A
+ * MISSING file (ENOENT) at either layer is NOT an error: it resolves to no rules
+ * for that layer (an intended removal), matching the boot loader. Returns
+ * `{ matcher: undefined, ruleCount: 0 }` when neither file exists.
+ */
+export async function loadLayeredRoutingMatcherStrict(
+  userPath: string,
+  workspaceCwd: string | undefined,
+): Promise<{ matcher: RoutingMatcher | undefined; ruleCount: number }> {
+  const user = await loadRoutingConfigFile(userPath);
+  const workspace = workspaceCwd
+    ? await loadRoutingConfigFile(join(workspaceCwd, '.qwen', 'routing.yaml'))
+    : null;
+  const merged = mergeRoutingConfigs(workspace, user);
+  if (!merged) return { matcher: undefined, ruleCount: 0 };
+  return { matcher: compileRouting(merged), ruleCount: merged.rules.length };
+}
+
 /** One rule of the resolved (merged) routing ruleset, with its source file path. */
 export interface ResolvedRoutingRule {
   /** The file the rule was loaded from (workspace or user routing.yaml path). */

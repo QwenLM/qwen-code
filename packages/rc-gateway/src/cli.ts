@@ -15,6 +15,7 @@ import { PushStore } from './pushStore.js';
 import { SnoozeStore } from './routing/snooze.js';
 import {
   loadLayeredRoutingMatcher,
+  loadLayeredRoutingMatcherStrict,
   loadResolvedRoutingRules,
   formatResolvedRouting,
 } from './routing/rules.js';
@@ -55,6 +56,7 @@ import {
   quotaLimitsFromPolicy,
 } from './policy/quotas.js';
 import { PolicyReloader } from './policy/reloader.js';
+import { DebouncedReloader } from './reload/debouncedReloader.js';
 import {
   checkPolicyFilePermissions,
   formatInsecurePolicyWarning,
@@ -181,6 +183,18 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // no gateway-level owner-broadcast surface exists yet (Phase 4).
   const watchers: FSWatcher[] = [];
   let reloader: PolicyReloader | undefined;
+  // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
+  // 250 ms debounce; on parse failure retain the previously-compiled ruleset and
+  // emit routing_reload_failed"). Symmetric to the policy reloader above and
+  // shares its dir watchers. The STRICT loader throws on a malformed layer so a
+  // half-typed save RETAINS the prior rules (a silent fail-open would instead
+  // WIDEN the fan-out). The swap is a sync notifier.setRouting; per-event
+  // atomicity is handled by notify() capturing the matcher once.
+  let routingReloader:
+    | DebouncedReloader<
+        Awaited<ReturnType<typeof loadLayeredRoutingMatcherStrict>>
+      >
+    | undefined;
   if (enforcer) {
     const activeEnforcer = enforcer;
     reloader = new PolicyReloader({
@@ -222,10 +236,44 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       },
     });
     const activeReloader = reloader;
-    // Watch the PARENT DIR of each policy file (survives an editor's atomic
-    // rename-replace, unlike a file watch), filtering for the policy.yaml
-    // basename. fs.watch THROWS SYNCHRONOUSLY on a missing dir → guard the CALL;
-    // a missing/unwatchable dir simply won't hot-reload that layer.
+    // Routing shares the same workspace cwd + parent dirs as policy, so build its
+    // reloader here and dispatch from the one dir watcher below. enforcer is only
+    // ever set when notifier exists, but narrow explicitly for the type-checker.
+    if (notifier) {
+      const activeNotifier = notifier;
+      const routingPath = join(homedir(), '.qwen', 'rc', 'routing.yaml');
+      routingReloader = new DebouncedReloader({
+        load: () => loadLayeredRoutingMatcherStrict(routingPath, workspaceCwd),
+        // Sync field swap; notify() captures the matcher once per event.
+        apply: ({ matcher }) => activeNotifier.setRouting(matcher),
+        onReloaded: ({ ruleCount }) => {
+          void audit.record({
+            action: 'routing_reloaded',
+            detail: { ruleCount },
+          });
+          // eslint-disable-next-line no-console
+          console.log(
+            `routing: reloaded (${ruleCount === 0 ? 'no' : ruleCount} rule(s))`,
+          );
+        },
+        onError: (err) => {
+          const reason = (err as Error)?.name ?? 'error';
+          void audit.record({
+            action: 'routing_reload_failed',
+            detail: { reason },
+          });
+          // eslint-disable-next-line no-console
+          console.warn(
+            `routing: reload failed, keeping previous ruleset (${reason})`,
+          );
+        },
+      });
+    }
+    const activeRoutingReloader = routingReloader;
+    // Watch the PARENT DIR of each config file (survives an editor's atomic
+    // rename-replace, unlike a file watch), dispatching by basename to the
+    // policy and routing reloaders. fs.watch THROWS SYNCHRONOUSLY on a missing
+    // dir → guard the CALL; a missing/unwatchable dir simply won't hot-reload.
     const dirs = [join(homedir(), '.qwen', 'rc')];
     if (workspaceCwd) dirs.push(join(workspaceCwd, '.qwen'));
     for (const dir of dirs) {
@@ -236,6 +284,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
             // (the watched dirs are tiny; debounce collapses spurious wakes).
             if (filename === null || filename === 'policy.yaml') {
               activeReloader.trigger();
+            }
+            if (filename === null || filename === 'routing.yaml') {
+              activeRoutingReloader?.trigger();
             }
           }),
         );
@@ -403,6 +454,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const shutdown = async () => {
     for (const w of watchers) w.close();
     reloader?.stop();
+    routingReloader?.stop();
     if (quietDigestTimer) clearInterval(quietDigestTimer);
     if (pump) await pump.stop();
     await handle.stop();
