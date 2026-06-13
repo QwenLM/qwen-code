@@ -887,6 +887,32 @@ describe('Server Config (config.ts)', () => {
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
+
+    it('getFailedMcpServerNames skips pending approval servers', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { pending: new MCPServerConfig() },
+        pendingMcpServers: ['pending'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('approveMcpServerForSession drops only the approved pending server', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        pendingMcpServers: ['a', 'b'],
+      } as ConfigParameters);
+
+      config.approveMcpServerForSession('a');
+
+      expect(config.isMcpServerPendingApproval('a')).toBe(false);
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
+
+      config.approveMcpServerForSession('not-pending');
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
+    });
   });
 
   describe('refreshAuth', () => {
