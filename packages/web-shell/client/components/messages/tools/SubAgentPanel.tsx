@@ -1,6 +1,17 @@
-import { memo, useEffect, useRef, useState, useMemo } from 'react';
+import {
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  type ReactNode,
+} from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
+// Circular import with ToolGroup (agents render tool rows; agent tool
+// rows render SubAgentPanel). Safe only while both modules dereference
+// each other's exports at render time — never in top-level code.
+import { ToolLine } from '../ToolGroup';
 import { Markdown } from '../Markdown';
 import {
   formatDurationMs,
@@ -59,74 +70,11 @@ function isTaskExecution(raw: unknown): raw is TaskExecution {
   );
 }
 
-function getToolSummary(tool: ACPToolCall): string {
-  if (tool.title) {
-    const colonIdx = tool.title.indexOf(': ');
-    return colonIdx > 0 ? tool.title.slice(colonIdx + 2) : tool.title;
-  }
-  const args = tool.args || {};
-  if (args.command) return args.command as string;
-  if (args.file_path) return args.file_path as string;
-  if (args.path) return args.path as string;
-  if (args.query) return args.query as string;
-  if (args.description) return args.description as string;
-  return '';
-}
-
-function getToolOutput(tool: ACPToolCall): string {
-  if (tool.status !== 'completed' && tool.status !== 'failed') return '';
-  if (tool.content) {
-    for (const b of tool.content) {
-      if (b.type === 'content' && b.content?.text) {
-        const text = b.content.text;
-        const firstLine = text.split('\n')[0];
-        if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
-        return firstLine;
-      }
-    }
-  }
-  const raw = tool.rawOutput;
-  if (raw) {
-    const text =
-      typeof raw === 'string'
-        ? raw
-        : typeof raw === 'object' && !Array.isArray(raw)
-          ? typeof (raw as Record<string, unknown>).output === 'string'
-            ? ((raw as Record<string, unknown>).output as string)
-            : typeof (raw as Record<string, unknown>).content === 'string'
-              ? ((raw as Record<string, unknown>).content as string)
-              : typeof (raw as Record<string, unknown>).text === 'string'
-                ? ((raw as Record<string, unknown>).text as string)
-                : null
-          : null;
-    if (text) {
-      const firstLine = text.split('\n')[0] ?? '';
-      return firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine;
-    }
-  }
-  return '';
-}
-
 const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
   if (tool.subTools || tool.subContent) return <SubAgentPanel tool={tool} />;
-
-  const summary = getToolSummary(tool);
-  const output = getToolOutput(tool);
-
-  return (
-    <div className={chromeStyles.line}>
-      <div className={chromeStyles.lineMain}>
-        <StatusIcon status={tool.status} />
-        <span className={chromeStyles.lineName}>{tool.toolName}</span>
-        {summary && (
-          <span className={chromeStyles.lineArg}>
-            {truncateText(summary, 70)}
-          </span>
-        )}
-      </div>
-      {output && <div className={chromeStyles.lineOutput}>{output}</div>}
-    </div>
-  );
+  // Same row as the main transcript: one-line summary, expandable to
+  // the full output / diff / file content where the tool has any.
+  return <ToolLine tool={tool} />;
 });
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
@@ -218,7 +166,7 @@ function SubAgentStream({ text }: { text: string }) {
       </pre>
       {compactThinking && (overflowing || streamExpanded) && (
         <button
-          className={styles.streamToggle}
+          className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
           aria-expanded={streamExpanded}
           aria-label="Toggle agent stream details"
@@ -226,6 +174,60 @@ function SubAgentStream({ text }: { text: string }) {
           {streamExpanded ? '▲' : '▼'}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Final agent result. The result is only on screen after the user
+ * explicitly opened the enclosing agent (tool row, accordion entry or
+ * panel header), so it renders in full straight away — capped to the
+ * same scrollable window as the live stream with compactThinking
+ * enabled, which keeps the opener within reach to collapse it again.
+ */
+function SubAgentResult({ content }: { content: string }) {
+  const { compactThinking } = useWebShellCustomization();
+  return (
+    <div className={compactThinking ? styles.scrollWindow : undefined}>
+      <Markdown content={content} />
+    </div>
+  );
+}
+
+/**
+ * Sub-tool list, capped to the same scrollable window as the result
+ * with compactThinking enabled. While the agent is still running the
+ * window follows the newest call; once it completes it snaps back to
+ * the top for reading.
+ */
+function SubAgentTools({
+  pinTail,
+  itemCount,
+  children,
+}: {
+  pinTail: boolean;
+  itemCount: number;
+  children: ReactNode;
+}) {
+  const { compactThinking } = useWebShellCustomization();
+  const windowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = windowRef.current;
+    if (!el || !compactThinking) return;
+    el.scrollTop = pinTail ? el.scrollHeight : 0;
+  }, [compactThinking, pinTail, itemCount]);
+
+  return (
+    <div
+      ref={windowRef}
+      className={
+        compactThinking
+          ? `${styles.tools} ${styles.scrollWindow}`
+          : styles.tools
+      }
+    >
+      {children}
     </div>
   );
 }
@@ -311,7 +313,7 @@ export function SubAgentPanel({
           {(!showTabs || activeTab === 'result') && hasResult && (
             <div className={styles.content}>
               {isComplete ? (
-                <Markdown content={tool.subContent || resultText} />
+                <SubAgentResult content={tool.subContent || resultText} />
               ) : (
                 tool.subContent && <SubAgentStream text={tool.subContent} />
               )}
@@ -321,18 +323,24 @@ export function SubAgentPanel({
           {(!showTabs || activeTab === 'tools') && (
             <>
               {tool.subTools && tool.subTools.length > 0 && (
-                <div className={styles.tools}>
+                <SubAgentTools
+                  pinTail={!isComplete}
+                  itemCount={tool.subTools.length}
+                >
                   {tool.subTools.map((sub) => (
                     <SubToolLine key={sub.callId} tool={sub} />
                   ))}
-                </div>
+                </SubAgentTools>
               )}
               {taskToolCalls && taskToolCalls.length > 0 && (
-                <div className={styles.tools}>
+                <SubAgentTools
+                  pinTail={!isComplete}
+                  itemCount={taskToolCalls.length}
+                >
                   {taskToolCalls.map((tc) => (
                     <TaskToolCallLine key={tc.callId} tc={tc} />
                   ))}
-                </div>
+                </SubAgentTools>
               )}
             </>
           )}

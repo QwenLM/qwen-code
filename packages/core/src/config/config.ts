@@ -82,6 +82,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import { type PlanGateState, createPlanGateState } from '../plan-gate/state.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -537,6 +538,39 @@ export interface ExtensionInstallMetadata {
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
+/**
+ * Per-message budget (chars) for the combined model-facing output of one
+ * batch of tool calls. When a batch's total output exceeds this, the largest
+ * results are offloaded to disk (with a recoverable pointer). `<= 0` disables.
+ */
+export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
+
+/**
+ * Provenance of an MCP server config. Two purposes (see issue #4615):
+ *
+ * - **Approval gating**: `'project'` (a workspace `.mcp.json`) and `'workspace'`
+ *   (a workspace `.qwen/settings.json`) are checked-in / shareable and therefore
+ *   untrusted — both are held behind the pending-approval gate. See
+ *   {@link isGatedMcpScope}.
+ * - **Precedence**: `'workspace'` and `'system'` rank ABOVE a `.mcp.json`
+ *   server, while user/default-scoped servers (left `scope` unset) rank below it
+ *   — so `.mcp.json` overrides user settings but never enterprise-enforced
+ *   `'system'` settings.
+ *
+ * Configs from user/default settings, extensions, and `--mcp-config` leave
+ * `scope` unset.
+ */
+export type McpServerScope = 'project' | 'workspace' | 'system';
+
+/**
+ * Scopes whose servers are checked-in / shareable and therefore untrusted: they
+ * must be approved before the discovery layer connects them. `'system'`
+ * (enterprise-enforced) and unset (user/default/CLI/extension) scopes are
+ * trusted and never gated. See issue #4615.
+ */
+export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
+  return scope === 'project' || scope === 'workspace';
+}
 
 export class MCPServerConfig {
   constructor(
@@ -580,6 +614,15 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    /**
+     * Provenance of this server config (see {@link McpServerScope}). Gated
+     * scopes (`'project'`, `'workspace'`) are held behind the pending-approval
+     * gate; `'system'` and unset scopes connect as before. Also drives
+     * precedence in `assembleMcpServers`. Appended at the end of the parameter
+     * list to avoid shifting positional arguments at the many
+     * `new MCPServerConfig(...)` call sites. See issue #4615.
+     */
+    readonly scope?: McpServerScope,
   ) {}
 }
 
@@ -764,7 +807,6 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   agentTeamEnabled?: boolean;
-  forkSubagentEnabled?: boolean;
   workflowsEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
@@ -772,6 +814,12 @@ export interface ConfigParameters {
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
+   * (pending or rejected). These are loaded so they can be listed, but the
+   * discovery layer must not connect them. See issue #4615.
+   */
+  pendingMcpServers?: string[];
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -801,6 +849,7 @@ export interface ConfigParameters {
   skipLoopDetection?: boolean;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
+  toolOutputBatchBudget?: number;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -1076,6 +1125,10 @@ export class Config {
         args?: string,
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
+  // Skill keys (e.g. "skill:foo") that coreToolScheduler announced inline on a
+  // tool result. The client's drain consumes this set so it can mark them as
+  // announced and avoid double-announcing in the same turn's tail reminder.
+  private pendingInlineAnnouncedSkillKeys = new Set<string>();
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -1085,7 +1138,7 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly sandbox: SandboxConfig | undefined;
-  private readonly targetDir: string;
+  private targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -1124,6 +1177,7 @@ export class Config {
   private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
+  private pendingMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1132,6 +1186,8 @@ export class Config {
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
+  private planGateState?: PlanGateState;
+  private planGateEntryCounter = 0;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
@@ -1151,10 +1207,13 @@ export class Config {
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly fileCheckpointingEnabled: boolean;
+  private fileCheckpointingEnabled: boolean;
+  // Object (not primitive) so sub-agents via Object.create(parentConfig)
+  // share the same budget instance through prototype lookup.
+  private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
-  private readonly cwd: string;
+  private cwd: string;
   private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private outputLanguageFilePath?: string;
@@ -1176,7 +1235,6 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly forkSubagentEnabled: boolean = false;
   private workflowsEnabled = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
@@ -1215,10 +1273,12 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
-  readonly storage: Storage;
+  storage: Storage;
+  private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
+  private readonly toolOutputBatchBudget: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
@@ -1303,6 +1363,7 @@ export class Config {
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
     this.excludedMcpServers = params.excludedMcpServers;
+    this.pendingMcpServers = params.pendingMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -1367,7 +1428,6 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? true;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
@@ -1414,6 +1474,8 @@ export class Config {
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputBatchBudget =
+      params.toolOutputBatchBudget ?? DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
@@ -1990,6 +2052,9 @@ export class Config {
       if (this.isMcpServerDisabled(name)) {
         continue;
       }
+      if (this.isMcpServerPendingApproval(name)) {
+        continue;
+      }
       if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
         failed.push(name);
       }
@@ -2251,6 +2316,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
@@ -2283,18 +2349,14 @@ export class Config {
       const cliVersion = this.cliVersion ?? null;
       const workDir = this.targetDir;
       const newSessionId = this.sessionId;
-      void (async () => {
-        try {
-          await clearRuntimeStatus(oldPath);
-          await writeRuntimeStatus(newPath, {
-            sessionId: newSessionId,
-            workDir,
-            qwenVersion: cliVersion,
-          });
-        } catch {
-          // ignored: best-effort cleanup
-        }
-      })();
+      this.queueRuntimeStatusWrite(async () => {
+        await clearRuntimeStatus(oldPath);
+        await writeRuntimeStatus(newPath, {
+          sessionId: newSessionId,
+          workDir,
+          qwenVersion: cliVersion,
+        });
+      });
     }
 
     return this.sessionId;
@@ -2311,6 +2373,40 @@ export class Config {
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
+  }
+
+  private queueRuntimeStatusWrite(write: () => Promise<void>): void {
+    this.runtimeStatusWrite = this.runtimeStatusWrite
+      .catch(() => {
+        // Keep later writes alive after a best-effort sidecar failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: runtime status must not disrupt session control flow.
+      });
+  }
+
+  private async flushRuntimeStatusWrites(): Promise<void> {
+    await this.runtimeStatusWrite.catch(() => {
+      // ignored: runtime status is best-effort.
+    });
+  }
+
+  private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
+    if (!this.runtimeStatusEnabled) {
+      return;
+    }
+    this.queueRuntimeStatusWrite(async () => {
+      await writeRuntimeStatus(
+        this.storage.getRuntimeStatusPath(this.sessionId),
+        {
+          sessionId: this.sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        },
+      );
+    });
+    await this.flushRuntimeStatusWrites();
   }
 
   /**
@@ -2603,6 +2699,152 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  private getCurrentSessionArtifactMoves(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): Array<{ from: string; to: string }> {
+    const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
+    const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
+    return [
+      `${this.sessionId}.jsonl`,
+      `${this.sessionId}.runtime.json`,
+      `${this.sessionId}.worktree.json`,
+    ].map((fileName) => ({
+      from: path.join(oldChatsDir, fileName),
+      to: path.join(newChatsDir, fileName),
+    }));
+  }
+
+  private moveFile(from: string, to: string): void {
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw error;
+      }
+      let copied = false;
+      try {
+        fs.copyFileSync(from, to);
+        copied = true;
+        fs.unlinkSync(from);
+      } catch (fallbackError) {
+        if (copied) {
+          try {
+            fs.unlinkSync(to);
+          } catch {
+            // Best-effort cleanup; surface the original fallback failure.
+          }
+        }
+        throw fallbackError;
+      }
+    }
+  }
+
+  private moveCurrentSessionArtifacts(
+    oldStorage: Storage,
+    newStorage: Storage,
+  ): void {
+    const moved: Array<{ from: string; to: string }> = [];
+    for (const { from, to } of this.getCurrentSessionArtifactMoves(
+      oldStorage,
+      newStorage,
+    )) {
+      if (!fs.existsSync(from)) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      try {
+        this.moveFile(from, to);
+        moved.push({ from, to });
+      } catch (error) {
+        for (const movedArtifact of moved.reverse()) {
+          try {
+            fs.mkdirSync(path.dirname(movedArtifact.from), {
+              recursive: true,
+            });
+            this.moveFile(movedArtifact.to, movedArtifact.from);
+          } catch (rollbackError) {
+            this.debugLogger.warn(
+              'Failed to roll back moved session artifact',
+              rollbackError,
+            );
+          }
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async prepareSessionArtifactMigration(
+    oldStorage: Storage,
+    newStorage: Storage,
+    oldDir: string,
+  ): Promise<void> {
+    this.chatRecordingService?.finalize();
+    await this.chatRecordingService?.flush();
+    await this.flushRuntimeStatusWrites();
+    try {
+      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+    } catch (error) {
+      try {
+        process.chdir(oldDir);
+      } catch (rollbackError) {
+        this.debugLogger.warn(
+          'Failed to roll back working directory after session artifact migration failed',
+          rollbackError,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async relocateWorkingDirectory(
+    newDir: string,
+    expectedCanonicalDir?: string,
+  ): Promise<{ memoryRefreshError?: unknown }> {
+    const oldDir = fs.realpathSync(process.cwd());
+    const targetPath = path.resolve(newDir);
+    const expected = expectedCanonicalDir ?? fs.realpathSync(targetPath);
+    if (!fs.statSync(targetPath).isDirectory()) {
+      throw new Error(`Path is not a directory: ${targetPath}`);
+    }
+    const workspaceDirectories = WorkspaceContext.resolveRootDirectories(
+      expected,
+      this.explicitIncludeDirectories,
+    );
+
+    process.chdir(targetPath);
+    const actualCwd = fs.realpathSync(process.cwd());
+    if (actualCwd !== expected) {
+      process.chdir(oldDir);
+      throw new Error(
+        `Changed directory to ${actualCwd}, expected ${expected}.`,
+      );
+    }
+
+    const oldStorage = this.storage;
+    const newStorage = new Storage(expected);
+    await this.prepareSessionArtifactMigration(oldStorage, newStorage, oldDir);
+
+    this.targetDir = expected;
+    this.cwd = expected;
+    this.storage = newStorage;
+    this.chatRecordingService?.resetStoragePaths();
+    await this.refreshCurrentRuntimeStatus(expected);
+    this.workspaceContext.applyRootDirectories(workspaceDirectories);
+    this.fileDiscoveryService = null;
+    this.sessionService = undefined;
+    this.fileHistoryService = undefined;
+    this.getFileReadCache().clear();
+
+    try {
+      await this.refreshHierarchicalMemory();
+      return {};
+    } catch (error) {
+      return { memoryRefreshError: error };
+    }
   }
 
   /**
@@ -2927,6 +3169,31 @@ export class Config {
     return this.excludedMcpServers?.includes(serverName) ?? false;
   }
 
+  /**
+   * True for a project-scoped (`.mcp.json`) server that the user has not
+   * approved (pending or rejected). The discovery layer skips these BEFORE any
+   * stdio spawn / transport / health check, so inspecting an untrusted
+   * `.mcp.json` has no side effects. See issue #4615.
+   */
+  isMcpServerPendingApproval(serverName: string): boolean {
+    return this.pendingMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * Drop a project server from the pending-approval set after the user approves
+   * it mid-session (via the startup dialog), so a subsequent
+   * `discoverToolsForServer` connects it instead of skipping it. See issue
+   * #4615. No-op for servers that were never pending.
+   */
+  approveMcpServerForSession(serverName: string): void {
+    if (!this.pendingMcpServers) {
+      return;
+    }
+    this.pendingMcpServers = this.pendingMcpServers.filter(
+      (name) => name !== serverName,
+    );
+  }
+
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
     if (this.initialized) {
       throw new Error('Cannot modify mcpServers after initialization');
@@ -3212,6 +3479,15 @@ export class Config {
     return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
+  /**
+   * Returns the Plan Approval Gate state for the current Plan Mode Entry, or
+   * undefined when not in plan mode. The returned object is mutable; callers
+   * may update its fields directly (e.g. review count, gate mode).
+   */
+  getPlanGateState(): PlanGateState | undefined {
+    return this.planGateState;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -3225,11 +3501,16 @@ export class Config {
     // Track the mode before entering plan mode so it can be restored later
     if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
       this.prePlanMode = this.approvalMode;
+      // Begin a fresh Plan Mode Entry for the Plan Approval Gate.
+      this.planGateState = createPlanGateState(++this.planGateEntryCounter);
     } else if (
       mode !== ApprovalMode.PLAN &&
       this.approvalMode === ApprovalMode.PLAN
     ) {
       this.prePlanMode = undefined;
+      // Successfully leaving PLAN clears all gate state (including any
+      // user_takeover marker, which only lives for the duration of PLAN).
+      this.planGateState = undefined;
     }
     // Strip over-broad allow rules (Bash interpreter wildcards, any Agent /
     // Skill allow) on AUTO entry; restore them on AUTO exit. Settings on
@@ -3531,11 +3812,6 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isForkSubagentEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
-    return this.forkSubagentEnabled;
-  }
-
   isWorkflowsEnabled(): boolean {
     // Workflows are experimental and opt-in: enabled via settings or env var
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
@@ -3609,6 +3885,11 @@ export class Config {
     return this.fileCheckpointingEnabled;
   }
 
+  enableFileCheckpointing(): void {
+    this.fileCheckpointingEnabled = true;
+    this.fileHistoryService = undefined;
+  }
+
   getFileHistoryService(): FileHistoryService {
     if (!this.fileHistoryService) {
       this.fileHistoryService = new FileHistoryService(
@@ -3616,6 +3897,15 @@ export class Config {
         this.fileCheckpointingEnabled,
         this.cwd,
       );
+      const snapshots = this.sessionData?.fileHistorySnapshots;
+      if (snapshots?.length && this.fileHistoryService.isEnabled()) {
+        this.fileHistoryService.restoreFromSnapshots(snapshots);
+        void this.fileHistoryService.validateRestoredSnapshots().catch((e) => {
+          this.debugLogger.error(
+            `FileHistory: validateRestoredSnapshots failed: ${e}`,
+          );
+        });
+      }
     }
     return this.fileHistoryService;
   }
@@ -4020,6 +4310,22 @@ export class Config {
     return this.truncateToolOutputLines;
   }
 
+  getToolOutputBatchBudget(): number {
+    if (this.toolOutputBatchBudget <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    return this.toolOutputBatchBudget;
+  }
+
+  trackToolResultBytes(n: number): void {
+    this.toolResultBudget.bytesWritten += n;
+  }
+
+  getToolResultBytesWritten(): number {
+    return this.toolResultBudget.bytesWritten;
+  }
+
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
   }
@@ -4172,8 +4478,8 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that SkillTool can merge these into
-   * its tool description.
+   * CommandService after initialisation so that the startup snapshot and
+   * per-turn drain can include these in the `<available_skills>` listing.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
@@ -4216,6 +4522,31 @@ export class Config {
       ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
+  }
+
+  /**
+   * Records skill keys that were announced inline on a tool result by
+   * `coreToolScheduler` (e.g. path-activated conditional skills). The
+   * client's `drainSkillAndCommandReminders` consumes these to mark them as
+   * announced and avoid a duplicate announcement in the same turn's tail
+   * reminder. Keys use the `"skill:<name>"` format matching
+   * `GeminiClient.skillEntryKey`.
+   */
+  addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
+    for (const k of keys) {
+      this.pendingInlineAnnouncedSkillKeys.add(k);
+    }
+  }
+
+  /**
+   * Returns and clears the set of skill keys announced inline since the last
+   * consumption. Idempotent — a second call returns an empty set until new
+   * keys are added.
+   */
+  consumeInlineAnnouncedSkillKeys(): Set<string> {
+    const result = this.pendingInlineAnnouncedSkillKeys;
+    this.pendingInlineAnnouncedSkillKeys = new Set();
+    return result;
   }
 
   getPermissionManager(): PermissionManager | null {
@@ -4426,6 +4757,10 @@ export class Config {
       await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
+      });
+      await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
+        const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
+        return new EnterPlanModeTool(this);
       });
     }
     await registerLazy(ToolNames.ENTER_WORKTREE, async () => {

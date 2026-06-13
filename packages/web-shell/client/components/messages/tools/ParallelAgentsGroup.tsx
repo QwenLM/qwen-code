@@ -96,8 +96,6 @@ export function ParallelAgentsGroup({
       <div className={styles.header}>
         <span>{t('parallelAgents.title')}</span>
         <span className={styles.headerDot}>·</span>
-        <span className={styles.headerTotal}>{total}</span>
-        <span className={styles.headerDot}>·</span>
         <span className={styles.headerCount}>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>

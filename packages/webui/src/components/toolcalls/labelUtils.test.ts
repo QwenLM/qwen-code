@@ -72,4 +72,25 @@ describe('getToolDisplayLabel', () => {
     );
     expect(getToolDisplayLabel({ kind: 'switch_mode' })).toBe('ExitPlanMode');
   });
+
+  it('returns EnterPlanMode for enter_plan_mode kind', () => {
+    expect(getToolDisplayLabel({ kind: 'enter_plan_mode' })).toBe(
+      'EnterPlanMode',
+    );
+  });
+
+  it('disambiguates switch_mode as EnterPlanMode when title contains "enter plan"', () => {
+    expect(
+      getToolDisplayLabel({
+        kind: 'switch_mode',
+        title: 'EnterPlanMode',
+      }),
+    ).toBe('EnterPlanMode');
+    expect(
+      getToolDisplayLabel({
+        kind: 'switch_mode',
+        title: 'Enter plan mode',
+      }),
+    ).toBe('EnterPlanMode');
+  });
 });

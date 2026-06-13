@@ -17,6 +17,7 @@ import {
   SessionService,
   shouldShowStep,
   TrustGateError,
+  addDaemonRequestAttribute,
   emitDaemonLog,
   hashDaemonWorkspace,
   recordDaemonBridgeError,
@@ -73,6 +74,8 @@ import {
   InvalidRewindTargetError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
@@ -110,6 +113,7 @@ import {
   type WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspaceSettings.js';
+import { registerA2uiActionRoutes } from './routes/a2uiAction.js';
 import {
   createRateLimiter,
   setRateLimiter,
@@ -276,9 +280,7 @@ export async function listWorkspaceSessionsForResponse(
   });
 
   const nextCursor =
-    persisted.nextCursor != null
-      ? String(persisted.nextCursor)
-      : undefined;
+    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
 
   return { sessions, nextCursor };
 }
@@ -672,7 +674,7 @@ function resolveDaemonTelemetryRoute(
     return { route: 'POST /sessions/delete' };
   }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|rewind|approval-mode|language|a2ui-action)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -943,12 +945,17 @@ export function createServeApp(
     injected: deps.fsFactory,
     trusted: false,
   });
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  const sessionShellCommandEnabled =
+    opts.enableSessionShell === true && tokenConfigured;
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
       eventRingSize: opts.eventRingSize,
       boundWorkspace,
+      sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider: createDaemonStatusProvider(),
@@ -1327,7 +1334,7 @@ export function createServeApp(
   // Mutation-route gate factory. Non-strict mode is passthrough;
   // `{ strict: true }` requires a token even on loopback defaults.
   const mutate = createMutationGate({
-    tokenConfigured: opts.token !== undefined,
+    tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
 
@@ -1367,6 +1374,7 @@ export function createServeApp(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable: deps.persistSetting !== undefined,
+        sessionShellCommandEnabled,
         rateLimit: opts.rateLimit === true,
         reloadAvailable: deps.workspace !== undefined,
       }),
@@ -1531,6 +1539,26 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, bridge),
     });
   }
+
+  // A2UI action inbound (the upstream half of A2UI-over-MCP): user
+  // interactions from web clients are proxied to the UI MCP server's
+  // standard `action` tool.
+  registerA2uiActionRoutes(app, {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    // UI-server discovery uses the daemon's workspace MCP status, which
+    // includes servers registered at runtime.
+    getMcpServers: async (req) => {
+      const ctx = buildWorkspaceCtx(req, 'POST /session/:id/a2ui-action');
+      const status = await workspace.getWorkspaceMcpStatus(ctx);
+      return (status.servers ?? []) as Array<{
+        name: string;
+        mcpStatus?: string;
+        config?: Record<string, unknown>;
+      }>;
+    },
+  });
 
   // -- auth device-flow routes ---------------------------------------------
 
@@ -2190,6 +2218,7 @@ export function createServeApp(
       });
       return;
     }
+    addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
     const abort = new AbortController();
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
@@ -2626,8 +2655,26 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/shell', mutate(), async (req, res) => {
+  app.post('/session/:id/shell', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
+    if (!sessionShellCommandEnabled) {
+      sendBridgeError(res, new SessionShellDisabledError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      return;
+    }
+    if (clientId === undefined) {
+      sendBridgeError(res, new SessionShellClientRequiredError(), {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+      return;
+    }
     const body = safeBody(req);
     const command = body['command'];
     if (typeof command !== 'string' || command.trim().length === 0) {
@@ -2641,17 +2688,12 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      res.off('close', onResClose);
-      return;
-    }
     try {
       const result = await bridge.executeShellCommand(
         sessionId,
         command.trim(),
         abort.signal,
-        clientId !== undefined ? { clientId } : undefined,
+        { clientId },
       );
       if (daemonLog) {
         daemonLog.info('shell command completed', {
@@ -3595,6 +3637,7 @@ export function createServeApp(
     fsFactory,
     deviceFlowRegistry,
     token: opts.token,
+    sessionShellCommandEnabled,
     checkRate: rateLimiter?.checkRate,
   });
   if (acpHandle) {
@@ -4330,6 +4373,22 @@ function sendBridgeErrorImpl(
       code: 'invalid_client_id',
       sessionId: err.sessionId,
       clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof SessionShellDisabledError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_shell_disabled',
+      errorKind: 'session_shell_disabled',
+    });
+    return;
+  }
+  if (err instanceof SessionShellClientRequiredError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'client_id_required',
+      errorKind: 'client_id_required',
     });
     return;
   }

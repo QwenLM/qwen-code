@@ -1373,6 +1373,13 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionBtwResult;
   }
 
+  /**
+   * Execute a direct daemon-side shell command for a session. The daemon must
+   * be started with direct session shell enabled and bearer auth configured;
+   * callers must also provide a client id already bound to this session.
+   * Prefer `DaemonSessionClient.shellCommand()` when available because it
+   * forwards the session-bound client id automatically.
+   */
   async shellCommand(
     sessionId: string,
     command: string,
@@ -1495,14 +1502,21 @@ export class DaemonClient {
    * `timeoutMs` when their threat model needs a tighter cap, or `0`
    * to disable the timeout entirely.
    *
+   * `entryIndex` targets one pooled entry by index. Use `'*'` to
+   * restart all entries for a pooled server.
+   *
    * Pre-flight `caps.features.workspace_mcp_restart` before calling.
    */
   async restartMcpServer(
     serverName: string,
-    opts?: { clientId?: string; timeoutMs?: number },
+    opts?: { clientId?: string; entryIndex?: number | '*'; timeoutMs?: number },
   ): Promise<DaemonMcpRestartResult> {
+    const query =
+      opts?.entryIndex === undefined
+        ? ''
+        : `?entryIndex=${encodeURIComponent(String(opts.entryIndex))}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart${query}`,
       {
         method: 'POST',
         headers: this.headers(

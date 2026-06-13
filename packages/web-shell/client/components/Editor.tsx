@@ -58,7 +58,7 @@ interface EditorProps {
   currentMode?: string;
   draftText?: string;
   draftVersion?: number;
-  onFocusActiveAgents?: () => boolean;
+  onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
@@ -67,7 +67,6 @@ interface EditorProps {
 }
 
 export interface EditorHandle {
-  blur(): void;
   clearText(): void;
   focus(): void;
   getText(): string;
@@ -169,7 +168,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     currentMode = 'default',
     draftText,
     draftVersion,
-    onFocusActiveAgents,
+    onFocusFooter,
     dialogOpen = false,
     followupState,
     onAcceptFollowup,
@@ -210,8 +209,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   onAcceptFollowupRef.current = onAcceptFollowup;
   const onDismissFollowupRef = useRef(onDismissFollowup);
   onDismissFollowupRef.current = onDismissFollowup;
-  const onFocusActiveAgentsRef = useRef(onFocusActiveAgents);
-  onFocusActiveAgentsRef.current = onFocusActiveAgents;
+  const onFocusFooterRef = useRef(onFocusFooter);
+  onFocusFooterRef.current = onFocusFooter;
   const languageRef = useRef(language);
   languageRef.current = language;
   const workspaceActionsRef = useRef(workspace?.actions);
@@ -314,6 +313,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       ),
     ];
 
+    // Shared newline handler for all multi-line input shortcuts. Inserts a
+    // literal '\n' at the cursor instead of submitting.
+    const insertNewline = (view: EditorView) => {
+      view.dispatch(view.state.replaceSelection('\n'));
+      return true;
+    };
+
     const submitKeymap = keymap.of([
       {
         key: 'Enter',
@@ -331,19 +337,24 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           return submitText(view);
         },
       },
+      // Newline shortcuts, mirroring the CLI TUI's NEWLINE bindings:
+      // Shift+Enter, Ctrl+J, Ctrl+Enter / Cmd+Enter (Mod-Enter), and
+      // Option/Alt+Enter for terminal muscle memory.
       {
         key: 'Shift-Enter',
-        run: (view) => {
-          view.dispatch(view.state.replaceSelection('\n'));
-          return true;
-        },
+        run: insertNewline,
       },
       {
         key: 'Ctrl-j',
-        run: (view) => {
-          view.dispatch(view.state.replaceSelection('\n'));
-          return true;
-        },
+        run: insertNewline,
+      },
+      {
+        key: 'Mod-Enter',
+        run: insertNewline,
+      },
+      {
+        key: 'Alt-Enter',
+        run: insertNewline,
       },
       {
         key: 'Escape',
@@ -441,7 +452,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           }
           const next = history.navigateDown();
           if (next === null) {
-            return onFocusActiveAgentsRef.current?.() ?? false;
+            return onFocusFooterRef.current?.() ?? false;
           }
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: next },
@@ -928,10 +939,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     viewRef.current?.focus();
   }, []);
 
-  const blur = useCallback(() => {
-    viewRef.current?.contentDOM.blur();
-  }, []);
-
   const insertText = useCallback((text: string) => {
     const view = viewRef.current;
     if (!view || !text) {
@@ -983,14 +990,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   useImperativeHandle(
     ref,
     () => ({
-      blur,
       clearText,
       focus,
       getText,
       insertText,
       retryLast,
     }),
-    [blur, clearText, focus, getText, insertText, retryLast],
+    [clearText, focus, getText, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

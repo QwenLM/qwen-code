@@ -384,6 +384,98 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
   });
 });
 
+describe('BridgeClient — A2UI session update publishing', () => {
+  it('publishes per-surface a2ui frames before the sanitized original frame', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const fakeEntry = {
+      sessionId: 'sess:a2ui',
+      activePromptOriginatorClientId: 'client-1',
+      events: { publish },
+    };
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === 'sess:a2ui' ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const rawText =
+      '[{"version":"v0.9","createSurface":{"surfaceId":"s1","components":[]}},' +
+      '{"version":"v0.9","updateComponents":{"surfaceId":"s1","components":[]}},' +
+      '{"version":"v0.9","updateDataModel":{"surfaceId":"s2","path":"/","value":1}}]\n' +
+      'rendered fallback';
+
+    await client.sessionUpdate({
+      sessionId: 'sess:a2ui',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        _meta: { serverId: 'a2ui-ui', toolName: 'present_choices' },
+        content: [
+          { type: 'content', content: { type: 'text', text: rawText } },
+        ],
+        rawOutput: rawText,
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    type PublishedFrame = {
+      type: string;
+      originatorClientId?: string;
+      data: {
+        sessionId: string;
+        update: {
+          sessionUpdate: string;
+          a2ui?: {
+            surfaceId: string;
+            callId?: string;
+            commands: unknown[];
+          };
+          content?: Array<{ content: { text: string } }>;
+          rawOutput?: string;
+          _meta?: { source?: string };
+        };
+      };
+    };
+    const published = publish.mock.calls.map(
+      ([frame]) => frame as PublishedFrame,
+    );
+
+    expect(published).toHaveLength(3);
+    expect(published[0]).toMatchObject({
+      type: 'session_update',
+      originatorClientId: 'client-1',
+      data: {
+        sessionId: 'sess:a2ui',
+        update: {
+          sessionUpdate: 'a2ui',
+          a2ui: {
+            surfaceId: 's1',
+            callId: 'call-1',
+          },
+          _meta: { source: 'a2ui-bridge' },
+        },
+      },
+    });
+    expect(published[0].data.update.a2ui?.commands).toHaveLength(2);
+    expect(published[1].data.update.a2ui).toMatchObject({
+      surfaceId: 's2',
+      callId: 'call-1',
+    });
+    expect(published[1].data.update.a2ui?.commands).toHaveLength(1);
+    expect(published[2].originatorClientId).toBe('client-1');
+    expect(published[2].data.update.content?.[0].content.text).toBe(
+      'rendered fallback',
+    );
+    expect(published[2].data.update.rawOutput).toBe('rendered fallback');
+    expect(JSON.stringify(published[2].data.update)).not.toContain(
+      'createSurface',
+    );
+  });
+});
+
 /**
  * Wenshao review #4335 / 3271978365 — `requestPermission`'s pre-publish
  * `CancelSentinelCollisionError` guard prevents an orphan SSE

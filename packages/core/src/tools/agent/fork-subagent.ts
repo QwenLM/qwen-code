@@ -1,11 +1,23 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import type { SubagentConfig } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
+/**
+ * Fork subagent availability gate.
+ *
+ * Fork is available by default in interactive sessions. Non-interactive
+ * sessions (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork
+ * progress display and permission prompts, which can cause hangs or silent
+ * failures.
+ *
+ * When fork is unavailable, omitting `subagent_type` falls back to a
+ * general-purpose subagent instead of forking.
+ */
 export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isForkSubagentEnabled() && config.isInteractive();
+  return config.isInteractive();
 }
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
@@ -18,8 +30,9 @@ export const FORK_AGENT = {
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
+  approvalMode: 'default',
   level: 'session' as const,
-};
+} satisfies SubagentConfig;
 
 // Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability

@@ -215,6 +215,24 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 
+function sanitizeProviderBaseUrl(baseUrl: string): string {
+  const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) {
+    return baseUrl;
+  }
+
+  const authorityStart = scheme[0].length;
+  const rest = baseUrl.slice(authorityStart);
+  const authorityEnd = rest.search(/[/?#]/);
+  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf('@');
+  if (at === -1) {
+    return baseUrl;
+  }
+
+  return `${baseUrl.slice(0, authorityStart)}${authority.slice(at + 1)}${rest.slice(authority.length)}`;
+}
+
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
  * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
@@ -1481,7 +1499,7 @@ function readExistingProviderConfig(
 
   return {
     protocol,
-    baseUrl,
+    baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
@@ -2241,30 +2259,13 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Skip MCP discovery in the BOOTSTRAP config. Bootstrap MCP clients
-  // are never used to serve a session (each session runs its own
-  // discovery), so skipping here avoids spawning every server twice.
-  const bootstrapSkipsMcpDiscovery = true;
   await config.initialize({
     skipGeminiInitialization: true,
-    skipMcpDiscovery: bootstrapSkipsMcpDiscovery,
+    // Bootstrap skips MCP discovery — each session runs its own
+    // pool-routed discovery, so bootstrap-level spawns would be
+    // redundant subprocess leaks (W119).
+    skipMcpDiscovery: true,
   });
-  // Skip the MCP failure warning when discovery was intentionally
-  // bypassed — per-session paths surface real failures through their
-  // own status routes / events.
-  if (!bootstrapSkipsMcpDiscovery) {
-    await config.waitForMcpReady();
-    const failedMcpServers =
-      typeof config.getFailedMcpServerNames === 'function'
-        ? config.getFailedMcpServerNames()
-        : [];
-    if (failedMcpServers.length > 0) {
-      process.stderr.write(
-        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
-          `Continuing with built-in tools and any servers that did connect.\n`,
-      );
-    }
-  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -3741,7 +3742,9 @@ class QwenAgent implements Agent {
           ...(model.modalities !== undefined
             ? { modalities: model.modalities }
             : {}),
-          ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+          ...(model.baseUrl !== undefined
+            ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl) }
+            : {}),
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
@@ -3763,7 +3766,9 @@ class QwenAgent implements Agent {
               current: {
                 ...(currentAuth ? { authType: String(currentAuth) } : {}),
                 ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
-                ...(baseUrl ? { baseUrl } : {}),
+                ...(baseUrl
+                  ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
+                  : {}),
                 ...(fastModelId ? { fastModelId } : {}),
               },
             }
@@ -6210,7 +6215,7 @@ class QwenAgent implements Agent {
         return {
           authType: cfg?.authType ?? config.getAuthType() ?? null,
           model: cfg?.model ?? config.getModel() ?? null,
-          baseUrl: cfg?.baseUrl ?? null,
+          baseUrl: cfg?.baseUrl ? sanitizeProviderBaseUrl(cfg.baseUrl) : null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
       }
@@ -6692,7 +6697,12 @@ class QwenAgent implements Agent {
     resume?: boolean,
   ): Promise<Config> {
     this.settings = loadSettings(cwd);
-    const mergedMcpServers = { ...this.settings.merged.mcpServers };
+    // ACP/IDE-injected servers are session-level: they must outrank a project
+    // `.mcp.json` and stay un-gated. Collect them separately and pass them as
+    // `sessionMcpServers` (top precedence tier) rather than merging into
+    // `settings.mcpServers`, where `assembleMcpServers` would demote them below
+    // `.mcp.json` (#4615).
+    const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
@@ -6701,7 +6711,7 @@ class QwenAgent implements Agent {
         for (const { name: envName, value } of stdioServer.env) {
           env[envName] = value;
         }
-        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+        sessionMcpServers[stdioServer.name] = new MCPServerConfig(
           stdioServer.command,
           stdioServer.args,
           env,
@@ -6716,7 +6726,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of sseServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+        sessionMcpServers[sseServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6734,7 +6744,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of httpServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+        sessionMcpServers[httpServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6747,7 +6757,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
+    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -6771,7 +6781,14 @@ class QwenAgent implements Agent {
       // sessions otherwise leak persisted disabled skills into the first
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
+      sessionMcpServers,
     );
+    // ACP sessions run with piped stdio (non-TTY), so the default
+    // interactive-based gating disables file checkpointing. Enable it
+    // explicitly so /rewind works across daemon session resume.
+    if (typeof config.enableFileCheckpointing === 'function') {
+      config.enableFileCheckpointing();
+    }
     // Inject the workspace-shared MCP transport pool BEFORE
     // `config.initialize()` so the ToolRegistry picks it up.
     if (

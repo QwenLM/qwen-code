@@ -1141,6 +1141,15 @@ export type DaemonMcpRestartResult =
       restarted: false;
       skipped: true;
       reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    }
+  | {
+      serverName: string;
+      entries: Array<{
+        entryIndex: number;
+        restarted: boolean;
+        durationMs?: number;
+        reason?: string;
+      }>;
     };
 
 export type DaemonMcpManageAction =

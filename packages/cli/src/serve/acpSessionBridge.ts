@@ -99,6 +99,8 @@ export {
   CancelSentinelCollisionError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 export {

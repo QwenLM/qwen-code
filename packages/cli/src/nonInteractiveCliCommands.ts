@@ -285,8 +285,8 @@ export const handleSlashCommand = async (
     allLoaders,
     abortController.signal,
   );
-  // Register model-invocable commands provider so SkillTool description stays
-  // up-to-date in non-interactive / ACP mode.
+  // Register model-invocable commands provider so the startup snapshot and
+  // per-turn drain include these in non-interactive / ACP mode.
   config.setModelInvocableCommandsProvider(() =>
     commandService.getModelInvocableCommands().map((cmd) => ({
       name: cmd.name,
@@ -390,7 +390,9 @@ export const handleSlashCommand = async (
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
     sessionStartTime: new Date(),
-    metrics: config ? uiTelemetryService.getMetricsForSession(config.getSessionId()) : uiTelemetryService.getMetrics(),
+    metrics: config
+      ? uiTelemetryService.getMetricsForSession(config.getSessionId())
+      : uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
     promptCount: 1,
   };

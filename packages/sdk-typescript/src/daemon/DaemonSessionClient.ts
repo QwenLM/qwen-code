@@ -329,6 +329,12 @@ export class DaemonSessionClient {
     });
   }
 
+  /**
+   * Execute a direct daemon-side shell command for this session. Requires the
+   * daemon to opt in to direct session shell and bearer auth; this wrapper
+   * automatically forwards the client id bound when the session was created
+   * or attached.
+   */
   async shellCommand(
     command: string,
     signal?: AbortSignal,

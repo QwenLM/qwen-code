@@ -475,10 +475,10 @@ export function MessageList({
     }
   }, [messages.length]);
 
-  // Container-resize guard: when floating panels (TodoPanel,
-  // ActiveAgentsPanel) appear or disappear the scroll container's
-  // clientHeight changes. Snap back to bottom so the user doesn't
-  // lose their place while follow mode is active.
+  // Container-resize guard: when floating panels (e.g. TodoPanel)
+  // appear or disappear the scroll container's clientHeight changes.
+  // Snap back to bottom so the user doesn't lose their place while
+  // follow mode is active.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;

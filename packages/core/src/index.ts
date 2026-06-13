@@ -111,6 +111,7 @@ export {
   buildSkillLlmContent,
   applySkillAllowedTools,
 } from './tools/skill-utils.js';
+export { atomicWriteFile } from './utils/atomicFileWrite.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -122,6 +123,10 @@ export type {
   ExitPlanModeTool,
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
+export type {
+  EnterPlanModeTool,
+  EnterPlanModeParams,
+} from './tools/enterPlanMode.js';
 export type {
   SyntheticOutputTool,
   StructuredOutputParams,
@@ -266,6 +271,7 @@ export type {
   OAuthAuthorizationServerMetadata,
   OAuthProtectedResourceMetadata,
 } from './mcp/oauth-utils.js';
+export { hashMcpServerConfig } from './mcp/configHash.js';
 
 // ============================================================================
 // Telemetry
@@ -374,6 +380,7 @@ export {
 export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
+export * from './utils/secure-browser-launcher.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';

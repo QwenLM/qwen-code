@@ -7,10 +7,14 @@
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import * as os from 'node:os';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
   createProductionDispatch,
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  resolveMaxAgentsPerRun,
+  resolveConcurrencyLimit,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 
@@ -290,5 +294,430 @@ describe('WorkflowOrchestrator failure-context preservation', () => {
     expect(wfErr.message).toContain('scripted failure');
     expect(wfErr.phases).toEqual(['plan', 'execute']);
     expect(wfErr.logs).toEqual(['starting', 'about to fail']);
+  });
+});
+
+describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
+  describe('parallel()', () => {
+    it('resolves all thunks to a position-aligned array', async () => {
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `r:${prompt}`,
+      );
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => agent("a"),
+          () => agent("b"),
+          () => agent("c"),
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['r:a', 'r:b', 'r:c']);
+    });
+
+    it('errors-as-data: a thunk that throws becomes null at its index, others unaffected', async () => {
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `r:${prompt}`,
+      );
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => agent("a"),
+          () => { throw new Error("boom"); },
+          () => agent("c"),
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['r:a', null, 'r:c']);
+    });
+
+    it('rejects on a non-function element (eager promise instead of thunk)', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        orchestrator.run({
+          script: `return await parallel([agent("a")]);`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/array of functions/);
+    });
+
+    // EAD-1 (P2 self-review): a thunk that resolves to a non-JSON-serializable
+    // value (BigInt / circular) must become null at its index — NOT crash the
+    // whole batch. The in-realm revival is per-element, so one bad slot cannot
+    // destroy its siblings (errors-as-data holds for return values too).
+    it('a thunk returning a non-serializable value becomes null without crashing siblings', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await parallel([
+          () => "a",
+          () => 1n,
+          () => "c",
+          () => { const o = {}; o.self = o; return o; },
+        ]);`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['a', null, 'c', null]);
+    });
+
+    it('caps concurrent agents within a fan-out to the shared per-run window', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return 'ok';
+      });
+      await orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: 50 }, () => () => agent("x"))
+        );`,
+        args: undefined,
+      });
+      // 50 thunks >> window, so the window fully fills: peak === cap.
+      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      expect(peak).toBe(cap);
+    });
+  });
+
+  describe('pipeline()', () => {
+    it('runs each item through the stages; first stage receives (item, item, idx)', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([10, 20],
+          (prev, item, idx) => prev + "|" + item + "|" + idx,
+          (prev) => "S2(" + prev + ")",
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual(['S2(10|10|0)', 'S2(20|20|1)']);
+    });
+
+    it('a stage returning null drops that item to null and skips remaining stages', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([1, 2, 3],
+          (x) => (x === 2 ? null : x),
+          (x) => x * 100,
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual([100, null, 300]);
+    });
+
+    it('a stage that throws drops that item to null (errors-as-data), others unaffected', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      const outcome = await orchestrator.run({
+        script: `return await pipeline([1, 2, 3],
+          (x) => { if (x === 2) throw new Error("bad"); return x; },
+          (x) => x * 100,
+        );`,
+        args: undefined,
+      });
+      expect(outcome.result).toEqual([100, null, 300]);
+    });
+
+    it('rejects when a stage is not a function', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+      await expect(
+        orchestrator.run({
+          script: `return await pipeline([1, 2], "not a function");`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(/stages must be functions/);
+    });
+
+    // TST-1 (P2 self-review): pipeline must share the SAME per-run window as
+    // parallel — a pipeline impl that gave itself a separate (or no) limiter
+    // would let concurrency exceed the cap. Drive 50 item-chains, each calling
+    // one agent per stage, and assert peak in-flight === cap.
+    it('caps concurrent agents across a pipeline fan-out (shares the run window)', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return 'ok';
+      });
+      await orchestrator.run({
+        script: `return await pipeline(
+          Array.from({ length: 50 }, (_, i) => i),
+          (x) => agent("s1-" + x),
+        );`,
+        args: undefined,
+      });
+      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      expect(peak).toBe(cap);
+    });
+
+    // TST-2 (P2 self-review): pipeline is parallel-of-chains — STAGGERED, with
+    // NO inter-stage barrier. Item 0's stage-2 dispatch must be able to fire
+    // WHILE item 1's stage-1 dispatch is still pending. We assert this
+    // deterministically via a release gate: item 1's stage 1 blocks until
+    // item 0 reaches stage 2 and releases the gate. A barrier impl
+    // (all items must clear stage N before any enters stage N+1) cannot
+    // satisfy this — it would wait for item 1's stage 1 to finish first,
+    // creating a circular wait that the vitest timeout would catch.
+    //
+    // PR #4947 R2 T6 (DragonnZhang): the previous version of this test used
+    // an elapsed-time threshold (50ms vs 120ms) which fails deterministically
+    // on a 3-core macOS-14 CI runner because the cpu-derived concurrency
+    // limit becomes 1 — FIFO then forces all stage-1 dispatches to settle
+    // before any stage-2 starts, breaking the timing assumption. Force the
+    // limit to 2 AND use a release gate so the assertion is timing-free.
+    it('is staggered with no inter-stage barrier (item A reaches stage 2 while item B is still in stage 1)', async () => {
+      const envPrev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '2';
+      try {
+        let releaseItem1Stage1: () => void = () => {};
+        const item1Stage1Gate = new Promise<void>((resolve) => {
+          releaseItem1Stage1 = resolve;
+        });
+        let item0ReachedStage2 = false;
+
+        const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+          if (prompt === 's1-0') return 'ok'; // item 0's stage 1: fast
+          if (prompt === 's1-1') {
+            // item 1's stage 1: BLOCKS until item 0 reaches stage 2.
+            // A staggered impl lets item 0 advance to stage 2 while this is
+            // still in flight. A barrier impl would hang here waiting for
+            // item 0's stage 2 — but item 0's stage 2 cannot start because
+            // the barrier is waiting for THIS to finish. Mutual wait =
+            // vitest timeout = test fails for a barrier impl.
+            await item1Stage1Gate;
+            return 'ok';
+          }
+          if (prompt === 's2-0') {
+            item0ReachedStage2 = true;
+            releaseItem1Stage1();
+            return 'ok';
+          }
+          if (prompt === 's2-1') return 'ok';
+          throw new Error(`unexpected prompt ${prompt}`);
+        });
+
+        await orchestrator.run({
+          script: `return await pipeline([0, 1],
+            (prev, item) => agent("s1-" + item),
+            (prev, item) => agent("s2-" + item),
+          );`,
+          args: undefined,
+        });
+
+        expect(item0ReachedStage2).toBe(true);
+      } finally {
+        if (envPrev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = envPrev;
+      }
+    }, 10_000);
+  });
+
+  describe('1000-agent cap', () => {
+    it('the 1001st sequential agent() call throws the cap error', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      await expect(
+        orchestrator.run({
+          script: `for (let i = 0; i < ${DEFAULT_MAX_AGENTS_PER_RUN + 1}; i++) {
+            await agent("x");
+          }
+          return "done";`,
+          args: undefined,
+        }),
+      ).rejects.toThrow(
+        new RegExp(`${DEFAULT_MAX_AGENTS_PER_RUN} agent\\(\\) calls per run`),
+      );
+    });
+
+    it('the cap counts agents launched via parallel() — a fan-out cannot bypass it', async () => {
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      const outcome = await orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: ${DEFAULT_MAX_AGENTS_PER_RUN + 1} }, () => () => agent("x"))
+        );`,
+        args: undefined,
+      });
+      const arr = outcome.result as Array<string | null>;
+      // Exactly 1000 dispatches succeed; the one over the cap becomes null.
+      expect(arr.filter((v) => v === 'ok')).toHaveLength(
+        DEFAULT_MAX_AGENTS_PER_RUN,
+      );
+      expect(arr.filter((v) => v === null)).toHaveLength(1);
+    });
+  });
+
+  describe('abort', () => {
+    it('parallel() rejects (not silent nulls) when the run is aborted', async () => {
+      const ac = new AbortController();
+      ac.abort();
+      const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+      await expect(
+        orchestrator.run({
+          script: `return await parallel([() => agent("a"), () => agent("b")]);`,
+          args: undefined,
+          abortOnTimeout: ac,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
+    // TST-3 (P2 self-review): the pre-aborted case above only exercises the
+    // fast-path. Abort MID-FLIGHT — after dispatches have already started —
+    // and confirm parallel() rejects rather than resolving with a silent array
+    // of nulls (which would let an aborted/timed-out workflow continue).
+    it('parallel() rejects when aborted MID-FLIGHT (after dispatches started)', async () => {
+      const ac = new AbortController();
+      let dispatched = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatched++;
+        await new Promise((r) => setTimeout(r, 40));
+        return 'ok';
+      });
+      const p = orchestrator.run({
+        script: `return await parallel(
+          Array.from({ length: 6 }, () => () => agent("x"))
+        );`,
+        args: undefined,
+        abortOnTimeout: ac,
+      });
+      // Abort once at least one dispatch is in flight.
+      setTimeout(() => ac.abort(), 10);
+      await expect(p).rejects.toThrow(/abort/i);
+      expect(dispatched).toBeGreaterThan(0);
+    }, 10_000);
+  });
+
+  describe('nested fan-out (shared-window re-entrancy)', () => {
+    // F1 (P2 review round 1): the concurrency limiter throttles AGENT
+    // DISPATCHES, not orchestration thunks. `pipeline([items], item =>
+    // parallel([...]))` is a canonical pattern (it's in the upstream
+    // /deep-research workflow). If the limiter sat at the thunk level, the
+    // outer pipeline chains would each hold a slot while awaiting an inner
+    // parallel(), and on a low concurrency limit every slot is held by a
+    // stalled outer thunk → the inner agent() calls can never acquire a slot
+    // → unrecoverable deadlock (silent hang until the 30-min wall clock).
+    // Forcing the window to 1 makes the worst case deterministic.
+    it('a parallel() inside a pipeline() stage does not deadlock at concurrency=1', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async (p) => `r:${p}`);
+        const outcome = await orchestrator.run({
+          script: `return await pipeline([0, 1, 2],
+            (prev, item) => parallel([() => agent("a" + item)]),
+          );`,
+          args: undefined,
+        });
+        expect(outcome.result).toEqual([['r:a0'], ['r:a1'], ['r:a2']]);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = prev;
+      }
+    }, 15_000);
+
+    it('parallel() of parallel() does not deadlock at concurrency=1', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async (p) => `r:${p}`);
+        const outcome = await orchestrator.run({
+          script: `return await parallel([
+            () => parallel([() => agent("x")]),
+            () => parallel([() => agent("y")]),
+          ]);`,
+          args: undefined,
+        });
+        expect(outcome.result).toEqual([['r:x'], ['r:y']]);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = prev;
+      }
+    }, 15_000);
+  });
+
+  describe('env-overridable caps', () => {
+    it('resolveMaxAgentsPerRun defaults to 1000 and honors a valid override', () => {
+      expect(resolveMaxAgentsPerRun({})).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '50' }),
+      ).toBe(50);
+    });
+
+    it('resolveMaxAgentsPerRun rejects a non-integer / <1 override and falls back', () => {
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '0' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: 'abc' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '2.5' }),
+      ).toBe(DEFAULT_MAX_AGENTS_PER_RUN);
+    });
+
+    // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
+    // be clamped, not honored — protects operators from a fat-finger
+    // QWEN_CODE_MAX_WORKFLOW_AGENTS=999999999 silently uncapping the run.
+    it('resolveMaxAgentsPerRun clamps an over-ceiling override to the hard maximum', () => {
+      expect(
+        resolveMaxAgentsPerRun({
+          QWEN_CODE_MAX_WORKFLOW_AGENTS: '999999999',
+        }),
+      ).toBe(10_000);
+      // Just under the ceiling is preserved.
+      expect(
+        resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '9999' }),
+      ).toBe(9999);
+    });
+
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+      expect(
+        resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
+      ).toBe(4);
+      // invalid → cpu-derived default, always within [1, 16]
+      const fallback = resolveConcurrencyLimit({
+        QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
+      });
+      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
+    // be clamped, not honored — a single Node process running 999999
+    // concurrent LLM calls would OOM long before saturating the model.
+    it('resolveConcurrencyLimit clamps an over-ceiling override to the hard maximum', () => {
+      expect(
+        resolveConcurrencyLimit({
+          QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '999999',
+        }),
+      ).toBe(64);
+      // Just under the ceiling is preserved.
+      expect(
+        resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '63' }),
+      ).toBe(63);
+    });
+
+    it('QWEN_CODE_MAX_WORKFLOW_AGENTS actually lowers the cap at run time', async () => {
+      const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '3';
+      try {
+        const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+        const outcome = await orchestrator.run({
+          script: `return await parallel(
+            Array.from({ length: 4 }, () => () => agent("x"))
+          );`,
+          args: undefined,
+        });
+        const arr = outcome.result as Array<string | null>;
+        expect(arr.filter((v) => v === 'ok')).toHaveLength(3);
+        expect(arr.filter((v) => v === null)).toHaveLength(1);
+      } finally {
+        if (prev === undefined)
+          delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+        else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+      }
+    });
   });
 });

@@ -809,8 +809,6 @@ export default {
     'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'Cannot fork before the first conversation turn.':
     'Não é possível criar um fork antes da primeira rodada da conversa.',
-  'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.':
-    'O comando /fork requer o feature gate de fork. Defina QWEN_CODE_ENABLE_FORK_SUBAGENT=1 para ativá-lo.',
   'The agent tool is unavailable; cannot fork.':
     'A ferramenta de agente está indisponível; não é possível criar um fork.',
   'Failed to launch fork: {{error}}': 'Falha ao iniciar o fork: {{error}}',
@@ -1462,6 +1460,27 @@ export default {
   'Found {{count}} TOML command files:':
     'Encontrados {{count}} arquivos de comando TOML:',
   'Current tasks': 'Tarefas atuais',
+  'Background tasks': 'Tarefas em segundo plano',
+  'No tasks currently running': 'Nenhuma tarefa em execução',
+  'No entry to show.': 'Nenhuma entrada para mostrar.',
+  'needs approval': 'precisa de aprovação',
+  'Background agent needs approval':
+    'Agente em segundo plano precisa de aprovação',
+  'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
+  Running: 'Em execução',
+  Paused: 'Pausado',
+  Completed: 'Concluído',
+  Failed: 'Falhou',
+  Stopped: 'Parado',
+  Shell: 'Shell',
+  Monitor: 'Monitor',
+  Command: 'Comando',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidação de memória',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidação de memória (revisando {{count}} sessão)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidação de memória (revisando {{count}} sessões)',
   '... and {{count}} more': '... e mais {{count}}',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'O formato TOML está obsoleto. Você gostaria de migrá-los para o formato Markdown?',

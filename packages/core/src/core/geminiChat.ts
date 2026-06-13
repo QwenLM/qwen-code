@@ -41,6 +41,7 @@ import {
   logContentRetry,
   logContentRetryFailure,
   logApiRetry,
+  logChatCompression,
 } from '../telemetry/loggers.js';
 import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
@@ -53,11 +54,19 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
-import { estimatePromptTokens } from '../services/tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimatePromptTokens,
+} from '../services/tokenEstimation.js';
+import {
+  microcompactHistory,
+  type MicrocompactMeta,
+} from '../services/microcompaction/microcompact.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
   ApiRetryEvent,
+  makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
@@ -1487,6 +1496,79 @@ export class GeminiChat {
     }
 
     return info;
+  }
+
+  /**
+   * Fast, rule-based compression without any LLM side-query.
+   *
+   * Force-runs microcompaction (clear old tool results + media, keep recent N)
+   * then strips thinking parts from all model turns.
+   */
+  compressFast(): {
+    info: ChatCompressionInfo;
+    microcompactMeta?: MicrocompactMeta;
+  } {
+    // Use the same estimator on both sides so the NOOP gate compares
+    // apples to apples. The API-authoritative lastPromptTokenCount is
+    // then adjusted by the estimated delta — never replaced wholesale.
+    const beforeEstimate = estimateContentTokens(this.history);
+
+    // Step 1: force microcompaction (clear old tool results + media)
+    const mcResult = microcompactHistory(
+      this.history,
+      null,
+      this.config.getClearContextOnIdle(),
+      { force: true },
+    );
+    const mcMeta = mcResult.meta;
+
+    // Step 2: strip thinking parts from model turns
+    const newHistory = mcResult.history
+      .map((c) => (c.role === 'model' ? stripThoughtPartsFromContent(c) : c))
+      .filter((c): c is Content => c !== null);
+
+    const afterEstimate = estimateContentTokens(newHistory);
+
+    if (afterEstimate >= beforeEstimate) {
+      const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+      return {
+        info: {
+          originalTokenCount: apiBaseline,
+          newTokenCount: apiBaseline,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    const reduction = beforeEstimate - afterEstimate;
+    const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+    const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
+
+    const info: ChatCompressionInfo = {
+      originalTokenCount: apiBaseline,
+      newTokenCount: adjustedTokenCount,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      triggerReason: 'manual',
+    };
+
+    this.chatRecordingService?.recordChatCompression({
+      info,
+      compressedHistory: newHistory,
+    });
+    logChatCompression(
+      this.config,
+      makeChatCompressionEvent({
+        tokens_before: info.originalTokenCount,
+        tokens_after: info.newTokenCount,
+      }),
+    );
+    this.setHistory(newHistory);
+    clearDetailedSpanState();
+    this.lastPromptTokenCount = adjustedTokenCount;
+    this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
+    this.consecutiveFailures = 0;
+
+    return { info, microcompactMeta: mcMeta };
   }
 
   setSystemInstruction(sysInstr: string) {

@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  propagation,
   SpanStatusCode,
   trace,
   type Span,
@@ -29,6 +30,110 @@ import {
 describe('daemon-tracing', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('injects traceparent from the active span without the global propagator', () => {
+    const traceId = '1234567890abcdef1234567890abcdef';
+    const spanId = 'abcdef1234567890';
+    const activeSpan = {
+      spanContext: () => ({
+        traceId,
+        spanId,
+        traceFlags: 1,
+      }),
+    } as Span;
+    vi.spyOn(trace, 'getActiveSpan').mockReturnValue(activeSpan);
+    const injectSpy = vi.spyOn(propagation, 'inject');
+
+    const injected = injectDaemonTraceContext({
+      prompt: [],
+      _meta: {
+        keep: true,
+        [DAEMON_TRACEPARENT_META_KEY]: 'client-spoof',
+        [DAEMON_TRACESTATE_META_KEY]: 'client-state',
+      },
+    });
+
+    expect(injectSpy).not.toHaveBeenCalled();
+    expect((injected._meta as Record<string, unknown>)['keep']).toBe(true);
+    expect(
+      (injected._meta as Record<string, unknown>)[DAEMON_TRACEPARENT_META_KEY],
+    ).toBe(`00-${traceId}-${spanId}-01`);
+    expect(
+      (injected._meta as Record<string, unknown>)[DAEMON_TRACESTATE_META_KEY],
+    ).toBeUndefined();
+  });
+
+  it('injects the active bridge span context through the bridge telemetry seam', async () => {
+    const traceId = 'fedcba0987654321fedcba0987654321';
+    const daemonSpan = {
+      spanContext: () => ({
+        traceId,
+        spanId: '1111111111111111',
+        traceFlags: 1,
+      }),
+    } as Span;
+    const bridgeSpan = {
+      spanContext: () => ({
+        traceId,
+        spanId: '2222222222222222',
+        traceFlags: 1,
+      }),
+      setStatus: vi.fn(),
+      end: vi.fn(),
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      recordException: vi.fn(),
+    } as unknown as Span;
+    let activeSpan: Span | undefined = daemonSpan;
+    vi.spyOn(trace, 'getActiveSpan').mockImplementation(() => activeSpan);
+    const startActiveSpan = vi.fn(
+      async (
+        _name: string,
+        _opts: unknown,
+        fn: (span: Span) => Promise<unknown>,
+      ) => {
+        activeSpan = bridgeSpan;
+        try {
+          return await fn(bridgeSpan);
+        } finally {
+          activeSpan = daemonSpan;
+        }
+      },
+    );
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan,
+    } as unknown as Tracer);
+
+    const telemetry = createDaemonBridgeTelemetry();
+    const captured = telemetry.captureContext();
+    let injected: { _meta?: Record<string, unknown> } | undefined;
+    await telemetry.runWithContext(captured, async () => {
+      await telemetry.withSpan(
+        'prompt.dispatch',
+        { 'session.id': 'session-A' },
+        async () => {
+          injected = telemetry.injectPromptContext({
+            prompt: [],
+            _meta: {},
+          });
+        },
+      );
+    });
+
+    const extracted = extractDaemonTraceContext(injected);
+    expect(trace.getSpanContext(extracted!)?.traceId).toBe(traceId);
+    expect(trace.getSpanContext(extracted!)?.spanId).toBe('2222222222222222');
+    expect(startActiveSpan).toHaveBeenCalledWith(
+      'qwen-code.daemon.bridge',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          'qwen-code.daemon.operation': 'prompt.dispatch',
+          'session.id': 'session-A',
+        }),
+      }),
+      expect.any(Function),
+    );
   });
 
   it('extracts daemon trace context from reserved prompt metadata keys', () => {
