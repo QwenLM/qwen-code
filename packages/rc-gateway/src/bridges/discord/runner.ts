@@ -45,7 +45,13 @@ export interface DiscordBridgeConfig {
   baseUrl: string;
   /** Logger for boot/error lines (default no-op). */
   log?: (msg: string) => void;
+  /** Injectable backoff sleep (tests). Resolves early on abort. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
+
+/** SSE reconnect backoff per the spec: initial 1s, max 30s, jitter ±20%. */
+const RECONNECT_INITIAL_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
 
 /** Where a rendered permission_request landed, so it can be edited on resolve. */
 interface SentRequest {
@@ -128,18 +134,44 @@ export class DiscordBridge {
     await gateway.start(signal);
   }
 
-  /** Open an SSE echo subscription for every bound session not already watched. */
+  /**
+   * Start a self-healing SSE echo loop for every bound session not already
+   * watched. Unlike Telegram (whose poll loop re-reconciles every tick so a
+   * dropped stream self-heals), Discord's inbound is push — so each session needs
+   * its OWN reconnect loop, or the approval echo silently dies on the first SSE
+   * disconnect (network blip, gateway restart, token eviction). The loop
+   * re-subscribes with exponential backoff (1s→30s, jitter ±20%) until `signal`
+   * aborts.
+   */
   private reconcileSubscriptions(signal: AbortSignal): void {
     for (const sessionId of this.cfg.channels.boundSessions()) {
       if (this.subscribed.has(sessionId)) continue;
       this.subscribed.add(sessionId);
-      void this.cfg.client
-        .subscribeEvents(
+      void this.subscriptionLoop(sessionId, signal);
+    }
+  }
+
+  private async subscriptionLoop(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const sleep = this.cfg.sleep ?? defaultSleep;
+    let backoff = RECONNECT_INITIAL_MS;
+    try {
+      while (!signal.aborted) {
+        // subscribeEvents resolves when the stream ends (or never opened); the
+        // caller owns reconnection — that's this loop.
+        await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => this.deliverEvent(sessionId, ev),
           signal,
-        )
-        .finally(() => this.subscribed.delete(sessionId));
+        );
+        if (signal.aborted) break;
+        await sleep(jitter(backoff), signal);
+        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+      }
+    } finally {
+      this.subscribed.delete(sessionId); // allow a later reconcile to re-arm it
     }
   }
 
@@ -212,4 +244,25 @@ function disableRows(rows: DiscordActionRow[]): DiscordActionRow[] {
     type: row.type,
     components: row.components.map((b) => ({ ...b, disabled: true })),
   }));
+}
+
+/** Apply ±20% jitter to a backoff delay (spreads herd reconnects). */
+function jitter(ms: number): number {
+  return Math.round(ms * (0.8 + Math.random() * 0.4));
+}
+
+/** Sleep `ms`, resolving early if `signal` aborts (so shutdown is prompt). */
+function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }

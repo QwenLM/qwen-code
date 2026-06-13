@@ -35,7 +35,9 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness(
+  opts: { sleep?: (ms: number, s: AbortSignal) => Promise<void> } = {},
+) {
   const created: Array<{
     channelId: string;
     content: string;
@@ -94,6 +96,10 @@ function harness() {
       startedHandlers = handlers;
       return { start: async () => {} };
     },
+    // By default park after the first subscribe (the fake stream resolves
+    // immediately, so without this the reconnect loop would spin). The reconnect
+    // test overrides this to exercise re-subscription.
+    sleep: opts.sleep ?? (() => new Promise<void>(() => {})),
   });
 
   return {
@@ -133,6 +139,31 @@ describe('DiscordBridge runner', () => {
     await waitFor(() => h.subscribed.includes('sess_new'));
     expect(channels.sessionFor('chan_9')).toBe('sess_new');
     expect(h.subscribed).toContain('sess_new');
+  });
+
+  it('re-subscribes after the SSE stream ends (self-heals on disconnect)', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const ac = new AbortController();
+    let subscribeCount = 0;
+    // The fake stream resolves immediately (a "disconnect"); count re-subscribes
+    // and abort after a few to prove the loop reconnects rather than dying once.
+    const h = harness({
+      sleep: async () => {
+        if (subscribeCount >= 3) ac.abort();
+      },
+    });
+    // Replace subscribeEvents to count attempts for this test.
+    (
+      h.bridge as unknown as { cfg: { client: { subscribeEvents: unknown } } }
+    ).cfg.client.subscribeEvents = async () => {
+      subscribeCount++;
+    };
+
+    void h.bridge.start(ac.signal);
+    // The loop re-subscribes each cycle (not a single attempt) until abort.
+    await waitFor(() => subscribeCount >= 3);
+    expect(subscribeCount).toBeGreaterThanOrEqual(3);
+    expect(ac.signal.aborted).toBe(true);
   });
 
   it('deliverEvent renders a permission_request to every bound channel', async () => {
