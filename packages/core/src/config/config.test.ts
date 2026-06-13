@@ -1538,6 +1538,108 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
   });
 
+  it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: 'short project rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
+      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'a'.repeat(800),
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 1,000 token context window"),
+    );
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('more than 15%'),
+    );
+  });
+
+  it('getWarnings should include oversized context before initialize refresh runs', () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800),
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining('Loaded QWEN.md/context instructions'),
+    );
+  });
+
+  it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const config = new Config({
+      ...baseParams,
+      model: 'unknown-model-for-context-warning-test',
+      userMemory: 'a'.repeat(100_000),
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("model's 131,072 token context window"),
+    );
+  });
+
+  it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'short project context',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .some((warning) =>
+          warning.includes('Loaded QWEN.md/context instructions'),
+        ),
+    ).toBe(false);
+  });
+
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
