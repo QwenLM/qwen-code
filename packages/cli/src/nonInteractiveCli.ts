@@ -1296,13 +1296,19 @@ export async function runNonInteractive(
             : config.getCronScheduler();
 
           if (scheduler) {
-            await scheduler
-              .enableDurable(config.getSessionId())
-              .catch((err) => {
-                debugLogger.warn(
-                  `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
-                );
-              });
+            // Durable (file-backed) cron only in a trusted folder:
+            // .qwen/scheduled_tasks.json is project-controlled, so loading
+            // and firing its prompts is gated like project hooks
+            // (Config.getProjectHooks). Session-only jobs still run.
+            if (config.isTrustedFolder()) {
+              await scheduler
+                .enableDurable(config.getSessionId())
+                .catch((err) => {
+                  debugLogger.warn(
+                    `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
+                  );
+                });
+            }
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
               // drop scheduler.sessionSize to 0 on their own, so without

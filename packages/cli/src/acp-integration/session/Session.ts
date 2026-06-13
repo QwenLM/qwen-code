@@ -1917,13 +1917,19 @@ export class Session implements SessionContext {
     // checking for work before the load completes would skip start() and
     // leave durable jobs dormant until the next prompt. Missed one-shots
     // are delivered as late fires through the start() callback below.
-    try {
-      await scheduler.enableDurable(this.sessionId);
-    } catch (err) {
-      // Durable support is best-effort; session-only jobs still run.
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
-      );
+    // Durable (file-backed) cron only in a trusted folder:
+    // .qwen/scheduled_tasks.json is project-controlled, so loading and
+    // firing its prompts is gated like project hooks
+    // (Config.getProjectHooks). Session-only jobs still run.
+    if (this.config.isTrustedFolder()) {
+      try {
+        await scheduler.enableDurable(this.sessionId);
+      } catch (err) {
+        // Durable support is best-effort; session-only jobs still run.
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      }
     }
 
     // dispose() may have run while the durable load was in flight; its

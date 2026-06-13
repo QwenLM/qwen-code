@@ -2542,19 +2542,34 @@ export const useGeminiStream = (
     notificationQueueRef.current = [];
   }, [sessionStates.sessionId]);
 
+  // Current sessionId for the cron effect, read through a ref so the
+  // effect doesn't list sessionId as a dep. Keeping it out of the deps is
+  // deliberate: /clear swaps the sessionId mid-session, and a re-run would
+  // fire the cleanup below — printing a false "loops cancelled" notice and
+  // tearing down a scheduler that immediately restarts. The effect should
+  // run once on mount and clean up only on real unmount.
+  const cronSessionIdRef = useRef(sessionStates.sessionId);
+  cronSessionIdRef.current = sessionStates.sessionId;
+
   // Start the cron scheduler on mount, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
   useEffect(() => {
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
 
-    // Enable durable cron support (loads tasks from disk, acquires lock).
-    // Missed one-shots arrive as late fires through the start() callback.
-    void scheduler.enableDurable(sessionStates.sessionId).catch((err) => {
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
-      );
-    });
+    // Enable durable (file-backed) cron only in a trusted folder:
+    // .qwen/scheduled_tasks.json is project-controlled, and a watcher
+    // reload turns it into a live prompt-injection channel. Gate it the
+    // same way project hooks are gated (Config.getProjectHooks). Session-
+    // only loops created in-session still run via start() below.
+    if (config.isTrustedFolder()) {
+      // Missed one-shots arrive as late fires through the start() callback.
+      void scheduler.enableDurable(cronSessionIdRef.current).catch((err) => {
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      });
+    }
 
     scheduler.start((job: { prompt: string; missed?: boolean }) => {
       const label = job.prompt.slice(0, 40);
@@ -2572,7 +2587,7 @@ export const useGeminiStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, sessionStates.sessionId]);
+  }, [config]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
