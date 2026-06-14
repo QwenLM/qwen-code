@@ -5870,10 +5870,10 @@ describe('createServeApp', () => {
       });
     });
 
-    it('deep=1 returns ISO timestamp and idleSinceMs when lastActivityAt is set', async () => {
-      const activityTime = Date.now() - 60_000; // 1 minute ago
+    it('deep=1 derives idleSinceMs from the same lastActivityAt snapshot', async () => {
+      const now = 1_700_000_060_000;
+      const activityTime = now - 60_000;
       const bridge = fakeBridge();
-      // Override lastActivityAt and idleSinceMs to simulate prior activity
       Object.defineProperty(bridge, 'lastActivityAt', {
         get() {
           return activityTime;
@@ -5881,20 +5881,23 @@ describe('createServeApp', () => {
       });
       Object.defineProperty(bridge, 'idleSinceMs', {
         get() {
-          return Date.now() - activityTime;
+          throw new Error('idleSinceMs getter should not be read');
         },
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .get('/health?deep=1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(res.status).toBe(200);
-      expect(res.body.lastActivityAt).toBe(
-        new Date(activityTime).toISOString(),
-      );
-      // idleSinceMs should be roughly 60s (allow some slack for test execution)
-      expect(res.body.idleSinceMs).toBeGreaterThanOrEqual(59_000);
-      expect(res.body.idleSinceMs).toBeLessThanOrEqual(65_000);
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .get('/health?deep=1')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.lastActivityAt).toBe(
+          new Date(activityTime).toISOString(),
+        );
+        expect(res.body.idleSinceMs).toBe(60_000);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
 
     it('deep=1 returns 503 when bridge state access throws', async () => {
