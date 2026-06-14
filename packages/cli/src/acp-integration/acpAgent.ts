@@ -1426,10 +1426,14 @@ function readProviderModels(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
   const entry = modelProviders[protocol];
+  const entryRecord =
+    typeof entry === 'object' && entry !== null
+      ? (entry as Record<string, unknown>)
+      : undefined;
   const models = Array.isArray(entry)
     ? entry
-    : typeof entry === 'object' && entry !== null && Array.isArray(entry.models)
-      ? entry.models
+    : Array.isArray(entryRecord?.['models'])
+      ? (entryRecord['models'] as ProviderModelConfig[])
       : [];
   return models.filter(isProviderModelConfig);
 }
