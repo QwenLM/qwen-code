@@ -118,6 +118,11 @@
   color: var(--accent-color);
 }
 
+.hintItem:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .hintSep {
   color: var(--text-dimmed);
 }

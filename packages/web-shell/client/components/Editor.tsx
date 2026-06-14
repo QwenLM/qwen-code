@@ -1381,6 +1381,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     !followupState?.isVisible &&
     !disabled &&
     !dialogOpen;
+  // Enable/disable the ↑/↓ history hints based on whether there's an older /
+  // newer entry to move to (mirrors the keyboard no-op at the ends).
+  const histNav = (shellMode ? shellHistory : promptHistory).nav;
   // Shared props for the hint-row buttons: keep focus in the editor
   // (preventDefault on mousedown) and don't bubble to the container's click-
   // to-focus handler (stopPropagation on click).
@@ -1475,12 +1478,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       </div>
       {showShortcutHints && (
         <div className={styles.hints}>
-          <button {...hintProps(navigatePrevHistory)}>
+          <button {...hintProps(navigatePrevHistory)} disabled={!histNav.canUp}>
             <span className={styles.hintKey}>↑</span>
             {t('editor.hintPrev')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button {...hintProps(navigateNextHistory)}>
+          <button
+            {...hintProps(navigateNextHistory)}
+            disabled={!histNav.canDown}
+          >
             <span className={styles.hintKey}>↓</span>
             {t('editor.hintNext')}
           </button>
