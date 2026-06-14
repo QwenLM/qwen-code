@@ -156,11 +156,12 @@ interface TodoSnapshot {
  * unlike a user-turn reset — it still tracks a list correctly when it spans
  * turns (a "continue" turn that completes an item carried over from before).
  *
- * Two rare cases this trades for, both degrading to "the collapsed diff omits
- * one event" while the expanded list stays correct:
- * - A todo reworded mid-task on a stable id (`1 "Write report"` →
- *   `1 "Write the final report" completed`) reads as a new task, so the
- *   completion is treated as first-seen and not surfaced.
+ * Two rare cases this trades for, both only affecting the collapsed diff while
+ * the expanded list stays correct:
+ * - A todo reworded on a stable id reads as a new task. Reworded while still
+ *   `in_progress` it emits a spurious `started`; reworded straight to
+ *   `completed` (`1 "Write report"` → `1 "Write the final report" completed`)
+ *   the completion is treated as first-seen and dropped.
  * - Two unrelated plans that reuse both the id AND the exact content (a generic
  *   recurring todo like `"Run tests"`) still collide.
  */

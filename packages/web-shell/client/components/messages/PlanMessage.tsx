@@ -10,18 +10,25 @@ interface PlanMessageProps {
   todos: TodoItem[];
 }
 
+// Isolating the context read here (mirroring ToolGroup's TodoToolBody) keeps the
+// memo-shielded PlanMessage from re-rendering when the timeline Map reference
+// changes — only this small summary does.
+function PlanEventSummary({ id, todos }: PlanMessageProps) {
+  const timeline = useContext(TodoTimelineContext);
+  const events = timeline.get(id)?.events ?? [];
+  return <TodoEventSummary todos={todos} events={events} />;
+}
+
 export const PlanMessage = memo(function PlanMessage({
   id,
   todos,
 }: PlanMessageProps) {
   const { t } = useI18n();
-  const timeline = useContext(TodoTimelineContext);
   const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
 
   const total = todos.length;
   const completed = todos.filter((td) => td.status === 'completed').length;
-  const events = timeline.get(id)?.events ?? [];
 
   return (
     <div className={styles.message}>
@@ -43,7 +50,7 @@ export const PlanMessage = memo(function PlanMessage({
       {expanded ? (
         <TodoFullList todos={todos} numbered />
       ) : (
-        <TodoEventSummary todos={todos} events={events} />
+        <PlanEventSummary id={id} todos={todos} />
       )}
     </div>
   );

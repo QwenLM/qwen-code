@@ -6,6 +6,7 @@ import {
   getFloatingTodos,
   getTodoStatusIcon,
   getTodoWindow,
+  isTodoWriteToolName,
   todoTimelineSignature,
 } from './todos';
 
@@ -323,6 +324,24 @@ describe('todoTimelineSignature', () => {
     expect(status).not.toBe(base);
     expect(id).not.toBe(base);
     expect(content).not.toBe(base);
+  });
+
+  it('is empty for a transcript with no todo snapshots', () => {
+    expect(todoTimelineSignature([])).toBe('');
+    expect(todoTimelineSignature([userMessage('u1')])).toBe('');
+  });
+});
+
+describe('isTodoWriteToolName', () => {
+  it.each(['todo_write', 'todowrite', 'TodoWrite', 'TODO_WRITE'])(
+    'matches %s',
+    (name) => {
+      expect(isTodoWriteToolName(name)).toBe(true);
+    },
+  );
+
+  it.each(['read', 'edit', 'write_file', ''])('rejects %s', (name) => {
+    expect(isTodoWriteToolName(name)).toBe(false);
   });
 });
 
