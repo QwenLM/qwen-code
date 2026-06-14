@@ -37,6 +37,7 @@ import {
   type ExecFileSyncOptionsWithStringEncoding,
 } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DaemonClient, type SubscribeOptions } from '@qwen-code/sdk';
@@ -461,6 +462,8 @@ export function percentiles(values: number[]): Percentiles {
  */
 export interface ConsumeSseResult {
   received: number;
+  /** The last non-undefined `ev.id` observed (for `Last-Event-ID` reconnect). */
+  lastSeenId?: number;
   evictedAt?: number;
   evictionReason?: string;
   elapsedMs: number;
@@ -481,6 +484,7 @@ export async function consumeSseEvents(
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const startedAt = Date.now();
   let received = 0;
+  let lastSeenId: number | undefined;
   let evictedAt: number | undefined;
   let evictionReason: string | undefined;
 
@@ -499,6 +503,7 @@ export async function consumeSseEvents(
       signal: ac.signal,
     })) {
       received++;
+      if (ev.id !== undefined) lastSeenId = ev.id;
       if (ev.type === 'client_evicted') {
         evictedAt = ev.id;
         const data = ev.data as { reason?: string } | undefined;
@@ -525,12 +530,37 @@ export async function consumeSseEvents(
 
   return {
     received,
+    lastSeenId,
     evictedAt,
     evictionReason,
     elapsedMs: Date.now() - startedAt,
   };
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+export function gitHead(timeoutMs = 5_000): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+export function makeTempWorkspace(label: string, prefix = 'qwen-test'): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-${label}-`));
+}
+
+export interface ScenarioResult {
+  name: string;
+  status: 'passed' | 'failed' | 'skipped';
+  durationMs: number;
+  error?: string;
+  metrics?: Record<string, unknown>;
 }

@@ -205,6 +205,12 @@ describe('createWorkflowSandbox security', () => {
   // closures threw host-realm Error objects. The vm-realm wrapper now
   // converts every rejection into `new Error(msg)` inside the vm context,
   // so `e.constructor` stays in the vm realm.
+  //
+  // PR #4947+ note: the schema/model/agentType/isolation opts that used to
+  // throw at sandbox level in P1 are wired through to the dispatch in P3.
+  // The still-thrown path used here is an INVALID isolation value, which
+  // the sandbox refuses with "unknown isolation mode" before reaching
+  // dispatch — the throw point this test cares about for the T1 regression.
   it('thrown Error from agent() options validation cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
@@ -212,7 +218,7 @@ describe('createWorkflowSandbox security', () => {
     });
     const result = await sandbox.run(`
       try {
-        await agent("x", { schema: { type: "object" } });
+        await agent("x", { isolation: "not-a-real-mode" });
         return 'no-throw';
       } catch (e) {
         try {
@@ -365,17 +371,29 @@ describe('createWorkflowSandbox security', () => {
     );
   }, 35_000); // wall clock for the test itself
 
-  // UP-C1: agent({schema}) must throw a clear error, not silently drop the opt.
-  it('agent() rejects unsupported schema opt with a clear error', async () => {
+  // P3 (PR #5xxx): schema / model / agentType / isolation are passed through
+  // to the dispatch in P3. The sandbox no longer rejects them — the dispatch
+  // is responsible for surfacing "agent type not found", "isolation:'remote'
+  // is not available in this build", and the StructuredOutput contract.
+  // Sandbox-level rejection only remains for invalid isolation modes (not
+  // 'worktree' / 'remote'), which is covered by the security regression
+  // test above.
+  it('agent({schema}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return { ok: true, echoed: prompt };
+      },
     });
-    await expect(
-      sandbox.run(`
-        return agent("hi", { schema: { type: "object" } });
-      `),
-    ).rejects.toThrow(/schema.*P3/);
+    const result = await sandbox.run(
+      `return await agent("hi", { schema: { type: "object", properties: { ok: { type: "boolean" } } } });`,
+    );
+    expect(seen).toHaveLength(1);
+    expect((seen[0].opts as { schema?: unknown }).schema).toBeDefined();
+    // Result is the revived object payload.
+    expect(result).toEqual({ ok: true, echoed: 'hi' });
   });
 
   // UP-C1: agent({phase}) is honored — pushed to the phases array.
@@ -709,28 +727,30 @@ describe('createWorkflowSandbox security', () => {
     expect(['undefined', 'threw', 'no-iterator']).toContain(result);
   });
 
-  // FIX-F (Round 4 UP Critical): P2/P5 primitives are stub-throwing globals
-  // so model-authored scripts get a clear "scheduled for PN" error rather
-  // than `ReferenceError: parallel is not defined` (which the model would
-  // misdiagnose as a bug in its own script).
-  it('parallel() throws a P1-unsupported error rather than ReferenceError', async () => {
+  // FIX-F (Round 4 UP Critical): an un-injected sandbox exposes stub-throwing
+  // parallel/pipeline globals so a model-authored script gets a clear
+  // "unavailable" error rather than `ReferenceError: parallel is not defined`
+  // (which the model would misdiagnose as a bug in its own script). In
+  // production the orchestrator always injects real impls; these stubs only
+  // fire for a bare sandbox constructed without them.
+  it('parallel() throws an availability error rather than ReferenceError when not injected', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return parallel([() => agent("a")]);`),
-    ).rejects.toThrow(/parallel.*not supported in P1/);
+    ).rejects.toThrow(/parallel\(\) is unavailable/);
   });
 
-  it('pipeline() throws a P1-unsupported error rather than ReferenceError', async () => {
+  it('pipeline() throws an availability error rather than ReferenceError when not injected', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return pipeline([1, 2], x => x, x => x);`),
-    ).rejects.toThrow(/pipeline.*not supported in P1/);
+    ).rejects.toThrow(/pipeline\(\) is unavailable/);
   });
 
   it('workflow() throws a P1-unsupported error rather than ReferenceError', async () => {
@@ -791,6 +811,75 @@ describe('createWorkflowSandbox security', () => {
       return await pipeline([1, 2, 3], async (x) => x * 10);
     `);
     expect(result).toEqual([10, 20, 30]);
+  });
+
+  // SECURITY (PR #4732 P2): the host parallel/pipeline impl resolves with a
+  // HOST-realm array. vmAsync's resolve path is verbatim, so without the
+  // in-realm JSON revival the RESOLVED array's prototype chain reaches the
+  // host Function constructor — `out.constructor.constructor('return process')()`
+  // would leak host process. The pre-P2 escape test only probed the *Promise*
+  // (vm-realm via vmAsync), NOT the resolved array — this is the uncovered gap.
+  // These tests FAIL against a verbatim wrapper and PASS with revival.
+  it('parallel() RESOLVED array cannot reach host process (revived in-realm)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      // host impl returns a plain HOST array on purpose.
+      parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
+    });
+    const result = await sandbox.run(`
+      const out = await parallel([async () => 1, async () => 2]);
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  it('parallel() revives NESTED objects in-realm (not just the outer array)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
+    });
+    const result = await sandbox.run(`
+      const out = await parallel([async () => ({ k: 'v' })]);
+      try {
+        const v = out[0].constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  it('pipeline() RESOLVED array cannot reach host process (revived in-realm)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      pipeline: async (items, ...stages) => {
+        const out: unknown[] = [];
+        for (let i = 0; i < items.length; i++) {
+          let cur: unknown = items[i];
+          for (const stage of stages) {
+            cur = await stage(cur, items[i], i);
+          }
+          out.push(cur);
+        }
+        return out;
+      },
+    });
+    const result = await sandbox.run(`
+      const out = await pipeline([1, 2], async (x) => x * 10);
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
   });
 
   it('opts.budget overrides the throwing stub when provided', async () => {
@@ -930,36 +1019,112 @@ describe('createWorkflowSandbox security', () => {
     ).toThrow(/max nesting depth/);
   });
 
-  // FIX-C7 (TST-2-I1): each of the four unsupported-opts throw branches must
-  // have its own test. A refactor that deletes any branch passes the others.
-  it('agent() rejects isolation opt with clear error', async () => {
+  // P3 (PR #5xxx): agentType / model / isolation are passed through to the
+  // dispatch — the sandbox no longer rejects them. Unknown isolation modes
+  // (anything other than 'worktree' / 'remote') still throw at sandbox level
+  // because those values cannot be meaningful to any dispatch.
+  it('agent() rejects unknown isolation mode with clear error', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
-      sandbox.run(`return agent("hi", { isolation: "worktree" });`),
-    ).rejects.toThrow(/isolation.*not supported in P1/);
+      sandbox.run(`return agent("hi", { isolation: "not-a-real-mode" });`),
+    ).rejects.toThrow(/unknown isolation mode/);
   });
 
-  it('agent() rejects model opt with clear error', async () => {
+  it('agent({isolation:"worktree"}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
     });
-    await expect(
-      sandbox.run(`return agent("hi", { model: "gpt-4" });`),
-    ).rejects.toThrow(/model.*not supported in P1/);
+    const result = await sandbox.run(
+      `return await agent("x", { isolation: "worktree" });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { isolation?: unknown }).isolation).toBe(
+      'worktree',
+    );
   });
 
-  it('agent() rejects agentType opt with clear error', async () => {
+  it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
     });
-    await expect(
-      sandbox.run(`return agent("hi", { agentType: "Explore" });`),
-    ).rejects.toThrow(/agentType.*not supported in P1/);
+    await sandbox.run(`return await agent("x", { isolation: "remote" });`);
+    expect((seen[0].opts as { isolation?: unknown }).isolation).toBe('remote');
+  });
+
+  it('agent({model}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    await sandbox.run(`return await agent("x", { model: "qwen3-max" });`);
+    expect((seen[0].opts as { model?: unknown }).model).toBe('qwen3-max');
+  });
+
+  it('agent({agentType}) is passed through to dispatch in P3', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    await sandbox.run(`return await agent("x", { agentType: "Explore" });`);
+    expect((seen[0].opts as { agentType?: unknown }).agentType).toBe('Explore');
+  });
+
+  // SECURITY (P3 widening): when dispatch returns a host-realm object (the
+  // structured payload in schema mode), the agent() wrapper revives per-call
+  // so the constructor chain stays in the vm realm. The same T1/T8/T14
+  // vector closed for parallel/pipeline's array result must be closed here.
+  it('agent() object return cannot reach host process via constructor chain', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => ({ ok: true, leak: 'attempt' }),
+    });
+    const result = await sandbox.run(`
+      const out = await agent("x", { schema: { type: "object" } });
+      try {
+        const v = out.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  // EAD-1 sibling for agent(): a non-JSON-serializable host return value
+  // becomes null at the script boundary instead of throwing the wrapper.
+  it('agent() object return that cannot serialize collapses to null', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => {
+        const a: { self?: unknown } = {};
+        a.self = a;
+        return a as unknown as object;
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { schema: { type: "object" } });`,
+    );
+    expect(result).toBeNull();
   });
 
   // FIX-C7 (TST-2-I3): the dedup branch in agent({phase}) — consecutive

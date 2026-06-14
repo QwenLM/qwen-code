@@ -34,6 +34,32 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('stamps published events with serverTimestamp metadata', () => {
+    const bus = new EventBus();
+    const before = Date.now();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { source: 'test' },
+    });
+    const after = Date.now();
+
+    expect(event?._meta?.['source']).toBe('test');
+    expect(event?._meta?.['serverTimestamp']).toBeGreaterThanOrEqual(before);
+    expect(event?._meta?.['serverTimestamp']).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves an existing serverTimestamp when publishing', () => {
+    const bus = new EventBus();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { serverTimestamp: 123 },
+    });
+
+    expect(event?._meta?.['serverTimestamp']).toBe(123);
+  });
+
   it('delivers live publishes to a subscriber', async () => {
     const bus = new EventBus();
     const abort = new AbortController();
@@ -65,7 +91,7 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('replay + live: new events follow the replay tail', async () => {
+  it('replay + live: new events follow the replay tail (with replay_complete sentinel)', async () => {
     const bus = new EventBus();
     bus.publish({ type: 'foo', data: 'a' });
     bus.publish({ type: 'foo', data: 'b' });
@@ -75,8 +101,29 @@ describe('EventBus', () => {
 
     setTimeout(() => bus.publish({ type: 'foo', data: 'c' }), 5);
 
-    const events = await collect(iter, 3);
-    expect(events.map((e) => e.data)).toEqual(['a', 'b', 'c']);
+    // The replay loop drains the ring, emits a `replay_complete`
+    // sentinel (id-less, lets consumers drop catch-up indicators), and
+    // then live events flow. Sentinel goes AFTER the ring tail so the
+    // consumer sees historical frames first, then the "you're live now"
+    // signal, then live events.
+    const events = await collect(iter, 4);
+    expect(events.map((e) => e.type)).toEqual([
+      'foo',
+      'foo',
+      'replay_complete',
+      'foo',
+    ]);
+    expect(events.map((e) => e.data)).toEqual([
+      'a',
+      'b',
+      // D4: canonical `lastReplayedEventId` + deprecated `lastEventId` alias.
+      expect.objectContaining({
+        lastReplayedEventId: 2,
+        lastEventId: 2,
+        replayedCount: 2,
+      }),
+      'c',
+    ]);
     abort.abort();
   });
 
@@ -274,13 +321,21 @@ describe('EventBus', () => {
     // A `lastEventId: 0` resume with a queue cap larger than the ring
     // collects exactly 8000 live frames; ids start at 2 because id=1
     // was the one shifted out of the ring.
+    //
+    // #4175 F4 prereq: `lastEventId: 0` + earliest-id-in-ring = 2
+    // crosses the eviction-detection threshold (earliest > last + 1),
+    // so an extra synthetic `state_resync_required` frame is emitted
+    // FIRST. The filter below restricts to live ids, which excludes
+    // the synthetic (no id), so the original "8000 live frames"
+    // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
       maxQueued: 9000,
       signal: abort.signal,
     });
-    const events = await collect(iter, 8000);
+    // Collect 8001 frames now: 1 synthetic resync + 8000 live.
+    const events = await collect(iter, 8001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
@@ -288,6 +343,8 @@ describe('EventBus', () => {
     expect(liveIds).toHaveLength(8000);
     expect(liveIds[0]).toBe(2);
     expect(liveIds[liveIds.length - 1]).toBe(8001);
+    // The synthetic resync frame is the first one.
+    expect(events[0]?.type).toBe('state_resync_required');
   });
 
   it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {
@@ -405,12 +462,15 @@ describe('EventBus', () => {
     const events: BridgeEvent[] = [];
     for await (const e of iter) {
       events.push(e);
-      if (events.length === 11) break;
+      // 10 replay + 1 replay_complete sentinel + 1 live = 12 total
+      if (events.length === 12) break;
     }
     // The live frame must arrive — NOT a `client_evicted` terminal.
     expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
     expect(events.at(-1)?.type).toBe('live');
     expect(events.filter((e) => e.type === 'replay')).toHaveLength(10);
+    // `replay_complete` sentinel signals end-of-replay before live frames.
+    expect(events.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
     abort.abort();
   });
 
@@ -480,9 +540,227 @@ describe('EventBus', () => {
     const out: BridgeEvent[] = [];
     for await (const e of iter) {
       out.push(e);
-      if (out.length === 3) break;
+      // state_resync_required (synthetic) + 3 replay frames +
+      // replay_complete sentinel = 5 frames.
+      if (out.length === 5) break;
     }
-    expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+    // First frame is the synthetic state_resync_required (no id).
+    expect(out[0]?.type).toBe('state_resync_required');
+    expect(out[0]?.id).toBeUndefined();
+    // Then the 3 surviving ring frames.
+    expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+    // The replay_complete sentinel fires at the end of replay even on
+    // the resync path — `replayedCount` is the actual frames pushed (3),
+    // NOT `earliestAvailableId - lastEventId` (which would over-count
+    // across the evicted hole).
+    expect(out[4]?.type).toBe('replay_complete');
+    expect(out[4]?.id).toBeUndefined();
+    expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
     abort.abort();
+  });
+
+  describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('emits state_resync_required when lastEventId is past the ring head', async () => {
+      // Setup: ring holds 3, ids 1..5 published → ring contains [3,4,5].
+      // Consumer reconnects with Last-Event-ID: 1 → events 2 was evicted.
+      // Daemon must emit state_resync_required FIRST so SDK reducer
+      // knows its state is stale before applying any replay frames.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      // First frame is the resync terminal (synthetic, no id).
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('ring_evicted');
+      expect(data.lastDeliveredId).toBe(1);
+      expect(data.earliestAvailableId).toBe(3); // event 2 was evicted
+      // Replay continues after the resync frame (per design — SDK can
+      // compute "what you missed" diff later) — so we still get the
+      // 3 surviving ring frames.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+      // replay_complete sentinel closes the replay even when a resync
+      // gap preceded it; replayedCount counts only the 3 surviving
+      // frames actually delivered (not the evicted hole).
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when lastEventId is in the ring', async () => {
+      // Consumer's lastEventId is well within the ring → no gap → no
+      // resync needed.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 3) break;
+      }
+      // No resync frame — just the 3 replay frames (ids 3, 4, 5).
+      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required at the exact boundary (lastEventId === earliest - 1)', async () => {
+      // Boundary: ring's earliest id is N, lastEventId is N-1.
+      // No gap → no resync. Off-by-one guard.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      // Ring is now [3, 4, 5]. lastEventId=2 means "I have 1 and 2";
+      // next expected is 3, which IS in the ring. No gap.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // 3 replay frames + 1 replay_complete sentinel = 4 total
+        if (out.length === 4) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      // Replay frames in order, then the sentinel (id-less, signals
+      // catch-up complete).
+      expect(out.filter((e) => e.type === 'foo').map((e) => e.id)).toEqual([
+        3, 4, 5,
+      ]);
+      expect(out.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
+      abort.abort();
+    });
+
+    it('emits epoch_reset resync when lastEventId is past the bus high-water (D1)', async () => {
+      // doudouOUC #4484 post-merge review (D1): a fresh bus (nextId=1,
+      // empty ring) that receives a consumer presenting `lastEventId: 5`
+      // means the consumer's cursor is from a PREVIOUS bus epoch (daemon
+      // restart rebuilt the EventBus). Pre-fix this slid past the
+      // `ring_evicted` check (empty ring) and emitted a bare
+      // `replay_complete{replayedCount:0}` — a false "you're caught up"
+      // while the consumer's reducer still held dead-epoch state. Now it
+      // must emit `state_resync_required{reason:'epoch_reset'}` first.
+      const bus = new EventBus(10);
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 5,
+        signal: abort.signal,
+      });
+      // Publish one live event AFTER subscribe to confirm the stream works.
+      setTimeout(() => bus.publish({ type: 'foo', data: 1 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + replay_complete (0 frames) + 1 live = 3 total.
+        if (out.length === 3) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.lastDeliveredId).toBe(5);
+      expect(data.earliestAvailableId).toBe(1);
+      expect(out[1]?.type).toBe('replay_complete');
+      expect(out[1]?.data).toMatchObject({ replayedCount: 0 });
+      expect(out[2]?.type).toBe('foo');
+      expect(out[2]?.id).toBe(1);
+      abort.abort();
+    });
+
+    it('epoch_reset replays the WHOLE fresh ring (stale cursor must not filter new low ids)', async () => {
+      // After a restart the new epoch starts ids at 1 again. A consumer
+      // reconnecting with `lastEventId: 50` (dead epoch) must still receive
+      // the fresh ring's low-id events — filtering replay by 50 would drop
+      // ids 1..3 entirely, leaving the consumer permanently behind.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 50,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect((out[0]?.data as { reason: string }).reason).toBe('epoch_reset');
+      // All three fresh events replay despite ids < stale cursor.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('does NOT emit epoch_reset at the caught-up boundary (lastEventId === high-water)', async () => {
+      // Consumer fully caught up: lastEventId equals the bus high-water
+      // (nextId - 1). nextId is one past it, so `lastEventId >= nextId` is
+      // false — no epoch reset. Off-by-one guard for D1.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      // high-water is 3; nextId is 4. lastEventId: 3 is the caught-up case.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 3,
+        signal: abort.signal,
+      });
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // replay_complete (0 frames) + 1 live = 2.
+        if (out.length === 2) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out[0]?.type).toBe('replay_complete');
+      expect(out[1]?.id).toBe(4);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when no lastEventId is provided (fresh subscribe)', async () => {
+      // First-time subscriber has no prior state to resync — resync
+      // would be meaningless. Check the no-lastEventId branch is
+      // skipped entirely.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+      // Live-only — publish one event after subscribe to give the
+      // iterator something to yield.
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      expect(out[0]?.type).toBe('foo');
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
   });
 });

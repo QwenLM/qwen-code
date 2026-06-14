@@ -185,9 +185,30 @@ describe('tokenLimit', () => {
   });
 
   describe('Zhipu GLM', () => {
-    it('should return 200K for GLM-5 and GLM-4.7 (latest)', () => {
+    it('should default GLM-5.2+ and GLM-6.x onward to 1M (forward default)', () => {
+      expect(tokenLimit('glm-5.2')).toBe(1000000);
+      expect(tokenLimit('GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('glm-5.3')).toBe(1000000);
+      expect(tokenLimit('glm-6')).toBe(1000000);
+      expect(tokenLimit('glm-6.5')).toBe(1000000);
+      expect(tokenLimit('glm-10')).toBe(1000000); // two-digit major
+    });
+
+    it('should strip third-party deploy prefixes before matching', () => {
+      expect(tokenLimit('zai/GLM-5.2')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.3')).toBe(1000000);
+      expect(tokenLimit('pai/glm-5.1')).toBe(202752);
+    });
+
+    it('should pin GLM-5 / 5.1 and GLM-4.x to 200K', () => {
       expect(tokenLimit('glm-5')).toBe(202752);
+      expect(tokenLimit('glm-5.0')).toBe(202752);
+      expect(tokenLimit('glm-5.1')).toBe(202752);
       expect(tokenLimit('glm-4.7')).toBe(202752);
+    });
+
+    it('should keep non-numeric GLM names on the conservative fallback', () => {
+      expect(tokenLimit('glm-z1')).toBe(202752);
     });
 
     it('should return 200K for legacy GLM (fallback)', () => {

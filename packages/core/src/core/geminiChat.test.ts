@@ -4071,6 +4071,75 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should pass configured retry error codes into streamed retry diagnostics', async () => {
+      vi.useFakeTimers();
+
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'test-model',
+          retryErrorCodes: [4999],
+        });
+        const providerThrottle = Object.assign(
+          new StreamContentError('Provider-specific throttle'),
+          { status: 4999 },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw providerThrottle;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Success after custom code retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-custom-retry-code',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await secondPromise;
+
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+        }
+
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Rate limit retry scheduled',
+          expect.objectContaining({
+            classificationDiagnosis: 'retryable',
+            classificationReason: 'rate-limit',
+            errorKind: 'provider',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry immediately when skipDelay is called during rate-limit wait', async () => {
       vi.useFakeTimers();
 
@@ -7480,6 +7549,140 @@ describe('GeminiChat', async () => {
       // Next unforced call: counter is back to 0.
       await chat.tryCompress('p3', 'm1');
       expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
+    });
+  });
+
+  describe('compressFast', () => {
+    const userMsg = (text: string): Content => ({
+      role: 'user' as const,
+      parts: [{ text }],
+    });
+    const modelMsg = (text: string): Content => ({
+      role: 'model' as const,
+      parts: [{ text }],
+    });
+    const modelMsgWithThinking = (
+      text: string | null,
+      thinking: string,
+    ): Content => ({
+      role: 'model' as const,
+      parts: [{ thought: true, text: thinking }, ...(text ? [{ text }] : [])],
+    });
+    const toolCall = (name: string): Content => ({
+      role: 'model' as const,
+      parts: [{ functionCall: { name, args: {} } }],
+    });
+    const toolResult = (name: string, output: string): Content => ({
+      role: 'user' as const,
+      parts: [{ functionResponse: { name, response: { output } } }],
+    });
+
+    beforeEach(() => {
+      (mockConfig as unknown as Record<string, unknown>)[
+        'getClearContextOnIdle'
+      ] = vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      });
+    });
+
+    it('strips thinking from model turns', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsgWithThinking('response text', 'internal reasoning'),
+        userMsg('next'),
+        modelMsg('plain reply'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // Thinking parts should be stripped from the first model message
+      const history = chat.getHistory();
+      const firstModel = history.find((c) => c.role === 'model');
+      expect(firstModel?.parts).toEqual([{ text: 'response text' }]);
+    });
+
+    it('NOOP when nothing is compressible', () => {
+      chat.setHistory([
+        userMsg('hello'),
+        modelMsg('hi'),
+        userMsg('how are you'),
+        modelMsg('good'),
+      ]);
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    });
+
+    it('clears old tool results via microcompaction', () => {
+      const history: Content[] = [];
+      // Create many tool calls so keepRecent=5 kicks in
+      for (let i = 0; i < 8; i++) {
+        history.push(toolCall('read_file'));
+        history.push(
+          toolResult('read_file', `content for file ${i} `.repeat(50)),
+        );
+      }
+      history.push(userMsg('final'));
+      history.push(modelMsg('done'));
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(5000);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.microcompactMeta).toBeDefined();
+      expect(result.microcompactMeta!.toolsCleared).toBeGreaterThan(0);
+    });
+
+    it('adjusts lastPromptTokenCount by estimated delta on COMPRESSED', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      const apiBaseline = 50000;
+      chat.setLastPromptTokenCount(apiBaseline);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeLessThan(apiBaseline);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
+      expect(chat.getLastPromptTokenCount()).toBe(result.info.newTokenCount);
+    });
+
+    it('falls back to estimateContentTokens when lastPromptTokenCount is 0', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 5; i++) {
+        history.push(
+          userMsg(`question ${i}`),
+          modelMsgWithThinking(
+            `response ${i}`,
+            `very long internal reasoning for turn ${i} `.repeat(100),
+          ),
+        );
+      }
+      chat.setHistory(history);
+      chat.setLastPromptTokenCount(0);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.originalTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(
+        result.info.originalTokenCount,
+      );
     });
   });
 });

@@ -377,8 +377,9 @@ jobs:
         shell: 'bash'
         env:
           IS_DRY_RUN: '${{ inputs.dry_run }}'
-          APPLE_APP_SPECIFIC_PASSWORD_SECRET: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          APPLE_ID_SECRET: '${{ secrets.APPLE_ID }}'
+          APPLE_NOTARY_API_KEY_P8_BASE64_SECRET: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_NOTARY_KEY_ID_SECRET: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          APPLE_NOTARY_ISSUER_ID_SECRET: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
           APPLE_TEAM_ID_SECRET: '${{ secrets.APPLE_TEAM_ID }}'
           MAC_CSC_KEY_PASSWORD_SECRET: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
           MAC_CSC_LINK_SECRET: '${{ secrets.MAC_CSC_LINK }}'
@@ -424,17 +425,25 @@ jobs:
               fi
 
               if [ "$IS_DRY_RUN" = "false" ]; then
-                if [ -z "$APPLE_ID_SECRET" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD_SECRET" ] || [ -z "$APPLE_TEAM_ID_SECRET" ]; then
-                  echo "::error::Published macOS desktop releases require APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID for notarization."
+                if [ -z "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] || [ -z "$APPLE_NOTARY_KEY_ID_SECRET" ] || [ -z "$APPLE_NOTARY_ISSUER_ID_SECRET" ] || [ -z "$APPLE_TEAM_ID_SECRET" ]; then
+                  echo "::error::Published macOS desktop releases require APPLE_NOTARY_API_KEY_P8_BASE64, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID, and APPLE_TEAM_ID for notarization."
                   exit 1
                 fi
-                append_env "NOTARIZE" "true"
+              fi
+
+              # Materialize the App Store Connect API key (.p8) so electron-builder
+              # (>=24) notarizes via notarytool. It reads APPLE_API_KEY (a path to
+              # the .p8 file), APPLE_API_KEY_ID, and APPLE_API_ISSUER from the env.
+              if [ -n "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" ] && [ -n "$APPLE_NOTARY_KEY_ID_SECRET" ] && [ -n "$APPLE_NOTARY_ISSUER_ID_SECRET" ]; then
+                api_key_path="${RUNNER_TEMP}/apple-notary-key.p8"
+                printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64_SECRET" | base64 --decode > "$api_key_path"
+                append_env "APPLE_API_KEY" "$api_key_path"
+                append_env "APPLE_API_KEY_ID" "$APPLE_NOTARY_KEY_ID_SECRET"
+                append_env "APPLE_API_ISSUER" "$APPLE_NOTARY_ISSUER_ID_SECRET"
               fi
 
               append_env "CSC_LINK" "$mac_csc_link"
               append_env "CSC_KEY_PASSWORD" "$mac_csc_key_password"
-              append_env "APPLE_ID" "$APPLE_ID_SECRET"
-              append_env "APPLE_APP_SPECIFIC_PASSWORD" "$APPLE_APP_SPECIFIC_PASSWORD_SECRET"
               append_env "APPLE_TEAM_ID" "$APPLE_TEAM_ID_SECRET"
               echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
             else
@@ -455,12 +464,11 @@ jobs:
               append_env "WIN_CSC_LINK" "$WIN_CSC_LINK_SECRET"
               append_env "WIN_CSC_KEY_PASSWORD" "$WIN_CSC_KEY_PASSWORD_SECRET"
             else
-              if ! allow_unsigned_artifacts; then
-                echo "::error::Published Windows desktop releases require WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD."
-                exit 1
+              if [ "$IS_DRY_RUN" = "true" ]; then
+                echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
+              else
+                echo "::warning::Windows signing certificate is not configured; published Windows desktop releases will be unsigned."
               fi
-
-              echo "Windows signing certificate is not configured; Windows dry-run artifacts will be unsigned."
             fi
           else
             if [ "$RUNNER_OS" != "Linux" ] && [ -n "$CSC_LINK_SECRET" ]; then

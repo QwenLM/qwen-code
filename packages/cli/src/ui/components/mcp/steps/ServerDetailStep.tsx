@@ -150,8 +150,12 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               {server.source === 'user'
                 ? t('User Settings')
                 : server.source === 'project'
-                  ? t('Workspace Settings')
-                  : t('Extension')}
+                  ? '.mcp.json'
+                  : server.source === 'workspace'
+                    ? t('Workspace Settings')
+                    : server.source === 'system'
+                      ? t('System Settings')
+                      : t('Extension')}
             </Text>
           </Box>
         </Box>
