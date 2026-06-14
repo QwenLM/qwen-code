@@ -338,6 +338,35 @@ describe('AgentTool', () => {
       ]);
     });
 
+    it('does not expose teammate name when teams are disabled', () => {
+      const schema = agentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: unknown;
+        };
+      };
+
+      expect(parameters.properties.name).toBeUndefined();
+    });
+
+    it('exposes teammate name when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          name?: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(parameters.properties.name?.description).toContain('active team');
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -519,8 +548,10 @@ describe('AgentTool', () => {
   });
 
   describe('team routing', () => {
-    it('rejects `name` when no team is active', async () => {
+    it('falls back to one-shot when `name` is supplied without a team', async () => {
       vi.mocked(config.getTeamManager).mockReturnValue(null);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
       const invocation = agentTool.build({
         description: 'Spawn helper',
         prompt: 'Do work',
@@ -528,11 +559,11 @@ describe('AgentTool', () => {
         name: 'helper',
       });
       const result = await invocation.execute(new AbortController().signal);
-      expect(result.error).toBeDefined();
-      expect(result.llmContent).toContain('no active team');
-      expect(result.llmContent).toContain('"helper"');
-      // Subagent must NOT have been spawned as a one-shot fallback.
-      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+
+      expect(result.llmContent).not.toContain('no active team');
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
     });
   });
 
