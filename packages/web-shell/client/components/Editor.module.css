@@ -280,6 +280,34 @@
   border-radius: 6px;
   font-family: var(--font-mono, monospace);
   font-size: 13px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar
+) {
+  width: 6px;
+  height: 6px;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar-track
+) {
+  background: transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip-autocomplete
+    > ul::-webkit-scrollbar-thumb
+) {
+  background: var(--border-color);
+  border-radius: 3px;
 }
 
 :global([data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li) {
@@ -412,6 +440,31 @@
   line-height: 1.45;
   white-space: pre-line;
   overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar
+) {
+  width: 6px;
+  height: 6px;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar-track
+) {
+  background: transparent;
+}
+
+:global(
+  [data-web-shell-tooltip-portal]
+    .cm-tooltip.cm-completionInfo::-webkit-scrollbar-thumb
+) {
+  background: var(--border-color);
+  border-radius: 3px;
 }
 
 :global(
