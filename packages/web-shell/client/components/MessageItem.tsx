@@ -75,6 +75,8 @@ export const MessageItem = memo(function MessageItem({
           <SystemMessage
             content={message.content}
             variant={message.variant}
+            source={message.source}
+            data={message.data}
             onShowContextDetail={onShowContextDetail}
             isLatest={isLatest}
             showRetryHint={showRetryHint && message.retryable === true}
@@ -161,7 +163,9 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         next.role === 'system' &&
         prev.content === next.content &&
         prev.variant === next.variant &&
-        prev.retryable === next.retryable
+        prev.retryable === next.retryable &&
+        prev.source === next.source &&
+        prev.data === next.data
       );
     case 'user_shell':
       return (

@@ -18,7 +18,6 @@ import {
 } from 'react';
 import {
   DaemonClient,
-  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
@@ -1441,6 +1440,11 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   }
   const meta = update['_meta'];
   if (!isRecord(meta)) return null;
+  const status = normalizeGoalStatus(meta['goalStatus']);
+  if (status) {
+    return createGoalStatusUiEvent(event, status);
+  }
+
   const terminal = normalizeGoalTerminal(meta['goalTerminal']);
   if (terminal) {
     return createGoalStatusUiEvent(event, terminal);
@@ -1470,7 +1474,37 @@ function createGoalStatusUiEvent(
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
-    text: DAEMON_GOAL_STATUS_SENTINEL_PREFIX + JSON.stringify(status),
+    text: '',
+    source: 'goal',
+    data: status,
+  };
+}
+
+function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const kind = getString(value, 'kind');
+  if (
+    kind !== 'set' &&
+    kind !== 'cleared' &&
+    kind !== 'achieved' &&
+    kind !== 'failed' &&
+    kind !== 'aborted'
+  ) {
+    return null;
+  }
+  const condition = getString(value, 'condition');
+  if (!condition) return null;
+  const iterations = getNumber(value, 'iterations');
+  const durationMs = getNumber(value, 'durationMs');
+  const setAt = getNumber(value, 'setAt');
+  const lastReason = getString(value, 'lastReason');
+  return {
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(setAt !== undefined ? { setAt } : {}),
+    ...(lastReason ? { lastReason } : {}),
   };
 }
 

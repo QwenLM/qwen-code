@@ -12,6 +12,7 @@ import {
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './BaseEmitter.js';
+import type { HistoryItemGoalStatus } from '../../../ui/types.js';
 
 /**
  * Handles emission of text message chunks (user, agent, thought).
@@ -64,6 +65,18 @@ export class MessageEmitter extends BaseEmitter {
       content: { type: 'text', text: '' },
       _meta: {
         goalTerminal: event,
+      },
+    });
+  }
+
+  async emitGoalStatus(
+    status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: status,
       },
     });
   }

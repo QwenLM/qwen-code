@@ -31,6 +31,11 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
+type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
+  source?: string;
+  data?: unknown;
+};
+
 interface TranscriptMessageLabels {
   promptCancelled?: string;
 }
@@ -408,7 +413,8 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'status':
       case 'debug': {
-        const text = (block as DaemonStatusTranscriptBlock).text;
+        const statusBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const text = statusBlock.text;
         const todos = parsePlanTodos(text);
         if (todos) {
           messages.push({
@@ -430,13 +436,15 @@ export function transcriptBlocksToDaemonMessages(
           content: text,
           variant: 'info',
           timestamp: blockTime,
+          ...(statusBlock.source ? { source: statusBlock.source } : {}),
+          ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
         });
         needsNewContentMessage = true;
         break;
       }
 
       case 'error': {
-        const errorBlock = block as DaemonStatusTranscriptBlock;
+        const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
         messages.push({
           id: block.id,
           role: 'system',
@@ -444,6 +452,8 @@ export function transcriptBlocksToDaemonMessages(
           variant: 'error',
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
+          ...(errorBlock.source ? { source: errorBlock.source } : {}),
+          ...(errorBlock.data !== undefined ? { data: errorBlock.data } : {}),
         });
         needsNewContentMessage = true;
         break;
