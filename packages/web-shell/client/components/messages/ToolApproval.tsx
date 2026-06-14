@@ -211,6 +211,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   }, [handleKeyDown]);
 
   const isExec = isExecKind(request);
+  const isAgent = request.toolName === 'agent';
   const command = getCommandFromRawInput(request);
 
   return (
@@ -230,9 +231,11 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       ) : null}
 
       <div className={styles.question}>
-        {isExec
-          ? t('approval.execQuestion', { tool: toolName })
-          : t('approval.changeQuestion')}
+        {isAgent
+          ? t('approval.launchAgentQuestion')
+          : isExec
+            ? t('approval.execQuestion', { tool: toolName })
+            : t('approval.changeQuestion')}
       </div>
 
       <div className={styles.options}>
