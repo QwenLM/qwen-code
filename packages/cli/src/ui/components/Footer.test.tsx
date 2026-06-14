@@ -170,6 +170,7 @@ describe('<Footer />', () => {
       const { lastFrame } = renderWithWidth(16, createMockUIState());
       const frame = lastFrame()!;
       expect(frame).toContain('visible-start');
+      expect(frame).toContain('chunk-10');
       expect(frame).not.toContain('hidden-tail');
       expect(frame).not.toContain('? for shortcuts');
     });
