@@ -230,6 +230,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const pastedImagesRef = useRef<PromptImage[]>([]);
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const nextPasteIdRef = useRef(1);
+  // Tracks a trigger char ('/' or '@') inserted by a hint button so it can be
+  // removed if the user cancels completion (Escape) without typing past it.
+  const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
 
   const promptHistory = useInputHistory();
   const shellHistory = useInputHistory('qwen-web-shell-command-history');
@@ -295,8 +298,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
-    // Match the ArrowUp keymap: leave multi-line input alone rather than
-    // replacing a multi-line draft with a single history entry.
+    // Match the ArrowUp keymap: when the completion menu is open, move its
+    // selection instead of navigating history.
+    if (completionStatus(view.state) === 'active') {
+      moveCompletionSelection(false)(view);
+      view.focus();
+      return;
+    }
+    // ...and leave multi-line input alone rather than replacing a multi-line
+    // draft with a single history entry.
     if (view.state.doc.lines > 1) {
       view.focus();
       return;
@@ -321,8 +331,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
-    // Match the ArrowDown keymap: leave multi-line input alone rather than
-    // replacing a multi-line draft with a single history entry.
+    // Match the ArrowDown keymap: when the completion menu is open, move its
+    // selection instead of navigating history.
+    if (completionStatus(view.state) === 'active') {
+      moveCompletionSelection(true)(view);
+      view.focus();
+      return;
+    }
+    // ...and leave multi-line input alone rather than replacing a multi-line
+    // draft with a single history entry.
     if (view.state.doc.lines > 1) {
       view.focus();
       return;
@@ -496,10 +513,28 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Escape',
-        run: () => {
+        run: (view) => {
           if (shellModeRef.current) {
             setShellMode(false);
             return true;
+          }
+          // If completion is open on a trigger a hint button inserted and the
+          // user never typed past it, Escape removes the trigger too (it was
+          // clicked in, not typed).
+          const trigger = autoTriggerRef.current;
+          if (trigger && completionStatus(view.state) === 'active') {
+            const doc = view.state.doc;
+            const intact =
+              doc.length === trigger.from + trigger.text.length &&
+              doc.sliceString(trigger.from) === trigger.text;
+            if (intact) {
+              autoTriggerRef.current = null;
+              closeCompletion(view);
+              view.dispatch({
+                changes: { from: trigger.from, to: doc.length, insert: '' },
+              });
+              return true;
+            }
           }
           if (queuedMessagesRef.current.length === 0) return false;
           return onClearQueuedMessagesRef.current?.() ?? false;
@@ -681,6 +716,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
       if (!update.docChanged && !update.selectionSet) {
         return;
+      }
+      // Drop the click-inserted trigger marker once the user edits past it, so
+      // a later Escape doesn't wipe content they actually typed.
+      if (update.docChanged && autoTriggerRef.current) {
+        const t = autoTriggerRef.current;
+        const doc = update.state.doc;
+        const intact =
+          doc.length === t.from + t.text.length &&
+          doc.sliceString(t.from) === t.text;
+        if (!intact) autoTriggerRef.current = null;
       }
       if (update.docChanged && pendingPastesRef.current.size > 0) {
         const nextPasteId = prunePendingPastes(
@@ -1037,6 +1082,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     // menu instead of inserting a duplicate.
     let skipInsert = false;
     let caretOverride: number | null = null;
+    // Whether to open the completion menu afterwards. A mid-line '/' no-op
+    // (non-empty draft) must not, since the slash source needs a line-leading
+    // '/' and would otherwise pop an empty/unrelated menu.
+    let openMenu = text === '/' || text === '@';
     if (text === '/') {
       // The slash-command menu only triggers on a line-leading '/'. Re-open the
       // menu (don't insert) when the line already starts with '/', and no-op
@@ -1044,8 +1093,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       // the menu, and replacing the draft would silently destroy it. The user
       // can clear the draft themselves to start a command on an empty line.
       const line = view.state.doc.lineAt(selection.head);
-      if (line.text.startsWith('/') || view.state.doc.length > 0) {
+      if (line.text.startsWith('/')) {
+        skipInsert = true; // re-open the menu on the existing command
+      } else if (view.state.doc.length > 0) {
         skipInsert = true;
+        openMenu = false; // no-op on a non-empty draft; don't pop an empty menu
       }
     } else if (text === '@') {
       const before =
@@ -1076,6 +1128,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         selection: { anchor: selection.from + insert.length },
         scrollIntoView: true,
       });
+      // Remember the click-inserted trigger so Escape can undo it if the user
+      // never types past it (see the Escape keymap).
+      if (openMenu) {
+        autoTriggerRef.current = { text: insert, from: selection.from };
+      }
     } else if (caretOverride !== null) {
       view.dispatch({
         selection: { anchor: caretOverride },
@@ -1083,7 +1140,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       });
     }
     view.focus();
-    if (text === '/' || text === '@') {
+    if (openMenu) {
       window.setTimeout(() => {
         const nextView = viewRef.current;
         if (nextView && nextView.hasFocus) {
