@@ -272,7 +272,7 @@ function getToolResultsTotalCharsThreshold(
   if (settings.toolResultsTotalCharsThreshold !== undefined) {
     return settings.toolResultsTotalCharsThreshold;
   }
-  if (settings.toolResultsThresholdMinutes === -1) {
+  if ((settings.toolResultsThresholdMinutes ?? 0) < 0) {
     return -1;
   }
   return DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD;
@@ -303,6 +303,7 @@ interface SizeClearPlan {
   keepToolRefs: Set<string>;
   toolResultCharsBefore: number;
   toolResultCharsAfter: number;
+  pendingToolResultChars: number;
   toolResultsTotalCharsThreshold: number;
 }
 
@@ -323,11 +324,15 @@ function planSizeBasedClearing(
   const { tool } = collectCompactablePartRefs(virtualHistory);
   const charsByRef = new Map<string, number>();
   let totalChars = 0;
+  let pendingChars = 0;
   for (const ref of tool) {
     const chars = getToolOutputChars(getPart(virtualHistory, ref));
     if (chars <= 0) continue;
     charsByRef.set(refKey(ref), chars);
     totalChars += chars;
+    if (ref.contentIndex >= history.length) {
+      pendingChars += chars;
+    }
   }
   if (totalChars <= threshold) {
     return null;
@@ -362,7 +367,8 @@ function planSizeBasedClearing(
     toolRefs: tool,
     keepToolRefs,
     toolResultCharsBefore: totalChars,
-    toolResultCharsAfter: remainingChars,
+    toolResultCharsAfter: remainingChars - pendingChars,
+    pendingToolResultChars: pendingChars,
     toolResultsTotalCharsThreshold: threshold,
   };
 }
@@ -383,6 +389,7 @@ export interface MicrocompactMeta {
   thresholdMinutes: number;
   toolResultCharsBefore?: number;
   toolResultCharsAfter?: number;
+  pendingToolResultChars?: number;
   toolResultsTotalCharsThreshold?: number;
   /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
@@ -441,6 +448,7 @@ export function microcompactHistory(
   let clearRefs: PartRef[] = [];
   let toolResultCharsBefore: number | undefined;
   let toolResultCharsAfter: number | undefined;
+  let pendingToolResultChars: number | undefined;
   let toolResultsTotalCharsThreshold: number | undefined;
 
   if (opts?.force) {
@@ -485,6 +493,7 @@ export function microcompactHistory(
     clearRefs = sizePlan.clearRefs;
     toolResultCharsBefore = sizePlan.toolResultCharsBefore;
     toolResultCharsAfter = sizePlan.toolResultCharsAfter;
+    pendingToolResultChars = sizePlan.pendingToolResultChars;
     toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
   }
 
@@ -598,6 +607,7 @@ export function microcompactHistory(
       thresholdMinutes,
       toolResultCharsBefore,
       toolResultCharsAfter,
+      pendingToolResultChars,
       toolResultsTotalCharsThreshold,
       toolsCleared,
       mediaCleared,

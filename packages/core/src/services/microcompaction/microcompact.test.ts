@@ -401,17 +401,15 @@ describe('microcompactHistory', () => {
       },
       {
         sizeOnly: true,
-        pendingContent: makeToolResult(
-          'run_shell_command',
-          'Y'.repeat(50_000),
-        ),
+        pendingContent: makeToolResult('run_shell_command', 'Y'.repeat(50_000)),
       },
     );
 
     expect(result.meta).toBeDefined();
     expect(result.meta!.triggerReason).toBe('size');
     expect(result.meta!.toolResultCharsBefore).toBe(530_000);
-    expect(result.meta!.toolResultCharsAfter).toBeLessThanOrEqual(500_000);
+    expect(result.meta!.toolResultCharsAfter).toBe(360_000);
+    expect(result.meta!.pendingToolResultChars).toBe(50_000);
     expect(result.meta!.toolsCleared).toBe(1);
     expect(result.history).toHaveLength(history.length);
     expect(
@@ -483,16 +481,52 @@ describe('microcompactHistory', () => {
       makeToolCall('run_shell_command'),
       makeToolResult('run_shell_command', MICROCOMPACT_CLEARED_MESSAGE),
       makeToolCall('run_shell_command'),
-      makeToolResult('run_shell_command', 'recent'),
+      makeToolResult('run_shell_command', 'A'.repeat(200_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'B'.repeat(200_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'C'.repeat(200_000)),
     ];
 
     const result = microcompactHistory(history, Date.now(), {
       toolResultsThresholdMinutes: 60,
       toolResultsNumToKeep: 1,
-      toolResultsTotalCharsThreshold: 10,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('E'.repeat(500_000));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('C'.repeat(200_000));
+  });
+
+  it('treats a negative legacy idle threshold as disabling the size trigger when unset', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 20; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'X'.repeat(30_000)),
+      );
+    }
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: -2,
+      toolResultsNumToKeep: 1,
     });
 
     expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
   });
 
   it('disables the size trigger when toolResultsTotalCharsThreshold is -1', () => {

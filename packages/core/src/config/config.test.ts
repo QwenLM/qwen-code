@@ -2918,6 +2918,21 @@ describe('Server Config (config.ts)', () => {
         toolResultsTotalCharsThreshold: -1,
       });
     });
+
+    it('should treat any negative legacy idle threshold as disabling the size trigger too', () => {
+      const config = new Config({
+        ...baseParams,
+        clearContextOnIdle: {
+          toolResultsThresholdMinutes: -2,
+        },
+      });
+
+      expect(config.getClearContextOnIdle()).toMatchObject({
+        toolResultsThresholdMinutes: -2,
+        toolResultsNumToKeep: 5,
+        toolResultsTotalCharsThreshold: -1,
+      });
+    });
   });
 
   // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the

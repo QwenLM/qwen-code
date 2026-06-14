@@ -1401,7 +1401,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD as number,
             description:
-              'Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable.',
+              'Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.',
             showInDialog: false,
           },
         },

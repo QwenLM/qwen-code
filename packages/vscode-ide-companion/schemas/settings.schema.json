@@ -605,7 +605,7 @@
               "default": 5
             },
             "toolResultsTotalCharsThreshold": {
-              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable.",
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
               "type": "number",
               "default": 500000
             }

@@ -1588,14 +1588,19 @@ export class GeminiClient {
       this.getChat().setHistory(mcResult.history);
       await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       if (m.triggerReason === 'size') {
-        debugLogger.debug(
+        const pendingNote =
+          m.pendingToolResultChars && m.pendingToolResultChars > 0
+            ? ` (+${m.pendingToolResultChars} pending)`
+            : '';
+        debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
-            `tool result(s) (~${m.tokensSaved} tokens), now ` +
-            `${m.toolResultCharsAfter}, kept ${m.toolsKept} tool result(s)`,
+            `tool result(s) (~${m.tokensSaved} tokens), history now ` +
+            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
+            `tool result(s)`,
         );
       } else {
-        debugLogger.debug(
+        debugLogger.info(
           `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
             `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
             `kept ${m.toolsKept} tool / ${m.mediaKept} media`,

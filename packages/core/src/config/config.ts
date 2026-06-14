@@ -1434,7 +1434,7 @@ export class Config {
       toolResultsNumToKeep: clearContextOnIdle?.toolResultsNumToKeep ?? 5,
       toolResultsTotalCharsThreshold:
         clearContextOnIdle?.toolResultsTotalCharsThreshold ??
-        (clearContextOnIdle?.toolResultsThresholdMinutes === -1
+        ((clearContextOnIdle?.toolResultsThresholdMinutes ?? 0) < 0
           ? -1
           : DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD),
     };

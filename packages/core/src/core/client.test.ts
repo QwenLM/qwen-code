@@ -2148,6 +2148,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('[TIME-BASED MC]'),
+      );
       expect(client['lastHookMicrocompactionTimestamp']).toBeGreaterThan(
         Date.now() - 60_000,
       );
@@ -2664,6 +2667,14 @@ describe('Gemini Client (client.ts)', () => {
       ).toBe('[Old tool result content cleared]');
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('history now 360000 (+50000 pending)'),
+      );
     });
 
     it('runs microcompaction on SendMessageType.Cron', async () => {
