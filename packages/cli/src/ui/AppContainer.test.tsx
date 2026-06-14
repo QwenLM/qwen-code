@@ -91,8 +91,11 @@ vi.mock('./hooks/useFocus.js');
 vi.mock('./hooks/useBracketedPaste.js');
 vi.mock('./hooks/useKeypress.js');
 vi.mock('./hooks/useLoadingIndicator.js');
+const { mockUseMemoryMonitor } = vi.hoisted(() => ({
+  mockUseMemoryMonitor: vi.fn(),
+}));
 vi.mock('./hooks/useMemoryMonitor.js', () => ({
-  useMemoryMonitor: () => {},
+  useMemoryMonitor: mockUseMemoryMonitor,
 }));
 vi.mock('./hooks/useFolderTrust.js');
 vi.mock('./hooks/useIdeTrustListener.js');
@@ -3668,5 +3671,94 @@ describe('dedupeNewestFirst', () => {
         'first prompt',
       ]),
     ).toEqual(['first prompt', 'third prompt', 'second prompt']);
+  });
+});
+
+describe('useMemoryMonitor integration', () => {
+  let mockConfig: Config;
+  let mockSettings: LoadedSettings;
+  let mockInitResult: InitializationResult;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+
+    // Bypass the global useMemoryMonitor mock for this describe block,
+    // so AppContainer runs the real hook.
+    const real = await vi.importActual<
+      typeof import('./hooks/useMemoryMonitor.js')
+    >('./hooks/useMemoryMonitor.js');
+    mockUseMemoryMonitor.mockImplementation(real.useMemoryMonitor);
+
+    mockConfig = makeFakeConfig();
+    vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
+    const mockGeminiClient: Partial<GeminiClient> = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
+      isInitialized: vi.fn().mockReturnValue(false),
+    };
+    vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(
+      mockGeminiClient as GeminiClient,
+    );
+
+    mockSettings = {
+      merged: {
+        hideTips: false,
+        theme: 'default',
+        ui: { showStatusInTitle: false, hideWindowTitle: false },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    mockInitResult = {
+      themeError: null,
+      authError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    } as InitializationResult;
+  });
+
+  afterEach(() => {
+    cleanup();
+    // Restore the global mock so other describe blocks are unaffected.
+    mockUseMemoryMonitor.mockImplementation(() => {});
+  });
+
+  it('registers starvation callback on mount', () => {
+    const setOnStarvationCallback = vi.fn();
+    vi.spyOn(mockConfig, 'getMemoryPressureMonitor').mockReturnValue({
+      setOnStarvationCallback,
+    } as unknown as ReturnType<Config['getMemoryPressureMonitor']>);
+
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+
+    expect(setOnStarvationCallback).toHaveBeenCalledTimes(1);
+    expect(setOnStarvationCallback).toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  it('clears starvation callback on unmount', () => {
+    const setOnStarvationCallback = vi.fn();
+    vi.spyOn(mockConfig, 'getMemoryPressureMonitor').mockReturnValue({
+      setOnStarvationCallback,
+    } as unknown as ReturnType<Config['getMemoryPressureMonitor']>);
+
+    const { unmount } = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+
+    unmount();
+
+    expect(setOnStarvationCallback).toHaveBeenLastCalledWith(undefined);
   });
 });
