@@ -339,7 +339,7 @@ export class MemoryPressureMonitor extends EventEmitter {
         this.onStarvationCallback?.();
       } catch (err) {
         debugLogger.error(
-          `onStarvation callback failed: ${err instanceof Error ? err.message : String(err)}`,
+          `onStarvation callback failed: ${getErrorMessage(err)}`,
         );
       }
       return;
