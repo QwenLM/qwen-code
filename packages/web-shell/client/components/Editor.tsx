@@ -295,6 +295,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
+    // Match the ArrowUp keymap: leave multi-line input alone rather than
+    // replacing a multi-line draft with a single history entry.
+    if (view.state.doc.lines > 1) {
+      view.focus();
+      return;
+    }
     const history = shellModeRef.current
       ? shellHistoryActionsRef.current
       : historyActionsRef.current;
@@ -315,6 +321,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (disabledRef.current) return;
     const view = viewRef.current;
     if (!view) return;
+    // Match the ArrowDown keymap: leave multi-line input alone rather than
+    // replacing a multi-line draft with a single history entry.
+    if (view.state.doc.lines > 1) {
+      view.focus();
+      return;
+    }
     const history = shellModeRef.current
       ? shellHistoryActionsRef.current
       : historyActionsRef.current;
@@ -1294,10 +1306,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // shortcuts (history search, slash commands, file mentions) so they stay
   // discoverable even while typing. Hidden where it would conflict or not
   // apply: shell mode (different prefix), reverse-i-search (its own hint bar),
-  // a followup suggestion occupying the placeholder, or while disabled — the
-  // buttons would otherwise bypass the editor's disabled guard.
+  // a followup suggestion occupying the placeholder, while disabled (the
+  // buttons would otherwise bypass the editor's disabled guard), or while a
+  // dialog is open (matching the Ctrl+R keymap guard).
   const showShortcutHints =
-    !shellMode && !searchMode && !followupState?.isVisible && !disabled;
+    !shellMode &&
+    !searchMode &&
+    !followupState?.isVisible &&
+    !disabled &&
+    !dialogOpen;
   // Shared props for the hint-row buttons: keep focus in the editor
   // (preventDefault on mousedown) and don't bubble to the container's click-
   // to-focus handler (stopPropagation on click).
