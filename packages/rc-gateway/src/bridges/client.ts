@@ -73,6 +73,24 @@ export class BridgeClient {
     return this.postJson('/rc/bridges', reg);
   }
 
+  /**
+   * Redeem a one-time invite token (POST /rc/bridges/:id/invite/redeem). On a
+   * `200` the bridge learns the `sessionId` to bind; on a non-2xx the gateway's
+   * `error` text ("Invalid or expired invite token") is relayed to the chat. This
+   * is the SOLE bind path — a chat user never names a session id directly.
+   */
+  async redeemInvite(
+    bridgeId: string,
+    token: string,
+  ): Promise<WriteResult & { sessionId?: string }> {
+    const r = await this.postJson(
+      `/rc/bridges/${encodeURIComponent(bridgeId)}/invite/redeem`,
+      { token },
+    );
+    const sessionId = (r.body as { sessionId?: unknown })?.sessionId;
+    return typeof sessionId === 'string' ? { ...r, sessionId } : r;
+  }
+
   /** Send a prompt on behalf of a chat user (POST /rc/session/:id/prompt). */
   async sendPrompt(
     sessionId: string,

@@ -47,10 +47,23 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
 
   let promptResult: WriteResult = { ok: true, status: 200 };
   let voteResult: WriteResult = { ok: true, status: 200 };
+  const redeems: Array<{ bridgeId: string; token: string }> = [];
+  let redeemResult: (WriteResult & { sessionId?: string }) | undefined;
 
   const ok: DiscordRestResult = { ok: true, status: 200 };
   const base: DiscordDispatchDeps = {
     bridge: {
+      redeemInvite: async (bridgeId, token) => {
+        redeems.push({ bridgeId, token });
+        if (redeemResult) return redeemResult;
+        return token === 'inv_ok'
+          ? { ok: true, status: 200, sessionId: 'sess_abc' }
+          : {
+              ok: false,
+              status: 400,
+              body: { error: 'Invalid or expired invite token' },
+            };
+      },
       sendPrompt: async (sessionId, prompt, subActor) => {
         prompts.push({ sessionId, prompt, subActor });
         return promptResult;
@@ -79,6 +92,7 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
       },
     },
     channels,
+    bridgeId: 'discord',
     bans: new Set<string>(),
     ...over,
   };
@@ -90,8 +104,11 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
     replies,
     defers,
     editedReplies,
+    redeems,
     setPromptResult: (r: WriteResult) => (promptResult = r),
     setVoteResult: (r: WriteResult) => (voteResult = r),
+    setRedeemResult: (r: WriteResult & { sessionId?: string }) =>
+      (redeemResult = r),
   };
 }
 
@@ -191,16 +208,25 @@ describe('discord dispatch — slash commands', () => {
     arg,
   });
 
-  it('attach binds the channel and replies ephemerally', async () => {
+  it('attach REDEEMS the invite token and binds the returned session', async () => {
     const f = deps();
-    await handleSlashCommand(cmd('attach', 'sess_abc'), f.deps);
+    await handleSlashCommand(cmd('attach', 'inv_ok'), f.deps);
+    expect(f.redeems).toEqual([{ bridgeId: 'discord', token: 'inv_ok' }]);
     expect(channels.sessionFor('chan_42')).toBe('sess_abc');
     expect(f.replies[0]).toContain('sess_abc');
   });
 
-  it('attach with no arg replies with usage and binds nothing', async () => {
+  it('attach with a bad token relays the gateway error and binds NOTHING', async () => {
+    const f = deps();
+    await handleSlashCommand(cmd('attach', 'inv_bad'), f.deps);
+    expect(channels.sessionFor('chan_42')).toBeUndefined();
+    expect(f.replies[0]).toBe('Invalid or expired invite token');
+  });
+
+  it('attach with no arg replies with usage and does not redeem', async () => {
     const f = deps();
     await handleSlashCommand(cmd('attach', '  '), f.deps);
+    expect(f.redeems).toHaveLength(0);
     expect(channels.sessionFor('chan_42')).toBeUndefined();
     expect(f.replies[0]).toContain('Usage');
   });

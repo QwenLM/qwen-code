@@ -76,6 +76,9 @@ interface SentRequest {
  * dispatch are unit-tested; the live `/sync` long-poll against a homeserver is not
  * CI-exercised. E2EE rooms are detect-and-refused, not decrypted (no crypto).
  */
+/** This bridge's stable id (registration + invite-redeem route path). */
+const MATRIX_BRIDGE_ID = 'matrix';
+
 export class MatrixBridge {
   private readonly cfg: MatrixBridgeConfig;
   private readonly commandPrefix: string;
@@ -104,6 +107,7 @@ export class MatrixBridge {
       bridge: this.cfg.client,
       rest: this.cfg.rest,
       rooms: this.cfg.rooms,
+      bridgeId: MATRIX_BRIDGE_ID,
       bans: this.bans,
       encryptedRooms: this.encryptedRooms,
       tracked: this.tracked,
@@ -114,7 +118,7 @@ export class MatrixBridge {
   /** Register, subscribe to bound sessions, then run the sync loop until abort. */
   async start(signal: AbortSignal): Promise<void> {
     const reg = await this.cfg.client.register({
-      id: 'matrix',
+      id: MATRIX_BRIDGE_ID,
       displayName: 'Matrix',
       supportsActions: false, // reactions, not buttons
       supportsMarkdown: true,

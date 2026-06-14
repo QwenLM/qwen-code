@@ -17,8 +17,11 @@ import {
   createBanSubActorRoute,
   createLiftBanRoute,
   createListBansRoute,
+  createMintInviteRoute,
+  createRedeemInviteRoute,
 } from './bridges.js';
 import { SubActorBanStore } from '../bridges/subActorBans.js';
+import { InviteStore } from '../bridges/inviteStore.js';
 import { OWNER, BRIDGE, SESSION_READ } from '../scopes.js';
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -316,5 +319,126 @@ describe('sub-actor ban routes', () => {
       { method: 'DELETE' },
     );
     expect(again.status).toBe(404);
+  });
+});
+
+describe('invite routes (mint + redeem)', () => {
+  let invites: InviteStore;
+  let invAudit: ReturnType<typeof fakeAudit>;
+  let invServer: Server | undefined;
+  let invBase: string;
+
+  beforeEach(() => {
+    invites = new InviteStore();
+    invAudit = fakeAudit();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as { rcClient?: unknown }).rcClient = {
+        id: 'tkn-owner',
+        scopes: [OWNER, BRIDGE, SESSION_READ],
+      };
+      next();
+    });
+    app.post('/rc/bridges/invites', createMintInviteRoute(invites, invAudit));
+    app.post(
+      '/rc/bridges/:id/invite/redeem',
+      createRedeemInviteRoute(invites, invAudit),
+    );
+    return new Promise<void>((resolve) => {
+      invServer = app.listen(0, '127.0.0.1', () => {
+        invBase = `http://127.0.0.1:${(invServer!.address() as AddressInfo).port}`;
+        resolve();
+      });
+    });
+  });
+  afterEach(
+    () =>
+      new Promise<void>((r) => (invServer ? invServer.close(() => r()) : r())),
+  );
+
+  async function mint(body: unknown) {
+    const res = await fetch(`${invBase}/rc/bridges/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return {
+      status: res.status,
+      json: await res.json().catch(() => undefined),
+    };
+  }
+  async function redeem(id: string, body: unknown) {
+    const res = await fetch(`${invBase}/rc/bridges/${id}/invite/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return {
+      status: res.status,
+      json: await res.json().catch(() => undefined),
+    };
+  }
+
+  it('mints an inv_ token, audits the kind + session, NEVER logs the token', async () => {
+    const { status, json } = await mint({
+      kind: 'telegram',
+      sessionId: 'sess_42',
+    });
+    expect(status).toBe(200);
+    expect(json.token.startsWith('inv_')).toBe(true);
+    expect(json).toMatchObject({ kind: 'telegram', sessionId: 'sess_42' });
+    expect(typeof json.expiresAt).toBe('number');
+    const rec = invAudit.calls.find((c) => c.action === 'bridge_invite_minted');
+    expect(rec?.target).toBe('sess_42');
+    expect(rec?.detail).toMatchObject({ kind: 'telegram' });
+    // the one-time secret must not appear anywhere in the audit row
+    expect(JSON.stringify(rec)).not.toContain(json.token);
+  });
+
+  it('400s an invalid kind or sessionId', async () => {
+    expect((await mint({ kind: 'irc', sessionId: 's' })).status).toBe(400);
+    expect((await mint({ kind: 'telegram', sessionId: '' })).status).toBe(400);
+    expect((await mint({ kind: 'telegram', sessionId: 'a\nb' })).status).toBe(
+      400,
+    );
+  });
+
+  it('redeems a minted token to its session and audits with the bridge id', async () => {
+    const { json } = await mint({ kind: 'discord', sessionId: 'sess_9' });
+    const r = await redeem('discord', { token: json.token });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ sessionId: 'sess_9', kind: 'discord' });
+    const rec = invAudit.calls.find(
+      (c) => c.action === 'bridge_invite_redeemed',
+    );
+    expect(rec?.target).toBe('sess_9');
+    expect(rec?.detail).toMatchObject({ kind: 'discord', bridgeId: 'discord' });
+  });
+
+  it('is single-use: a second redeem 400s with the spec error text', async () => {
+    const { json } = await mint({ kind: 'matrix', sessionId: 'sess_x' });
+    expect((await redeem('matrix', { token: json.token })).status).toBe(200);
+    const second = await redeem('matrix', { token: json.token });
+    expect(second.status).toBe(400);
+    expect(second.json.error).toBe('Invalid or expired invite token');
+    expect(
+      invAudit.calls.some((c) => c.action === 'bridge_invite_redeem_failed'),
+    ).toBe(true);
+  });
+
+  it('does NOT gate on kind — a telegram invite redeems via any bridge id', async () => {
+    const { json } = await mint({ kind: 'telegram', sessionId: 'sess_k' });
+    // redeemed through a bridge whose id differs from the invite kind: allowed.
+    const r = await redeem('my-custom-bridge', { token: json.token });
+    expect(r.status).toBe(200);
+    expect(r.json.sessionId).toBe('sess_k');
+  });
+
+  it('400s an unknown / missing token with the spec error text', async () => {
+    expect((await redeem('telegram', { token: 'inv_nope' })).status).toBe(400);
+    const r = await redeem('telegram', {});
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('Invalid or expired invite token');
   });
 });

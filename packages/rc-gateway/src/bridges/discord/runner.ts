@@ -76,6 +76,9 @@ interface SentRequest {
  * is delegated to discord.js and is NOT exercised here — there is no real Discord
  * to test against in this environment.
  */
+/** This bridge's stable id (registration + invite-redeem route path). */
+const DISCORD_BRIDGE_ID = 'discord';
+
 export class DiscordBridge {
   private readonly cfg: DiscordBridgeConfig;
   private readonly bans = new Set<string>();
@@ -94,6 +97,7 @@ export class DiscordBridge {
       bridge: this.cfg.client,
       rest: this.cfg.rest,
       channels: this.cfg.channels,
+      bridgeId: DISCORD_BRIDGE_ID,
       bans: this.bans,
     };
   }
@@ -104,7 +108,7 @@ export class DiscordBridge {
    */
   async start(signal: AbortSignal): Promise<void> {
     const reg = await this.cfg.client.register({
-      id: 'discord',
+      id: DISCORD_BRIDGE_ID,
       displayName: 'Discord',
       supportsActions: true,
       supportsMarkdown: true,

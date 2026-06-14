@@ -618,6 +618,100 @@ describe('gateway app', () => {
     expect(sent?.subActor).toBe('telegram:evan');
   });
 
+  it('mints an invite (OWNER) and a bridge token redeems it (sole bind path)', async () => {
+    const { url, pairing } = await boot();
+    // Token-for helper inline: mint via pairing then redeem to a bearer token.
+    const tokenFor = async (scopes: string[]) => {
+      const { code } = pairing.mint(scopes);
+      const r = await fetch(`${url}/rc/pair/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, label: 'x' }),
+      });
+      return ((await r.json()) as { token: string }).token;
+    };
+    const ownerToken = await tokenFor([OWNER]);
+    const bridgeToken = await tokenFor([BRIDGE]);
+
+    // Owner mints an invite for a session.
+    const mint = await fetch(`${url}/rc/bridges/invites`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({ kind: 'telegram', sessionId: 'sess-1' }),
+    });
+    expect(mint.status).toBe(200);
+    const { token } = (await mint.json()) as { token: string };
+    expect(token.startsWith('inv_')).toBe(true);
+
+    // A bridge token redeems it (BRIDGE scope) → learns the session.
+    const redeem = await fetch(`${url}/rc/bridges/telegram/invite/redeem`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bridgeToken}`,
+      },
+      body: JSON.stringify({ token }),
+    });
+    expect(redeem.status).toBe(200);
+    expect((await redeem.json()).sessionId).toBe('sess-1');
+
+    // Single-use: a second redeem fails with the spec error text.
+    const again = await fetch(`${url}/rc/bridges/telegram/invite/redeem`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bridgeToken}`,
+      },
+      body: JSON.stringify({ token }),
+    });
+    expect(again.status).toBe(400);
+    expect((await again.json()).error).toBe('Invalid or expired invite token');
+  });
+
+  it('a non-OWNER token cannot mint an invite (403)', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, WRITE]); // no owner
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    const token = ((await r.json()) as { token: string }).token;
+    const mint = await fetch(`${url}/rc/bridges/invites`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ kind: 'telegram', sessionId: 'sess-1' }),
+    });
+    expect(mint.status).toBe(403);
+  });
+
+  it('a non-BRIDGE token cannot redeem an invite (403)', async () => {
+    const { url, pairing } = await boot();
+    // session:read+approve (a plain phone), no bridge scope.
+    const { code } = pairing.mint([SESSION_READ, APPROVE]);
+    const r = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'x' }),
+    });
+    const token = ((await r.json()) as { token: string }).token;
+    const redeem = await fetch(`${url}/rc/bridges/telegram/invite/redeem`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ token: 'inv_whatever' }),
+    });
+    expect(redeem.status).toBe(403);
+  });
+
   it('a NON-bridge write token cannot stamp subActor (header ignored)', async () => {
     const { url, pairing, auditPath } = await boot();
     const { code } = pairing.mint([SESSION_READ, WRITE]); // no bridge

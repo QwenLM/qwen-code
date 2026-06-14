@@ -97,21 +97,33 @@ is missing, the gateway logs a warning and does **not** start the bridge.
 
 ### Binding a channel
 
-In a channel the bot can see, run:
+Binding is **operator-issued** — a channel only binds when an operator hands out
+a one-time invite token. First, on the workstation, mint an invite for the
+session you want to expose:
 
 ```
-/qwen attach <sessionId>
+curl -s -X POST http://127.0.0.1:4170/rc/bridges/invites \
+  -H "Authorization: Bearer <OWNER token>" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"discord","sessionId":"<session id>"}'
+# → { "token": "inv_…", "expiresAt": … }
 ```
 
-The reply is **ephemeral** (visible only to you). `/qwen detach` unbinds the
-channel; `/qwen status` reports the current binding and a usage tip.
+Then, in a channel the bot can see, a guild member runs:
 
-> **Binding deviation.** The spec's `/qwen attach` redeems a one-time invite
-> token via a `/rc/bridges/:id/invite/redeem` route. That route is not part of
-> the bridge-protocol contract yet (neither the contract nor the Telegram bridge
-> built it), so `/qwen attach` currently binds a **session id directly**,
-> mirroring Telegram's `/start <sessionId>`. Invite-token redemption is a
-> deferred contract enhancement.
+```
+/qwen attach <invite token>
+```
+
+The bridge redeems the token via `POST /rc/bridges/:id/invite/redeem`, binds the
+channel to the session the token names, and replies **ephemerally** (visible only
+to you). A guild member never types a session id — the operator decides every
+channel→session binding, and an invalid or expired token is refused with the
+gateway's error text (no binding persisted). `/qwen detach` unbinds the channel;
+`/qwen status` reports the current binding and a usage tip.
+
+Invites are one-time and short-lived (20 min). The gateway holds them in memory,
+so a gateway restart drops any unredeemed invite — just mint a fresh one.
 
 ### Sending prompts
 

@@ -33,10 +33,25 @@ function fakeDeps(chats: TelegramChatStore) {
     [];
   let promptResult: WriteResult = { ok: true, status: 200 };
   let voteResult: WriteResult = { ok: true, status: 200 };
+  const redeems: Array<{ bridgeId: string; token: string }> = [];
+  // By default a redeem of "inv_ok" → sess-x; anything else → the gateway error.
+  let redeemResult: (WriteResult & { sessionId?: string }) | undefined;
   const deps: DispatchDeps = {
     chats,
+    bridgeId: 'telegram',
     bans: new Set<string>(),
     bridge: {
+      redeemInvite: async (bridgeId, token) => {
+        redeems.push({ bridgeId, token });
+        if (redeemResult) return redeemResult;
+        return token === 'inv_ok'
+          ? { ok: true, status: 200, sessionId: 'sess-x' }
+          : {
+              ok: false,
+              status: 400,
+              body: { error: 'Invalid or expired invite token' },
+            };
+      },
       sendPrompt: async (sessionId, prompt, subActor) => {
         prompts.push({ sessionId, prompt, subActor });
         return promptResult;
@@ -63,8 +78,11 @@ function fakeDeps(chats: TelegramChatStore) {
     acks,
     prompts,
     votes,
+    redeems,
     setPromptResult: (r: WriteResult) => (promptResult = r),
     setVoteResult: (r: WriteResult) => (voteResult = r),
+    setRedeemResult: (r: WriteResult & { sessionId?: string }) =>
+      (redeemResult = r),
   };
 }
 
@@ -92,17 +110,46 @@ describe('TelegramChatStore', () => {
 });
 
 describe('handleUpdate — messages', () => {
-  it('/start <sessionId> binds the chat and confirms', async () => {
+  it('/start <token> REDEEMS an invite and binds the returned session', async () => {
     const h = fakeDeps(chats);
     await handleUpdate(
       {
         update_id: 1,
-        message: { message_id: 1, chat: { id: 5 }, text: '/start sess-x' },
+        message: { message_id: 1, chat: { id: 5 }, text: '/start inv_ok' },
       },
       h.deps,
     );
+    // redeemed via the bridge's id + the token; bound to the gateway's session
+    expect(h.redeems).toEqual([{ bridgeId: 'telegram', token: 'inv_ok' }]);
     expect(chats.sessionFor(5)).toBe('sess-x');
     expect(h.sent[0].text).toContain('sess-x');
+  });
+
+  it('/start with a bad token relays the gateway error and binds NOTHING', async () => {
+    const h = fakeDeps(chats);
+    await handleUpdate(
+      {
+        update_id: 1,
+        message: { message_id: 1, chat: { id: 5 }, text: '/start inv_bad' },
+      },
+      h.deps,
+    );
+    expect(chats.sessionFor(5)).toBeUndefined(); // no binding persisted
+    expect(h.sent[0].text).toBe('Invalid or expired invite token');
+  });
+
+  it('/start with no token shows usage and does not redeem', async () => {
+    const h = fakeDeps(chats);
+    await handleUpdate(
+      {
+        update_id: 1,
+        message: { message_id: 1, chat: { id: 5 }, text: '/start' },
+      },
+      h.deps,
+    );
+    expect(h.redeems).toHaveLength(0);
+    expect(chats.sessionFor(5)).toBeUndefined();
+    expect(h.sent[0].text).toContain('Usage');
   });
 
   it('a plain message in a bound chat becomes a prompt with the per-sender sub-actor', async () => {

@@ -53,6 +53,14 @@ beforeEach(() => {
     cap(req);
     res.status(200).json({ ok: true });
   });
+  app.post('/rc/bridges/:id/invite/redeem', (req, res) => {
+    cap(req);
+    if (req.body?.token === 'inv_good') {
+      res.status(200).json({ sessionId: 'sess_bound', kind: 'telegram' });
+      return;
+    }
+    res.status(400).json({ error: 'Invalid or expired invite token' });
+  });
   app.get('/rc/session/:id/events', (_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write(
@@ -109,6 +117,28 @@ describe('BridgeClient (loopback contract)', () => {
       subActor: 'telegram:evan',
       body: { outcome: 'allow_once', optionId: 'opt-a' },
     });
+  });
+
+  it('redeemInvite POSTs the bridge invite route and returns the bound sessionId', async () => {
+    const r = await client().redeemInvite('telegram', 'inv_good');
+    expect(r.ok).toBe(true);
+    expect(r.sessionId).toBe('sess_bound');
+    expect(captured[0]).toMatchObject({
+      method: 'POST',
+      path: '/rc/bridges/telegram/invite/redeem',
+      auth: 'Bearer qwk_test',
+      body: { token: 'inv_good' },
+    });
+  });
+
+  it('redeemInvite surfaces the gateway error (no sessionId) on a bad token', async () => {
+    const r = await client().redeemInvite('telegram', 'inv_bad');
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(400);
+    expect(r.sessionId).toBeUndefined();
+    expect((r.body as { error?: string }).error).toBe(
+      'Invalid or expired invite token',
+    );
   });
 
   it('surfaces a 429 with retryAfterSec for back-pressure', async () => {

@@ -82,6 +82,10 @@ function harness(
       registered = true;
       return { ok: true, status: 200 };
     },
+    redeemInvite: async (_bridgeId: string, token: string) =>
+      token === 'inv_new'
+        ? { ok: true, status: 200, sessionId: 'sess_new' }
+        : { ok: false, status: 400, body: { error: 'bad' } },
     subscribeEvents: async (sessionId: string) => {
       subscribed.push(sessionId);
     },
@@ -126,7 +130,7 @@ describe('DiscordBridge runner', () => {
     await h.bridge.start(new AbortController().signal);
     expect(h.subscribed).toEqual([]); // nothing bound yet
 
-    // Simulate /qwen attach arriving over the gateway.
+    // Simulate /qwen attach <invite> arriving over the gateway.
     h.handlers()!.onSlash({
       interactionId: 'int_1',
       interactionToken: 'tok',
@@ -134,7 +138,7 @@ describe('DiscordBridge runner', () => {
       guildId: 'g1',
       userId: 'u1',
       name: 'attach',
-      arg: 'sess_new',
+      arg: 'inv_new',
     });
     await waitFor(() => h.subscribed.includes('sess_new'));
     expect(channels.sessionFor('chan_9')).toBe('sess_new');

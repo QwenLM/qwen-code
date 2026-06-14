@@ -35,6 +35,9 @@ export interface TelegramBridgeConfig {
  * CI-exercised — `deliverEvent` and a single poll tick ARE unit-tested; the
  * long-poll orchestration is code-reviewed/structurally verified only.
  */
+/** This bridge's stable id (registration + invite-redeem route path). */
+const TELEGRAM_BRIDGE_ID = 'telegram';
+
 export class TelegramBridge {
   private readonly cfg: TelegramBridgeConfig;
   private readonly bans = new Set<string>();
@@ -51,6 +54,7 @@ export class TelegramBridge {
       bridge: this.cfg.client,
       tg: this.cfg.botApi,
       chats: this.cfg.chats,
+      bridgeId: TELEGRAM_BRIDGE_ID,
       bans: this.bans,
     };
   }
@@ -61,7 +65,7 @@ export class TelegramBridge {
    */
   async start(signal: AbortSignal): Promise<void> {
     const reg = await this.cfg.client.register({
-      id: 'telegram',
+      id: TELEGRAM_BRIDGE_ID,
       displayName: 'Telegram',
       supportsActions: true,
       supportsMarkdown: true,

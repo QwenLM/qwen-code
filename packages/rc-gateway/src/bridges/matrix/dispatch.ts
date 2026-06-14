@@ -18,10 +18,10 @@ import { subActorOf, voteForReaction, outcomeFor } from './render.js';
  *
  * Sub-actor is always the fully-qualified MXID (`matrix:@user:server`).
  *
- * Binding deviation (documented, same as Discord): the spec's `!qwen attach`
- * redeems an invite token via `/rc/bridges/:id/invite/redeem` — a route not in
- * the bridge-protocol contract — so `!qwen attach <sessionId>` binds a session id
- * directly. Invite-token redemption is a deferred contract enhancement.
+ * Binding: `<prefix> attach <token>` REDEEMS an operator-issued one-time invite
+ * via `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) — the SOLE way
+ * a room binds, and still power-gated (≥50) + refused in encrypted rooms. A room
+ * member never names a session id directly; the operator decides every binding.
  *
  * Encrypted rooms (E2EE) are NOT supported in this build: the bridge can't read
  * ciphertext over the plain fetch transport, so it REFUSES to bind an encrypted
@@ -39,6 +39,10 @@ export const ENCRYPTED_ROOM_NOTICE =
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
+  redeemInvite(
+    bridgeId: string,
+    token: string,
+  ): Promise<WriteResult & { sessionId?: string }>;
   sendPrompt(
     sessionId: string,
     prompt: string,
@@ -70,6 +74,8 @@ export interface MatrixDispatchDeps {
   bridge: PromptVoter;
   rest: MatrixResponder;
   rooms: MatrixRoomStore;
+  /** This bridge's stable id (for the invite-redeem route path). */
+  bridgeId: string;
   /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
   bans: Set<string>;
   /** Rooms detected as E2EE → attach refused, messages can't be read. */
@@ -183,12 +189,19 @@ async function handleCommand(
       return;
     }
     if (!arg) {
-      await reply(`Usage: ${deps.commandPrefix} attach <sessionId>`);
+      await reply(`Usage: ${deps.commandPrefix} attach <invite token>`);
       return;
     }
-    await deps.rooms.bind(msg.roomId, arg);
+    // Redeem the operator's one-time invite. On failure, relay the gateway's
+    // error text and persist NOTHING — a member can't bind by guessing.
+    const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, arg);
+    if (!redeemed.ok || !redeemed.sessionId) {
+      await reply(inviteError(redeemed));
+      return;
+    }
+    await deps.rooms.bind(msg.roomId, redeemed.sessionId);
     await reply(
-      `Room bound to session \`${arg}\`. React 👍/👎 on tool-call messages to vote.`,
+      `Room bound to session \`${redeemed.sessionId}\`. React 👍/👎 on tool-call messages to vote.`,
     );
     return;
   }
@@ -208,8 +221,14 @@ async function handleCommand(
   await reply(
     sessionId
       ? `Bound to session \`${sessionId}\`. Type in chat to send prompts; react 👍/👎 on tool calls to vote.`
-      : `Not bound. A moderator can run \`${deps.commandPrefix} attach <sessionId>\`.`,
+      : `Not bound. A moderator can run \`${deps.commandPrefix} attach <invite token>\`.`,
   );
+}
+
+/** The gateway's `error` text for a failed redeem, or a safe default. */
+function inviteError(r: { body?: unknown }): string {
+  const err = (r.body as { error?: unknown })?.error;
+  return typeof err === 'string' ? err : 'Invalid or expired invite token';
 }
 
 /**

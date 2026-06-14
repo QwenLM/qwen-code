@@ -12,7 +12,15 @@ import type {
   BridgeRegistration,
 } from '../bridges/registry.js';
 import type { SubActorBanStore } from '../bridges/subActorBans.js';
+import type { InviteStore } from '../bridges/inviteStore.js';
 import { parseSubActor } from '../auth.js';
+
+/** Recognized bridge kinds an invite may target (advisory metadata, see below). */
+const INVITE_KINDS = new Set(['telegram', 'discord', 'matrix']);
+/** A session id is an opaque daemon handle; bound + control-char-free for audit. */
+const SESSION_ID_MAX = 256;
+/** Spec error text returned verbatim on a bad/expired token (bridges relay it). */
+const INVALID_INVITE_MESSAGE = 'Invalid or expired invite token';
 
 /** Stable bridge id: alphanumeric-led, safe id charset, bounded (audit-safe). */
 const BRIDGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:._@-]*$/;
@@ -240,5 +248,97 @@ export function createLiftBanRoute(
 export function createListBansRoute(bans: SubActorBanStore): RequestHandler {
   return (_req, res) => {
     res.status(200).json({ banned: bans.list() });
+  };
+}
+
+/**
+ * POST /rc/bridges/invites { kind, sessionId } — OWNER mints a one-time invite
+ * token (the gateway analog of the spec's `qwen rc bridges invite --kind <kind>
+ * --session <id>` CLI). A bridge later redeems it to learn which session to bind,
+ * so a chat user NEVER names a session id directly — the operator decides every
+ * chat→session binding. Returns `{ token, expiresAt, kind, sessionId }`.
+ *
+ * `kind` is recorded for audit but is NOT enforced at redeem (a deliberate
+ * non-gate — see {@link InviteStore.redeem}); it is still validated here so a
+ * typo'd invite fails fast at mint rather than confusing the operator later.
+ */
+export function createMintInviteRoute(
+  invites: InviteStore,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const kind = typeof b['kind'] === 'string' ? b['kind'].trim() : '';
+    if (!INVITE_KINDS.has(kind)) {
+      res
+        .status(400)
+        .json({ error: 'Invalid bridge kind', code: 'invalid_kind' });
+      return;
+    }
+    const sessionId =
+      typeof b['sessionId'] === 'string' ? b['sessionId'].trim() : '';
+    if (
+      !sessionId ||
+      sessionId.length > SESSION_ID_MAX ||
+      CONTROL_RE.test(sessionId)
+    ) {
+      res
+        .status(400)
+        .json({ error: 'Invalid sessionId', code: 'invalid_session_id' });
+      return;
+    }
+    const { token, expiresAt } = invites.mint(kind, sessionId);
+    // Audit the kind + target session (no secret — the token itself is NEVER
+    // logged; it is the one-time secret handed back only in the response body).
+    void audit?.record({
+      action: 'bridge_invite_minted',
+      actorTokenId: req.rcClient?.id,
+      target: sessionId,
+      detail: { kind },
+    });
+    res.status(200).json({ token, expiresAt, kind, sessionId });
+  };
+}
+
+/**
+ * POST /rc/bridges/:id/invite/redeem { token } — BRIDGE scope. A bridge redeems
+ * a one-time invite, learning the `sessionId` to bind. Returns `200 { sessionId,
+ * kind }` on success or `400 { error: "Invalid or expired invite token" }` which
+ * the bridge relays verbatim to the chat. Single-use: a redeem always burns the
+ * token.
+ *
+ * `:id` is the bridge's stable id, carried for AUDIT CONTEXT ONLY — it is NOT
+ * validated against the registry (that would couple redeem to register-ordering
+ * and the in-memory registry drops on restart). The bridge-scope token + the
+ * one-time invite are the real controls.
+ */
+export function createRedeemInviteRoute(
+  invites: InviteStore,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return (req, res) => {
+    const b = (req.body ?? {}) as { token?: unknown };
+    const token = typeof b.token === 'string' ? b.token : '';
+    const redeemed = token ? invites.redeem(token) : null;
+    if (!redeemed) {
+      void audit?.record({
+        action: 'bridge_invite_redeem_failed',
+        actorTokenId: req.rcClient?.id,
+        target: req.params.id,
+      });
+      res
+        .status(400)
+        .json({ error: INVALID_INVITE_MESSAGE, code: 'invalid_invite' });
+      return;
+    }
+    void audit?.record({
+      action: 'bridge_invite_redeemed',
+      actorTokenId: req.rcClient?.id,
+      target: redeemed.sessionId,
+      detail: { kind: redeemed.kind, bridgeId: req.params.id },
+    });
+    res
+      .status(200)
+      .json({ sessionId: redeemed.sessionId, kind: redeemed.kind });
   };
 }

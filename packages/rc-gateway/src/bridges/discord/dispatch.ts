@@ -20,16 +20,18 @@ import { subActorOf, parseCustomId, outcomeFor } from './render.js';
  * Sub-actor is always `discord:<author-or-member-snowflake>` (a STRING). Ban
  * cache mirrors the gateway's 403 so a banned user is dropped without re-hitting.
  *
- * Binding deviation (documented): the spec's `/qwen attach` redeems an invite
- * token via a `/rc/bridges/:id/invite/redeem` route that neither the
- * bridge-protocol contract nor the Telegram bridge built. To stay within the
- * proven contract, `/qwen attach <sessionId>` binds directly to a session id
- * (mirroring Telegram's `/start <sessionId>`). Invite-token redemption is a
- * deferred contract enhancement.
+ * Binding: `/qwen attach <token>` REDEEMS an operator-issued one-time invite via
+ * `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) — the SOLE way a
+ * channel binds. A guild member never names a session id directly; the operator
+ * decides every channel→session binding.
  */
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
+  redeemInvite(
+    bridgeId: string,
+    token: string,
+  ): Promise<WriteResult & { sessionId?: string }>;
   sendPrompt(
     sessionId: string,
     prompt: string,
@@ -65,6 +67,8 @@ export interface DiscordDispatchDeps {
   bridge: PromptVoter;
   rest: DiscordResponder;
   channels: DiscordChannelStore;
+  /** This bridge's stable id (for the invite-redeem route path). */
+  bridgeId: string;
   /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
   bans: Set<string>;
 }
@@ -87,7 +91,7 @@ export interface NormalizedSlashCommand {
   /** Invoking member's user snowflake (string). */
   userId: string;
   name: 'attach' | 'detach' | 'status';
-  /** The string arg for `/qwen attach` (a session id, per the deviation above). */
+  /** The string arg for `/qwen attach` — an operator-issued invite token. */
   arg?: string;
 }
 
@@ -139,7 +143,7 @@ export async function handleMessage(
 
 /**
  * Slash commands are the control plane (all reply ephemerally):
- *  - `/qwen attach <sessionId>` binds this channel to a session.
+ *  - `/qwen attach <token>` REDEEMS an operator invite to bind this channel.
  *  - `/qwen detach` unbinds it.
  *  - `/qwen status` reports the current binding + a usage tip.
  */
@@ -148,13 +152,24 @@ export async function handleSlashCommand(
   deps: DiscordDispatchDeps,
 ): Promise<void> {
   if (cmd.name === 'attach') {
-    const sessionId = (cmd.arg ?? '').trim();
-    if (!sessionId) {
-      await reply(deps, cmd, 'Usage: /qwen attach <sessionId>');
+    const token = (cmd.arg ?? '').trim();
+    if (!token) {
+      await reply(deps, cmd, 'Usage: /qwen attach <invite token>');
       return;
     }
-    await deps.channels.bind(cmd.channelId, cmd.guildId, sessionId);
-    await reply(deps, cmd, `Channel bound to session \`${sessionId}\`.`);
+    // Redeem the operator's one-time invite. On failure, relay the gateway's
+    // error text and persist NOTHING — a member can't bind by guessing.
+    const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, token);
+    if (!redeemed.ok || !redeemed.sessionId) {
+      await reply(deps, cmd, inviteError(redeemed));
+      return;
+    }
+    await deps.channels.bind(cmd.channelId, cmd.guildId, redeemed.sessionId);
+    await reply(
+      deps,
+      cmd,
+      `Channel bound to session \`${redeemed.sessionId}\`.`,
+    );
     return;
   }
   if (cmd.name === 'detach') {
@@ -173,7 +188,7 @@ export async function handleSlashCommand(
     cmd,
     sessionId
       ? `Bound to session \`${sessionId}\`. Type in chat to send prompts; use the Approve/Deny buttons on tool calls.`
-      : 'Not bound. Run /qwen attach <sessionId> to bind this channel.',
+      : 'Not bound. Run /qwen attach <invite token> to bind this channel.',
   );
 }
 
@@ -244,4 +259,10 @@ function reply(
     cmd.interactionToken,
     content,
   );
+}
+
+/** The gateway's `error` text for a failed redeem, or a safe default. */
+function inviteError(r: { body?: unknown }): string {
+  const err = (r.body as { error?: unknown })?.error;
+  return typeof err === 'string' ? err : 'Invalid or expired invite token';
 }

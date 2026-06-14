@@ -9,7 +9,7 @@ import { dirname } from 'node:path';
 
 /**
  * Crash-safe Telegram chat ↔ session bindings (`add-telegram-bridge`): which
- * daemon session a Telegram chat is bound to (via `/start <sessionId>`).
+ * daemon session a Telegram chat is bound to (via `/start <invite token>`).
  * Persisted to `~/.qwen/rc/bridges/telegram/chats.json` so bindings survive a
  * restart. Reverse lookup (session → chats) drives where a session's
  * permission_request messages are sent. Load/save never throw (a corrupt/missing

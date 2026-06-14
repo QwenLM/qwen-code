@@ -53,8 +53,11 @@ import {
   createBanSubActorRoute,
   createLiftBanRoute,
   createListBansRoute,
+  createMintInviteRoute,
+  createRedeemInviteRoute,
 } from './routes/bridges.js';
 import { BridgeRegistry } from './bridges/registry.js';
+import { InviteStore } from './bridges/inviteStore.js';
 import { createLineageRoute } from './routes/lineage.js';
 import { createSessionListRoute } from './routes/sessions.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
@@ -200,6 +203,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // bridge token). In-memory; ban/lift are audited so they survive in the log.
   const subActorBans = new SubActorBanStore();
   const subActorBan = enforceSubActorBan(subActorBans);
+  // One-time bridge invite tokens (operator mints; a bridge redeems to learn the
+  // session to bind). In-memory + single-use + TTL, like pairing codes; a restart
+  // drops unredeemed invites and the operator re-mints.
+  const bridgeInvites = new InviteStore();
 
   // Single loader instance: holds the per-process collision-warned set so a
   // workspace>user name collision is audited at most once for the lifetime.
@@ -328,6 +335,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/bridges/:id',
     requireScope(SESSION_READ, audit),
     createDeregisterBridgeRoute(bridgeRegistry, audit),
+  );
+  // Bridge invites: the operator mints a one-time invite (OWNER) so a bridge can
+  // redeem it (BRIDGE) to learn which session to bind — a chat user never names a
+  // session id directly. `/rc/bridges/invites` is a distinct 3-segment path (no
+  // collision with the `:id` routes above), and redeem's `:id` is audit context.
+  app.post(
+    '/rc/bridges/invites',
+    requireScope(OWNER, audit),
+    createMintInviteRoute(bridgeInvites, audit),
+  );
+  app.post(
+    '/rc/bridges/:id/invite/redeem',
+    requireScope(BRIDGE, audit),
+    createRedeemInviteRoute(bridgeInvites, audit),
   );
   // Sub-actor bans (owner-only): ban/lift one chat user; list current bans.
   app.get(

@@ -70,22 +70,36 @@ and does **not** start the bridge (it never kills the gateway).
 
 ### Binding a room
 
+Binding is **operator-issued**. First, on the workstation, mint a one-time invite
+for the session you want to expose:
+
+```
+curl -s -X POST http://127.0.0.1:4170/rc/bridges/invites \
+  -H "Authorization: Bearer <OWNER token>" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"matrix","sessionId":"<session id>"}'
+# → { "token": "inv_…", "expiresAt": … }
+```
+
+Then:
+
 1. Invite the bot (`@qwenbot:…`) to an **unencrypted** room — it auto-joins.
 2. A room member with **power level ≥ 50** (Moderator) posts:
 
    ```
-   !qwen attach <sessionId>
+   !qwen attach <invite token>
    ```
 
+The bridge redeems the token via `POST /rc/bridges/:id/invite/redeem` and binds
+the room to the session the token names — a member never types a session id. An
+invalid or expired token is refused with the gateway's error text (no binding).
 `!qwen detach` (also power ≥ 50) unbinds; `!qwen status` reports the binding. A
 non-moderator attach is refused ("Permission denied: attach requires power level
-≥ 50"). An attach in an encrypted room is refused with the E2EE notice.
+≥ 50") **before** any redeem; an attach in an encrypted room is refused with the
+E2EE notice, also before redeem.
 
-> **Binding deviation.** The spec's `!qwen attach` redeems a one-time invite
-> token via a `/rc/bridges/:id/invite/redeem` route not yet in the
-> bridge-protocol contract. As with the Discord bridge, `!qwen attach` currently
-> binds a **session id directly**. Invite-token redemption is a deferred contract
-> enhancement.
+Invites are one-time and short-lived (20 min), held in gateway memory — a restart
+drops any unredeemed invite, so just mint a fresh one.
 
 ### Sending prompts and voting
 

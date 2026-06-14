@@ -44,9 +44,22 @@ function deps(over: Partial<MatrixDispatchDeps> = {}) {
   const sent: Array<{ roomId: string; body: string }> = [];
   let promptResult: WriteResult = { ok: true, status: 200 };
   let voteResult: WriteResult = { ok: true, status: 200 };
+  const redeems: Array<{ bridgeId: string; token: string }> = [];
+  let redeemResult: (WriteResult & { sessionId?: string }) | undefined;
 
   const base: MatrixDispatchDeps = {
     bridge: {
+      redeemInvite: async (bridgeId, token) => {
+        redeems.push({ bridgeId, token });
+        if (redeemResult) return redeemResult;
+        return token === 'inv_ok'
+          ? { ok: true, status: 200, sessionId: 'sess_xyz' }
+          : {
+              ok: false,
+              status: 400,
+              body: { error: 'Invalid or expired invite token' },
+            };
+      },
       sendPrompt: async (sessionId, prompt, subActor) => {
         prompts.push({ sessionId, prompt, subActor });
         return promptResult;
@@ -63,6 +76,7 @@ function deps(over: Partial<MatrixDispatchDeps> = {}) {
       },
     },
     rooms,
+    bridgeId: 'matrix',
     bans: new Set<string>(),
     encryptedRooms: new Set<string>(),
     tracked: new Map<string, TrackedEvent>(),
@@ -74,8 +88,11 @@ function deps(over: Partial<MatrixDispatchDeps> = {}) {
     prompts,
     votes,
     sent,
+    redeems,
     setPromptResult: (r: WriteResult) => (promptResult = r),
     setVoteResult: (r: WriteResult) => (voteResult = r),
+    setRedeemResult: (r: WriteResult & { sessionId?: string }) =>
+      (redeemResult = r),
   };
 }
 
@@ -146,37 +163,50 @@ describe('matrix dispatch — message → prompt', () => {
 });
 
 describe('matrix dispatch — !qwen commands + power-level gate', () => {
-  it('attach binds when the invoker is a moderator (power ≥ 50)', async () => {
+  it('attach REDEEMS an invite when the invoker is a moderator (power ≥ 50)', async () => {
     const f = deps();
     await handleMessage(
-      msg({ body: '!qwen attach sess_xyz', powerLevel: 50 }),
+      msg({ body: '!qwen attach inv_ok', powerLevel: 50 }),
       f.deps,
     );
+    expect(f.redeems).toEqual([{ bridgeId: 'matrix', token: 'inv_ok' }]);
     expect(rooms.sessionFor('!abc:home.example.com')).toBe('sess_xyz');
     expect(f.sent[0].body).toContain('Room bound to session');
     expect(f.sent[0].body).toContain('React 👍/👎');
   });
 
-  it('rejects attach from a non-moderator (power < 50), no binding', async () => {
+  it('attach with a bad token relays the gateway error and binds NOTHING', async () => {
+    const f = deps();
+    await handleMessage(
+      msg({ body: '!qwen attach inv_bad', powerLevel: 50 }),
+      f.deps,
+    );
+    expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
+    expect(f.sent[0].body).toBe('Invalid or expired invite token');
+  });
+
+  it('rejects attach from a non-moderator (power < 50) — no redeem, no binding', async () => {
     const f = deps();
     await handleMessage(
       msg({
-        body: '!qwen attach sess_xyz',
+        body: '!qwen attach inv_ok',
         sender: '@guest:home.example.com',
         powerLevel: 0,
       }),
       f.deps,
     );
+    expect(f.redeems).toHaveLength(0); // power gate runs BEFORE redeem
     expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
     expect(f.sent[0].body).toContain('power level ≥ 50');
   });
 
-  it('refuses attach in an encrypted room', async () => {
+  it('refuses attach in an encrypted room — no redeem, no binding', async () => {
     const f = deps({ encryptedRooms: new Set(['!abc:home.example.com']) });
     await handleMessage(
-      msg({ body: '!qwen attach sess_xyz', powerLevel: 100 }),
+      msg({ body: '!qwen attach inv_ok', powerLevel: 100 }),
       f.deps,
     );
+    expect(f.redeems).toHaveLength(0); // encryption gate runs BEFORE redeem
     expect(rooms.sessionFor('!abc:home.example.com')).toBeUndefined();
     expect(f.sent[0].body).toBe(ENCRYPTED_ROOM_NOTICE);
   });

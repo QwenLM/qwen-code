@@ -12,6 +12,10 @@ import { subActorOf, parseCallbackData, outcomeFor } from './render.js';
 
 /** The bridge-client surface the dispatcher needs (subset → easy to mock). */
 export interface PromptVoter {
+  redeemInvite(
+    bridgeId: string,
+    token: string,
+  ): Promise<WriteResult & { sessionId?: string }>;
   sendPrompt(
     sessionId: string,
     prompt: string,
@@ -35,15 +39,19 @@ export interface DispatchDeps {
   bridge: PromptVoter;
   tg: ChatSender;
   chats: TelegramChatStore;
+  /** This bridge's stable id (for the invite-redeem route path). */
+  bridgeId: string;
   /** Local ban cache (sub-actor ids) — mirrors gateway 403s to avoid re-hitting. */
   bans: Set<string>;
 }
 
 /**
  * Handle one Telegram update (`add-telegram-bridge`). Self-catching: one bad
- * update must never kill the poll loop. A `/start <sessionId>` binds the chat; a
- * plain message becomes a prompt (per-sender sub-actor, local ban check, 429 →
- * "slow down", 403 → cache the ban + drop); a button tap becomes a vote.
+ * update must never kill the poll loop. A `/start <token>` REDEEMS an
+ * operator-issued invite to bind the chat (the SOLE bind path — a chat user
+ * never names a session id directly); a plain message becomes a prompt
+ * (per-sender sub-actor, local ban check, 429 → "slow down", 403 → cache the
+ * ban + drop); a button tap becomes a vote.
  */
 export async function handleUpdate(
   update: TelegramUpdate,
@@ -68,15 +76,25 @@ async function handleMessage(
   const text = (msg.text ?? '').trim();
 
   if (text.startsWith('/start')) {
-    const sessionId = text.slice('/start'.length).trim();
-    if (!sessionId) {
-      await deps.tg.sendMessage(chatId, 'Usage: /start <sessionId>');
+    const token = text.slice('/start'.length).trim();
+    if (!token) {
+      await deps.tg.sendMessage(chatId, 'Usage: /start <invite token>');
       return;
     }
-    await deps.chats.bind(chatId, sessionId);
+    // Redeem the operator's one-time invite. On failure, relay the gateway's
+    // error text and persist NOTHING — a chat user can't bind by guessing.
+    const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, token);
+    if (!redeemed.ok || !redeemed.sessionId) {
+      await deps.tg.sendMessage(chatId, inviteError(redeemed));
+      return;
+    }
+    // DEFERRED: the spec persists `(chatId, sessionId, primarySubActor)`; our
+    // store keeps only `(chatId, sessionId)` — the per-message sub-actor is
+    // resolved at send time, so the redeemer's identity isn't needed at bind.
+    await deps.chats.bind(chatId, redeemed.sessionId);
     await deps.tg.sendMessage(
       chatId,
-      `Bound to session ${sessionId}. Messages here are sent as prompts.`,
+      `Bound chat to session ${redeemed.sessionId}. Messages here are sent as prompts.`,
     );
     return;
   }
@@ -85,7 +103,7 @@ async function handleMessage(
   if (!sessionId) {
     await deps.tg.sendMessage(
       chatId,
-      'This chat is not bound to a session. Send /start <sessionId> first.',
+      'This chat is not bound to a session. Use an operator-issued invite: /start <token>.',
     );
     return;
   }
@@ -145,4 +163,10 @@ async function handleCallback(
     cbq.id,
     parsed.action === 'approve' ? 'Approved' : 'Denied',
   );
+}
+
+/** The gateway's `error` text for a failed redeem, or a safe default. */
+function inviteError(r: { body?: unknown }): string {
+  const err = (r.body as { error?: unknown })?.error;
+  return typeof err === 'string' ? err : 'Invalid or expired invite token';
 }

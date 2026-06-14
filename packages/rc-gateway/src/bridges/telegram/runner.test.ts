@@ -53,6 +53,10 @@ function fakes(updateBatches: TelegramUpdate[][]) {
       registered = true;
       return { ok: true, status: 200 };
     },
+    redeemInvite: async (_bridgeId: string, token: string) =>
+      token === 'inv_ok'
+        ? { ok: true, status: 200, sessionId: 'sess-q' }
+        : { ok: false, status: 400, body: { error: 'bad' } },
     sendPrompt: async () => ({ ok: true, status: 200 }),
     vote: async () => ({ ok: true, status: 200 }),
     subscribeEvents: async (sessionId: string) => {
@@ -76,18 +80,18 @@ function fakes(updateBatches: TelegramUpdate[][]) {
 }
 
 describe('TelegramBridge runner', () => {
-  it('registers, then a /start update binds the chat and subscribes its session', async () => {
+  it('registers, then a /start invite redeem binds the chat and subscribes its session', async () => {
     const f = fakes([
       [
         {
           update_id: 1,
-          message: { message_id: 1, chat: { id: 7 }, text: '/start sess-q' },
+          message: { message_id: 1, chat: { id: 7 }, text: '/start inv_ok' },
         },
       ],
     ]);
     await f.bridge.start(f.ac.signal);
     expect(f.isRegistered()).toBe(true);
-    expect(chats.sessionFor(7)).toBe('sess-q');
+    expect(chats.sessionFor(7)).toBe('sess-q'); // bound to the redeemed session
     expect(f.subscribed).toContain('sess-q'); // reconcile picked up the binding
   });
 
