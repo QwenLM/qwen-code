@@ -342,9 +342,8 @@ jobs:
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Product decision exited with code $EXIT_CODE"
           fi
-          # Propagate: this stage is a gate. Without this, a timed-out or
-          # crashed run leaves the step green and the capture fallback would
-          # default the verdict to "pass", silently waving the PR through.
+          # Propagate: this stage is a gate. Without this, a timed-out,
+          # crashed, or empty-output run could silently wave the PR through.
           exit "$EXIT_CODE"
 
       # Publish the product-decision comment / review with the write PAT. No
@@ -410,7 +409,8 @@ jobs:
             VERDICT=$(jq -r '.verdict // "fail"' "$VERDICT_FILE")
           else
             if [ "$RUN_OUTCOME" = "success" ]; then
-              VERDICT="pass"
+              echo "::error::Product-decision agent produced no verdict JSON"
+              exit 1
             else
               VERDICT="fail"
             fi
@@ -584,6 +584,15 @@ jobs:
             echo "::warning::Review timed out after ${INNER_TIMEOUT_MIN} minutes"
           elif [ "$EXIT_CODE" -ne 0 ]; then
             echo "::warning::Review exited with code $EXIT_CODE"
+          fi
+
+          RESULT="$QWEN_REVIEW_OUTPUT_FILE"
+          if [ ! -f "$RESULT" ]; then
+            RESULT="$(find "$GITHUB_WORKSPACE/.qwen/tmp" -maxdepth 1 -name 'qwen-review-*-review.json' 2>/dev/null | head -1 || true)"
+          fi
+          if [ "$EXIT_CODE" -eq 0 ] && { [ -z "${RESULT:-}" ] || [ ! -f "$RESULT" ]; }; then
+            echo "::error::Review agent exited successfully but produced no review JSON"
+            exit 1
           fi
           # Propagate: a crashed or timed-out review must fail this job, so the
           # Publish step does not fire on a partial result and the fallback
