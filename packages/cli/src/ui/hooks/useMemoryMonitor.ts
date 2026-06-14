@@ -128,14 +128,14 @@ export const useMemoryMonitor = ({
     const monitor = config.getMemoryPressureMonitor();
     if (!monitor) return;
 
-    monitor.setOnToolCompleteCallback(() => {
+    monitor.setOnStarvationCallback(() => {
       if (Date.now() - lastIntervalRunRef.current > 60_000) {
         runMemoryCheck();
       }
     });
 
     return () => {
-      monitor.setOnToolCompleteCallback(undefined);
+      monitor.setOnStarvationCallback(undefined);
     };
   }, [config, runMemoryCheck]);
 };

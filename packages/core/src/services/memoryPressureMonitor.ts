@@ -247,7 +247,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private pendingCheck = false;
   private lastCheckTime = 0;
   private checkGeneration = 0;
-  private onToolCompleteCallback?: () => void;
+  private onStarvationCallback?: () => void;
   private cleanupInProgress = false;
   // Sampling runs every pressure check, so a persistent failure would spam the
   // logs. Surface the first failure at error level (so operators can tell
@@ -314,8 +314,8 @@ export class MemoryPressureMonitor extends EventEmitter {
   }
 
   /** Register a callback invoked when the monitor detects starvation. */
-  setOnToolCompleteCallback(cb: (() => void) | undefined): void {
-    this.onToolCompleteCallback = cb;
+  setOnStarvationCallback(cb: (() => void) | undefined): void {
+    this.onStarvationCallback = cb;
   }
 
   /**
@@ -328,11 +328,20 @@ export class MemoryPressureMonitor extends EventEmitter {
     const now = Date.now();
 
     if (this.pendingCheck && now - this.lastCheckTime > 60_000) {
+      debugLogger.warn(
+        `[STARVATION] Microtask starved for ${((now - this.lastCheckTime) / 1000).toFixed(1)}s; running synchronous pressure check`,
+      );
       this.pendingCheck = false;
       this.checkGeneration++;
       this.lastCheckTime = now;
       this.performCheck();
-      this.onToolCompleteCallback?.();
+      try {
+        this.onStarvationCallback?.();
+      } catch (err) {
+        debugLogger.error(
+          `onStarvation callback failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       return;
     }
 

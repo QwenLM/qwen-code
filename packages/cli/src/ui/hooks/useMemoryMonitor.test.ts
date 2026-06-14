@@ -20,11 +20,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
-const mockSetOnToolCompleteCallback = vi.fn();
+const mockSetOnStarvationCallback = vi.fn();
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => ({
     getMemoryPressureMonitor: () => ({
-      setOnToolCompleteCallback: mockSetOnToolCompleteCallback,
+      setOnStarvationCallback: mockSetOnStarvationCallback,
     }),
   }),
 }));
