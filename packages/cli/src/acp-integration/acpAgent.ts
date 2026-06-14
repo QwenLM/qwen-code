@@ -1425,8 +1425,13 @@ function readProviderModels(
   const modelProviders = toRecord(
     (settings.merged as Record<string, unknown>)['modelProviders'],
   );
-  const models = modelProviders[protocol];
-  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
+  const entry = modelProviders[protocol];
+  const models = Array.isArray(entry)
+    ? entry
+    : typeof entry === 'object' && entry !== null && Array.isArray(entry.models)
+      ? entry.models
+      : [];
+  return models.filter(isProviderModelConfig);
 }
 
 function findExistingProviderModels(
