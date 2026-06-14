@@ -69,18 +69,25 @@ export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
         onCloseRef.current?.();
       }
     };
+    // Escape must win over the App-level global Escape handler, which is a
+    // bubble listener registered earlier and not gated on the panel — it would
+    // otherwise clear queued prompts / cancel the stream / arm "Esc to clear"
+    // first, leaving the panel open. Capture runs before it, and
+    // stopPropagation keeps it from firing.
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
         onCloseRef.current?.();
       }
     };
     window.addEventListener('mousedown', onPointerOutside);
     window.addEventListener('touchstart', onPointerOutside);
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
     return () => {
       window.removeEventListener('mousedown', onPointerOutside);
       window.removeEventListener('touchstart', onPointerOutside);
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, true);
     };
   }, []);
 

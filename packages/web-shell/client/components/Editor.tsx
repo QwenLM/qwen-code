@@ -1307,9 +1307,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // Shared props for the hint-row buttons: keep focus in the editor
   // (preventDefault on mousedown) and don't bubble to the container's click-
   // to-focus handler (stopPropagation on click).
-  const hintProps = (handler: () => void) => ({
+  const hintProps = (handler: () => void, haspopup?: 'dialog' | 'listbox') => ({
     type: 'button' as const,
     className: styles.hintItem,
+    ...(haspopup ? { 'aria-haspopup': haspopup } : {}),
     onMouseDown: (e: ReactMouseEvent<HTMLButtonElement>) => e.preventDefault(),
     onClick: (e: ReactMouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
@@ -1407,17 +1408,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             {t('editor.hintNext')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button {...hintProps(openHistorySearch)}>
+          <button {...hintProps(openHistorySearch, 'dialog')}>
             <span className={styles.hintKey}>ctrl+r</span>
             {t('editor.hintSearch')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button {...hintProps(() => insertText('/'))}>
+          <button {...hintProps(() => insertText('/'), 'listbox')}>
             <span className={styles.hintKey}>/</span>
             {t('editor.hintCommands')}
           </button>
           <span className={styles.hintSep}>·</span>
-          <button {...hintProps(() => insertText('@'))}>
+          <button {...hintProps(() => insertText('@'), 'listbox')}>
             <span className={styles.hintKey}>@</span>
             {t('editor.hintFiles')}
           </button>
