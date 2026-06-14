@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FC } from 'react';
 import { MarkdownRenderer } from './messages/MarkdownRenderer/MarkdownRenderer.js';
+import { isAgentTool } from '../constants/toolNames.js';
 
 export interface PermissionOption {
   name: string;
@@ -83,6 +84,11 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
 
   // Get the title for the permission request
   const getTitle = () => {
+    // Check tool name before `kind` so the Agent prompt wins, matching
+    // ToolApproval.tsx's `isAgent`-first ordering across the two surfaces.
+    if (isAgentTool(toolCall.toolName)) {
+      return 'Launch this agent?';
+    }
     if (toolCall.kind === 'edit' || toolCall.kind === 'write') {
       const fileName = getAffectedFileName();
       return (
@@ -112,9 +118,6 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
     }
     if (toolCall.kind === 'switch_mode') {
       return 'Would you like to proceed?';
-    }
-    if (toolCall.toolName === 'agent') {
-      return 'Launch this agent?';
     }
     return toolCall.title || 'Permission Required';
   };
@@ -246,7 +249,7 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
             toolCall.kind === 'read' ||
             toolCall.kind === 'execute' ||
             toolCall.kind === 'bash' ||
-            toolCall.toolName === 'agent') &&
+            isAgentTool(toolCall.toolName)) &&
             toolCall.title && (
               <div
                 /* 13px, normal font weight; normal whitespace wrapping + long word breaking; maximum 3 lines with overflow ellipsis */

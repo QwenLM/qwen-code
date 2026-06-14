@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
@@ -211,7 +212,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   }, [handleKeyDown]);
 
   const isExec = isExecKind(request);
-  const isAgent = request.toolName === 'agent';
+  const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
 
   return (

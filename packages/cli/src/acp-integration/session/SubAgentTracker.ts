@@ -208,6 +208,12 @@ export class SubAgentTracker {
           locations,
           kind,
           rawInput: state?.args,
+          // Mirror the tool name so consumers can give specific tools (e.g. the
+          // Agent tool) dedicated permission UI without relying on a protocol
+          // `kind` ACP can't carry. This is the second producer path (nested
+          // sub-agent tool calls); Session.ts adds the same _meta on the primary
+          // path.
+          _meta: { toolName: event.name },
         },
       };
 
