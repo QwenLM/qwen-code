@@ -21,7 +21,7 @@ const AUTH_TYPE_TO_PROTOCOL: Record<string, Protocol> = {
   anthropic: Protocol.ANTHROPIC,
 };
 
-function authTypeToProtocol(authType: AuthType): Protocol {
+export function authTypeToProtocol(authType: AuthType): Protocol {
   return AUTH_TYPE_TO_PROTOCOL[authType] ?? Protocol.OPENAI;
 }
 

@@ -44,6 +44,7 @@ import {
   type AuthEnvMapping,
 } from './constants.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
+import { authTypeToProtocol } from '../providers/install.js';
 export {
   validateModelConfig,
   type ModelConfigValidationResult,
@@ -288,6 +289,7 @@ export function resolveModelConfig(
     apiKeyEnvKey,
     baseUrl: baseUrlResult?.value,
     proxy,
+    protocol: authType ? authTypeToProtocol(authType) : undefined,
     ...generationConfig,
   };
 
@@ -366,6 +368,7 @@ function resolveQwenOAuthConfig(
     model: resolvedModel,
     apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
     proxy,
+    protocol: authTypeToProtocol(AuthType.QWEN_OAUTH),
     ...generationConfig,
   };
 
