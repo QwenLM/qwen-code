@@ -61,7 +61,9 @@ function applyModelProvidersPatch(
   patch: ProviderModelProvidersPatch,
 ): ModelProvidersConfig {
   const existingProvider = existingModelProviders[patch.authType];
-  const existingModels = existingProvider?.models ?? [];
+  const existingModels = Array.isArray(existingProvider)
+    ? existingProvider
+    : (existingProvider?.models ?? []);
 
   let updatedModels = patch.models;
   if (patch.mergeStrategy === 'append') {

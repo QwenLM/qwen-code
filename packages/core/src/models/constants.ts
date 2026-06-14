@@ -88,7 +88,7 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
-} as const;
+} as const satisfies Record<string, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,

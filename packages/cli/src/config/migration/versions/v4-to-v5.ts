@@ -59,6 +59,8 @@ export class V4ToV5Migration implements SettingsMigration {
 
     const result = structuredClone(settings) as Record<string, unknown>;
 
+    const warnings: string[] = [];
+
     const modelProviders = result['modelProviders'];
     if (typeof modelProviders === 'object' && modelProviders !== null) {
       const providers = modelProviders as Record<string, unknown>;
@@ -67,8 +69,14 @@ export class V4ToV5Migration implements SettingsMigration {
           continue;
         }
 
+        if (!(key in PROVIDER_KEY_TO_PROTOCOL)) {
+          warnings.push(
+            `Unknown provider key "${key}", defaulting protocol to "openai".`,
+          );
+        }
+
         providers[key] = {
-          protocol: PROVIDER_KEY_TO_PROTOCOL[key],
+          protocol: PROVIDER_KEY_TO_PROTOCOL[key] ?? 'openai',
           models: value,
         };
       }
@@ -76,7 +84,7 @@ export class V4ToV5Migration implements SettingsMigration {
 
     result['$version'] = 5;
 
-    return { settings: result, warnings: [] };
+    return { settings: result, warnings };
   }
 }
 

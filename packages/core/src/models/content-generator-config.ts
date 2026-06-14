@@ -24,6 +24,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ResolvedModelConfig } from './types.js';
+import { authTypeToProtocol } from '../providers/install.js';
 
 export interface AuthOverrides {
   authType: string;
@@ -66,6 +67,9 @@ export function buildAgentContentGeneratorConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (nextConfig as any)[field] = undefined;
     }
+    nextConfig.protocol = authTypeToProtocol(
+      authOverrides.authType as AuthType,
+    );
   }
 
   if (resolvedModel) {

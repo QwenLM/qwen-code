@@ -271,6 +271,13 @@ export class ModelRegistry {
       }
     }
 
+    // Clear existing user-configured protocols (preserve qwen-oauth)
+    for (const authType of this.protocolByAuthType.keys()) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        this.protocolByAuthType.delete(authType);
+      }
+    }
+
     // Re-register user-configured models for other authTypes
     if (modelProvidersConfig) {
       for (const [rawKey, providerConfig] of Object.entries(

@@ -572,9 +572,7 @@ export class ModelsConfig {
       const protocol = this.modelRegistry.getProtocolForAuthType(
         this.currentAuthType,
       );
-      if (protocol) {
-        this._generationConfig.protocol = protocol;
-      }
+      this._generationConfig.protocol = protocol;
     }
     return this._generationConfig;
   }
