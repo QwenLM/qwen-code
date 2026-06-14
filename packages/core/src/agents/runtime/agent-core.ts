@@ -655,6 +655,7 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
+    let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -690,6 +691,9 @@ export class AgentCore {
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
+            ...(stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokens: stickyMaxOutputTokens }
+              : {}),
           },
         };
 
@@ -729,6 +733,9 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (streamEvent.maxOutputTokensEscalated !== undefined) {
+              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
             functionCalls.length = 0;
             roundText = '';
             roundThoughtText = '';
