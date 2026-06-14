@@ -104,7 +104,7 @@ const env = {
   DEV: 'true',
   CLI_VERSION: 'dev',
   NODE_ENV: 'development',
-  NODE_OPTIONS: `${existingNodeOptions} ${importFlag}`.trim(),
+  NODE_OPTIONS: `${existingNodeOptions} --expose-gc ${importFlag}`.trim(),
 };
 
 // On Windows, use tsx.cmd; on Unix, use tsx directly

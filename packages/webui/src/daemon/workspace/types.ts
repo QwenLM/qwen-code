@@ -70,6 +70,11 @@ export interface DaemonWorkspaceProviderProps {
   token?: string;
   workspaceCwd?: string;
   autoConnect?: boolean;
+  /**
+   * Optional pluggable transport forwarded to `DaemonClient`. When
+   * omitted the client uses the default REST+SSE transport.
+   */
+  transport?: import('@qwen-code/sdk/daemon').DaemonTransport;
   children: ReactNode;
 }
 

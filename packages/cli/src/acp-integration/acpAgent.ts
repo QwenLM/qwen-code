@@ -2698,7 +2698,7 @@ class QwenAgent implements Agent {
         },
         // Vendor capability advertisement (ACP spec: extensions declare
         // themselves via _meta on capability objects). Lets clients
-        // feature-detect `_qwen/session/continue` instead of relying on a
+        // feature-detect `qwen/session/continue` instead of relying on a
         // "Method not found" probe against older agents.
         _meta: {
           qwen: {
@@ -6719,7 +6719,12 @@ class QwenAgent implements Agent {
     resume?: boolean,
   ): Promise<Config> {
     this.settings = loadSettings(cwd);
-    const mergedMcpServers = { ...this.settings.merged.mcpServers };
+    // ACP/IDE-injected servers are session-level: they must outrank a project
+    // `.mcp.json` and stay un-gated. Collect them separately and pass them as
+    // `sessionMcpServers` (top precedence tier) rather than merging into
+    // `settings.mcpServers`, where `assembleMcpServers` would demote them below
+    // `.mcp.json` (#4615).
+    const sessionMcpServers: Record<string, MCPServerConfig> = {};
 
     for (const server of mcpServers) {
       const stdioServer = toStdioServer(server);
@@ -6728,7 +6733,7 @@ class QwenAgent implements Agent {
         for (const { name: envName, value } of stdioServer.env) {
           env[envName] = value;
         }
-        mergedMcpServers[stdioServer.name] = new MCPServerConfig(
+        sessionMcpServers[stdioServer.name] = new MCPServerConfig(
           stdioServer.command,
           stdioServer.args,
           env,
@@ -6743,7 +6748,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of sseServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[sseServer.name] = new MCPServerConfig(
+        sessionMcpServers[sseServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6761,7 +6766,7 @@ class QwenAgent implements Agent {
         for (const { name: headerName, value } of httpServer.headers) {
           headers[headerName] = value;
         }
-        mergedMcpServers[httpServer.name] = new MCPServerConfig(
+        sessionMcpServers[httpServer.name] = new MCPServerConfig(
           undefined,
           undefined,
           undefined,
@@ -6774,7 +6779,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
+    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -6798,6 +6803,7 @@ class QwenAgent implements Agent {
       // sessions otherwise leak persisted disabled skills into the first
       // <available_skills> at cold start.
       buildDisabledSkillNamesProvider(this.settings),
+      sessionMcpServers,
     );
     // ACP sessions run with piped stdio (non-TTY), so the default
     // interactive-based gating disables file checkpointing. Enable it
@@ -6937,6 +6943,9 @@ class QwenAgent implements Agent {
 
     // Install rewriter AFTER history replay to avoid rewriting historical messages
     session.installRewriter();
+
+    // After replay so a durable cron fire can't interleave with it.
+    session.startCronScheduler();
 
     return session;
   }

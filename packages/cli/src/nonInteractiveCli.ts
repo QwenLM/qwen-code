@@ -28,6 +28,7 @@ import {
   SendMessageType,
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   ORPHAN_TOOL_USE_REPAIR_REASON,
   restoreWorktreeContext,
   TeamEventType,
@@ -441,6 +442,22 @@ export async function runNonInteractive(
       }
     };
 
+    // First-turn SendMessageType override for continuation turns; null means
+    // the regular options.sendMessageType / UserQuery selection applies.
+    let continueSendType: SendMessageType | null = null;
+    let strippedContinuationEntries: Content[] = [];
+    let continuationSendStarted = false;
+    const restoreStrippedContinuationEntries = () => {
+      if (continuationSendStarted || strippedContinuationEntries.length === 0) {
+        return;
+      }
+      const chat = geminiClient.getChat();
+      for (const entry of strippedContinuationEntries) {
+        chat.addHistory(entry);
+      }
+      strippedContinuationEntries = [];
+    };
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
@@ -469,29 +486,11 @@ export async function runNonInteractive(
         options.userMessage,
       );
 
-      // First-turn SendMessageType override for continuation turns; null
-      // means the regular options.sendMessageType / UserQuery selection
-      // applies.
-      let continueSendType: SendMessageType | null = null;
-      let strippedContinuationEntries: Content[] = [];
-      let continuationSendStarted = false;
-      const restoreStrippedContinuationEntries = () => {
-        if (
-          continuationSendStarted ||
-          strippedContinuationEntries.length === 0
-        ) {
-          return;
-        }
-        const chat = geminiClient.getChat();
-        for (const entry of strippedContinuationEntries) {
-          chat.addHistory(entry);
-        }
-        strippedContinuationEntries = [];
-      };
-
       if (options.continueInterrupted) {
         const detection = detectTurnInterruption(
-          geminiClient.getChat().getHistoryTail(1),
+          geminiClient
+            .getChat()
+            .getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
         );
         if (detection.kind === 'none') {
           await emitNonInteractiveFinalMessage({
@@ -1366,15 +1365,32 @@ export async function runNonInteractive(
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
+          // Durable support is fully enabled: file tasks load, the lock
+          // is acquired or probed, and missed one-shots are detected —
+          // start() below flushes them onto the queue so they execute
+          // during this run. The hold-open stays keyed on session-only
+          // jobs alone, so durable jobs never pin the process: once
+          // session jobs and the drain are done, stop() releases the
+          // lock and the run exits; durable jobs persist for a future
+          // owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
 
-          if (scheduler && scheduler.size > 0) {
+          if (scheduler) {
+            // Durable tasks live under ~/.qwen (user-owned, not in the
+            // working tree), so no folder-trust gate is needed here.
+            await scheduler
+              .enableDurable(config.getSessionId())
+              .catch((err) => {
+                debugLogger.warn(
+                  `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
+                );
+              });
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
-              // drop scheduler.size to 0 on their own, so without this the
-              // hold-back loop below is unreachable after an abort.
+              // drop scheduler.sessionSize to 0 on their own, so without
+              // this the hold-back loop below is unreachable after an abort.
               const onAbort = () => {
                 scheduler.stop();
                 resolve();
@@ -1398,7 +1414,7 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.size === 0 && !drainPromise) {
+                if (scheduler.sessionSize === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();
@@ -1617,6 +1633,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      restoreStrippedContinuationEntries();
+
       // Unsubscribe the leader message callback and approval
       // listener, but do NOT tear down the team itself — in
       // stream-json sessions the same Config is reused across

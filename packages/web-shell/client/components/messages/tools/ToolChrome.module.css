@@ -24,6 +24,18 @@
   min-width: 0;
 }
 
+/* Leading disclosure column. Rendered (blank) for every tool row so names stay
+   aligned; shows ▸/▾ only when the row can expand. */
+.lineToggle {
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dimmed);
+  text-align: center;
+  user-select: none;
+}
+
 .icon {
   font-size: 13px;
   flex-shrink: 0;
@@ -108,6 +120,21 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.4;
+}
+
+/* Full, wrapped tool argument shown below the header when the row is expanded
+   (the header drops its single-line ellipsised copy). Aligns with the expanded
+   output block below it. */
+.lineFullArg {
+  margin-left: 16px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .lineDetail {

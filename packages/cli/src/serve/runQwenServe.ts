@@ -86,6 +86,13 @@ function isPositiveIntegerMs(value: number): boolean {
   return Number.isFinite(value) && Number.isInteger(value) && value > 0;
 }
 
+function isNonNegativeIntegerOrInfinity(value: number): boolean {
+  return (
+    value === Number.POSITIVE_INFINITY ||
+    (Number.isFinite(value) && Number.isInteger(value) && value >= 0)
+  );
+}
+
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 function assertTimerDelayInRange(name: string, value: number): void {
@@ -440,6 +447,15 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const sessionShellCommandEnabled =
+    optsIn.enableSessionShell === true && token !== undefined;
+  if (optsIn.enableSessionShell === true && token === undefined) {
+    writeStderrLine(
+      `qwen serve: --enable-session-shell ignored because no bearer token ` +
+        `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
+        `enable direct session shell.`,
+    );
+  }
   // Env-var fallback for the deadline options. Explicit option
   // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
   // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
@@ -644,6 +660,13 @@ export async function runQwenServe(
     }
     assertTimerDelayInRange('promptDeadlineMs', opts.promptDeadlineMs);
   }
+  if (opts.maxPendingPromptsPerSession !== undefined) {
+    if (!isNonNegativeIntegerOrInfinity(opts.maxPendingPromptsPerSession)) {
+      throw new TypeError(
+        `Invalid maxPendingPromptsPerSession: ${opts.maxPendingPromptsPerSession}. Must be a non-negative integer (0 / Infinity = unlimited).`,
+      );
+    }
+  }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
       throw new TypeError(
@@ -839,6 +862,9 @@ export async function runQwenServe(
     deps.bridge ??
     createAcpSessionBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.maxPendingPromptsPerSession !== undefined
+        ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
+        : {}),
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
         : {}),
@@ -852,6 +878,7 @@ export async function runQwenServe(
         ? { sessionIdleTimeoutMs: opts.sessionIdleTimeoutMs }
         : {}),
       boundWorkspace,
+      sessionShellCommandEnabled,
       childEnvOverrides,
       channelFactory,
       onDiagnosticLine: diagnosticSink,

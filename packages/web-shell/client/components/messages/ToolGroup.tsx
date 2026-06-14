@@ -1,15 +1,19 @@
-import { memo, useContext, useEffect, useMemo, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type { DaemonSettingDescriptor } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   ACPToolCall,
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
+// Circular import with SubAgentPanel (its SubToolLine renders ToolLine
+// from this module). Safe only while both modules dereference each
+// other's exports at render time — never in top-level code.
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { DiffView } from './tools/DiffView';
 import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
-import { extractTodosFromToolCall } from '../../utils/todos';
+import { extractTodosFromToolCall, getTodoStatusIcon } from '../../utils/todos';
 import {
   formatDurationMs,
   formatElapsed,
@@ -50,7 +54,10 @@ interface ToolGroupProps {
     answers?: Record<string, string>,
   ) => void;
   workspaceCwd?: string;
+  shellOutputMaxLines?: number;
 }
+
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
@@ -72,6 +79,27 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
     return !!text && text.split('\n').length > 3;
   }
   return false;
+}
+
+// Tools whose expanded row renders a kind-specific detail view (shell output /
+// diff / file content / Q&A). Must stay in sync with the renderers in
+// ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
+// to show when expanded, so they keep their one-line result summary instead of
+// hiding it behind an empty detail area.
+function hasDetailView(tool: ACPToolCall): boolean {
+  const name = tool.toolName.toLowerCase();
+  return (
+    isShellToolName(name) ||
+    name === 'write_file' ||
+    name === 'writefile' ||
+    name === 'edit' ||
+    name === 'write' ||
+    name === 'editfile' ||
+    name === 'read' ||
+    name === 'read_file' ||
+    name === 'readfile' ||
+    isAskUserQuestionToolName(tool.toolName)
+  );
 }
 
 function hasDiffContent(tool: ACPToolCall): boolean {
@@ -144,22 +172,41 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
   return result.reverse().join('\n');
 }
 
-const MAX_BASH_LINES = 5;
 const MAX_BASH_LINE_CHARS = 150;
 const MAX_READ_LINES = 25;
+
+// A description longer than this is likely ellipsised on a normal-width row, so
+// the row becomes expandable to re-flow the full text into a wrapped block.
+const DESCRIPTION_EXPAND_THRESHOLD = 60;
+
+export function resolveShellOutputMaxLines(
+  settings: readonly DaemonSettingDescriptor[],
+): number {
+  const setting = settings.find((s) => s.key === 'ui.shellOutputMaxLines');
+  const value = setting?.values.effective;
+  const raw =
+    typeof value === 'number' ? value : DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  return Math.max(0, Math.floor(raw || 0));
+}
 
 function truncateLine(line: string, max: number): string {
   if (line.length <= max) return line;
   return line.slice(0, max) + ' …';
 }
 
-function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
+function ExpandedBashOutput({
+  tool,
+  maxLines,
+}: {
+  tool: ACPToolCall;
+  maxLines: number;
+}) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
-  const isLong = lines.length > MAX_BASH_LINES;
-  const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
+  const isLong = maxLines > 0 && lines.length > maxLines;
+  const hiddenLinesCount = Math.max(0, lines.length - maxLines);
   const hasTruncatedLine = useMemo(
     () => lines.some((l) => l.length > MAX_BASH_LINE_CHARS),
     [lines],
@@ -168,16 +215,15 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const displayText = useMemo(() => {
     if (showAll) return output;
     if (isLong) {
-      // Match CLI behavior: long shell output shows a fixed tail preview.
       return [
         `... first ${hiddenLinesCount} lines hidden ...`,
         ...lines
-          .slice(-MAX_BASH_LINES)
+          .slice(-maxLines)
           .map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)),
       ].join('\n');
     }
     return lines.map((l) => truncateLine(l, MAX_BASH_LINE_CHARS)).join('\n');
-  }, [hiddenLinesCount, isLong, lines, output, showAll]);
+  }, [hiddenLinesCount, isLong, lines, maxLines, output, showAll]);
   const ansiSegments = useMemo(
     () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
     [displayText],
@@ -281,7 +327,7 @@ function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
             key={todo.id || i}
             className={`${styles.todoItem} ${getTodoClass(todo.status)}`}
           >
-            {getTodoIcon(todo.status)} {todo.content}
+            {getTodoStatusIcon(todo.status)} {todo.content}
           </div>
         ))}
       </div>
@@ -323,22 +369,12 @@ function getTodoClass(status: TodoItem['status']): string {
   }
 }
 
-function getTodoIcon(status: TodoItem['status']): string {
-  switch (status) {
-    case 'completed':
-      return '●';
-    case 'in_progress':
-      return '◐';
-    case 'pending':
-      return '○';
-  }
-}
-
 interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
   onConfirm?: (id: string, selectedOption: string) => void;
   workspaceCwd?: string;
+  shellOutputMaxLines?: number;
 }
 
 function getAgentDisplayInfo(
@@ -400,6 +436,14 @@ function getAgentDisplayInfo(
 }
 
 function shouldAutoExpand(tool: ACPToolCall): boolean {
+  // Only the verbose tool kinds below (shell/edit/write/ask) auto-expand, and
+  // only while pending/in-progress or after failing: a successful completion
+  // collapses them to a one-line summary so the transcript stays scannable
+  // (click to reopen), while a failure of those kinds stays expanded so its
+  // error output is visible without a click. Every other tool kind is collapsed
+  // by default regardless of status — its summary line already shows the
+  // outcome and it stays click-to-expand.
+  if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
   if (name === 'write_file' || name === 'writefile') return true;
@@ -451,6 +495,27 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
       description={info.description}
       elapsed={info.elapsed}
     />
+  );
+}
+
+function isDescriptionExpandable(description: string): boolean {
+  return (
+    description.length > DESCRIPTION_EXPAND_THRESHOLD ||
+    description.includes('\n')
+  );
+}
+
+function ToggleChevron({
+  expandable,
+  expanded,
+}: {
+  expandable: boolean;
+  expanded: boolean;
+}) {
+  return (
+    <span className={styles.lineToggle} aria-hidden="true">
+      {expandable ? (expanded ? '▾' : '▸') : ''}
+    </span>
   );
 }
 
@@ -519,6 +584,7 @@ function areToolLinePropsEqual(
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -562,22 +628,28 @@ function areSubToolsEqual(
   return true;
 }
 
-const ToolLine = memo(function ToolLine({
+export const ToolLine = memo(function ToolLine({
   tool,
   approval,
   onConfirm,
   workspaceCwd,
+  shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
 }: ToolLineProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
   );
+  // Set once the user explicitly toggles this row, so auto-collapse-on-
+  // completion never silently overrides their choice.
+  const userToggledRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(
     () => {
       setExpanded(compactMode ? false : shouldAutoExpand(tool));
+      // A new tool identity (or compact-mode toggle) resets the manual latch.
+      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
@@ -597,6 +669,17 @@ const ToolLine = memo(function ToolLine({
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [isRunningAgent]);
+
+  // Collapse a regular tool to its one-line summary once it completes
+  // successfully — unless the user explicitly toggled this row, in which case
+  // their choice wins. Agents are excluded (they keep whatever expand state the
+  // user chose, driven from their own panel) and failures stay open so the
+  // error output remains visible.
+  useEffect(() => {
+    if (!isAgent && tool.status === 'completed' && !userToggledRef.current) {
+      setExpanded(false);
+    }
+  }, [isAgent, tool.status]);
 
   if (isAgent) {
     if (hasApproval && onConfirm) {
@@ -699,10 +782,20 @@ const ToolLine = memo(function ToolLine({
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
       : formatElapsed(tool.startTime, tool.endTime);
-  const expandable = hasExpandableContent(tool);
 
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
+  // A row expands when it has detail output (bash/diff/read content) or when
+  // its description is long enough to be ellipsised. When a long description is
+  // expanded we move it out of the header into a wrapped block below, so the
+  // header drops its single-line copy.
+  const descExpandable = !isTodo && isDescriptionExpandable(description);
+  const expandable = !isTodo && (hasExpandableContent(tool) || descExpandable);
+  const relocateDescription = expanded && descExpandable;
+  // Whether the expanded row renders a kind-specific detail view. When it does
+  // not (e.g. grep/glob/web_fetch with a long description), keep the result
+  // summary visible instead of replacing it with an empty detail area.
+  const detailView = hasDetailView(tool);
 
   if (hasApproval && onConfirm) {
     return (
@@ -716,8 +809,16 @@ const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       <div
         className={`${styles.lineMain} ${expandable ? styles.lineExpandable : ''}`}
-        onClick={expandable ? () => setExpanded(!expanded) : undefined}
+        onClick={
+          expandable
+            ? () => {
+                userToggledRef.current = true;
+                setExpanded((value) => !value);
+              }
+            : undefined
+        }
       >
+        <ToggleChevron expandable={expandable} expanded={expanded} />
         <StatusIcon status={tool.status} />
         <span className={styles.lineName}>{displayName}</span>
         <ToolHeaderExtra
@@ -725,19 +826,24 @@ const ToolLine = memo(function ToolLine({
             kind: getToolHeaderKind(tool),
             tool,
             displayName,
-            description,
+            description: relocateDescription ? '' : description,
             elapsed,
             workspaceCwd,
           }}
         />
       </div>
       {isTodo && <TodoWriteContent tool={tool} />}
-      {!isTodo && !expanded && result && (
+      {relocateDescription && (
+        <div className={styles.lineFullArg}>{description}</div>
+      )}
+      {!isTodo && result && (!expanded || !detailView) && (
         <div className={styles.lineOutput}>{result}</div>
       )}
-      {!isTodo && expanded && (
+      {!isTodo && expanded && detailView && (
         <div className={styles.lineDetail}>
-          {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
+          {isShellToolName(name) && (
+            <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
+          )}
           {(name === 'write_file' || name === 'writefile') && (
             <ExpandedEditDiff tool={tool} />
           )}
@@ -761,6 +867,7 @@ export const ToolGroup = memo(function ToolGroup({
   pendingApproval,
   onConfirm,
   workspaceCwd,
+  shellOutputMaxLines,
 }: ToolGroupProps) {
   const compactMode = useContext(CompactModeContext);
   const directApprovalTool =
@@ -788,6 +895,7 @@ export const ToolGroup = memo(function ToolGroup({
           approval={pendingApproval}
           onConfirm={onConfirm}
           workspaceCwd={workspaceCwd}
+          shellOutputMaxLines={shellOutputMaxLines}
         />
       ))}
     </div>

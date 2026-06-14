@@ -11,6 +11,13 @@ import type { AddressInfo } from 'node:net';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  InvalidClientIdError,
+  PromptQueueFullError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionService } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
@@ -85,12 +92,14 @@ class FakeBridge {
   lastSetModel: unknown;
   lastSpawnScope: string | undefined;
   closeShouldThrow = false;
+  closeError: Error | undefined;
   killed: string[] = [];
   cancelled: string[] = [];
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  spawnClientId: string | undefined = 'client-1';
 
   closedSessions: string[] = [];
 
@@ -101,7 +110,7 @@ class FakeBridge {
       sessionId: 'sess-1',
       workspaceCwd: '/ws',
       attached: false,
-      clientId: 'client-1',
+      clientId: this.spawnClientId,
     };
   }
   async killSession(sessionId: string) {
@@ -141,11 +150,12 @@ class FakeBridge {
     return q.iterable;
   }
 
-  async sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
+  sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
     const q = this.queues.get(sessionId);
-    if (this.promptBehavior && q)
-      return this.promptBehavior(sessionId, q, signal);
-    return { stopReason: 'end_turn' };
+    if (this.promptBehavior && q) {
+      return Promise.resolve(this.promptBehavior(sessionId, q, signal));
+    }
+    return Promise.resolve({ stopReason: 'end_turn' });
   }
 
   respondToSessionPermission() {
@@ -207,6 +217,7 @@ class FakeBridge {
   async closeSession(sessionId: string) {
     this.closedSessions.push(sessionId);
     if (this.closeGate) await this.closeGate;
+    if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
   async detachClient(sessionId: string, clientId?: string) {
@@ -221,7 +232,26 @@ class FakeBridge {
   async generateSessionBtw(sessionId: string, question: string) {
     return { sessionId, answer: `re: ${question}` };
   }
-  async executeShellCommand(sessionId: string, command: string) {
+  shellCalls: Array<{
+    sessionId: string;
+    command: string;
+    signal?: AbortSignal;
+    context?: unknown;
+  }> = [];
+  shellError: unknown;
+  async executeShellCommand(
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+    context?: unknown,
+  ) {
+    this.shellCalls.push({
+      sessionId,
+      command,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(context !== undefined ? { context } : {}),
+    });
+    if (this.shellError !== undefined) throw this.shellError;
     return { exitCode: 0, output: `$ ${command}`, aborted: false };
   }
   async getSessionContextUsageStatus(sessionId: string) {
@@ -410,7 +440,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
 
-  async function initialize(): Promise<string> {
+  async function restartServer(opts: {
+    sessionShellCommandEnabled?: boolean;
+    nextBridge?: FakeBridge;
+  }): Promise<void> {
+    server.closeAllConnections?.();
+    await new Promise<void>((r) => server.close(() => r()));
+    bridge = opts.nextBridge ?? new FakeBridge();
+    const app = express();
+    app.use(express.json());
+    mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+      boundWorkspace: '/ws',
+      workspace: fakeWorkspace,
+      enabled: true,
+      sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
+    });
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = server.address() as AddressInfo;
+    base = `http://127.0.0.1:${addr.port}`;
+  }
+
+  async function initializeRaw(): Promise<{
+    connId: string;
+    body: Record<string, unknown>;
+  }> {
     const res = await fetch(`${base}/acp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -419,9 +474,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(res.status).toBe(200);
     const connId = res.headers.get('acp-connection-id');
     expect(connId).toBeTruthy();
-    const body = (await res.json()) as { result: { protocolVersion: number } };
-    expect(body.result.protocolVersion).toBe(1);
-    return connId!;
+    const body = (await res.json()) as Record<string, unknown>;
+    return { connId: connId!, body };
+  }
+
+  async function initialize(): Promise<string> {
+    const { connId, body } = await initializeRaw();
+    const result = body['result'] as { protocolVersion: number };
+    expect(result.protocolVersion).toBe(1);
+    return connId;
   }
 
   function post(connId: string, msg: unknown) {
@@ -464,6 +525,31 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/new',
     });
     expect(bad.status).toBe(404);
+  });
+
+  it('initialize omits _qwen/session/shell by default', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/shell',
+    );
+  });
+
+  it('initialize advertises _qwen/session/shell when enabled', async () => {
+    await restartServer({ sessionShellCommandEnabled: true });
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/shell',
+    );
   });
 
   it('session/new reply rides the connection-scoped stream', async () => {
@@ -1081,27 +1167,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
-  it('session/new forwards sessionScope; rejects invalid scope', async () => {
+  it('session/new always uses thread scope (ACP standard compliance)', async () => {
+    // ACP standard: session/new MUST create a new isolated session.
+    // sessionScope param is ignored; bridge always gets 'thread'.
     const connId = await initialize();
-    const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    // invalid scope → error on conn stream
     await post(connId, {
       jsonrpc: '2.0',
       id: 43,
       method: 'session/new',
-      params: { sessionScope: 'bogus' },
+      params: { sessionScope: 'single' }, // ignored
     });
-    const [bad] = (await got) as Array<{ error: { code: number } }>;
-    expect(bad.error.code).toBe(-32602);
-    // valid scope → forwarded to bridge
+    await new Promise((r) => setTimeout(r, 30));
+    expect(bridge.lastSpawnScope).toBe('thread');
+
+    // Even 'bogus' is ignored (not rejected) — param is simply not read
     const c2 = await initialize();
     await post(c2, {
       jsonrpc: '2.0',
       id: 44,
       method: 'session/new',
-      params: { sessionScope: 'thread' },
+      params: { sessionScope: 'bogus' },
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');
@@ -1121,6 +1206,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{ error: { code: number } }>;
     expect(frame.error.code).toBe(-32602);
+  });
+
+  it('session/prompt queue cap error includes stable JSON-RPC data', async () => {
+    bridge.promptBehavior = () => {
+      throw new PromptQueueFullError(5, 5, 'sess-1');
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 46,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'prompt_queue_full',
+      sessionId: 'sess-1',
+      limit: 5,
+      pendingCount: 5,
+    });
   });
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {
@@ -1684,7 +1797,64 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/shell rejects empty command', async () => {
+    it('_qwen/session/shell returns stable disabled error by default', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 53,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: '' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'session_shell_disabled' },
+        },
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp session/shell session='),
+        ),
+      ).toBe(false);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp dispatch error'),
+        ),
+      ).toBe(false);
+    });
+
+    it('_qwen/session/shell rejects unowned session when enabled', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 54,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+      expect(bridge.shellCalls).toHaveLength(0);
+      expect(
+        stdioMocks.writeStderrLine.mock.calls.some(([line]) =>
+          line.includes('/acp session/shell session='),
+        ),
+      ).toBe(false);
+    });
+
+    it('_qwen/session/shell requires an owned bridge-stamped clientId when enabled', async () => {
+      const nextBridge = new FakeBridge();
+      nextBridge.spawnClientId = undefined;
+      await restartServer({
+        sessionShellCommandEnabled: true,
+        nextBridge,
+      });
       const connId = await initialize();
       const streamRes = openStream(connId);
       await new Promise((r) => setTimeout(r, 30));
@@ -1697,15 +1867,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
-        id: 53,
+        id: 55,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'client_id_required' },
+        },
+      });
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('_qwen/session/shell rejects empty command when enabled', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 56,
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command: '' },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+      expect(bridge.shellCalls).toHaveLength(0);
     });
 
     it('_qwen/session/shell returns result', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
       const connId = await initialize();
       const streamRes = openStream(connId);
       const command = 'ls\nFAKE\r\x1b[31m';
@@ -1719,7 +1919,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
-        id: 54,
+        id: 57,
         method: '_qwen/session/shell',
         params: { sessionId: 'sess-1', command },
       });
@@ -1734,6 +1934,122 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(shellLog).not.toContain('\n');
       expect(shellLog).not.toContain('\r');
       expect(shellLog).not.toContain('\x1b');
+      expect(bridge.shellCalls).toEqual([
+        {
+          sessionId: 'sess-1',
+          command,
+          signal: expect.any(AbortSignal),
+          context: { clientId: 'client-1', fromLoopback: true },
+        },
+      ]);
+      expect(bridge.shellCalls[0]?.signal?.aborted).toBe(false);
+    });
+
+    it('_qwen/session/shell maps bridge shell policy errors to RPC errorKind', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new SessionShellDisabledError();
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const disabledFrames = await takeFrames(await streamRes, 2);
+      expect(disabledFrames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'session_shell_disabled' },
+        },
+      });
+
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new SessionShellClientRequiredError();
+      const connId2 = await initialize();
+      const streamRes2 = openStream(connId2);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId2, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId2, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const clientRequiredFrames = await takeFrames(await streamRes2, 2);
+      expect(clientRequiredFrames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'client_id_required' },
+        },
+      });
+    });
+
+    it('_qwen/session/shell preserves InvalidClientIdError invalid params mapping', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = new InvalidClientIdError('sess-1', 'client-2');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/session/shell does not map arbitrary error names as shell policy errors', async () => {
+      await restartServer({ sessionShellCommandEnabled: true });
+      bridge.shellError = Object.assign(new Error('fake policy'), {
+        name: 'SessionShellDisabledError',
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/shell',
+        params: { sessionId: 'sess-1', command: 'pwd' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32603,
+          data: { errorKind: 'internal' },
+        },
+      });
     });
 
     it('_qwen/session/detach succeeds', async () => {
@@ -1919,6 +2235,92 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr close errors', async () => {
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      bridge.closeError = new Error(
+        `close\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`,
+      );
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 67,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: [`sess${lineSep}FAKE\r\x1b[31m`] },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: { removed: [], notFound: [] },
+      });
+      const deleteLog = stdioMocks.writeStderrLine.mock.calls
+        .map(([line]) => line)
+        .find((line) => line.includes('sessions/delete'));
+      expect(deleteLog).toContain(
+        'closeSession(sess FAK) failed: close FAILED  [31m',
+      );
+      expect(deleteLog).not.toContain('\n');
+      expect(deleteLog).not.toContain('\r');
+      expect(deleteLog).not.toContain('\x1b');
+      expect(deleteLog).not.toContain(lineSep);
+      expect(deleteLog).not.toContain(bidiOverride);
+    });
+
+    it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
+      const lineSep = '\u2028';
+      const bidiOverride = '\u202e';
+      const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
+      const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
+      const removeSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'removeSessions')
+        .mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            {
+              sessionId,
+              error: removeError as unknown as Error,
+            },
+          ],
+        });
+
+      try {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 68,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          result: {
+            removed: [],
+            notFound: [],
+            errors: [{ sessionId, error: removeError }],
+          },
+        });
+        expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
+
+        const deleteLog = stdioMocks.writeStderrLine.mock.calls
+          .map(([line]) => line)
+          .find((line) => line.includes('sessions/delete'));
+        expect(deleteLog).toContain(
+          'removeSessions(sess FAK) failed: remove FAILED  [31m',
+        );
+        expect(deleteLog).not.toContain('\n');
+        expect(deleteLog).not.toContain('\r');
+        expect(deleteLog).not.toContain('\x1b');
+        expect(deleteLog).not.toContain(lineSep);
+        expect(deleteLog).not.toContain(bidiOverride);
+      } finally {
+        removeSessionsSpy.mockRestore();
+      }
     });
   });
 

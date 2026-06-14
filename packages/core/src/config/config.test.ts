@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -55,6 +56,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -313,7 +315,6 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_SOFT',
   'QWEN_MEMORY_PRESSURE_HARD',
   'QWEN_MEMORY_PRESSURE_CRITICAL',
-  'QWEN_MEMORY_ENABLE_GC',
 ];
 
 vi.mock('../core/baseLlmClient.js');
@@ -408,6 +409,81 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
     expect(config.getSystemPrompt()).toBeUndefined();
+  });
+
+  it('wires file history snapshot updates to chat recording', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+      chatRecording: true,
+    });
+    const recordedSnapshots: FileHistorySnapshot[] = [];
+    const recordFileHistorySnapshot = vi.fn((snapshot: FileHistorySnapshot) => {
+      recordedSnapshots.push(structuredClone(snapshot));
+    });
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const fileHistoryService = config.getFileHistoryService();
+      await fileHistoryService.makeSnapshot('p1');
+      await fileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).toHaveBeenCalledTimes(1);
+      expect(recordedSnapshots[0].trackedFileBackups['a.txt']).toEqual(
+        expect.objectContaining({
+          backupFileName: expect.any(String),
+          version: 1,
+        }),
+      );
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops stale file history callbacks after session switch', async () => {
+    const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
+    const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
+    const config = new Config({
+      ...baseParams,
+      cwd: projectDir,
+      fileCheckpointingEnabled: true,
+    });
+    const recordFileHistorySnapshot = vi.fn();
+    vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+      recordFileHistorySnapshot,
+    } as unknown as ReturnType<Config['getChatRecordingService']>);
+    const getGlobalQwenDirSpy = vi
+      .spyOn(Storage, 'getGlobalQwenDir')
+      .mockReturnValue(storageDir);
+
+    try {
+      const trackedFile = path.join(projectDir, 'a.txt');
+      await writeFile(trackedFile, 'original');
+
+      const oldFileHistoryService = config.getFileHistoryService();
+      await oldFileHistoryService.makeSnapshot('p1');
+      config.startNewSession('new-session-id');
+      await oldFileHistoryService.trackEdit(trackedFile);
+
+      expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
+    } finally {
+      getGlobalQwenDirSpy.mockRestore();
+      await rm(projectDir, { recursive: true, force: true });
+      await rm(storageDir, { recursive: true, force: true });
+    }
   });
 
   describe('FileReadCache isolation', () => {
@@ -592,8 +668,7 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it('enables explicit GC when requested by env', async () => {
-      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+    it('explicit GC is enabled by default', async () => {
       const globalWithGc = global as typeof global & { gc?: () => void };
       const originalGc = globalWithGc.gc;
       const gcSpy = vi.fn();
@@ -675,6 +750,28 @@ describe('Server Config (config.ts)', () => {
       const newSessionId = config.startNewSession();
 
       expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+
+    it('flushes the outgoing chat recording service when switching sessions', () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+      });
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          chatRecordingService?: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = { finalize, flush };
+
+      config.startNewSession();
+
+      expect(finalize).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -886,6 +983,32 @@ describe('Server Config (config.ts)', () => {
         excludedMcpServers: ['off'],
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips pending approval servers', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { pending: new MCPServerConfig() },
+        pendingMcpServers: ['pending'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('approveMcpServerForSession drops only the approved pending server', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        pendingMcpServers: ['a', 'b'],
+      } as ConfigParameters);
+
+      config.approveMcpServerForSession('a');
+
+      expect(config.isMcpServerPendingApproval('a')).toBe(false);
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
+
+      config.approveMcpServerForSession('not-pending');
+      expect(config.isMcpServerPendingApproval('b')).toBe(true);
     });
   });
 

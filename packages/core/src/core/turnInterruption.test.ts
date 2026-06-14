@@ -51,7 +51,7 @@ describe('detectTurnInterruption', () => {
   it('preserves per-turn reminder parts verbatim in the re-submission', () => {
     // The Retry send path does not re-inject per-turn reminders, so the
     // captured entry must keep them — the resumed request has to be
-    // byte-identical to the original.
+    // complete and belongs to the same logical turn.
     const history: Content[] = [
       {
         role: 'user',
@@ -82,6 +82,41 @@ describe('detectTurnInterruption', () => {
     ];
     const result = detectTurnInterruption(history);
     expect(result).toEqual({ kind: 'interrupted_prompt', parts: [frPart] });
+  });
+
+  it('captures all consecutive trailing user entries with functionResponses first', () => {
+    const history: Content[] = [
+      { role: 'model', parts: [{ text: 'waiting on tool result' }] },
+      { role: 'user', parts: [{ text: 'IDE context' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'contents' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = detectTurnInterruption(history);
+
+    expect(result).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+        { text: 'IDE context' },
+      ],
+    });
   });
 
   it('returns cloned parts that do not alias the history entry', () => {
@@ -137,7 +172,7 @@ describe('detectTurnInterruption', () => {
     });
   });
 
-  it('only inspects the final entry — earlier dangling calls are not its job', () => {
+  it('ignores earlier dangling calls when the final entry is clean', () => {
     // The mid-history dangling call is covered by the defensive repair
     // passes in the send path, not by continue detection.
     const history: Content[] = [

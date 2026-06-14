@@ -12,6 +12,7 @@ import {
   createDebugLogger,
   detectTurnInterruption,
   SendMessageType,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
@@ -483,7 +484,9 @@ class Session {
     }
 
     const detection = detectTurnInterruption(
-      geminiClient.getChat().getHistoryTail(1),
+      geminiClient
+        .getChat()
+        .getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
     );
     if (detection.kind === 'none') {
       return { accepted: false, interruption: 'none' };

@@ -148,6 +148,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'plan-1',
         role: 'plan',
+        timestamp: 1,
         todos: [
           {
             id: 'plan-0',
@@ -183,6 +184,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'plan-1',
         role: 'plan',
+        timestamp: 1,
         todos: [
           {
             id: 'plan-1',
@@ -231,6 +233,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'tg-todo-1',
         role: 'tool_group',
+        timestamp: 1,
         tools: [
           expect.objectContaining({
             callId: 'todo-call-1',
@@ -255,6 +258,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'tg-t1',
         role: 'tool_group',
+        timestamp: 1,
         tools: [
           expect.objectContaining({ callId: 'tc1', toolName: 'Read' }),
           expect.objectContaining({ callId: 'tc2', toolName: 'Grep' }),
@@ -378,6 +382,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'insight-1-ip',
         role: 'insight_progress',
+        timestamp: 1,
         stage: 'scan',
         progress: 0.5,
         detail: 'reading',
@@ -396,11 +401,36 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([
-      { id: 'insight-1-t-0', role: 'assistant', content: 'before' },
-      { id: 'insight-1-ir-0', role: 'insight_ready', path: '/tmp/report.md' },
-      { id: 'insight-1-t-2', role: 'assistant', content: 'middle' },
-      { id: 'insight-1-ie-0', role: 'insight_error', error: 'boom' },
-      { id: 'insight-1-t-4', role: 'assistant', content: 'after' },
+      {
+        id: 'insight-1-t-0',
+        role: 'assistant',
+        content: 'before',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-ir-0',
+        role: 'insight_ready',
+        path: '/tmp/report.md',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-t-2',
+        role: 'assistant',
+        content: 'middle',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-ie-0',
+        role: 'insight_error',
+        error: 'boom',
+        timestamp: 1,
+      },
+      {
+        id: 'insight-1-t-4',
+        role: 'assistant',
+        content: 'after',
+        timestamp: 1,
+      },
     ]);
   });
 
@@ -813,6 +843,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'assistant',
         content: 'hello world',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -1875,6 +1906,33 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Connection lost',
         variant: 'error',
+        retryable: false,
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('marks turn_error blocks as retryable system errors', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        source: 'turn_error' as const,
+        text: 'Request failed',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Request failed',
+        variant: 'error',
+        retryable: true,
+        timestamp: 1,
       },
     ]);
   });
@@ -1897,6 +1955,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Session initialized',
         variant: 'info',
+        timestamp: 1,
       },
     ]);
   });
@@ -1913,6 +1972,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: '',
         thinking: 'let me think about this',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -1983,9 +2043,21 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([
-      { id: 'a1', role: 'assistant', content: 'first', isStreaming: false },
-      { id: 'u1', role: 'user', content: 'question' },
-      { id: 'a2', role: 'assistant', content: 'second', isStreaming: false },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'first',
+        isStreaming: false,
+        timestamp: 1,
+      },
+      { id: 'u1', role: 'user', content: 'question', timestamp: 2 },
+      {
+        id: 'a2',
+        role: 'assistant',
+        content: 'second',
+        isStreaming: false,
+        timestamp: 3,
+      },
     ]);
   });
 
@@ -2002,6 +2074,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'here is my answer',
         thinking: 'analyzing...',
         isStreaming: false,
+        timestamp: 1,
       },
     ]);
   });
@@ -2049,6 +2122,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: 'Request cancelled.',
         variant: 'info',
+        timestamp: 20,
       },
     ]);
   });
@@ -2065,6 +2139,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         role: 'system',
         content: '请求已取消。',
         variant: 'info',
+        timestamp: 20,
       },
     ]);
   });

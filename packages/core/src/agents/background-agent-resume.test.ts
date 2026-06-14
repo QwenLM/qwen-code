@@ -88,6 +88,12 @@ describe('BackgroundAgentResumeService', () => {
       getHookSystem: () => hookSystem,
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
+      getModel: () => 'parent-model',
+      getBareMode: () => false,
+      getSandbox: () => undefined,
+      getScreenReader: () => false,
+      getMaxSessionTurns: () => -1,
+      getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
@@ -841,6 +847,93 @@ describe('BackgroundAgentResumeService', () => {
     expect(createAgentHeadless).toHaveBeenCalledTimes(1);
     const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
     expect(overriddenConfig.getApprovalMode()).toBe('default');
+  }, 20000);
+
+  it('restores persisted launch flags while resuming an agent', async () => {
+    const sessionId = 'session-cli-flags';
+    const agentId = 'agent-cli-flags';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with launch flags',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+      persistedCliFlags: {
+        approvalMode: 'auto-edit',
+        bare: true,
+        sandbox: { command: 'docker', image: 'qwen-code-sandbox' },
+        screenReader: true,
+        model: 'agent-model',
+        maxSessionTurns: 7,
+        maxToolCalls: 11,
+      },
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume with flags' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with launch flags',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with launch flags',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    const createAgentHeadless = vi.fn().mockResolvedValue({
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless = createAgentHeadless;
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+    const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+    expect(overriddenConfig.getApprovalMode()).toBe('auto-edit');
+    expect(overriddenConfig.getBareMode()).toBe(true);
+    expect(overriddenConfig.getSandbox()).toEqual({
+      command: 'docker',
+      image: 'qwen-code-sandbox',
+    });
+    expect(overriddenConfig.getScreenReader()).toBe(true);
+    expect(overriddenConfig.getModel()).toBe('agent-model');
+    expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
+    expect(overriddenConfig.getMaxToolCalls()).toBe(11);
   }, 20000);
 
   it('coalesces concurrent resume calls into a single running agent', async () => {

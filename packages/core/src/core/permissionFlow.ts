@@ -144,11 +144,13 @@ export function isPlanModeBlocked(
   isExitPlanModeTool: boolean,
   isAskUserQuestionTool: boolean,
   confirmationDetails?: ToolCallConfirmationDetails,
+  isEnterPlanModeTool?: boolean,
 ): boolean {
   return (
     isPlanMode &&
     !isExitPlanModeTool &&
     !isAskUserQuestionTool &&
+    !isEnterPlanModeTool &&
     confirmationDetails?.type !== 'info'
   );
 }

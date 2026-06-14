@@ -31,6 +31,14 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Execute]: 'execute',
   [Kind.Think]: 'think',
   [Kind.Fetch]: 'fetch',
+  // ACP defines no 'agent' ToolKind (verified through @agentclientprotocol/sdk
+  // 0.25.1). The daemon's ClientSideConnection Zod-validates every session/update
+  // and session/request_permission from the `qwen --acp` child before fanning out
+  // to SSE clients, so emitting 'agent' is rejected at that hop and the frame is
+  // dropped. Map the internal Kind.Agent to 'other' on the wire to stay
+  // protocol-valid; dedicated agent UI is delivered out-of-band (via _meta.toolName)
+  // in a follow-up rather than via a kind the protocol can't carry.
+  [Kind.Agent]: 'other',
   [Kind.Other]: 'other',
 };
 
@@ -266,6 +274,13 @@ export class ToolCallEmitter extends BaseEmitter {
   }
 
   /**
+   * Checks if a tool name is the EnterPlanModeTool.
+   */
+  isEnterPlanModeTool(toolName: string): boolean {
+    return toolName === ToolNames.ENTER_PLAN_MODE;
+  }
+
+  /**
    * Resolves tool metadata from the registry.
    * Falls back to defaults if tool not found or build fails.
    *
@@ -315,7 +330,11 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param toolName - Optional tool name to handle special cases like exit_plan_mode
    */
   mapToolKind(kind: Kind, toolName?: string): ToolKind {
-    if (toolName && this.isExitPlanModeTool(toolName)) {
+    // Special case: enter/exit_plan_mode use 'switch_mode' kind per ACP spec
+    if (
+      toolName &&
+      (this.isExitPlanModeTool(toolName) || this.isEnterPlanModeTool(toolName))
+    ) {
       return 'switch_mode';
     }
     return KIND_MAP[kind] ?? 'other';

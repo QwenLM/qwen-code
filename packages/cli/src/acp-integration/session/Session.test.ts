@@ -198,7 +198,15 @@ describe('Session', () => {
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
+    recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
+    setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+  };
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
@@ -264,7 +272,15 @@ describe('Session', () => {
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
+      recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
+      setTitleRecordedCallback: vi.fn(),
+    };
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
     };
 
     mockToolRegistry = {
@@ -307,12 +323,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
-      getFileHistoryService: vi.fn().mockReturnValue({
-        makeSnapshot: vi.fn().mockResolvedValue(undefined),
-        getSnapshots: vi.fn().mockReturnValue([]),
-        restoreFromSnapshots: vi.fn(),
-        rewind: vi.fn(),
-      }),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
     } as unknown as Config;
 
     mockClient = {
@@ -1232,6 +1243,35 @@ describe('Session', () => {
       });
     });
 
+    it('restores an orphaned trailing user prompt when continuation is cancelled before send starts', async () => {
+      const orphanedPrompt = [{ text: 'do the thing' }];
+      setHistoryTail([{ role: 'user', parts: orphanedPrompt }]);
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: orphanedPrompt }]);
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        await session.cancelPendingPrompt();
+        const error = new Error('aborted before send started');
+        error.name = 'AbortError';
+        throw error;
+      });
+
+      await expect(session.continueTurn()).resolves.toEqual({
+        stopReason: 'cancelled',
+        resumed: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: orphanedPrompt,
+      });
+    });
+
     it('writes a tool_result orphan exactly once when the continuation send is skipped', async () => {
       // A trailing user entry made of functionResponse parts is also an
       // `interrupted_prompt`. The unsent-message preservation inside the turn
@@ -1361,6 +1401,36 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('records the latest file history snapshot after makeSnapshot', async () => {
+      const latestSnapshot = {
+        promptId: 'test-session-id########1',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+      mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'edit file' }],
+      });
+
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+        'test-session-id########1',
+      );
+      expect(
+        mockChatRecordingService.recordFileHistorySnapshot,
+      ).toHaveBeenCalledWith(latestSnapshot);
+    });
+
     it('drains background task notifications through ACP after the prompt is idle', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -1925,6 +1995,151 @@ describe('Session', () => {
         false,
         expect.any(AbortSignal),
       );
+    });
+
+    it('uses GeminiClient retry stripping for daemon retry prompts', async () => {
+      const clientStrip = vi.fn();
+      const chatStrip = vi.fn();
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = clientStrip;
+      (
+        mockChat as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = chatStrip;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry the failed turn' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest & { _meta: Record<string, unknown> }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(clientStrip).toHaveBeenCalledTimes(1);
+      expect(chatStrip).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('restores stripped daemon retry history when the retry exits before send starts', async () => {
+      const orphanedPrompt = {
+        role: 'user' as const,
+        parts: [{ text: 'failed turn' }],
+      };
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([orphanedPrompt]);
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+        originalTokenCount: 101,
+        newTokenCount: 101,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry the failed turn' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest & { _meta: Record<string, unknown> }),
+      ).resolves.toEqual({ stopReason: 'max_tokens' });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+    });
+
+    it('restores only stripped daemon retry history when cancelled before the send loop starts', async () => {
+      const orphanedPrompt = {
+        role: 'user' as const,
+        parts: [{ text: 'failed turn' }],
+      };
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([orphanedPrompt]);
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockImplementation(async () => {
+          await session.cancelPendingPrompt();
+          return {
+            contentParts: 'file content',
+            files: [],
+          };
+        });
+
+      try {
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'retry the failed turn' },
+              {
+                type: 'resource_link',
+                name: 'README.md',
+                uri: 'file://README.md',
+              },
+            ],
+            _meta: { 'qwen.daemon.retry': true },
+          } as PromptRequest & { _meta: Record<string, unknown> }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+        expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      } finally {
+        readManyFilesSpy.mockRestore();
+      }
+    });
+
+    it('does not create file history snapshots for daemon retry prompts', async () => {
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry the failed turn' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as PromptRequest & { _meta: Record<string, unknown> }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordFileHistorySnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('treats the user-cancel sentinel as cancellation when send rejects with the abort reason', async () => {
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        await session.cancelPendingPrompt();
+        throw 'qwen:user-cancel';
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'cancel me' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'cancelled' });
     });
 
     it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
@@ -3332,6 +3547,7 @@ describe('Session', () => {
       it('runs automatic compression before cron-fired ACP prompt sends', async () => {
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             callback({ prompt: 'scheduled prompt' });
           }),
@@ -3382,6 +3598,7 @@ describe('Session', () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
           size: 1,
+          hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) => {
             cronCallback = callback;
             callback({ prompt: 'scheduled prompt' });
@@ -5398,6 +5615,52 @@ describe('Session', () => {
         expect.any(Array),
         expect.any(AbortSignal),
         expect.objectContaining({ enableCacheSharing: expect.any(Boolean) }),
+      );
+    });
+
+    it('fires prompt-suggestion extNotification after a continued turn completes', async () => {
+      generateMock.mockResolvedValue({ suggestion: 'Inspect the result?' });
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'resume me' }] }]);
+      (
+        mockGeminiClient as unknown as {
+          stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+        }
+      ).stripOrphanedUserEntriesFromHistory = vi.fn().mockReturnValue([]);
+
+      await session.continueTurn();
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          'qwen/notify/session/prompt-suggestion',
+          {
+            v: 1,
+            sessionId: 'test-session-id',
+            suggestion: 'Inspect the result?',
+            promptId: 'test-session-id########0',
+          },
+        );
+      });
+    });
+
+    it('does not emit after a no-op continued turn', async () => {
+      generateMock.mockResolvedValue({ suggestion: 'Repeat suggestion?' });
+      (
+        mockChat as unknown as { getHistoryTail: ReturnType<typeof vi.fn> }
+      ).getHistoryTail = vi
+        .fn()
+        .mockReturnValue([{ role: 'model', parts: [{ text: 'done' }] }]);
+
+      await session.continueTurn();
+
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/prompt-suggestion',
+        expect.anything(),
       );
     });
 

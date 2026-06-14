@@ -41,6 +41,57 @@ const { created, nextTerminateMode } = vi.hoisted(() => ({
   nextTerminateMode: { value: 'GOAL' as string },
 }));
 
+// P3 R2 self-review (P3-T6 gap, batch): tests below for
+// agent({isolation:'worktree'}) need to drive GitWorktreeService's
+// provision/cleanup branches deterministically. Module-level mock with
+// per-test stub overrides via vi.mocked(...).mockImplementation.
+//
+// Default behaviour = "everything succeeds and the worktree is clean
+// post-spawn" so the cleanup branch removes the worktree. Tests that
+// need a specific error path override the relevant method.
+const worktreeStubs = vi.hoisted(() => {
+  const makeStub = () => ({
+    checkGitAvailable: vi.fn(async () => ({ available: true })),
+    isGitRepository: vi.fn(async () => true),
+    getRepoTopLevel: vi.fn(async () => '/fake/repo'),
+    getCurrentBranch: vi.fn(async () => 'main'),
+    hasWorktreeChanges: vi.fn(async () => false),
+    hasUnmergedWorktreeCommits: vi.fn(async () => false),
+    createUserWorktree: vi.fn(
+      async (
+        slug: string,
+        _base?: string,
+        _options?: { symlinkDirectories?: readonly string[] },
+      ) => ({
+        success: true,
+        worktree: {
+          path: `/fake/repo/.qwen/worktrees/${slug}`,
+          branch: `worktree-${slug}`,
+        },
+      }),
+    ),
+    removeUserWorktree: vi.fn(async () => ({ success: true })),
+  });
+  return { makeStub, instances: [] as Array<ReturnType<typeof makeStub>> };
+});
+
+vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/gitWorktreeService.js')
+    >();
+  return {
+    ...actual,
+    generateAgentWorktreeSlug: () => 'agent-deadbe1',
+    writeWorktreeSessionMarker: vi.fn(async () => {}),
+    GitWorktreeService: vi.fn().mockImplementation(() => {
+      const stub = worktreeStubs.makeStub();
+      worktreeStubs.instances.push(stub);
+      return stub;
+    }),
+  };
+});
+
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
@@ -719,5 +770,1207 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
       }
     });
+  });
+});
+
+// ─── P3 (PR #5xxx): agentType + model + isolation + schema ──────────
+//
+// These tests exercise `createProductionDispatch`'s override path. The
+// fast path (no agentType / model / isolation / schema) is covered by the
+// existing tests above and the vi.mock('./agent-headless.js') used there;
+// the override path goes through SubagentManager.createAgentHeadless, so
+// each test wires a fake Config whose `getSubagentManager()` returns a
+// stub matching just enough surface (findSubagentByName +
+// createAgentHeadless) for the path under test.
+describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', () => {
+  // Reset GitWorktreeService stub state between tests so an override set
+  // by one test does not bleed into the next (mockImplementation is
+  // persistent; the per-test overrides below rely on a clean baseline).
+  beforeEach(async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    worktreeStubs.instances.length = 0;
+    vi.mocked(GitWorktreeService).mockImplementation(() => {
+      const stub = worktreeStubs.makeStub();
+      worktreeStubs.instances.push(stub);
+      return stub as unknown as InstanceType<typeof GitWorktreeService>;
+    });
+  });
+
+  type StubSubagentCall = {
+    config: { name?: string; model?: string; disallowedTools?: string[] };
+    runtimeContextSame: boolean;
+    options?: { runConfigOverrides?: unknown };
+    eventEmitterAttached: boolean;
+  };
+
+  function fakeConfigWithMgr(opts: {
+    findSubagentByName?: (name: string) => Promise<{
+      name: string;
+      description: string;
+      systemPrompt: string;
+      level: string;
+      tools?: string[];
+      disallowedTools?: string[];
+      model?: string;
+    } | null>;
+    onCreate?: (
+      call: StubSubagentCall,
+      ee?: {
+        on(event: string, cb: (payload: unknown) => void): void;
+      },
+    ) => Promise<{
+      // The mock subagent's contract is the minimal surface
+      // createProductionDispatch reads after createAgentHeadless returns.
+      finalText: string;
+      terminateMode: string;
+      // Hook for schema-mode tests: the override path attaches an
+      // AgentEventEmitter that the dispatch listens to for `structured_output`
+      // calls. The test can drive that emitter to simulate model behavior.
+      runWithEmitter?: (emitter: {
+        emit(event: string, payload: unknown): void;
+      }) => void;
+    }>;
+  }): {
+    config: Config;
+    calls: StubSubagentCall[];
+    disposed: number;
+  } {
+    const calls: StubSubagentCall[] = [];
+    let disposed = 0;
+    // Schema mode goes through createSchemaConfigOverride → rebuildToolRegistryOnOverride,
+    // which calls ov.createToolRegistry() and then copies tools from base.getToolRegistry().
+    // The override carries the result. We don't care about the registry contents in unit
+    // tests — only that the override flow doesn't crash on the missing methods — so the
+    // stub registry just answers the API surface those helpers call.
+    const fakeRegistry = {
+      copyDiscoveredToolsFrom: () => {},
+      registerTool: () => {},
+    };
+    const cfg = {
+      createToolRegistry: async () => fakeRegistry,
+      getToolRegistry: () => fakeRegistry,
+      // P3 R2 self-review: isolation:'worktree' provisioning reads
+      // these methods. Provide deterministic returns so the tests can
+      // drive GitWorktreeService stubs without re-deriving cwd.
+      getTargetDir: () => '/fake/repo',
+      getSessionId: () => 'sess_fake_test_id',
+      getWorktreeSymlinkDirectories: () => [],
+      getSubagentManager: () => ({
+        findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        createAgentHeadless: async (
+          subagentConfig: {
+            name?: string;
+            model?: string;
+            disallowedTools?: string[];
+          },
+          runtimeContext: Config,
+          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+        ) => {
+          const call: StubSubagentCall = {
+            config: subagentConfig,
+            runtimeContextSame: runtimeContext === cfg,
+            options: { runConfigOverrides: options?.runConfigOverrides },
+            eventEmitterAttached: options?.eventEmitter !== undefined,
+          };
+          calls.push(call);
+          const outcome = await opts.onCreate!(
+            call,
+            options?.eventEmitter as
+              | { on(event: string, cb: (payload: unknown) => void): void }
+              | undefined,
+          );
+          const finalText = outcome.finalText;
+          const terminateMode = outcome.terminateMode;
+          return {
+            subagent: {
+              execute: async (
+                _ctx: unknown,
+                signal?: AbortSignal,
+              ): Promise<void> => {
+                if (outcome.runWithEmitter && options?.eventEmitter) {
+                  outcome.runWithEmitter(
+                    options.eventEmitter as {
+                      emit(event: string, payload: unknown): void;
+                    },
+                  );
+                }
+                // Honor signal abort if it fires.
+                if (signal?.aborted) return;
+              },
+              getFinalText: () => finalText,
+              getTerminateMode: () => terminateMode,
+            },
+            dispose: async () => {
+              disposed += 1;
+            },
+          };
+        },
+      }),
+    } as unknown as Config;
+    return {
+      config: cfg,
+      calls,
+      get disposed() {
+        return disposed;
+      },
+    } as {
+      config: Config;
+      calls: StubSubagentCall[];
+      disposed: number;
+    };
+  }
+
+  it('agentType resolves SubagentConfig and routes through createAgentHeadless', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore.',
+        level: 'builtin',
+        tools: ['Read', 'Grep'],
+        disallowedTools: [],
+      }),
+      onCreate: async () => ({
+        finalText: 'explore-output',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('find foo', { agentType: 'Explore' });
+    expect(result).toBe('explore-output');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].config.name).toBe('Explore');
+    // Workflow floor [SendMessage, ExitPlanMode] must be unioned in.
+    expect(calls[0].config.disallowedTools).toEqual(
+      expect.arrayContaining(['send_message', 'exit_plan_mode']),
+    );
+  });
+
+  it('agentType not found throws upstream-aligned error', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => null,
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('whatever', { agentType: 'NotARealAgent' }),
+    ).rejects.toThrow(
+      /^agent\(\{agentType\}\): agent type 'NotARealAgent' not found\.$/,
+    );
+  });
+
+  it('opts.model is threaded into SubagentConfig.model for provider routing', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('hi', { model: 'qwen3-max' });
+    // No agentType → ephemeral default config built, then opts.model applied.
+    expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'remote' })).rejects.toThrow(
+      /agent\(\{isolation:'remote'\}\) is not available in this build\./,
+    );
+  });
+
+  it('floor disallowedTools always unioned (agentType cannot re-enable them)', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Permissive',
+        description: 'tries to override floor',
+        systemPrompt: 'permissive prompt',
+        level: 'project',
+        // A user-defined agentType that EXPLICITLY allows the very tools
+        // workflow forbids. The floor must still apply.
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('hi', { agentType: 'Permissive' });
+    const disallowed = calls[0].config.disallowedTools ?? [];
+    // Union: Foo (from agentType) + send_message + exit_plan_mode (floor).
+    expect(disallowed).toEqual(
+      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+    );
+  });
+
+  it('schema-mode: subagent calls structured_output successfully → returns validated args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema dispatch aborts after capture
+        runWithEmitter: (emitter) => {
+          // Simulate the subagent calling structured_output with valid args.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, value: 42 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    expect(result).toEqual({ ok: true, value: 42 });
+  });
+
+  it('schema-mode: 3 failed structured_output calls → upstream-aligned terminal error', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          // 3 failed structured_output calls = original attempt + 2 nudges.
+          for (let i = 1; i <= 3; i++) {
+            emitter.emit('tool_call', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              args: { bad: 'shape' },
+              description: '',
+              isOutputMarkdown: false,
+              timestamp: i,
+            });
+            emitter.emit('tool_result', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              success: false,
+              error: 'validation failed',
+              responseParts: [],
+              resultDisplay: '',
+              durationMs: 1,
+              timestamp: i,
+            });
+          }
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('extract', {
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow(
+      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+    );
+  });
+
+  // R3 review (wenshao T6 [M2]): when the subagent terminates without
+  // ever calling structured_output (model answered in plain text;
+  // attempts counter never incremented), the dispatch throws the
+  // accurate "no validation attempt" message — NOT the upstream-
+  // verbatim "after 2 in-conversation nudges" wording (which describes
+  // a different failure mode: 3 validation failures in a row).
+  it('schema-mode: subagent never calls structured_output → "no validation attempt" terminal', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: 'plain-text answer the script will discard',
+        terminateMode: 'GOAL',
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(
+      /subagent completed without calling structured_output \(no validation attempt — model produced plain-text content\)\./,
+    );
+  });
+
+  it('schema-mode attaches an event emitter to the subagent', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', { schema: { type: 'object' } });
+    expect(calls[0].eventEmitterAttached).toBe(true);
+  });
+
+  // R1 self-review (P3-T6 gap): the schema-mode state machine in
+  // createSchemaEventEmitter has a `state.result === null` guard that
+  // allows the model to RECOVER from earlier failed attempts. Only the
+  // 0-failure and 3+-failure boundaries were tested; the 1-failure and
+  // 2-failure recovery transitions had no coverage. A regression
+  // inverting the guard, or one where pendingArgs cleanup discards the
+  // recovered args, would slip past the previous tests.
+  it('schema-mode: success on 2nd attempt (1 nudge then valid) captures round-2 args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          // Round 1: invalid args, validation fails.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { bad: 'shape' },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: false,
+            error: 'validation failed',
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+          // Round 2: corrected args, validation passes. Must be captured
+          // as the result, not the round-1 args.
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 2,
+            callId: 'c2',
+            name: 'structured_output',
+            args: { ok: true, attempt: 2 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 2,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 2,
+            callId: 'c2',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object' },
+    });
+    expect(result).toEqual({ ok: true, attempt: 2 });
+  });
+
+  it('schema-mode: success on 3rd attempt (2 nudges then valid) captures round-3 args', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          for (let r = 1; r <= 2; r++) {
+            emitter.emit('tool_call', {
+              subagentId: 'sub',
+              round: r,
+              callId: `c${r}`,
+              name: 'structured_output',
+              args: { bad: r },
+              description: '',
+              isOutputMarkdown: false,
+              timestamp: r,
+            });
+            emitter.emit('tool_result', {
+              subagentId: 'sub',
+              round: r,
+              callId: `c${r}`,
+              name: 'structured_output',
+              success: false,
+              error: 'validation failed',
+              responseParts: [],
+              resultDisplay: '',
+              durationMs: 1,
+              timestamp: r,
+            });
+          }
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 3,
+            callId: 'c3',
+            name: 'structured_output',
+            args: { ok: true, attempt: 3 },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 3,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 3,
+            callId: 'c3',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 3,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract', {
+      schema: { type: 'object' },
+    });
+    expect(result).toEqual({ ok: true, attempt: 3 });
+  });
+
+  // R1 self-review (P3-T6 gap): the disallowed-tool floor invariant
+  // declares "ALWAYS applies regardless of agentType". The
+  // single-option tests above exercise floor+agentType and schema
+  // separately, but not their composition. A regression making the
+  // floor conditional on schema being unset (e.g. mistakenly moving
+  // the union inside an `if (opts.schema === undefined)` branch)
+  // would pass the existing tests.
+  it('schema-mode + agentType: floor disallowedTools still unioned', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Permissive',
+        description: 'allows SendMessage explicitly',
+        systemPrompt: 'permissive',
+        level: 'project',
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', {
+      agentType: 'Permissive',
+      schema: { type: 'object' },
+    });
+    const disallowed = calls[0].config.disallowedTools ?? [];
+    expect(disallowed).toEqual(
+      expect.arrayContaining(['Foo', 'send_message', 'exit_plan_mode']),
+    );
+  });
+
+  // R1 self-review (P3-T6 gap): caller-abort taking priority over
+  // "completed without StructuredOutput" is a contract boundary the
+  // dispatch enforces at the explicit `if (signal?.aborted)` check.
+  // Without this test, a refactor removing the check would silently
+  // convert user-cancelled schema runs into schema-failure errors.
+  it('schema-mode: caller abort takes priority over terminal "no structured_output" error', async () => {
+    const externalAbort = new AbortController();
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (_emitter) => {
+          // Caller-side abort fires while the subagent is in flight but
+          // before any structured_output call. After execute() returns,
+          // signal.aborted is true AND state.result is still null — the
+          // dispatch must throw AbortError, not the StructuredOutput
+          // terminal error.
+          externalAbort.abort();
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config, externalAbort.signal);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(/aborted/i);
+  });
+
+  // R1 self-review (P3-T6 gap): the override path's dispose() must run
+  // in a finally so per-agent MCP processes / hooks don't leak past the
+  // dispatch — including on the exception path. The test harness has a
+  // `disposed` counter that no test asserts on; this closes that gap on
+  // both the success and the thrown-from-execute paths.
+  it('override path always calls dispose() on the success path', async () => {
+    // Use model-only override (no agentType) so we don't go through the
+    // SubagentManager resolution path. The ephemeral-default branch
+    // still routes through createAgentHeadless and therefore dispose().
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await dispatch('hi', { model: 'qwen3-max' });
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  it('override path always calls dispose() even when terminateMode is non-GOAL', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'ERROR', // non-GOAL → dispatch throws after execute
+      }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await expect(dispatch('hi', { model: 'qwen3-max' })).rejects.toThrow(
+      /terminate mode: ERROR/,
+    );
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // R2 self-review (sec-2): sanitize control characters in user-controlled
+  // strings before interpolating into error messages so a model-authored
+  // agentType cannot fragment a single-line error across log records.
+  it('agentType not found: control chars in name are scrubbed from the error message', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async () => null,
+      onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    // newline + nul + del — all control codes < 0x20 or == 0x7f.
+    const evil = 'Explore\n\rEvil\x00\x7f';
+    await expect(dispatch('hi', { agentType: evil })).rejects.toThrow();
+    // The thrown message must NOT contain raw newlines / NULs.
+    try {
+      await dispatch('hi', { agentType: evil });
+    } catch (err) {
+      const msg = (err as Error).message;
+      // eslint-disable-next-line no-control-regex
+      expect(msg).not.toMatch(/[\n\r\u0000\u007f]/);
+      expect(msg).toContain('not found');
+    }
+  });
+
+  // R2 self-review (test-5): dispose() MUST still run even when
+  // subagent.execute throws synchronously from inside the in-flight
+  // event-emitter callback (schema-mode failure path). The R1 dispose
+  // tests covered terminate-mode-non-GOAL; this covers the thrown-from-
+  // execute branch.
+  it('override path: dispose() still runs in finally when execute throws', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'GOAL', // not reached
+        runWithEmitter: (_emitter) => {
+          throw new Error('simulated subagent failure');
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(helper.config);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(/simulated subagent failure/);
+    expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── isolation:'worktree' provision error branches ──────────────
+  // R2 self-review (test-1, [critical]): each provisionWorkflowWorktree
+  // error branch had no unit test. Coverage came only from the real-
+  // LLM E2E S7 happy path. Adversarial review noted the parent-dirty
+  // refuse, nested-worktree refuse, and git-not-available paths can
+  // change behavior with no regression signal. Each test below stubs
+  // the GitWorktreeService method that controls the branch.
+
+  it("isolation:'worktree' refuses when parent cwd is already inside a worktree", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    // Override getTargetDir to look nested-worktree-ish.
+    (config as unknown as { getTargetDir: () => string }).getTargetDir = () =>
+      '/some/repo/.qwen/worktrees/agent-existing/inner';
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /already inside a worktree/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when git is not available", async () => {
+    worktreeStubs.instances.length = 0; // reset
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          checkGitAvailable: vi.fn(async () => ({
+            available: false,
+            error: 'git binary missing',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /git binary missing/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          isGitRepository: vi.fn(async () => false),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /not a git repository/,
+    );
+  });
+
+  it("isolation:'worktree' refuses when parent working tree is dirty", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          hasWorktreeChanges: vi.fn(async () => true),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /uncommitted changes/,
+    );
+  });
+
+  it("isolation:'worktree' surfaces createUserWorktree failure", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          createUserWorktree: vi.fn(async () => ({
+            success: false,
+            error: 'simulated worktree create failure',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
+      /simulated worktree create failure/,
+    );
+  });
+
+  // ─── isolation:'worktree' cleanup error branches ────────────────
+  // R2 self-review (test-2, [major]): cleanupWorkflowWorktree has 3
+  // notable error/branch transitions: removeUserWorktree returns
+  // {success:false}, returns {success:true, branchPreserved:true}, or
+  // throws synchronously. Each path produces a different preserved
+  // suffix and was previously untested.
+
+  it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          // Subagent left the worktree clean.
+          hasWorktreeChanges: vi
+            .fn(async () => false)
+            // ... but the subsequent cleanup-side hasWorktreeChanges
+            // (called from inside cleanupWorkflowWorktree) also reports
+            // clean. Cleanup proceeds to removeUserWorktree which fails.
+            .mockImplementation(async () => false),
+          removeUserWorktree: vi.fn(async () => ({
+            success: false,
+            error: 'simulated remove failure',
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    // Suffix should appear because removeUserWorktree failed → preserve.
+    expect(String(result)).toMatch(
+      /\[worktree preserved:.*\(branch worktree-agent-deadbe1\)\]/,
+    );
+  });
+
+  it("isolation:'worktree' cleanup: branchPreserved race yields branch-only suffix", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          removeUserWorktree: vi.fn(async () => ({
+            success: true,
+            branchPreserved: true, // race: commits landed between checks and delete
+          })),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    // Directory-removed-but-branch-preserved suffix matches AgentTool
+    // verbatim and includes the recover hint.
+    expect(String(result)).toMatch(/worktree directory removed/);
+    expect(String(result)).toMatch(/git worktree add/);
+  });
+
+  it("isolation:'worktree' cleanup: thrown removeUserWorktree preserves path+branch", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          removeUserWorktree: vi.fn(async () => {
+            throw new Error('simulated git crash during remove');
+          }),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', { isolation: 'worktree' });
+    expect(String(result)).toMatch(
+      /\[worktree preserved:.*\(branch worktree-agent-deadbe1\)\]/,
+    );
+  });
+
+  // ─── isolation:'worktree' option combinations ───────────────────
+  // R2 self-review (test-3/4): single-option tests don't catch
+  // interactions. These verify model+worktree and schema+worktree
+  // each compose correctly.
+
+  it("model + isolation:'worktree': model threaded through AND worktree provisioned", async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('hi', {
+      model: 'qwen3-max',
+      isolation: 'worktree',
+    });
+    expect(calls[0].config.model).toBe('qwen3-max');
+    // Default-clean stub auto-removes; no suffix expected.
+    expect(String(result)).not.toMatch(/worktree preserved/);
+  });
+
+  it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true, in_worktree: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const result = await dispatch('extract from worktree', {
+      schema: { type: 'object' },
+      isolation: 'worktree',
+    });
+    // Schema-mode returns the structured object verbatim, not the
+    // string-with-suffix shape. The preserved-suffix mechanism intentionally
+    // does NOT mutate the structured payload — operator-visible info goes
+    // to debugLogger instead. See runOverridePath's "schema-mode... payload
+    // is returned verbatim" comment.
+    expect(result).toEqual({ ok: true, in_worktree: true });
+  });
+
+  // ─── R3 review (wenshao Round 2) ────────────────────────────────
+
+  // T0 [Critical]: when isolation:worktree is provisioned and then a
+  // later setup step throws (here, createSchemaConfigOverride via a
+  // broken fakeRegistry.copyDiscoveredToolsFrom), the outer try/finally
+  // MUST still fire the fallback worktree cleanup. Before the fix, the
+  // outer try opened AFTER schema setup, so this exact path orphaned
+  // the worktree on disk.
+  it("isolation:'worktree' + schema setup throws → worktree is still cleaned up", async () => {
+    const removeCalls: string[] = [];
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    vi.mocked(GitWorktreeService).mockImplementation(() => {
+      const stub = worktreeStubs.makeStub();
+      // Track removeUserWorktree calls — the fallback finally must call it.
+      stub.removeUserWorktree = vi.fn(async (slug: string) => {
+        removeCalls.push(slug);
+        return { success: true };
+      });
+      worktreeStubs.instances.push(stub);
+      return stub as unknown as InstanceType<typeof GitWorktreeService>;
+    });
+    // fakeConfigWithMgr's getToolRegistry returns fakeRegistry which has a
+    // no-op copyDiscoveredToolsFrom. Patch the worktree-override path so
+    // createSchemaConfigOverride's rebuildToolRegistryOnOverride throws.
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: 'unused',
+        terminateMode: 'GOAL',
+      }),
+    });
+    (
+      config as unknown as { createToolRegistry: () => Promise<unknown> }
+    ).createToolRegistry = async () => {
+      throw new Error('simulated registry rebuild failure');
+    };
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('hi', {
+        isolation: 'worktree',
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow(/simulated registry rebuild failure/);
+    // Cleanup must have called removeUserWorktree even though setup threw.
+    expect(removeCalls).toContain('agent-deadbe1');
+  });
+
+  // T1 + T4 [Critical/H1]: when agentType resolves with a restricted
+  // tools allowlist (no '*'), the schema-mode dispatch MUST add
+  // structured_output to the allowlist so prepareTools doesn't filter
+  // it out of the subagent's tool surface. Without this fix the
+  // SyntheticOutputTool was present in the per-call registry but
+  // invisible to the model, producing the silent "after 2 nudges" dead-end.
+  it('schema-mode + agentType restricted tools: structured_output appended to allowlist', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: 'You are Explore. Read-only. Be fast.',
+        level: 'builtin',
+        tools: ['Read', 'Grep', 'Glob'],
+        disallowedTools: [],
+      }),
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', {
+      agentType: 'Explore',
+      schema: { type: 'object' },
+    });
+    const tools = (calls[0].config as { tools?: string[] }).tools ?? [];
+    expect(tools).toContain('structured_output');
+    // The original agentType tools survive — not replaced.
+    expect(tools).toEqual(
+      expect.arrayContaining(['Read', 'Grep', 'Glob', 'structured_output']),
+    );
+  });
+
+  // T1 + T4 [Critical/H1] companion: the resolved agentType's
+  // systemPrompt MUST be preserved — schema-mode appends the StructuredOutput
+  // instruction block instead of replacing the persona outright.
+  it('schema-mode + agentType: systemPrompt appends schema instructions (persona preserved)', async () => {
+    const personaPrompt = 'You are Explore. Read-only. Be fast.';
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Explore',
+        description: 'fast read-only',
+        systemPrompt: personaPrompt,
+        level: 'builtin',
+      }),
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await dispatch('extract', {
+      agentType: 'Explore',
+      schema: { type: 'object' },
+    });
+    const sp =
+      (calls[0].config as { systemPrompt?: string }).systemPrompt ?? '';
+    expect(sp).toContain(personaPrompt);
+    expect(sp).toContain('structured_output');
+  });
+
+  // T2 + T5 [M1]: schema-mode dispatch MUST NOT accumulate listeners on
+  // the parent (run-level) AbortSignal across N calls. Before the fix
+  // `{ once: true }` only removed on actual parent abort, so a workflow
+  // with N schema calls and no abort accumulated N listeners + N child
+  // AbortController closures. The fix removes the named listener in the
+  // outer finally regardless of how the dispatch ended.
+  it('schema-mode: parent-abort listener is removed after each call (no accumulation)', async () => {
+    const sharedSignal = new AbortController().signal;
+    let liveListeners = 0;
+    const origAdd = sharedSignal.addEventListener.bind(sharedSignal);
+    const origRemove = sharedSignal.removeEventListener.bind(sharedSignal);
+    sharedSignal.addEventListener = ((type: string, ...rest: unknown[]) => {
+      if (type === 'abort') liveListeners += 1;
+      return (origAdd as unknown as (t: string, ...r: unknown[]) => void)(
+        type,
+        ...rest,
+      );
+    }) as typeof sharedSignal.addEventListener;
+    sharedSignal.removeEventListener = ((type: string, ...rest: unknown[]) => {
+      if (type === 'abort') liveListeners -= 1;
+      return (origRemove as unknown as (t: string, ...r: unknown[]) => void)(
+        type,
+        ...rest,
+      );
+    }) as typeof sharedSignal.removeEventListener;
+
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 1,
+          });
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config, sharedSignal);
+    // Run 5 schema-mode dispatches against the same parent signal.
+    for (let i = 0; i < 5; i++) {
+      await dispatch('extract', { schema: { type: 'object' } });
+    }
+    expect(liveListeners).toBe(0);
+  });
+
+  // T6 [M2]: a schema-mode dispatch whose subagent terminates via
+  // TIMEOUT (10 min cap), MAX_TURNS (50 cap), or ERROR without a
+  // structured_output call MUST throw the terminate-mode error, not the
+  // "after 2 in-conversation nudges" terminal. The previous path
+  // misdiagnosed every non-result outcome as a content failure.
+  it.each(['TIMEOUT', 'MAX_TURNS', 'ERROR'])(
+    'schema-mode + terminateMode=%s → "did not complete" terminal, not "after 2 nudges"',
+    async (mode) => {
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({
+          finalText: '',
+          terminateMode: mode,
+        }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('extract', { schema: { type: 'object' } }),
+      ).rejects.toThrow(
+        new RegExp(`did not complete \\(terminate mode: ${mode}\\)\\.`),
+      );
+    },
+  );
+
+  // T6 [M2] companion: when the schema-mode dispatch DID see 3 failed
+  // validation attempts (the real "after 2 in-conversation nudges"
+  // path), the upstream-verbatim wording is preserved. This is the
+  // existing 3-failure test, retained here with explicit terminateMode
+  // pinning to make the contract unambiguous.
+  it('schema-mode: 3 failed structured_output calls → upstream-verbatim "after 2 nudges"', async () => {
+    const { config } = fakeConfigWithMgr({
+      onCreate: async (_call, _ee) => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // dispatch aborts on 3rd failure
+        runWithEmitter: (emitter) => {
+          for (let i = 1; i <= 3; i++) {
+            emitter.emit('tool_call', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              args: { bad: i },
+              description: '',
+              isOutputMarkdown: false,
+              timestamp: i,
+            });
+            emitter.emit('tool_result', {
+              subagentId: 'sub',
+              round: i,
+              callId: `c${i}`,
+              name: 'structured_output',
+              success: false,
+              error: 'validation failed',
+              responseParts: [],
+              resultDisplay: '',
+              durationMs: 1,
+              timestamp: i,
+            });
+          }
+        },
+      }),
+    });
+    const dispatch = createProductionDispatch(config);
+    await expect(
+      dispatch('extract', { schema: { type: 'object' } }),
+    ).rejects.toThrow(
+      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+    );
   });
 });

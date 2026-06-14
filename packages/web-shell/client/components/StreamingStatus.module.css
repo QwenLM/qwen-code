@@ -21,3 +21,9 @@
   color: var(--text-dimmed);
   font-size: 13px;
 }
+
+@media (max-width: 700px) {
+  .label {
+    display: none;
+  }
+}

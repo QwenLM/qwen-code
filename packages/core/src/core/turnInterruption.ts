@@ -13,13 +13,13 @@ import { isSystemReminderContent } from '../utils/environmentContext.js';
  * restarts — unlike the Ctrl+Y retry path, which depends on
  * `lastPromptRef` surviving in the same process.
  *
- * Only the FINAL history entry is inspected:
- *  - `interrupted_prompt`: the tail is a non-structural `user` entry — a
- *    prompt (or a tool_result submission) whose model response never landed.
- *    Continuing means re-submitting `parts` with Retry semantics: the send
- *    path strips the orphaned trailing user entries and re-pushes the same
- *    content under the same logical turn, so the transcript gains no new
- *    user message.
+ * The history tail determines the classification:
+ *  - `interrupted_prompt`: the tail is one or more non-structural `user`
+ *    entries — a prompt (or a tool_result submission) whose model response
+ *    never landed. Continuing means re-submitting their `parts` with Retry
+ *    semantics: the send path strips the orphaned trailing user entries and
+ *    re-pushes the same content under the same logical turn, so the transcript
+ *    gains no new user message.
  *  - `interrupted_turn`: the tail is a `model` entry carrying `functionCall`s
  *    that no `functionResponse` ever answered (crash/abort mid tool run).
  *    Continuing means closing each pair with a synthesized error
@@ -42,13 +42,18 @@ export type TurnInterruption =
       danglingCalls: Array<{ callId: string; name: string }>;
     };
 
+// Continue detection must see every trailing user entry because the matching
+// strip step removes all of them. This path is explicit and cold, so cloning
+// the full practical history is safer than a small bounded tail.
+export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = Number.MAX_SAFE_INTEGER;
+
 /**
  * Detect whether the last turn of `history` was left unfinished, and if so
  * what kind of continuation applies. Pure read — never mutates `history`.
  *
- * Callers normally pass `chat.getHistoryTail(1)` (only the final entry is
- * examined), but accepting the full array keeps the function composable
- * with raw transcript fixtures in tests.
+ * Callers should pass enough tail entries to include all consecutive trailing
+ * user entries. Accepting the full array keeps the function composable with
+ * raw transcript fixtures in tests.
  *
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
  * @returns The interruption classification; see {@link TurnInterruption}.
@@ -60,17 +65,29 @@ export function detectTurnInterruption(history: Content[]): TurnInterruption {
   }
 
   if (last.role === 'user') {
-    // Structural reminder entries are not orphaned turns; the strip pass
-    // refuses to pop them, so re-submitting would duplicate the prompt.
-    if (isSystemReminderContent(last)) {
-      return { kind: 'none' };
+    const trailingUserEntries: Content[] = [];
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i];
+      if (!entry || entry.role !== 'user') {
+        break;
+      }
+      // Structural reminder entries are not orphaned turns; the strip pass
+      // refuses to pop them, so re-submitting would duplicate the prompt.
+      if (isSystemReminderContent(entry)) {
+        break;
+      }
+      trailingUserEntries.unshift(entry);
     }
-    // Capture the entry VERBATIM, including any per-turn system-reminder
-    // parts riding alongside the prompt ([reminder, prompt]). The Retry
-    // send path does not re-inject per-turn reminders, so replaying them
-    // keeps the resumed request byte-identical to the original — the
-    // continuation is the same turn, not a fresh one.
-    const parts = last.parts ?? [];
+    // Capture every part, including any per-turn system-reminder parts riding
+    // alongside the prompt. The Retry send path does not re-inject per-turn
+    // reminders, so replaying them keeps the continued turn complete. When a
+    // continuation includes tool results, keep functionResponse parts first:
+    // Anthropic-compatible backends require tool_result blocks before text.
+    const allParts = trailingUserEntries.flatMap((entry) => entry.parts ?? []);
+    const parts = [
+      ...allParts.filter((part) => part.functionResponse),
+      ...allParts.filter((part) => !part.functionResponse),
+    ];
     if (parts.length === 0) {
       return { kind: 'none' };
     }

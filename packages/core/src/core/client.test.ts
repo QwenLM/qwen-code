@@ -73,6 +73,7 @@ import {
   clearActiveGoal,
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
+import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -367,6 +368,12 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockFileHistoryService: {
+    makeSnapshot: ReturnType<typeof vi.fn>;
+    getSnapshots: ReturnType<typeof vi.fn>;
+    restoreFromSnapshots: ReturnType<typeof vi.fn>;
+    rewind: ReturnType<typeof vi.fn>;
+  };
   let mockMemoryManager: {
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
@@ -406,6 +413,12 @@ describe('Gemini Client (client.ts)', () => {
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
     });
+    mockFileHistoryService = {
+      makeSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSnapshots: vi.fn().mockReturnValue([]),
+      restoreFromSnapshots: vi.fn(),
+      rewind: vi.fn(),
+    };
 
     // Disable 429 simulation for tests
     setSimulate429(false);
@@ -491,6 +504,7 @@ describe('Gemini Client (client.ts)', () => {
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
@@ -604,6 +618,34 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('re-submits every consecutive trailing user entry', () => {
+      const trailingUsers: Content[] = Array.from(
+        { length: 41 },
+        (_, index) => ({
+          role: 'user',
+          parts: [{ text: `part-${index}` }],
+        }),
+      );
+      client.setHistory([
+        { role: 'model', parts: [{ text: 'waiting' }] },
+        ...trailingUsers,
+      ]);
+      const sendSpy = vi
+        .spyOn(client, 'sendMessageStream')
+        .mockReturnValue(fakeStream);
+      const signal = new AbortController().signal;
+
+      const result = client.continueInterruptedTurn(signal, 'prompt-id-long');
+
+      expect(result.detection.kind).toBe('interrupted_prompt');
+      expect(sendSpy).toHaveBeenCalledWith(
+        trailingUsers.flatMap((entry) => entry.parts ?? []),
+        signal,
+        'prompt-id-long',
+        { type: SendMessageType.Retry },
+      );
+    });
+
     it('closes dangling tool calls with a synthesized ToolResult submission', () => {
       client.setHistory([
         { role: 'user', parts: [{ text: 'run it' }] },
@@ -659,6 +701,68 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
+    });
+
+    it('seeds recently completed tools from resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_read',
+                      name: 'read_file',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_pending',
+                      name: 'write_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
@@ -1724,6 +1828,14 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(client['lastHookMicrocompactionTimestamp']).toBeNull();
+    });
+
+    it('clears recently completed tools', async () => {
+      client.recordCompletedToolCall('read_file');
+
+      await client.resetChat();
+
+      expect(client['recentCompletedToolNames']).toEqual([]);
     });
   });
 
@@ -3748,6 +3860,7 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
       };
       client['chat'] = mockChat as GeminiChat;
+      client.recordCompletedToolCall('mcp__ata__article-list-query');
 
       const stream = client.sendMessageStream(
         [{ text: 'Please answer tersely' }],
@@ -3764,6 +3877,7 @@ hello
         expect.objectContaining({
           config: mockConfig,
           excludedFilePaths: expect.any(Set),
+          recentTools: ['mcp__ata__article-list-query'],
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
@@ -6679,6 +6793,103 @@ Other open files:
           /* consume */
         }
         expect(recordAttributionSnapshot).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('file history snapshot persistence', () => {
+      let recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+      const latestSnapshot: FileHistorySnapshot = {
+        promptId: 'prompt-uq',
+        timestamp: new Date('2026-06-13T00:00:00.000Z'),
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a',
+            version: 1,
+            backupTime: new Date('2026-06-13T00:00:01.000Z'),
+          },
+        },
+      };
+
+      beforeEach(() => {
+        recordFileHistorySnapshot = vi.fn();
+        mockFileHistoryService.makeSnapshot.mockResolvedValue(undefined);
+        mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot,
+          recordUserMessage: vi.fn(),
+          recordCronPrompt: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+      });
+
+      async function collectStream(
+        messageType: SendMessageType,
+        promptId = 'prompt-uq',
+      ): Promise<ServerGeminiStreamEvent[]> {
+        const stream = client.sendMessageStream(
+          [{ text: 'user' }],
+          new AbortController().signal,
+          promptId,
+          { type: messageType },
+        );
+        const chunks: ServerGeminiStreamEvent[] = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      }
+
+      it('calls makeSnapshot for UserQuery turns', async () => {
+        await collectStream(SendMessageType.UserQuery, 'prompt-file-history');
+
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
+          'prompt-file-history',
+        );
+      });
+
+      it('records the latest snapshot after a UserQuery snapshot', async () => {
+        await collectStream(SendMessageType.UserQuery);
+
+        expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
+        await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
+        await collectStream(SendMessageType.Retry, 'prompt-retry');
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('swallows makeSnapshot rejection and still yields content', async () => {
+        mockFileHistoryService.makeSnapshot.mockRejectedValueOnce(
+          new Error('snapshot failed'),
+        );
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
+      });
+
+      it('swallows recordFileHistorySnapshot errors and still yields content', async () => {
+        recordFileHistorySnapshot.mockImplementationOnce(() => {
+          throw new Error('record failed');
+        });
+
+        const chunks = await collectStream(SendMessageType.UserQuery);
+
+        expect(chunks).toContainEqual({
+          type: GeminiEventType.Content,
+          value: 'ok',
+        });
       });
     });
   });

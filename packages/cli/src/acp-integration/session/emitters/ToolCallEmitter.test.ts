@@ -426,12 +426,21 @@ describe('ToolCallEmitter', () => {
       expect(emitter.mapToolKind(Kind.Execute)).toBe('execute');
       expect(emitter.mapToolKind(Kind.Think)).toBe('think');
       expect(emitter.mapToolKind(Kind.Fetch)).toBe('fetch');
+      // Kind.Agent maps to 'other' on the wire: ACP has no 'agent' ToolKind,
+      // so emitting it would be Zod-rejected at the daemon's ACP boundary.
+      expect(emitter.mapToolKind(Kind.Agent)).toBe('other');
       expect(emitter.mapToolKind(Kind.Other)).toBe('other');
     });
 
     it('should map exit_plan_mode tool to switch_mode kind', () => {
       // exit_plan_mode uses Kind.Think internally, but should map to switch_mode per ACP spec
       expect(emitter.mapToolKind(Kind.Think, 'exit_plan_mode')).toBe(
+        'switch_mode',
+      );
+    });
+
+    it('should map enter_plan_mode tool to switch_mode kind', () => {
+      expect(emitter.mapToolKind(Kind.Think, 'enter_plan_mode')).toBe(
         'switch_mode',
       );
     });

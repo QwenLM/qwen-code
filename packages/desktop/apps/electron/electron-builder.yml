@@ -124,6 +124,9 @@ dmg:
 
 win:
   icon: resources/brands/qwen-code/icon.ico
+  # Windows releases are currently unsigned, so keep this update channel unsigned
+  # from the first release. Re-enable only with a planned signed-channel migration.
+  verifyUpdateCodeSignature: false
   target:
     - target: nsis
       arch:

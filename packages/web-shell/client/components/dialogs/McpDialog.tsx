@@ -225,7 +225,25 @@ export function McpDialog({ onClose }: McpDialogProps) {
       setMessage(null);
       restartServer(serverName)
         .then((result) => {
-          if (result.restarted) {
+          if ('entries' in result) {
+            const restartedCount = result.entries.filter(
+              (entry) => entry.restarted,
+            ).length;
+            const failedReasons = result.entries
+              .filter((entry) => !entry.restarted)
+              .map(
+                (entry) => `#${entry.entryIndex}: ${entry.reason ?? 'unknown'}`,
+              )
+              .join(', ');
+            setMessage(
+              t('mcp.restartEntries', {
+                name: result.serverName,
+                restarted: restartedCount,
+                total: result.entries.length,
+                failedReasons,
+              }),
+            );
+          } else if (result.restarted) {
             setMessage(
               t('mcp.restarted', {
                 name: result.serverName,

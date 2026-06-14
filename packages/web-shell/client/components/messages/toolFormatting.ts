@@ -49,14 +49,21 @@ export function truncateText(text: string, max: number): string {
   return text.slice(0, max) + '...';
 }
 
+// The tool-header description is shown single-line (CSS-ellipsised) when the
+// row is collapsed and fully wrapped when it is expanded, so we keep the whole
+// string rather than hard-capping it at a line's worth of characters. A
+// generous ceiling still guards against a pathological multi-megabyte command
+// bloating the DOM.
+const MAX_DESCRIPTION_LENGTH = 2000;
+
 export function getToolDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
 ): string {
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
-  if (fromTitle) return truncateText(fromTitle, 120);
+  if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
-  if (fromArgs) return truncateText(fromArgs, 120);
+  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
   return '';
 }
 
@@ -177,7 +184,7 @@ function getDescriptionFromArgs(
     if (args.description) {
       description += ` (${String(args.description).replace(/\n/g, ' ')})`;
     }
-    return truncateText(description, 120);
+    return truncateText(description, MAX_DESCRIPTION_LENGTH);
   }
   if (name === 'grep_search' || name === 'grep' || name === 'search') {
     const pattern = args.pattern ?? args.query;

@@ -35,10 +35,12 @@ interface ServeArgs {
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
   workspace?: string;
   'require-auth': boolean;
+  'enable-session-shell': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -89,6 +91,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('max-pending-prompts-per-session', {
+        type: 'number',
+        default: 5,
+        description:
+          'Per-session cap on accepted prompts waiting or running. ' +
+          'New prompts beyond this return 503. Set to 0 to disable.',
+      })
       .option('workspace', {
         type: 'string',
         description:
@@ -116,6 +125,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
+      })
+      .option('enable-session-shell', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -277,6 +292,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
+    if (
+      maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
+      (!Number.isFinite(maxPendingPromptsPerSession) ||
+        !Number.isInteger(maxPendingPromptsPerSession) ||
+        maxPendingPromptsPerSession < 0)
+    ) {
+      writeStderrLine(
+        'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).',
+      );
+      process.exit(1);
+    }
     if (mcpClientBudget !== undefined) {
       // Mirror the `--require-auth` breadcrumb: surface the active
       // policy in stderr (journald / docker logs) so operators don't
@@ -383,10 +410,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
+        enableSessionShell: argv['enable-session-shell'],
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,

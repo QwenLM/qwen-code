@@ -905,7 +905,7 @@ export class Query implements AsyncIterable<SDKMessage> {
    * sending a new (synthetic) user message.
    *
    * Use after `resume`-ing a session whose last turn was cut off
-   * (process crash, stream interruption, token limit): the CLI classifies
+   * (process crash, stream interruption): the CLI classifies
    * the interruption from chat history and re-drives the model from where
    * it stopped — an orphaned prompt is re-submitted under the same logical
    * turn, dangling tool calls are closed with synthesized error results.

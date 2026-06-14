@@ -102,16 +102,6 @@ export const forkCommand: SlashCommand = {
       };
     }
 
-    if (!config.isForkSubagentEnabled?.()) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
-        ),
-      };
-    }
-
     // Route through the Agent tool's background path (omitting subagent_type
     // selects the implicit FORK_AGENT). This reuses the full background
     // machinery: registration in the BackgroundTaskRegistry, live activity

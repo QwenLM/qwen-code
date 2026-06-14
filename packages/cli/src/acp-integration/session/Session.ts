@@ -34,6 +34,7 @@ import {
   buildSyntheticToolResponseParts,
   CompressionStatus,
   detectTurnInterruption,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   ORPHAN_TOOL_USE_REPAIR_REASON,
   convertToFunctionResponse,
   createDebugLogger,
@@ -155,6 +156,8 @@ import {
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
+const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -391,15 +394,7 @@ export async function buildAvailableCommandsSnapshot(
 }
 
 /**
- * Session represents an active conversation session with the AI model.
- * It uses modular components for consistent event emission:
- * - HistoryReplayer for replaying past conversations
- * - ToolCallEmitter for tool-related session updates
- * - PlanEmitter for todo/plan updates
- * - SubAgentTracker for tracking sub-agent tool calls
- */
-/**
- * Result of {@link Session.continueTurn} / the `_qwen/session/continue`
+ * Result of {@link Session.continueTurn} / the `qwen/session/continue`
  * vendor method.
  */
 export interface ContinueTurnResponse {
@@ -410,6 +405,14 @@ export interface ContinueTurnResponse {
   interruption: TurnInterruption['kind'];
 }
 
+/**
+ * Session represents an active conversation session with the AI model.
+ * It uses modular components for consistent event emission:
+ * - HistoryReplayer for replaying past conversations
+ * - ToolCallEmitter for tool-related session updates
+ * - PlanEmitter for todo/plan updates
+ * - SubAgentTracker for tracking sub-agent tool calls
+ */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
   /**
@@ -506,6 +509,23 @@ export class Session implements SessionContext {
     return this.sessionId;
   }
 
+  /**
+   * Starts the cron scheduler at session creation. Durable tasks live on
+   * disk; waiting for the end of the first prompt (the in-turn start at
+   * the bottom of prompt()) would leave them invisible to cron_list /
+   * cron_delete for the whole first turn and unfired while the session
+   * idles before any prompt — the TUI equivalent enables durable cron on
+   * mount.
+   */
+  startCronScheduler(): void {
+    // Best-effort: a cron startup failure must not break session creation.
+    this.#startCronSchedulerIfNeeded().catch((error) => {
+      debugLogger.warn(
+        `Cron scheduler startup failed [session ${this.sessionId}]: ${error}`,
+      );
+    });
+  }
+
   getConfig(): Config {
     return this.config;
   }
@@ -545,9 +565,18 @@ export class Session implements SessionContext {
     this.cronProcessing = false;
     this.cronCompletion = null;
 
+    // Stop the scheduler too: after dispose the drain guard drops fired
+    // prompts, but tick() would still mark durable fires (deleting
+    // one-shots from disk without executing them) and the held lock
+    // would block another session from taking over.
+    if (this.config.isCronEnabled()) {
+      this.config.getCronScheduler().stop();
+    }
+
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     clearGoalTerminalObserver(this.sessionId);
   }
 
@@ -733,7 +762,7 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort();
+      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
     }
 
@@ -836,7 +865,8 @@ export class Session implements SessionContext {
     try {
       const result = await this.#executePrompt(params, pendingSend);
       this.pendingPrompt = null;
-      this.#startCronSchedulerIfNeeded();
+      void this.#startCronSchedulerIfNeeded();
+      // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
@@ -944,7 +974,7 @@ export class Session implements SessionContext {
   /**
    * Continue the most recent unfinished turn of this session without
    * appending any new user message to the transcript. Backs the
-   * `_qwen/session/continue` vendor method.
+   * `qwen/session/continue` vendor method.
    *
    * Unlike {@link prompt}, an in-flight turn is NOT aborted: continue only
    * applies to a session whose previous turn already stopped (process
@@ -1012,9 +1042,12 @@ export class Session implements SessionContext {
       try {
         const result = await this.#executeContinue(pendingSend);
         this.pendingPrompt = null;
-        this.#startCronSchedulerIfNeeded();
+        void this.#startCronSchedulerIfNeeded();
         void this.#drainCronQueue();
         void this.#drainNotificationQueue();
+        if (result.resumed) {
+          this.#maybeEmitFollowupSuggestion(result);
+        }
         return result;
       } finally {
         resolveCompletion();
@@ -1049,7 +1082,9 @@ export class Session implements SessionContext {
         this.config.getWorkingDir(),
         async () => {
           const detection = detectTurnInterruption(
-            this.#getCurrentChat().getHistoryTail(1),
+            this.#getCurrentChat().getHistoryTail(
+              TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+            ),
           );
           if (detection.kind === 'none') {
             return {
@@ -1080,7 +1115,6 @@ export class Session implements SessionContext {
 
           let turnCount = 0;
           let continueSendStarted = false;
-          let continuationWasCancelled = false;
           // When we have orphaned entries to restore, `restoreStrippedPromptEntries`
           // below is the single source of truth for re-adding the unsent initial
           // message. Tell the turn loop to skip its own functionResponse-only
@@ -1088,11 +1122,7 @@ export class Session implements SessionContext {
           // to history twice (once by preserve, once by restore).
           const ownsInitialUnsentMessage = strippedPromptEntries.length > 0;
           const restoreStrippedPromptEntries = () => {
-            if (
-              continueSendStarted ||
-              continuationWasCancelled ||
-              strippedPromptEntries.length === 0
-            ) {
+            if (continueSendStarted || strippedPromptEntries.length === 0) {
               return;
             }
             for (const entry of strippedPromptEntries) {
@@ -1115,7 +1145,6 @@ export class Session implements SessionContext {
             );
             const result =
               earlyExit ?? (await this.#finishTurn(pendingSend, promptId));
-            continuationWasCancelled = result.stopReason === 'cancelled';
             return {
               ...result,
               resumed: true,
@@ -1157,198 +1186,240 @@ export class Session implements SessionContext {
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
+        let retrySendStarted = false;
+        let strippedRetryEntries: Content[] = [];
+        const restoreStrippedRetryEntries = () => {
+          if (retrySendStarted || strippedRetryEntries.length === 0) {
+            return;
+          }
+          for (const entry of strippedRetryEntries) {
+            this.#getCurrentChat().addHistory(entry);
+          }
+          strippedRetryEntries = [];
+        };
         // Increment turn counter for each user prompt
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
         const parentContext = extractDaemonTraceContext(params);
 
-        return await withInteractionSpan(
-          this.config,
-          {
-            promptId,
-            model: this.config.getModel(),
-            messageType: 'acp_prompt',
-            ...(parentContext ? { parentContext } : {}),
-          },
-          async () => {
-            // Extract text from all text blocks to construct the full prompt text for logging
-            const promptText = params.prompt
-              .filter((block) => block.type === 'text')
-              .map((block) => (block.type === 'text' ? block.text : ''))
-              .join(' ');
+        try {
+          return await withInteractionSpan(
+            this.config,
+            {
+              promptId,
+              model: this.config.getModel(),
+              messageType: 'acp_prompt',
+              ...(parentContext ? { parentContext } : {}),
+            },
+            async () => {
+              // Extract text from all text blocks to construct the full prompt text for logging
+              const promptText = params.prompt
+                .filter((block) => block.type === 'text')
+                .map((block) => (block.type === 'text' ? block.text : ''))
+                .join(' ');
 
-            // Log user prompt
-            logUserPrompt(
-              this.config,
-              new UserPromptEvent(
-                promptText.length,
-                promptId,
-                this.config.getContentGeneratorConfig()?.authType,
-                promptText,
-              ),
-            );
-
-            // record user message for session management
-            this.config
-              .getChatRecordingService()
-              ?.recordUserMessage(promptText);
-
-            // Check if the input contains a slash command
-            const firstTextBlock = params.prompt.find(
-              (block) => block.type === 'text',
-            );
-            const inputText = firstTextBlock?.text || '';
-
-            let parts: Part[] | null;
-
-            if (isSlashCommand(inputText)) {
-              // Handle slash command in ACP mode using capability-based filtering
-              const slashCommandResult = await handleSlashCommand(
-                inputText,
-                pendingSend,
+              // Log user prompt
+              logUserPrompt(
                 this.config,
-                this.settings,
-              );
-
-              parts = await this.#processSlashCommandResult(
-                slashCommandResult,
-                params.prompt,
-              );
-
-              // If parts is null, the command was fully handled (e.g., /summary completed)
-              // Return early without sending to the model
-              if (parts === null) {
-                return { stopReason: 'end_turn' };
-              }
-            } else {
-              // Normal processing for non-slash commands
-              parts = await this.#resolvePrompt(
-                params.prompt,
-                pendingSend.signal,
-              );
-            }
-
-            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-            const hooksEnabled = !this.config.getDisableAllHooks?.();
-            const messageBus = this.config.getMessageBus?.();
-            if (
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
-              );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
-
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
-                const blockReason =
-                  hookOutput?.getEffectiveReason() || 'No reason provided';
-                await this.messageEmitter.emitAgentMessage(
-                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
-                );
-                return { stopReason: 'end_turn' };
-              }
-
-              // Add additional context from hooks to the request
-              const additionalContext = hookOutput?.getAdditionalContext();
-              if (additionalContext) {
-                parts = [...parts, { text: additionalContext }];
-              }
-            }
-
-            // Snapshot file state before this turn (mirrors the makeSnapshot
-            // block in GeminiClient.sendMessageStream). Placed after
-            // slash-command and hook early-returns so locally handled commands
-            // don't create phantom snapshots that desync the snapshot index.
-            try {
-              const fileHistoryService = this.config.getFileHistoryService();
-              await fileHistoryService.makeSnapshot(promptId);
-              try {
-                const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
-                if (latestSnapshot) {
-                  this.config
-                    .getChatRecordingService()
-                    ?.recordFileHistorySnapshot(latestSnapshot);
-                }
-              } catch (e) {
-                debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-              }
-            } catch (e) {
-              debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
-            }
-
-            // Prepend session-level system reminders (plan mode / subagent /
-            // arena) so the model sees them, matching the behaviour of
-            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
-            // plan mode in ACP has no effect because the model never learns it
-            // should avoid edits.
-            const systemReminders = await this.#buildInitialSystemReminders();
-            if (systemReminders.length > 0) {
-              parts = [...systemReminders, ...parts];
-            }
-
-            // Phase C: one-shot worktree restore notice, set by acpAgent on
-            // --resume / loadSession when the session's worktree is still alive.
-            // Prepended exactly once, then cleared so it doesn't repeat on
-            // subsequent turns.
-            if (this.pendingWorktreeNotice) {
-              parts = [
-                {
-                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-                },
-                ...parts,
-              ];
-              this.pendingWorktreeNotice = null;
-            }
-
-            let turnCount = 0;
-            // conversation_finished must fire on every terminal path of the
-            // turn, so the emission lives in a finally that wraps the whole
-            // turn. Daemon turns run autonomously in all approval modes.
-            try {
-              const earlyExit = await this.#runModelTurnLoop(
-                promptId,
-                { role: 'user', parts },
-                pendingSend,
-                () => {
-                  turnCount++;
-                },
-              );
-              return (
-                earlyExit ?? (await this.#finishTurn(pendingSend, promptId))
-              );
-            } finally {
-              logConversationFinishedEvent(
-                this.config,
-                new ConversationFinishedEvent(
-                  this.config.getApprovalMode(),
-                  turnCount,
+                new UserPromptEvent(
+                  promptText.length,
+                  promptId,
+                  this.config.getContentGeneratorConfig()?.authType,
+                  promptText,
                 ),
               );
-            }
-          },
-          (result: { stopReason: PromptResponse['stopReason'] }) =>
-            result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
-        );
+
+              // Retry: strip orphaned user entries so the model sees a clean
+              // history (no dangling user message from the failed attempt).
+              // Also skip recordUserMessage to avoid duplicating the user
+              // turn in the JSONL transcript.
+              const isRetry =
+                (params as { retry?: boolean }).retry === true ||
+                (params as { _meta?: Record<string, unknown> })._meta?.[
+                  DAEMON_RETRY_META_KEY
+                ] === true;
+              if (isRetry) {
+                strippedRetryEntries =
+                  this.config
+                    .getGeminiClient()!
+                    .stripOrphanedUserEntriesFromHistory() ?? [];
+              } else {
+                // record user message for session management
+                this.config
+                  .getChatRecordingService()
+                  ?.recordUserMessage(promptText);
+              }
+
+              // Check if the input contains a slash command
+              const firstTextBlock = params.prompt.find(
+                (block) => block.type === 'text',
+              );
+              const inputText = firstTextBlock?.text || '';
+
+              let parts: Part[] | null;
+
+              if (isSlashCommand(inputText)) {
+                // Handle slash command in ACP mode using capability-based filtering
+                const slashCommandResult = await handleSlashCommand(
+                  inputText,
+                  pendingSend,
+                  this.config,
+                  this.settings,
+                );
+
+                parts = await this.#processSlashCommandResult(
+                  slashCommandResult,
+                  params.prompt,
+                );
+
+                // If parts is null, the command was fully handled (e.g., /summary completed)
+                // Return early without sending to the model
+                if (parts === null) {
+                  return { stopReason: 'end_turn' };
+                }
+              } else {
+                // Normal processing for non-slash commands
+                parts = await this.#resolvePrompt(
+                  params.prompt,
+                  pendingSend.signal,
+                );
+              }
+
+              // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+              const hooksEnabled = !this.config.getDisableAllHooks?.();
+              const messageBus = this.config.getMessageBus?.();
+              if (
+                hooksEnabled &&
+                messageBus &&
+                this.config.hasHooksForEvent?.('UserPromptSubmit')
+              ) {
+                const response = await messageBus.request<
+                  HookExecutionRequest,
+                  HookExecutionResponse
+                >(
+                  {
+                    type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                    eventName: 'UserPromptSubmit',
+                    input: {
+                      prompt: promptText,
+                    },
+                    signal: pendingSend.signal,
+                  },
+                  MessageBusType.HOOK_EXECUTION_RESPONSE,
+                );
+                const hookOutput = response.output
+                  ? createHookOutput('UserPromptSubmit', response.output)
+                  : undefined;
+
+                if (
+                  hookOutput?.isBlockingDecision() ||
+                  hookOutput?.shouldStopExecution()
+                ) {
+                  // Hook blocked the prompt - send notification to UI and return
+                  const blockReason =
+                    hookOutput?.getEffectiveReason() || 'No reason provided';
+                  await this.messageEmitter.emitAgentMessage(
+                    `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                  );
+                  return { stopReason: 'end_turn' };
+                }
+
+                // Add additional context from hooks to the request
+                const additionalContext = hookOutput?.getAdditionalContext();
+                if (additionalContext) {
+                  parts = [...parts, { text: additionalContext }];
+                }
+              }
+
+              // Snapshot file state before this turn (mirrors the makeSnapshot
+              // block in GeminiClient.sendMessageStream). Placed after
+              // slash-command and hook early-returns so locally handled commands
+              // don't create phantom snapshots that desync the snapshot index.
+              if (!isRetry) {
+                try {
+                  const fileHistoryService =
+                    this.config.getFileHistoryService();
+                  await fileHistoryService.makeSnapshot(promptId);
+                  try {
+                    const latestSnapshot = fileHistoryService
+                      .getSnapshots()
+                      .at(-1);
+                    if (latestSnapshot) {
+                      this.config
+                        .getChatRecordingService()
+                        ?.recordFileHistorySnapshot(latestSnapshot);
+                    }
+                  } catch (e) {
+                    debugLogger.error(
+                      `FileHistory: recordSnapshot failed: ${e}`,
+                    );
+                  }
+                } catch (e) {
+                  debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+                }
+              }
+
+              // Prepend session-level system reminders (plan mode / subagent /
+              // arena) so the model sees them, matching the behaviour of
+              // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+              // plan mode in ACP has no effect because the model never learns it
+              // should avoid edits.
+              const systemReminders = await this.#buildInitialSystemReminders();
+              if (systemReminders.length > 0) {
+                parts = [...systemReminders, ...parts];
+              }
+
+              // Phase C: one-shot worktree restore notice, set by acpAgent on
+              // --resume / loadSession when the session's worktree is still alive.
+              // Prepended exactly once, then cleared so it doesn't repeat on
+              // subsequent turns.
+              if (this.pendingWorktreeNotice) {
+                parts = [
+                  {
+                    text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                  },
+                  ...parts,
+                ];
+                this.pendingWorktreeNotice = null;
+              }
+
+              let turnCount = 0;
+              // conversation_finished must fire on every terminal path of the
+              // turn, so the emission lives in a finally that wraps the whole
+              // turn. Daemon turns run autonomously in all approval modes.
+              try {
+                const earlyExit = await this.#runModelTurnLoop(
+                  promptId,
+                  { role: 'user', parts },
+                  pendingSend,
+                  () => {
+                    turnCount++;
+                  },
+                  () => {
+                    retrySendStarted = true;
+                  },
+                  isRetry && strippedRetryEntries.length > 0,
+                );
+                return (
+                  earlyExit ?? (await this.#finishTurn(pendingSend, promptId))
+                );
+              } finally {
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    turnCount,
+                  ),
+                );
+              }
+            },
+            (result: { stopReason: PromptResponse['stopReason'] }) =>
+              result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
+          );
+        } finally {
+          restoreStrippedRetryEntries();
+        }
       },
     );
   }
@@ -1376,7 +1447,9 @@ export class Session implements SessionContext {
     while (nextMessage !== null) {
       onIteration?.();
       if (pendingSend.signal.aborted) {
-        this.#getCurrentChat().addHistory(nextMessage);
+        if (!(ownsInitialUnsentMessage && isInitialMessage)) {
+          this.#getCurrentChat().addHistory(nextMessage);
+        }
         return { stopReason: 'cancelled' };
       }
 
@@ -1392,11 +1465,11 @@ export class Session implements SessionContext {
         );
         if (!sendResult.responseStream) {
           const wasCancelled = sendResult.stopReason === 'cancelled';
-          // Skip preservation only when the caller owns restoring this exact
-          // message AND the skip wasn't a cancellation. The cancelled branch
-          // re-adds the full message here and the caller's restore stays out
-          // (it guards on cancelled), so it must still run for cancellations.
-          if (!(ownsInitialUnsentMessage && isInitialMessage && !wasCancelled)) {
+          // If the continue path already stripped the initial orphaned entries,
+          // it restores those originals itself until a send really starts.
+          // That keeps max-token and pre-send cancellation exits from writing
+          // a merged replacement or duplicating functionResponse-only turns.
+          if (!(ownsInitialUnsentMessage && isInitialMessage)) {
             this.#preserveUnsentMessageHistory(nextMessage, wasCancelled);
           }
           return { stopReason: sendResult.stopReason };
@@ -1439,6 +1512,17 @@ export class Session implements SessionContext {
           }
         }
       } catch (error) {
+        // Only explicit user cancellation maps to a normal cancelled turn.
+        // Other aborts/errors should surface so infra failures are not hidden
+        // as successful cancels.
+        if (
+          pendingSend.signal.aborted &&
+          pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+          (this.#isAbortError(error) || error === USER_CANCEL_ABORT_REASON)
+        ) {
+          return { stopReason: 'cancelled' };
+        }
+
         // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
         const errorStatus = getErrorStatus(error);
         const errorMessage =
@@ -2115,11 +2199,33 @@ export class Session implements SessionContext {
    * The scheduler runs in the background, pushing fired prompts into
    * `cronQueue` and triggering `#drainCronQueue`.
    */
-  #startCronSchedulerIfNeeded(): void {
+  async #startCronSchedulerIfNeeded(): Promise<void> {
+    if (this.disposed) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
-    if (scheduler.size === 0) return;
+
+    // Enable durable cron support (loads tasks from disk, acquires lock).
+    // Awaited: on a fresh session the only jobs may live on disk, and
+    // checking for work before the load completes would skip start() and
+    // leave durable jobs dormant until the next prompt. Missed one-shots
+    // are delivered as late fires through the start() callback below.
+    // Durable tasks live under ~/.qwen (user-owned, not in the working
+    // tree), so no folder-trust gate is needed here.
+    try {
+      await scheduler.enableDurable(this.sessionId);
+    } catch (err) {
+      // Durable support is best-effort; session-only jobs still run.
+      debugLogger.warn(
+        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+      );
+    }
+
+    // dispose() may have run while the durable load was in flight; its
+    // stop() already tore the scheduler down — don't restart the tick.
+    if (this.disposed) return;
+
+    if (!scheduler.hasPendingWork) return;
 
     scheduler.start((job: { prompt: string }) => {
       if (this.cronDisabledByTokenLimit) return;
@@ -2158,10 +2264,13 @@ export class Session implements SessionContext {
 
       void this.#drainNotificationQueue();
 
-      // Stop scheduler if all jobs were deleted during execution
+      // Stop scheduler if all jobs were deleted during execution. With
+      // durable mode active hasPendingWork stays true even at zero
+      // in-memory jobs — the file watcher / lock takeover can still
+      // install tasks persisted by other sessions.
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
-        if (scheduler.size === 0) {
+        if (!scheduler.hasPendingWork) {
           scheduler.stop();
         }
       }
@@ -2387,6 +2496,31 @@ export class Session implements SessionContext {
         kind: 'shell',
       });
     });
+
+    // Session title recorded (auto-generated after a turn, or an in-process
+    // /rename) → notify attached clients. A title update is NOT an ACP
+    // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
+    // would reject an unknown kind at validation), so — like
+    // `current_model_update` above — it goes over the agent→bridge
+    // `extNotification` side-channel. The bridge demuxes it into the
+    // canonical `session_metadata_updated` bus event so HTTP clients can
+    // refresh their session list immediately instead of discovering the
+    // new title on their next poll.
+    this.config
+      .getChatRecordingService()
+      ?.setTitleRecordedCallback((customTitle, titleSource) => {
+        void this.client
+          .extNotification('qwen/notify/session/title-update', {
+            v: 1,
+            sessionId: this.sessionId,
+            title: customTitle,
+            titleSource,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the title
+            // until the client's next session-list refresh.
+          });
+      });
   }
 
   #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
@@ -3111,6 +3245,7 @@ export class Session implements SessionContext {
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
+        const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
 
         // Track cleanup functions for sub-agent event listeners
         let subAgentCleanupFunctions: Array<() => void> = [];
@@ -3345,6 +3480,7 @@ export class Session implements SessionContext {
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
                 confirmationDetails,
+                isEnterPlanModeTool,
               )
             ) {
               return earlyErrorResponse(
@@ -3598,6 +3734,23 @@ export class Session implements SessionContext {
 
           // Clean up event listeners
           subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          // enter_plan_mode and the AUTO/YOLO gate path of exit_plan_mode change the
+          // approval mode inside execute() without going through the user-confirmation
+          // branch above, so notify the client of the current mode explicitly.
+          // Only send when the mode actually changed (a gate "blocked" result keeps
+          // the mode at PLAN, and a redundant notification would be misleading).
+          if (
+            (isEnterPlanModeTool || isExitPlanModeTool) &&
+            !didRequestPermission &&
+            !toolResult.error &&
+            this.config.getApprovalMode() !== approvalMode
+          ) {
+            await this.sendUpdate({
+              sessionUpdate: 'current_mode_update',
+              currentModeId: this.config.getApprovalMode() as ApprovalModeValue,
+            });
+          }
 
           // Create response parts first (needed for emitResult and recordToolResult)
           const responseParts = convertToFunctionResponse(

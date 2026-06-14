@@ -80,6 +80,33 @@ describe('WorkflowTool', () => {
     expect(JSON.parse(llmText)).toEqual(['T:a', 'T:b']);
   });
 
+  // P3 (PR #5xxx): schema mode end-to-end through WorkflowTool. The
+  // dispatch returns the validated structured payload as an object; the
+  // sandbox revives it per-call into the vm realm; the script reads it
+  // as a vm-realm object; safeStringifyResult JSON-stringifies it for the
+  // LLM. A regression in any layer of that chain would surface here.
+  it('execute() runs agent({schema}) end-to-end and returns the revived object', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async (prompt, opts) => {
+        if (opts.schema !== undefined) {
+          return { extracted: prompt.toUpperCase(), confidence: 0.9 };
+        }
+        return prompt;
+      },
+    });
+    const invocation = tool.build({
+      script:
+        'const r = await agent("hello", { schema: { type: "object", properties: { extracted: { type: "string" } } } }); return r;',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
+    expect(JSON.parse(llmText)).toEqual({
+      extracted: 'HELLO',
+      confidence: 0.9,
+    });
+  });
+
   // PR #4947 R2 T8 (qwen-code-ci-bot): pipeline() through WorkflowTool
   // exercises a vm wrapper path that is structurally distinct from parallel's
   // single-argument call — pipeline uses `callPipeline.apply(null, arguments)`

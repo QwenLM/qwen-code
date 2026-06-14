@@ -1323,9 +1323,9 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
-  it('runs Race A dedup BEFORE the isResponding early-return (regression guard)', async () => {
+  it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
-    // ABOVE the `if (isResponding) return;` early-return: the scheduler's
+    // ABOVE the active-stream early-return: the scheduler's
     // `onAllToolCallsComplete` is single-shot per batch, so if the dedup
     // sat below the guard a tool whose result was already paired in
     // history would be left in `completed-but-not-submitted` forever
@@ -1472,8 +1472,8 @@ describe('useGeminiStream', () => {
     });
 
     // The dedup MUST still fire — markToolsAsSubmitted called with the
-    // deduped callId — even though the early-return on isResponding
-    // would otherwise skip every later branch.
+    // deduped callId — even though the active-stream guard would
+    // otherwise skip every later branch.
     await waitFor(() => {
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
         'call_race_A_responding',
@@ -1486,6 +1486,238 @@ describe('useGeminiStream', () => {
 
     // Release the held stream so the test exits cleanly.
     releaseStream();
+  });
+
+  it('submits a fast tool result after the stream ended but before React replaces the callback', async () => {
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_fast_after_stream',
+          name: 'read_file',
+          response: { error: 'ENOENT: missing file' },
+        },
+      },
+    ];
+    const fastFailedTool = {
+      request: {
+        callId: 'call_fast_after_stream',
+        name: 'read_file',
+        args: { path: '/tmp/missing.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-fast-after-stream',
+      },
+      status: 'error',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_fast_after_stream',
+        responseParts,
+        resultDisplay: undefined,
+        error: new Error('ENOENT: missing file'),
+        errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/missing.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    let releaseStream!: () => void;
+    const holdStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    // eslint-disable-next-line require-yield
+    const heldStream = (async function* () {
+      await holdStream;
+    })();
+    mockSendMessageStream.mockReturnValue(heldStream);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let submitPromise: Promise<unknown> | undefined;
+    act(() => {
+      submitPromise = result.current.submitQuery('edit the missing file');
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Save the callback from the render where React state still says
+    // "responding". The scheduler can call this stale closure if a tool
+    // finishes immediately after the stream returns.
+    const staleOnComplete = capturedOnComplete;
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    releaseStream();
+    await act(async () => {
+      await submitPromise;
+    });
+
+    const staleCompletedOnComplete = staleOnComplete as
+      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | null;
+    await act(async () => {
+      await staleCompletedOnComplete?.([fastFailedTool]);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(mockSendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      responseParts,
+      expect.any(AbortSignal),
+      'prompt-fast-after-stream',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+      'call_fast_after_stream',
+    ]);
+  });
+
+  it('drops a fast tool result after cancellation even if the stale callback runs later', async () => {
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_fast_after_cancel',
+          name: 'read_file',
+          response: { output: 'secret file contents' },
+        },
+      },
+    ];
+    const fastToolAfterCancel = {
+      request: {
+        callId: 'call_fast_after_cancel',
+        name: 'read_file',
+        args: { path: '/tmp/secret.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-fast-after-cancel',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_fast_after_cancel',
+        responseParts,
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/secret.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    let capturedOnComplete:
+      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    let releaseStream!: () => void;
+    const holdStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    // eslint-disable-next-line require-yield
+    const heldStream = (async function* () {
+      await holdStream;
+    })();
+    mockSendMessageStream.mockReturnValue(heldStream);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let submitPromise: Promise<unknown> | undefined;
+    act(() => {
+      submitPromise = result.current.submitQuery('read the file');
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const staleOnComplete = capturedOnComplete;
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    releaseStream();
+    await act(async () => {
+      await submitPromise;
+    });
+
+    await act(async () => {
+      await staleOnComplete?.([fastToolAfterCancel]);
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+      'call_fast_after_cancel',
+    ]);
   });
 
   it('handles a mixed batch (one deduped + one non-deduped) without double-counting telemetry', async () => {
@@ -4681,6 +4913,77 @@ describe('useGeminiStream', () => {
 
       // Verify state is reset to idle
       expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should drop queued tool calls when user cancels the turn', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call_cancelled',
+              name: 'write_file',
+              args: { path: 'cancelled.txt' },
+            },
+          };
+          yield { type: ServerGeminiEventType.UserCancelled };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('cancel before tool dispatch');
+      });
+
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    });
+
+    it('should not dispatch queued tool calls after the request is aborted', async () => {
+      let resolveStream!: () => void;
+      let toolCallQueued!: () => void;
+
+      const streamCanFinish = new Promise<void>((resolve) => {
+        resolveStream = resolve;
+      });
+      const toolCallWasQueued = new Promise<void>((resolve) => {
+        toolCallQueued = resolve;
+      });
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call_aborted',
+              name: 'write_file',
+              args: { path: 'aborted.txt' },
+            },
+          };
+          toolCallQueued();
+          await streamCanFinish;
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      let submitPromise!: Promise<void>;
+      await act(async () => {
+        submitPromise = result.current.submitQuery(
+          'abort before tool dispatch',
+        );
+      });
+
+      await toolCallWasQueued;
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      resolveStream();
+      await submitPromise;
+
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
     });
 
     it('should reset thought to null when there is an error', async () => {

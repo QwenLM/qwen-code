@@ -384,6 +384,158 @@ describe('BridgeClient — BridgeFileSystem injection seam (F1 step 5)', () => {
   });
 });
 
+describe('BridgeClient — A2UI session update publishing', () => {
+  it('publishes per-surface a2ui frames before the sanitized original frame', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const fakeEntry = {
+      sessionId: 'sess:a2ui',
+      activePromptOriginatorClientId: 'client-1',
+      events: { publish },
+    };
+    const noPermissionFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === 'sess:a2ui' ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const rawText =
+      '[{"version":"v0.9","createSurface":{"surfaceId":"s1","components":[]}},' +
+      '{"version":"v0.9","updateComponents":{"surfaceId":"s1","components":[]}},' +
+      '{"version":"v0.9","updateDataModel":{"surfaceId":"s2","path":"/","value":1}}]\n' +
+      'rendered fallback';
+
+    await client.sessionUpdate({
+      sessionId: 'sess:a2ui',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        _meta: { serverId: 'a2ui-ui', toolName: 'present_choices' },
+        content: [
+          { type: 'content', content: { type: 'text', text: rawText } },
+        ],
+        rawOutput: rawText,
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    type PublishedFrame = {
+      type: string;
+      originatorClientId?: string;
+      data: {
+        sessionId: string;
+        update: {
+          sessionUpdate: string;
+          a2ui?: {
+            surfaceId: string;
+            callId?: string;
+            commands: unknown[];
+          };
+          content?: Array<{ content: { text: string } }>;
+          rawOutput?: string;
+          _meta?: { source?: string };
+        };
+      };
+    };
+    const published = publish.mock.calls.map(
+      ([frame]) => frame as PublishedFrame,
+    );
+
+    expect(published).toHaveLength(3);
+    expect(published[0]).toMatchObject({
+      type: 'session_update',
+      originatorClientId: 'client-1',
+      data: {
+        sessionId: 'sess:a2ui',
+        update: {
+          sessionUpdate: 'a2ui',
+          a2ui: {
+            surfaceId: 's1',
+            callId: 'call-1',
+          },
+          _meta: { source: 'a2ui-bridge' },
+        },
+      },
+    });
+    expect(published[0].data.update.a2ui?.commands).toHaveLength(2);
+    expect(published[1].data.update.a2ui).toMatchObject({
+      surfaceId: 's2',
+      callId: 'call-1',
+    });
+    expect(published[1].data.update.a2ui?.commands).toHaveLength(1);
+    expect(published[2].originatorClientId).toBe('client-1');
+    expect(published[2].data.update.content?.[0].content.text).toBe(
+      'rendered fallback',
+    );
+    expect(published[2].data.update.rawOutput).toBe('rendered fallback');
+    expect(JSON.stringify(published[2].data.update)).not.toContain(
+      'createSurface',
+    );
+  });
+});
+
+describe('BridgeClient — original timestamp preservation', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function makeClientFor(sessionId: string, publish: ReturnType<typeof vi.fn>) {
+    const fakeEntry = { sessionId, events: { publish } };
+    return new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+  }
+
+  it('lifts a replayed update._meta.timestamp to the envelope serverTimestamp', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const client = makeClientFor('sess:replay', publish);
+    // A previous-day epoch — must survive to the envelope so EventBus does not
+    // overwrite it with publish-time Date.now().
+    const original = 1_700_000_000_000;
+
+    await client.sessionUpdate({
+      sessionId: 'sess:replay',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hi' },
+        _meta: { timestamp: original },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    const frame = publish.mock.calls[0][0] as {
+      _meta?: { serverTimestamp?: number };
+    };
+    expect(frame._meta?.serverTimestamp).toBe(original);
+  });
+
+  it('passes no envelope _meta for live updates without a timestamp', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const client = makeClientFor('sess:live', publish);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:live',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'yo' },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    const frame = publish.mock.calls[0][0] as {
+      _meta?: { serverTimestamp?: number };
+    };
+    // No envelope _meta → EventBus.publish applies its own Date.now() fallback.
+    expect(frame._meta).toBeUndefined();
+  });
+});
+
 /**
  * Wenshao review #4335 / 3271978365 — `requestPermission`'s pre-publish
  * `CancelSentinelCollisionError` guard prevents an orphan SSE

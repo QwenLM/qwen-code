@@ -1980,7 +1980,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.',
+          "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
         showInDialog: false,
         properties: {
           enabled: {
@@ -1990,7 +1990,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.',
+              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.',
             showInDialog: true,
           },
         },
