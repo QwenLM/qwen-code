@@ -203,6 +203,13 @@ export interface AgentParams {
 
 const debugLogger = createDebugLogger('AGENT');
 
+const TEAM_AGENT_NAME_PROPERTY = {
+  type: 'string',
+  description:
+    'When provided, spawn as a named teammate via the active team ' +
+    'instead of a one-shot subagent. Requires an active team context.',
+};
+
 /**
  * Maps ApprovalMode to PermissionMode for hook events.
  */
@@ -540,12 +547,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
-        name: {
-          type: 'string',
-          description:
-            'When provided, spawn as a named teammate via the active team ' +
-            'instead of a one-shot subagent. Requires an active team context.',
-        },
+        ...(config.isAgentTeamEnabled()
+          ? { name: TEAM_AGENT_NAME_PROPERTY }
+          : {}),
         isolation: {
           type: 'string',
           enum: ['worktree'],
@@ -725,6 +729,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         subagent_type?: {
           enum?: string[];
         };
+        name?: typeof TEAM_AGENT_NAME_PROPERTY;
       };
     };
     if (schema.properties && schema.properties.subagent_type) {
@@ -732,6 +737,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         schema.properties.subagent_type.enum = subagentNames;
       } else {
         delete schema.properties.subagent_type.enum;
+      }
+    }
+    if (schema.properties) {
+      if (this.config.isAgentTeamEnabled()) {
+        schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
+      } else {
+        delete schema.properties.name;
       }
     }
   }
@@ -1630,29 +1642,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     // ─── Team routing ────────────────────────────────────
-    // When a team is active AND the caller passed an explicit
-    // `name`, route through TeamManager as a named teammate.
-    // Without a name we fall through to the regular one-shot
-    // subagent flow — the schema says "When provided, spawn as
-    // a named teammate," so the absence of `name` means the
-    // caller wants a one-shot, not a teammate.
+    // A name only means "spawn a teammate" while a team is active. Older
+    // prompts may still pass it without a team; treat that as a normal
+    // one-shot agent instead of failing the whole task.
     if (this.params.name && !isTeammate()) {
-      // The schema for `name` says it requires an active team,
-      // so reject the call up front instead of silently launching
-      // a different kind of agent (one-shot subagent) that
-      // ignores the supplied name.
       if (!this.config.getTeamManager()) {
-        const msg =
-          `Cannot spawn teammate "${this.params.name}": no active team. ` +
-          `Use team_create to start a team first, or omit "name" to ` +
-          `launch a one-shot subagent.`;
-        return {
-          llmContent: msg,
-          returnDisplay: msg,
-          error: { message: msg },
-        };
+        debugLogger.debug(
+          `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
+        );
+      } else {
+        return this.executeTeammate(this.params.name, signal, updateOutput);
       }
-      return this.executeTeammate(this.params.name, signal, updateOutput);
     }
 
     // ── Isolation state hoisted to the outermost scope ────────────
