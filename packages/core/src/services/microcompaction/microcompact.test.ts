@@ -431,8 +431,16 @@ describe('microcompactHistory', () => {
       toolResultsTotalCharsThreshold: 500_000,
     });
 
-    expect(result.meta).toBeUndefined();
     expect(result.history).toBe(history);
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolResultCharsBefore: 800_000,
+      toolResultCharsAfter: 800_000,
+      toolResultsTotalCharsThreshold: 500_000,
+      toolsCleared: 0,
+      toolsKept: 2,
+      tokensSaved: 0,
+    });
   });
 
   it('does not clear media or non-compactable tool results for size overages', () => {

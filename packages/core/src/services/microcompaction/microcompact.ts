@@ -358,10 +358,6 @@ function planSizeBasedClearing(
     remainingChars -= chars;
   }
 
-  if (clearRefs.length === 0) {
-    return null;
-  }
-
   return {
     clearRefs,
     toolRefs: tool,
@@ -497,96 +493,99 @@ export function microcompactHistory(
     toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
   }
 
-  if (clearRefs.length === 0) {
+  if (clearRefs.length === 0 && triggerReason !== 'size') {
     return { history };
   }
 
-  const clearMap = buildClearMap(clearRefs);
-
-  const callIdToFilePath = buildCallIdToFilePath(history);
   const evictedReadPaths = new Set<string>();
   let unresolvedEvictedReads = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
   let mediaCleared = 0;
+  let result = history;
 
-  const result: Content[] = history.map((content, ci) => {
-    const partsToClean = clearMap.get(ci);
-    if (!partsToClean || !content.parts) return content;
+  if (clearRefs.length > 0) {
+    const clearMap = buildClearMap(clearRefs);
+    const callIdToFilePath = buildCallIdToFilePath(history);
 
-    let touched = false;
-    const newParts = content.parts.map((part, pi) => {
-      const kind = partsToClean.get(pi);
-      if (kind === undefined) return part;
-      if (isAlreadyCleared(part)) return part;
+    result = history.map((content, ci) => {
+      const partsToClean = clearMap.get(ci);
+      if (!partsToClean || !content.parts) return content;
 
-      if (
-        kind === 'tool' &&
-        part.functionResponse?.name &&
-        COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
-        !isErrorResponse(part)
-      ) {
-        tokensSaved += estimatePartTokens(part);
-        toolsCleared++;
-        touched = true;
-        // Record the blanked file's path so the caller disarms its
-        // fast-path; if unrecoverable, count it so the caller falls
-        // back to the blanket wipe (issue #4239).
-        if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-          const filePaths = part.functionResponse.id
-            ? callIdToFilePath.get(part.functionResponse.id)
-            : undefined;
-          if (filePaths && filePaths.length > 0) {
-            for (const p of filePaths) evictedReadPaths.add(p);
-          } else {
-            unresolvedEvictedReads++;
+      let touched = false;
+      const newParts = content.parts.map((part, pi) => {
+        const kind = partsToClean.get(pi);
+        if (kind === undefined) return part;
+        if (isAlreadyCleared(part)) return part;
+
+        if (
+          kind === 'tool' &&
+          part.functionResponse?.name &&
+          COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
+          !isErrorResponse(part)
+        ) {
+          tokensSaved += estimatePartTokens(part);
+          toolsCleared++;
+          touched = true;
+          // Record the blanked file's path so the caller disarms its
+          // fast-path; if unrecoverable, count it so the caller falls
+          // back to the blanket wipe (issue #4239).
+          if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
+            const filePaths = part.functionResponse.id
+              ? callIdToFilePath.get(part.functionResponse.id)
+              : undefined;
+            if (filePaths && filePaths.length > 0) {
+              for (const p of filePaths) evictedReadPaths.add(p);
+            } else {
+              unresolvedEvictedReads++;
+            }
           }
+          return {
+            functionResponse: {
+              ...stripNestedMedia(part.functionResponse),
+              response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+            },
+          };
         }
-        return {
-          functionResponse: {
-            ...stripNestedMedia(part.functionResponse),
-            response: { output: MICROCOMPACT_CLEARED_MESSAGE },
-          },
-        };
-      }
 
-      if (
-        kind === 'nested-media' &&
-        part.functionResponse &&
-        !isErrorResponse(part)
-      ) {
-        // Non-compactable tool result: keep response.output, drop only
-        // the nested media on functionResponse.parts.
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          functionResponse: stripNestedMedia(part.functionResponse),
-        };
-      }
+        if (
+          kind === 'nested-media' &&
+          part.functionResponse &&
+          !isErrorResponse(part)
+        ) {
+          // Non-compactable tool result: keep response.output, drop only
+          // the nested media on functionResponse.parts.
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            functionResponse: stripNestedMedia(part.functionResponse),
+          };
+        }
 
-      if (kind === 'media' && (part.inlineData || part.fileData)) {
-        const mime =
-          part.inlineData?.mimeType ??
-          part.fileData?.mimeType ??
-          'application/octet-stream';
-        tokensSaved += estimatePartTokens(part);
-        mediaCleared++;
-        touched = true;
-        return {
-          text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
-        };
-      }
+        if (kind === 'media' && (part.inlineData || part.fileData)) {
+          const mime =
+            part.inlineData?.mimeType ??
+            part.fileData?.mimeType ??
+            'application/octet-stream';
+          tokensSaved += estimatePartTokens(part);
+          mediaCleared++;
+          touched = true;
+          return {
+            text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
+          };
+        }
 
-      return part;
+        return part;
+      });
+
+      if (!touched) return content;
+      return { ...content, parts: newParts };
     });
+  }
 
-    if (!touched) return content;
-    return { ...content, parts: newParts };
-  });
-
-  if (tokensSaved === 0) {
+  if (tokensSaved === 0 && triggerReason !== 'size') {
     return { history };
   }
 

@@ -1585,8 +1585,11 @@ export class GeminiClient {
       }
 
       const m = mcResult.meta;
-      this.getChat().setHistory(mcResult.history);
-      await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+      const changed = m.tokensSaved > 0;
+      if (changed) {
+        this.getChat().setHistory(mcResult.history);
+        await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+      }
       if (m.triggerReason === 'size') {
         const pendingNote =
           m.pendingToolResultChars && m.pendingToolResultChars > 0
@@ -1606,7 +1609,7 @@ export class GeminiClient {
             `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
         );
       }
-      return true;
+      return changed;
     } catch (err) {
       debugLogger.error(
         `[MICROCOMPACTION] microcompactHistory failed: ${err instanceof Error ? err.message : String(err)}`,
