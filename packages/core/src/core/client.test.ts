@@ -6775,6 +6775,25 @@ Other open files:
       );
     });
 
+    it('forwards configured retryErrorCodes to retryWithBackoff', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        retryErrorCodes: [4999],
+      } as unknown as ContentGeneratorConfig);
+
+      await client.generateContent(
+        [{ role: 'user', parts: [{ text: 'hi' }] }],
+        {},
+        new AbortController().signal,
+        client['config'].getModel(),
+      );
+
+      expect(retryWithBackoff).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.objectContaining({ extraRetryErrorCodes: [4999] }),
+      );
+    });
+
     it('should use current model from config for content generation', async () => {
       const initialModel = client['config'].getModel();
       const contents = [{ role: 'user', parts: [{ text: 'test' }] }];

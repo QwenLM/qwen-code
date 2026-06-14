@@ -27,6 +27,7 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
@@ -1979,51 +1980,68 @@ export class GeminiChat {
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
-            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
-              popPartialIfPushed();
-              rateLimitRetryCount++;
-              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
-                ...RATE_LIMIT_RETRY_OPTIONS,
-                error,
-              });
-              const message = parseAndFormatApiError(
-                error instanceof Error ? error.message : String(error),
-              );
+            if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
-              debugLogger.warn('Rate limit retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                retryDelayMs: delayMs,
-                ...details,
+              const classification = classifyRetryError(error, {
+                authType: cgConfig?.authType,
+                extraRetryErrorCodes,
               });
-              const { promise: delayPromise, skip } = delay(
-                delayMs,
-                params.config?.abortSignal,
-              );
-              yield {
-                type: StreamEventType.RETRY,
-                retryInfo: {
-                  message,
+              // The classifier is observation-only here; stream retry control
+              // remains governed by isRateLimitError and the retry budget.
+              const diagnosticFields = {
+                classificationDiagnosis: classification.diagnosis,
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
+                ...details,
+              };
+
+              if (rateLimitRetryCount < maxRateLimitRetries) {
+                // Discard any partial assistant turn from the failed attempt
+                // before scheduling the retry, so a stale partial does not leak
+                // into history or the JSONL transcript.
+                popPartialIfPushed();
+                rateLimitRetryCount++;
+                const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                  ...RATE_LIMIT_RETRY_OPTIONS,
+                  error,
+                });
+                const message = parseAndFormatApiError(
+                  error instanceof Error ? error.message : String(error),
+                );
+                debugLogger.warn('Rate limit retry scheduled', {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
                   attempt: rateLimitRetryCount,
                   maxRetries: maxRateLimitRetries,
+                  retryDelayMs: delayMs,
+                  ...diagnosticFields,
+                });
+                const { promise: delayPromise, skip } = delay(
                   delayMs,
-                  skipDelay: skip,
-                },
-              };
-              // Don't count rate-limit retries against the content retry limit
-              attempt--;
-              await delayPromise;
-              continue;
-            }
-            if (isRateLimit) {
+                  params.config?.abortSignal,
+                );
+                yield {
+                  type: StreamEventType.RETRY,
+                  retryInfo: {
+                    message,
+                    attempt: rateLimitRetryCount,
+                    maxRetries: maxRateLimitRetries,
+                    delayMs,
+                    skipDelay: skip,
+                  },
+                };
+                // Don't count rate-limit retries against the content retry limit
+                attempt--;
+                await delayPromise;
+                continue;
+              }
+
               debugLogger.warn('Rate limit retry exhausted', {
                 retryPath: 'stream',
                 retryDecision: 'exhausted',
                 attempts: rateLimitRetryCount,
                 maxRetries: maxRateLimitRetries,
-                ...getRateLimitErrorDetails(error),
+                ...diagnosticFields,
               });
             }
 
@@ -2434,6 +2452,8 @@ export class GeminiChat {
         },
         prompt_id,
       );
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -2446,9 +2466,15 @@ export class GeminiChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
+        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
+        // predicate does not silently drop them — the default path checks these
+        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
+        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
+
         return false;
       },
-      authType: this.config.getContentGeneratorConfig()?.authType,
+      authType: cgConfig?.authType,
+      extraRetryErrorCodes,
       persistentMode: isUnattendedMode(),
       signal: params.config?.abortSignal,
       heartbeatFn: (info) => {

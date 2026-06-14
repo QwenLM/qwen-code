@@ -9,6 +9,9 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
+import { isRateLimitError } from './rateLimit.js';
+import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
+import { classifyRetryError } from './retryErrorClassification.js';
 import { retryContext } from './retryContext.js';
 
 const debugLogger = createDebugLogger('RETRY');
@@ -51,6 +54,7 @@ export interface RetryOptions {
   shouldRetryOnError: (error: Error) => boolean;
   shouldRetryOnContent?: (content: GenerateContentResponse) => boolean;
   authType?: string;
+  extraRetryErrorCodes?: readonly number[];
   // Persistent retry mode options
   persistentMode?: boolean;
   persistentMaxBackoffMs?: number;
@@ -92,11 +96,27 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
  * @param error The error object.
  * @returns True if the error is a transient error, false otherwise.
  */
-function defaultShouldRetry(error: Error | unknown): boolean {
+function defaultShouldRetry(
+  error: Error | unknown,
+  extraRetryErrorCodes?: readonly number[],
+): boolean {
   const status = getErrorStatus(error);
+  // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
+  // so an explicit `status === 429` check here would be redundant.
   return (
-    status === 429 || (status !== undefined && status >= 500 && status < 600)
+    isRateLimitError(error, extraRetryErrorCodes) ||
+    (status !== undefined && status >= 500 && status < 600)
   );
+}
+
+/**
+ * Statuses that may carry a provider-directed `Retry-After` header. 429 (Too
+ * Many Requests) and 503 (Service Unavailable) both commonly include it per
+ * RFC 7231, and the stream-side path already honors both — the HTTP path stays
+ * consistent by parsing Retry-After for the same set.
+ */
+function hasRetryAfterStatus(status?: number): boolean {
+  return status === 429 || status === 503;
 }
 
 /**
@@ -123,10 +143,35 @@ export function isUnattendedMode(): boolean {
 /**
  * Delays execution for a specified number of milliseconds.
  * @param ms The number of milliseconds to delay.
+ * @param signal Optional signal used to abort the delay.
  * @returns A promise that resolves after the delay.
  */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('Retry aborted by signal'));
+    }
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+    function onAbort() {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Retry aborted by signal'));
+    }
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Re-check after listener registration to close the TOCTOU race window.
+    if (signal?.aborted) {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Retry aborted by signal'));
+    }
+  });
 }
 
 /**
@@ -151,7 +196,7 @@ async function sleepWithHeartbeat(
     }
 
     const chunk = Math.max(1, Math.min(remaining, ctx.heartbeatInterval));
-    await delay(chunk);
+    await delay(chunk, ctx.signal);
     remaining -= chunk;
 
     if (remaining > 0 && ctx.heartbeatFn) {
@@ -190,6 +235,7 @@ export async function retryWithBackoff<T>(
     initialDelayMs,
     maxDelayMs,
     authType,
+    extraRetryErrorCodes,
     shouldRetryOnError,
     shouldRetryOnContent,
     persistentMode,
@@ -203,6 +249,8 @@ export async function retryWithBackoff<T>(
     ...DEFAULT_RETRY_OPTIONS,
     ...cleanOptions,
   };
+  const hasCustomShouldRetryOnError =
+    typeof options?.shouldRetryOnError === 'function';
 
   const persistent = persistentMode ?? false;
   const maxBackoff = persistentMaxBackoffMs ?? PERSISTENT_MAX_BACKOFF_MS;
@@ -222,6 +270,12 @@ export async function retryWithBackoff<T>(
   let iterationCount = 0;
   let retryTotalDelayMs = 0;
 
+  // Tracks the most recent response that failed `shouldRetryOnContent`, so that
+  // when content retries exhaust the attempt budget we can return that
+  // best-effort result (with its real content) instead of a context-free error.
+  let lastContentResult: T | undefined;
+  let hadContentRetry = false;
+
   while (attempt < maxAttempts) {
     attempt++;
     iterationCount++;
@@ -236,15 +290,27 @@ export async function retryWithBackoff<T>(
         shouldRetryOnContent &&
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
-        const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-        const delayWithJitter = Math.max(0, currentDelay + jitter);
-        await delay(delayWithJitter);
+        lastContentResult = result;
+        hadContentRetry = true;
+        const delayMs = getRetryDelayMs({
+          // attempt: 1 — currentDelay already tracks exponential growth;
+          // getRetryDelayMs is called here only for jitter calculation.
+          attempt: 1,
+          initialDelayMs: currentDelay,
+          maxDelayMs,
+          jitterRatio: 0.3,
+        });
+        debugLogger.warn(
+          `Attempt ${iterationCount}: response rejected by content check. ` +
+            `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`,
+        );
+        await delay(delayMs, signal);
         // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
         // reports — content-retry delays are invisible in the api_retry telemetry
         // channel (onRetry only fires from the catch-block error path). The LLM
         // span's retry_total_delay_ms attribute includes ALL delays (content +
         // error), which is the accurate "total time the user waited in backoff."
-        retryTotalDelayMs += delayWithJitter;
+        retryTotalDelayMs += delayMs;
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
       }
@@ -253,8 +319,32 @@ export async function retryWithBackoff<T>(
     } catch (error) {
       const errorStatus = getErrorStatus(error);
 
+      // Classification drives logging plus one control decision: a 'fail-fast'
+      // verdict keeps a permanent error out of the unbounded persistent loop
+      // (see shouldPersist below). Normal retry control still follows
+      // shouldRetryOnError and the persistent policy. Computed before the Qwen
+      // quota fast-fail so the original error (status, request id, provider
+      // body) is always classified and logged, even when we replace it with a
+      // guidance message.
+      const retryDiagnostics = classifyRetryError(error, {
+        authType,
+        extraRetryErrorCodes,
+      });
+
+      // Cancellation is authoritative: once the caller aborts (or the call
+      // throws an abort/cancel error), never schedule another attempt,
+      // regardless of a permissive shouldRetryOnError predicate.
+      if (retryDiagnostics.kind === 'abort') {
+        throw error;
+      }
+
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
+        debugLogger.error(
+          'Qwen OAuth quota exceeded, fast-failing',
+          retryDiagnostics,
+          error,
+        );
         throw new Error(
           `Qwen OAuth free tier has been discontinued as of 2026-04-15.\n\n` +
             `To continue using Qwen Code, try one of these alternatives:\n` +
@@ -269,8 +359,19 @@ export async function retryWithBackoff<T>(
       // Persistent mode still respects shouldRetryOnError — callers can force
       // fast-fail even for transient errors if they explicitly return false.
       const isTransient = isTransientCapacityError(error);
-      const callerAllowsRetry = shouldRetryOnError(error as Error);
-      const shouldPersist = persistent && isTransient && callerAllowsRetry;
+      const callerAllowsRetry = hasCustomShouldRetryOnError
+        ? shouldRetryOnError(error as Error)
+        : defaultShouldRetry(error, extraRetryErrorCodes);
+      // A permanent business failure can surface with a transient-looking status
+      // (e.g. DashScope `Throttling.AllocationQuota` arrives as HTTP 429). Such
+      // errors are classified as 'fail-fast'; they must not enter the unbounded
+      // persistent loop, where they would retry for hours and never recover.
+      // Excluding them here falls back to the normal, maxAttempts-bounded retry
+      // path so the request still gets a few attempts but is guaranteed to
+      // terminate.
+      const isFailFast = retryDiagnostics.diagnosis === 'fail-fast';
+      const shouldPersist =
+        persistent && isTransient && callerAllowsRetry && !isFailFast;
 
       // Check if we've exhausted retries or shouldn't retry
       if (!shouldPersist) {
@@ -285,31 +386,29 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        // Prefer Retry-After header for 429 errors
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+        const retryAfterMs = hasRetryAfterStatus(errorStatus)
+          ? getRetryAfterDelayMs(error)
+          : null;
 
-        if (retryAfterMs > 0) {
+        if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
           // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
           delayMs = Math.min(retryAfterMs, capMs);
         } else {
           // Exponential backoff — cap at maxBackoff (5min) then absolute cap
-          delayMs = Math.min(
-            initialDelayMs * Math.pow(2, persistentAttempt - 1),
-            maxBackoff,
-          );
-          delayMs = Math.min(delayMs, capMs);
-
-          // Add jitter (±25%), then re-apply caps so delay never exceeds limits
-          delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
-          delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
+          delayMs = getRetryDelayMs({
+            attempt: persistentAttempt,
+            initialDelayMs,
+            maxDelayMs: Math.min(maxBackoff, capMs),
+            jitterRatio: 0.25,
+          });
         }
 
         const reportedAttempt = persistentAttempt;
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
+          retryDiagnostics,
           error,
         );
 
@@ -349,23 +448,42 @@ export async function retryWithBackoff<T>(
           attempt = maxAttempts - 1;
         }
       } else {
-        // Normal retry path
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+        // Normal retry path.
+        const retryAfterMs = hasRetryAfterStatus(errorStatus)
+          ? getRetryAfterDelayMs(error)
+          : null;
 
         let actualDelayMs: number;
-        if (retryAfterMs > 0) {
-          debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
-            error,
-          );
+        if (retryAfterMs !== null && retryAfterMs > 0) {
+          // Normal HTTP retries intentionally preserve provider-directed
+          // Retry-After waits instead of clamping to the exponential
+          // maxDelayMs. The wait remains abort-aware so cancelled requests do
+          // not stay parked for the full provider delay.
           actualDelayMs = retryAfterMs;
           currentDelay = initialDelayMs;
+          logRetryAtStatusLevel(
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+            retryDiagnostics,
+            error,
+            errorStatus,
+          );
         } else {
-          logRetryAttempt(attempt, error, errorStatus);
-          const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-          actualDelayMs = Math.max(0, currentDelay + jitter);
+          actualDelayMs = getRetryDelayMs({
+            // attempt: 1 — currentDelay already tracks exponential growth;
+            // getRetryDelayMs is called here only for jitter calculation.
+            attempt: 1,
+            initialDelayMs: currentDelay,
+            maxDelayMs,
+            jitterRatio: 0.3,
+          });
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+          logRetryAttempt(
+            attempt,
+            error,
+            retryDiagnostics,
+            errorStatus,
+            actualDelayMs,
+          );
         }
 
         // Phase 4b — fire onRetry telemetry callback BEFORE sleep. Guard
@@ -387,52 +505,23 @@ export async function retryWithBackoff<T>(
           }
         }
 
-        await delay(actualDelayMs);
+        // Abort-aware: a cancelled request must not stay parked for the full
+        // delay (including a provider-directed Retry-After wait).
+        await delay(actualDelayMs, signal);
         retryTotalDelayMs += actualDelayMs;
       }
     }
   }
-  // This line should theoretically be unreachable due to the throw in the catch block.
-  // Added for type safety and to satisfy the compiler that a promise is always returned.
-  throw new Error('Retry attempts exhausted');
-}
-
-/**
- * Extracts the Retry-After delay from an error object's headers.
- * @param error The error object.
- * @returns The delay in milliseconds, or 0 if not found or invalid.
- */
-function getRetryAfterDelayMs(error: unknown): number {
-  if (typeof error === 'object' && error !== null) {
-    // Check for error.response.headers (common in axios errors)
-    if (
-      'response' in error &&
-      typeof (error as { response?: unknown }).response === 'object' &&
-      (error as { response?: unknown }).response !== null
-    ) {
-      const response = (error as { response: { headers?: unknown } }).response;
-      if (
-        'headers' in response &&
-        typeof response.headers === 'object' &&
-        response.headers !== null
-      ) {
-        const headers = response.headers as { 'retry-after'?: unknown };
-        const retryAfterHeader = headers['retry-after'];
-        if (typeof retryAfterHeader === 'string') {
-          const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-          if (!isNaN(retryAfterSeconds)) {
-            return retryAfterSeconds * 1000;
-          }
-          // It might be an HTTP date
-          const retryAfterDate = new Date(retryAfterHeader);
-          if (!isNaN(retryAfterDate.getTime())) {
-            return Math.max(0, retryAfterDate.getTime() - Date.now());
-          }
-        }
-      }
-    }
+  // The loop only falls through here when `shouldRetryOnContent` retries
+  // exhausted the attempt budget — the error path always throws inside the
+  // catch, and persistent mode clamps `attempt` so it never exits normally.
+  // Return the last response we received (best-effort) so the caller keeps the
+  // actual content and its context rather than a context-free error.
+  if (hadContentRetry) {
+    return lastContentResult as T;
   }
-  return 0;
+  // Defensive fallback for type safety; not expected to be reached.
+  throw new Error('Retry attempts exhausted');
 }
 
 /**
@@ -444,17 +533,35 @@ function getRetryAfterDelayMs(error: unknown): number {
 function logRetryAttempt(
   attempt: number,
   error: unknown,
+  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  errorStatus?: number,
+  delayMs?: number,
+): void {
+  const backoff =
+    delayMs !== undefined
+      ? `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`
+      : 'Retrying with backoff...';
+  const message = errorStatus
+    ? `Attempt ${attempt} failed with status ${errorStatus}. ${backoff}`
+    : `Attempt ${attempt} failed. ${backoff}`;
+
+  logRetryAtStatusLevel(message, retryDiagnostics, error, errorStatus);
+}
+
+/**
+ * Logs a retry message at a severity that matches the HTTP status: 5xx server
+ * errors log at `error` (so error-level alerting fires), everything else
+ * (including 429/503 throttling) at `warn`.
+ */
+function logRetryAtStatusLevel(
+  message: string,
+  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  error: unknown,
   errorStatus?: number,
 ): void {
-  const message = errorStatus
-    ? `Attempt ${attempt} failed with status ${errorStatus}. Retrying with backoff...`
-    : `Attempt ${attempt} failed. Retrying with backoff...`;
-
-  if (errorStatus === 429) {
-    debugLogger.warn(message, error);
-  } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, error);
+  if (errorStatus !== undefined && errorStatus >= 500 && errorStatus < 600) {
+    debugLogger.error(message, retryDiagnostics, error);
   } else {
-    debugLogger.warn(message, error);
+    debugLogger.warn(message, retryDiagnostics, error);
   }
 }

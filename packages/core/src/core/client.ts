@@ -2485,6 +2485,7 @@ export class GeminiClient {
       const {
         contentGenerator,
         retryAuthType,
+        retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
 
@@ -2502,6 +2503,7 @@ export class GeminiClient {
       };
       const result = await retryWithBackoff(apiCall, {
         authType: retryAuthType,
+        extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
