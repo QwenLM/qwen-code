@@ -841,8 +841,8 @@ jobs:
           REVIEW_VERDICT: '${{ needs.review.outputs.verdict }}'
           TMUX_VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
         with:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
