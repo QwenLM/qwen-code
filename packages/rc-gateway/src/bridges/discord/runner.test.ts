@@ -49,10 +49,13 @@ function harness(
     content: string;
     components: unknown;
   }> = [];
+  const threadsMade: Array<{ channelId: string; messageId: string }> = [];
   let nextId = 1;
+  let nextThread = 1;
   const subscribed: string[] = [];
   let registered = false;
   let startedHandlers: GatewayHandlers | undefined;
+  const timers: Array<() => void> = [];
 
   const rest = {
     createMessage: async (
@@ -71,6 +74,10 @@ function harness(
     ) => {
       edited.push({ channelId, messageId, content, components });
       return { ok: true, status: 200 };
+    },
+    createThread: async (channelId: string, messageId: string) => {
+      threadsMade.push({ channelId, messageId });
+      return { ok: true, status: 201, body: { id: `thread_${nextThread++}` } };
     },
     replyEphemeral: async () => ({ ok: true, status: 200 }),
     deferInteraction: async () => ({ ok: true, status: 200 }),
@@ -104,15 +111,27 @@ function harness(
     // immediately, so without this the reconnect loop would spin). The reconnect
     // test overrides this to exercise re-subscription.
     sleep: opts.sleep ?? (() => new Promise<void>(() => {})),
+    setTimer: (_ms, fn) => {
+      timers.push(fn);
+      return () => {
+        const i = timers.indexOf(fn);
+        if (i >= 0) timers.splice(i, 1);
+      };
+    },
   });
 
   return {
     bridge,
     created,
     edited,
+    threadsMade,
     subscribed,
     isRegistered: () => registered,
     handlers: () => startedHandlers,
+    fireTimers: () => {
+      for (const fn of timers.splice(0)) fn();
+    },
+    drain: () => bridge['stream'].whenIdle(),
   };
 }
 
@@ -232,14 +251,78 @@ describe('DiscordBridge runner', () => {
     expect(h.edited).toHaveLength(0);
   });
 
-  it('ignores non-permission frames (channels stay quiet)', async () => {
+  it('ignores session_update frames with no agent text (channels stay quiet)', async () => {
     await channels.bind('chan_1', 'g1', 'sess_q');
     const h = harness();
+    // a thought chunk / non-text frame → not rendered (deliberate scope)
     h.bridge.deliverEvent('sess_q', {
       type: 'session_update',
-      data: { text: 'thinking...' },
+      data: { update: { sessionUpdate: 'agent_thought_chunk' } },
     });
-    await new Promise((r) => setTimeout(r, 0));
+    h.fireTimers();
+    await h.drain();
     expect(h.created).toHaveLength(0);
+  });
+});
+
+describe('DiscordBridge runner — session_update streaming', () => {
+  const chunk = (text: string) => ({
+    type: 'session_update' as const,
+    data: {
+      update: { sessionUpdate: 'agent_message_chunk', content: { text } },
+    },
+  });
+
+  it('buffers agent_message_chunk text and flushes it as a channel message', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const h = harness();
+    h.bridge.deliverEvent('sess_q', chunk('Hello, working on it.\n\n')); // paragraph → flush
+    await h.drain();
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0].channelId).toBe('chan_1');
+    expect(h.created[0].content).toContain('Hello, working on it.');
+  });
+
+  it('flushes on the idle timer when no hard trigger fires', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const h = harness();
+    h.bridge.deliverEvent('sess_q', chunk('a quiet partial line'));
+    expect(h.created).toHaveLength(0); // buffered, no trigger yet
+    h.fireTimers();
+    await h.drain();
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0].content).toBe('a quiet partial line');
+  });
+
+  it('opens a thread on the 7th message of a turn and redirects there', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const h = harness();
+    for (let i = 1; i <= 7; i++) {
+      h.bridge.deliverEvent('sess_q', chunk(`message ${i}\n\n`));
+      await h.drain();
+    }
+    expect(h.threadsMade).toHaveLength(1);
+    expect(h.threadsMade[0].messageId).toBe('m_1'); // thread off the first message
+    // the 7th message landed in the thread, not the channel
+    expect(h.created[h.created.length - 1].channelId).toBe('thread_1');
+  });
+
+  it('a permission_resolved ends the turn — the next chunk goes to the channel', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const h = harness();
+    for (let i = 1; i <= 7; i++) {
+      h.bridge.deliverEvent('sess_q', chunk(`message ${i}\n\n`));
+      await h.drain();
+    }
+    expect(h.threadsMade).toHaveLength(1);
+    h.bridge.deliverEvent('sess_q', {
+      type: 'permission_resolved',
+      data: { requestId: 'r', outcome: 'allow_once' },
+    });
+    h.bridge.deliverEvent('sess_q', chunk('new turn line\n\n'));
+    await h.drain();
+    // back in the channel (fresh turn), no new thread yet
+    expect(h.created[h.created.length - 1].channelId).toBe('chan_1');
+    expect(h.threadsMade).toHaveLength(1);
   });
 });

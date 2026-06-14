@@ -23,17 +23,31 @@ sidecar later by changing only its configuration.
 - Forwards chat messages in a bound channel to the session as prompts.
 - Edits the original message (disabling the buttons, appending the outcome) when
   the request resolves.
+- **Streams the agent's running output** (`session_update`) into the channel:
+  chunks are buffered and flushed on a paragraph break / fenced-code close, at
+  1800 chars, or 1500 ms after the last chunk, then split into ≤2000-char
+  messages at safe boundaries (fence close > paragraph > word > hard cut), with
+  code fences kept balanced across the split (the closing/reopening fence chars
+  count against the 2000 budget).
+- **Threads on long streams** (design D4): after 6 messages in one agent turn,
+  the 7th and later are posted into a public thread opened off the turn's first
+  message, keeping the channel readable. A new turn (the event after a resolve,
+  or the next inbound prompt) goes back to the channel, not the old thread.
 
-### Not yet built (deferred)
+### Deliberate scope / deferrals
 
-This delivery is the **approval surface**, matching the Telegram bridge. The
-following spec requirements are intentionally deferred and are **not** present:
-
-- **`session_update` streaming** (mirroring the agent's running output into the
-  channel, with the 2000-char safe-split). The bridge keeps channels quiet —
-  only `permission_request` is rendered.
-- **Threads on long streams** (design D4). With no `session_update` streaming
-  there is nothing to thread.
+- Only `agent_message_chunk` (the assistant's prose) is streamed; thought and
+  tool-call chunks are skipped to keep channels readable.
+- A code block split across two _separate_ flushes renders as two blocks (each
+  individually fence-balanced); cross-flush fence continuity is not attempted.
+- If a turn ends with a sub-trigger tail still buffered (no paragraph break,
+  under the char cap, idle timer not yet fired), that tail isn't force-flushed at
+  the boundary — it merges into the next turn's first message. Cosmetic only;
+  content and fence balance are preserved.
+- **Last-Event-ID resume is not used.** The daemon replays nothing without a
+  cursor (`EventBus.subscribe` only replays when a cursor is supplied), so a
+  reconnect drops chunks emitted _during_ the blip rather than double-posting the
+  turn. Catching up on in-blip chunks is a deferrable gap-coverage enhancement.
 - Registration declares `supportsMarkdown: true` rather than the spec's
   `"limited"` plus `supportsThreads`/`supportsEdits` (the shared `BridgeClient`
   registration shape is boolean-only today).
@@ -129,7 +143,9 @@ so a gateway restart drops any unredeemed invite — just mint a fresh one.
 
 Once a channel is bound, **type in chat** to send a prompt to the session. Slash
 commands are the control plane; the chat input is the data plane. The bot's own
-messages are never relayed back to the daemon.
+messages are never relayed back to the daemon. As the agent works, its reply is
+streamed back into the channel (and into a thread once a turn runs long — see
+above).
 
 ### Approving tool calls
 

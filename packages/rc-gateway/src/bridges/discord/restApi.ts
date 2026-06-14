@@ -131,6 +131,24 @@ export class DiscordRestApi {
   }
 
   /**
+   * Open a PUBLIC thread off an existing message (`add-discord-bridge`: "Threads
+   * on long streams"). Discord: POST `/channels/<id>/messages/<msgId>/threads`.
+   * `name` is the thread title; the created thread is itself a channel, so
+   * subsequent stream flushes post to its id via {@link createMessage}.
+   */
+  async createThread(
+    channelId: string,
+    messageId: string,
+    name: string,
+  ): Promise<DiscordRestResult> {
+    return this.call(
+      'POST',
+      `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/threads`,
+      { name },
+    );
+  }
+
+  /**
    * Acknowledge an interaction with a DEFERRED ephemeral reply. Discord requires
    * an interaction be acknowledged within 3 seconds; deferring buys time to POST
    * the vote to the daemon, after which {@link editInteractionReply} fills in the

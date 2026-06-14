@@ -17,6 +17,8 @@ import {
   type NormalizedComponent,
 } from './dispatch.js';
 import { renderPermissionRequest, type DiscordActionRow } from './render.js';
+import { StreamRouter, type StreamPoster } from './streamRouter.js';
+import { extractAgentText } from './streamFrame.js';
 
 /**
  * The injected inbound transport. The runner only needs "start the gateway and
@@ -47,6 +49,8 @@ export interface DiscordBridgeConfig {
   log?: (msg: string) => void;
   /** Injectable backoff sleep (tests). Resolves early on abort. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Injectable idle-flush timer for the stream router (tests). */
+  setTimer?: (ms: number, fn: () => void) => () => void;
 }
 
 /** SSE reconnect backoff per the spec: initial 1s, max 30s, jitter ±20%. */
@@ -64,8 +68,10 @@ interface SentRequest {
 /**
  * The Discord bridge runner (`add-discord-bridge`): the inbound gateway loop
  * (discord.js, injected) feeds dispatch; an outbound SSE echo loop per bound
- * session renders permission_request frames into channel messages and edits them
- * (disabling the buttons) when resolved. It holds NO gateway internals — every
+ * session renders permission_request frames into channel messages (edited to
+ * disable the buttons when resolved) AND streams session_update prose into the
+ * channel via the {@link StreamRouter} (buffered, ≤2000-char safe-split, with
+ * threads on long turns). It holds NO gateway internals — every
  * daemon interaction goes through the injected {@link BridgeClient} over the
  * loopback HTTP+SSE contract, so the whole bridge moves to a separate process by
  * changing only config. Local ban cache mirrors gateway 403s.
@@ -85,11 +91,32 @@ export class DiscordBridge {
   private readonly subscribed = new Set<string>();
   /** requestId → every channel message that rendered it (edited on resolve). */
   private readonly sent = new Map<string, SentRequest[]>();
+  /** Streams agent prose into channels with buffering + threads-on-long-stream. */
+  private readonly stream: StreamRouter;
   private readonly log: (msg: string) => void;
 
   constructor(cfg: DiscordBridgeConfig) {
     this.cfg = cfg;
     this.log = cfg.log ?? (() => {});
+    const poster: StreamPoster = {
+      postMessage: async (dest, content) => {
+        const r = await this.cfg.rest.createMessage(dest, content);
+        return r.ok && typeof (r.body as { id?: unknown })?.id === 'string'
+          ? (r.body as { id: string }).id
+          : null;
+      },
+      createThread: async (channelId, messageId, name) => {
+        const r = await this.cfg.rest.createThread(channelId, messageId, name);
+        return r.ok && typeof (r.body as { id?: unknown })?.id === 'string'
+          ? (r.body as { id: string }).id
+          : null;
+      },
+    };
+    this.stream = new StreamRouter({
+      poster,
+      channelsFor: (sessionId) => this.cfg.channels.channelsFor(sessionId),
+      ...(cfg.setTimer ? { setTimer: cfg.setTimer } : {}),
+    });
   }
 
   private dispatchDeps(): DiscordDispatchDeps {
@@ -99,6 +126,7 @@ export class DiscordBridge {
       channels: this.cfg.channels,
       bridgeId: DISCORD_BRIDGE_ID,
       bans: this.bans,
+      onTurnBoundary: (sessionId) => this.stream.bumpTurn(sessionId),
     };
   }
 
@@ -180,16 +208,22 @@ export class DiscordBridge {
   }
 
   /**
-   * Outbound: render permission_request frames to every bound channel and edit
-   * them (disabling the buttons + appending the outcome) when resolved. Other
-   * frames are ignored to keep channels quiet. Fire-and-forget sends (a failed
-   * send must not break the SSE loop). Exposed for unit testing.
+   * Outbound SSE echo. permission_request → channel message with vote buttons;
+   * permission_resolved → edit (disable buttons + outcome) AND mark the turn
+   * boundary so the next stream chunk starts a fresh turn; session_update →
+   * stream the agent's prose through the buffer/thread router. Other frames are
+   * ignored to keep channels quiet. Fire-and-forget (a failed send must not break
+   * the SSE loop). Exposed for unit testing.
    */
   deliverEvent(sessionId: string, ev: BridgeEvent): void {
     if (ev.type === 'permission_request') {
       void this.deliverPermissionRequest(sessionId, ev.data);
     } else if (ev.type === 'permission_resolved') {
+      this.stream.notePermissionResolved(sessionId); // next chunk = new turn
       void this.deliverPermissionResolved(ev.data);
+    } else if (ev.type === 'session_update') {
+      const text = extractAgentText(ev.data);
+      if (text) this.stream.onChunk(sessionId, text);
     }
   }
 

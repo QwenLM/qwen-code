@@ -71,6 +71,12 @@ export interface DiscordDispatchDeps {
   bridgeId: string;
   /** Local ban cache (sub-actor ids) — mirrors gateway 403s. */
   bans: Set<string>;
+  /**
+   * Called when a NEW inbound prompt is accepted for a session — a turn boundary
+   * (spec: "the next inbound user prompt"). The runner uses it to end the prior
+   * turn so its stream thread isn't reused. Optional (pure-dispatch tests omit).
+   */
+  onTurnBoundary?: (sessionId: string) => void;
 }
 
 /** A non-bot chat message in a (possibly bound) channel. */
@@ -128,6 +134,7 @@ export async function handleMessage(
     deps.bans.add(subActor); // gateway banned this sub-actor → cache + drop
     return;
   }
+  if (r.ok) deps.onTurnBoundary?.(sessionId); // a new prompt starts a new turn
   if (r.status === 429) {
     const secs = r.retryAfterSec ?? 'a few';
     // A MESSAGE_CREATE has no interaction token, so an ephemeral reply is not

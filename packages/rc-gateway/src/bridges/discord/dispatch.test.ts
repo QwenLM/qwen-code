@@ -134,6 +134,24 @@ describe('discord dispatch — chat message → prompt', () => {
     ]);
   });
 
+  it('signals a turn boundary on an accepted prompt, but not on a banned 403', async () => {
+    await channels.bind('chan_42', 'g1', 'sess_abc');
+    const turns: string[] = [];
+    const f = deps({ onTurnBoundary: (s) => turns.push(s) });
+    await handleMessage(
+      { channelId: 'chan_42', authorId: '1', isBot: false, content: 'go' },
+      f.deps,
+    );
+    expect(turns).toEqual(['sess_abc']); // ok prompt → new turn
+
+    f.setPromptResult({ ok: false, status: 403 });
+    await handleMessage(
+      { channelId: 'chan_42', authorId: '2', isBot: false, content: 'x' },
+      f.deps,
+    );
+    expect(turns).toEqual(['sess_abc']); // 403 banned → no turn boundary
+  });
+
   it('ignores the bot’s own messages (no echo loop)', async () => {
     await channels.bind('chan_42', 'g1', 'sess_abc');
     const f = deps();

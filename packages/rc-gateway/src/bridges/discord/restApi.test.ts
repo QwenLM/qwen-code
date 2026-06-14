@@ -112,6 +112,23 @@ describe('DiscordRestApi — editMessage', () => {
   });
 });
 
+describe('DiscordRestApi — createThread', () => {
+  it('POSTs the message threads path and returns the thread id', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 201,
+      json: { id: 'thread_7' },
+    }));
+    const r = await api(impl).createThread('chan_1', 'm_42', 'qwen output');
+    expect(r.ok).toBe(true);
+    expect((r.body as { id: string }).id).toBe('thread_7');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toBe(
+      'https://discord.test/api/v10/channels/chan_1/messages/m_42/threads',
+    );
+    expect((calls[0].body as { name: string }).name).toBe('qwen output');
+  });
+});
+
 describe('DiscordRestApi — interaction responses', () => {
   it('deferInteraction acks with a deferred ephemeral callback', async () => {
     const { impl, calls } = fakeFetch(() => ({ status: 204, json: undefined }));
