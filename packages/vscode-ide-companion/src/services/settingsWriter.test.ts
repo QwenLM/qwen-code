@@ -68,14 +68,17 @@ describe('settingsWriter', () => {
     ) as Record<string, unknown>;
     const env = settings.env as Record<string, string>;
     const modelProviders = settings.modelProviders as Record<string, unknown>;
-    const openaiModels = modelProviders[AuthType.USE_OPENAI] as Array<
-      Record<string, string>
+    const openaiEntry = modelProviders[AuthType.USE_OPENAI] as Record<
+      string,
+      unknown
     >;
+    const openaiModels = openaiEntry.models as Array<Record<string, string>>;
 
     expect(env.OPENAI_API_KEY).toBe('manual-key');
     expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
     expect(settings.codingPlan).toBeUndefined();
     expect(settings.model).toEqual({ name: 'gpt-4o' });
+    expect(openaiEntry.protocol).toBe('openai');
     // The new entry must be present
     expect(openaiModels[0]).toEqual({
       id: 'gpt-4o',
