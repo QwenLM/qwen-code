@@ -4,9 +4,106 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { ensureToolResultPairing } from './speculation.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import {
+  abortSpeculation,
+  ensureToolResultPairing,
+  startSpeculation,
+} from './speculation.js';
 import type { Content } from '@google/genai';
+import { ApprovalMode, type Config } from '../config/config.js';
+
+const forkedAgentMocks = vi.hoisted(() => ({
+  runForkedAgent: vi.fn(),
+  sendMessageStream: vi.fn(),
+}));
+
+vi.mock('../utils/forkedAgent.js', () => ({
+  getCacheSafeParams: vi.fn(() => ({
+    generationConfig: {},
+    history: [],
+    model: 'qwen-fast',
+    version: 1,
+  })),
+  createForkedChat: vi.fn(() => ({
+    sendMessageStream: forkedAgentMocks.sendMessageStream,
+  })),
+  runForkedAgent: forkedAgentMocks.runForkedAgent,
+  runWithForkedChatModel: vi.fn(
+    async (
+      _config: Config,
+      model: string,
+      callback: (model: string) => Promise<unknown>,
+    ) => callback(model),
+  ),
+}));
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('startSpeculation', () => {
+  it('preserves generated tool call ids in paired responses', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(
+      async function* () {
+        if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+          yield {
+            type: 'chunk',
+            value: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call_123',
+                          name: 'read_file',
+                          args: { path: 'a.ts' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          };
+        }
+      },
+    );
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => {
+      expect(state.status).toBe('completed');
+    });
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(state.messages[1].parts?.[0].functionCall?.id).toBe('call_123');
+    expect(state.messages[2].parts?.[0].functionResponse?.id).toBe(
+      'call_123',
+    );
+
+    await abortSpeculation(state);
+  });
+});
 
 describe('ensureToolResultPairing', () => {
   it('returns empty array unchanged', () => {
