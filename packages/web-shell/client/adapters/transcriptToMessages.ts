@@ -15,6 +15,7 @@ import type {
 import type {
   DaemonMessage,
   DaemonMessageToolCall,
+  DaemonMessageToolCallContent,
   DaemonMessageToolCallStatus,
   DaemonMessageToolKind,
   DaemonMessageTodoItem,
@@ -645,6 +646,7 @@ function daemonToolBlockToToolCall(
 ): DaemonMessageToolCall {
   const rawOutput = getToolRawOutput(block);
   const isBackgroundAgent = isBackgroundAgentBlock(block, rawOutput);
+  const content = normalizeToolContent(block.content);
   const statusMap: Record<string, DaemonMessageToolCallStatus> = {
     running: 'in_progress',
     pending: 'pending',
@@ -676,6 +678,7 @@ function daemonToolBlockToToolCall(
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    ...(content ? { content } : {}),
   };
 }
 
@@ -811,6 +814,59 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
         ? block.rawOutput
         : block.details,
   };
+}
+
+function normalizeToolContent(
+  value: unknown,
+): DaemonMessageToolCallContent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const content = value.flatMap((entry): DaemonMessageToolCallContent[] => {
+    const item = getRecord(entry);
+    if (!item) return [];
+
+    const type = item['type'];
+    if (type === 'content') {
+      const body = getRecord(item['content']);
+      if (!body || typeof body['type'] !== 'string') return [];
+      return [
+        {
+          type: 'content',
+          content: { ...body, type: body['type'] },
+        },
+      ];
+    }
+
+    if (type === 'diff') {
+      const newText = item['newText'];
+      if (typeof newText !== 'string') return [];
+
+      const path = item['path'];
+      const oldText = item['oldText'];
+      return [
+        {
+          type: 'diff',
+          ...(typeof path === 'string' ? { path } : {}),
+          ...(typeof oldText === 'string' ? { oldText } : {}),
+          newText,
+        },
+      ];
+    }
+
+    if (type === 'terminal') {
+      const terminalId = item['terminalId'];
+      return [
+        {
+          type: 'terminal',
+          ...(typeof terminalId === 'string' ? { terminalId } : {}),
+        },
+      ];
+    }
+
+    return [];
+  });
+
+  return content.length > 0 ? content : undefined;
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
