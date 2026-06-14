@@ -976,6 +976,8 @@ export default {
     'No managed auto-memory entries matched: {{query}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
+  'Import MCP servers from Claude configs':
+    'Import MCP servers from Claude configs',
   'Open MCP management dialog': 'Open MCP management dialog',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   "Successfully authenticated and refreshed tools for '{{name}}'.":
