@@ -184,8 +184,9 @@ export function resolveCredentialField(
   if (explicitValue) return explicitValue;
   if (inheritedValue) return inheritedValue;
 
-  const envMapping =
-    AUTH_ENV_MAPPINGS[authType as keyof typeof AUTH_ENV_MAPPINGS];
+  const envMapping = Object.hasOwn(AUTH_ENV_MAPPINGS, authType)
+    ? AUTH_ENV_MAPPINGS[authType as keyof typeof AUTH_ENV_MAPPINGS]
+    : undefined;
   if (!envMapping) return undefined;
 
   for (const envKey of envMapping[field]) {
