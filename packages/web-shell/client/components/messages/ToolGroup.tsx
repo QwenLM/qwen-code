@@ -81,6 +81,27 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   return false;
 }
 
+// Tools whose expanded row renders a kind-specific detail view (shell output /
+// diff / file content / Q&A). Must stay in sync with the renderers in
+// ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
+// to show when expanded, so they keep their one-line result summary instead of
+// hiding it behind an empty detail area.
+function hasDetailView(tool: ACPToolCall): boolean {
+  const name = tool.toolName.toLowerCase();
+  return (
+    isShellToolName(name) ||
+    name === 'write_file' ||
+    name === 'writefile' ||
+    name === 'edit' ||
+    name === 'write' ||
+    name === 'editfile' ||
+    name === 'read' ||
+    name === 'read_file' ||
+    name === 'readfile' ||
+    isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
 function hasDiffContent(tool: ACPToolCall): boolean {
   if (tool.content?.some((b) => b.type === 'diff')) return true;
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
@@ -771,6 +792,10 @@ export const ToolLine = memo(function ToolLine({
   const descExpandable = !isTodo && isDescriptionExpandable(description);
   const expandable = !isTodo && (hasExpandableContent(tool) || descExpandable);
   const relocateDescription = expanded && descExpandable;
+  // Whether the expanded row renders a kind-specific detail view. When it does
+  // not (e.g. grep/glob/web_fetch with a long description), keep the result
+  // summary visible instead of replacing it with an empty detail area.
+  const detailView = hasDetailView(tool);
 
   if (hasApproval && onConfirm) {
     return (
@@ -811,10 +836,10 @@ export const ToolLine = memo(function ToolLine({
       {relocateDescription && (
         <div className={styles.lineFullArg}>{description}</div>
       )}
-      {!isTodo && !expanded && result && (
+      {!isTodo && result && (!expanded || !detailView) && (
         <div className={styles.lineOutput}>{result}</div>
       )}
-      {!isTodo && expanded && (
+      {!isTodo && expanded && detailView && (
         <div className={styles.lineDetail}>
           {isShellToolName(name) && (
             <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />

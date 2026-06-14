@@ -195,6 +195,31 @@ describe('tool description expand toggle', () => {
     expect(commandInLeafSpan()).toBe(false);
     expect(container.textContent).toContain(command); // still present, in the block
   });
+
+  it('keeps the result summary when expanding a long-description tool with no detail view', () => {
+    // glob with a long pattern: descExpandable but no kind-specific renderer.
+    const pattern = `**/${'x'.repeat(80)}/*.ts`;
+    const container = renderTool({
+      callId: 'call-glob',
+      toolName: 'glob',
+      status: 'completed',
+      args: { pattern },
+      rawOutput: 'a.ts\nb.ts\nc.ts',
+    });
+
+    const chevron = [...container.querySelectorAll('span')].find(
+      (s) => s.textContent === '▸',
+    );
+    expect(chevron).toBeTruthy(); // long pattern → expandable
+    expect(container.textContent).toContain('matching file'); // summary, collapsed
+
+    click(chevron!.parentElement!);
+
+    // Expanded: the summary must NOT be lost (no detail view replaces it), and
+    // the full pattern is reflowed into the block.
+    expect(container.textContent).toContain('matching file');
+    expect(container.textContent).toContain(pattern);
+  });
 });
 
 describe('auto-collapse on finish', () => {
