@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, Protocol } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
@@ -57,6 +57,7 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
+  private protocolByAuthType = new Map<string, Protocol>();
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -73,6 +74,7 @@ export class ModelRegistry {
     this.modelsByAuthType = new Map();
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
+    this.protocolByAuthType.set(AuthType.QWEN_OAUTH, Protocol.QWEN_OAUTH);
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
 
     // Register user-configured models for other authTypes
@@ -94,6 +96,7 @@ export class ModelRegistry {
           continue;
         }
 
+        this.protocolByAuthType.set(authType, providerConfig.protocol);
         this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }
@@ -206,6 +209,14 @@ export class ModelRegistry {
   }
 
   /**
+   * Get the protocol for an authType.
+   * Returns undefined if the authType is not registered.
+   */
+  getProtocolForAuthType(authType: AuthType): Protocol | undefined {
+    return this.protocolByAuthType.get(authType);
+  }
+
+  /**
    * Resolve model config by applying defaults
    */
   private resolveModelConfig(
@@ -279,6 +290,7 @@ export class ModelRegistry {
           continue;
         }
 
+        this.protocolByAuthType.set(authType, providerConfig.protocol);
         this.registerAuthTypeModels(authType, providerConfig.models);
       }
     }

@@ -568,6 +568,14 @@ export class ModelsConfig {
    * Get generation config for ContentGenerator creation
    */
   getGenerationConfig(): Partial<ContentGeneratorConfig> {
+    if (this.currentAuthType) {
+      const protocol = this.modelRegistry.getProtocolForAuthType(
+        this.currentAuthType,
+      );
+      if (protocol) {
+        this._generationConfig.protocol = protocol;
+      }
+    }
     return this._generationConfig;
   }
 
