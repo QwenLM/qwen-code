@@ -829,6 +829,11 @@ export const ToolLine = memo(function ToolLine({
       {isTodo && hasTodoList && (
         <TodoToolBody tool={tool} todos={todoItems!} expanded={expanded} />
       )}
+      {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
+          fall back to the raw result summary so the row isn't blank. */}
+      {isTodo && !hasTodoList && result && (
+        <div className={styles.lineOutput}>{result}</div>
+      )}
       {relocateDescription && (
         <div className={styles.lineFullArg}>{description}</div>
       )}

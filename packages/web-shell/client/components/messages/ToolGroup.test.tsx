@@ -379,8 +379,6 @@ describe('todo_write tool rendering', () => {
             { kind: 'completed', id: '1', content: 'First task' },
             { kind: 'started', id: '2', content: 'Second task' },
           ],
-          completed: 1,
-          total: 3,
         },
       ],
     ]);
@@ -392,6 +390,20 @@ describe('todo_write tool rendering', () => {
     expect(container.textContent).toContain('◐');
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).not.toContain('Third task');
+  });
+
+  it('falls back to the result summary when the todo payload is unparseable', () => {
+    // Malformed args (todos is a string) → no list to render; the row must not
+    // be blank — it shows the raw result summary instead.
+    const container = renderTodoTool({
+      callId: 'call-todo-bad',
+      toolName: 'todo_write',
+      status: 'completed',
+      kind: 'think',
+      args: { todos: 'oops not an array' },
+      rawOutput: { output: 'Todos updated summary line' },
+    });
+    expect(container.textContent).toContain('Todos updated summary line');
   });
 });
 

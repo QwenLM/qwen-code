@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { Message, TodoItem } from '../adapters/types';
+import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
 import {
   computeTodoTimeline,
+  extractTodosFromToolCall,
   getFloatingTodos,
   getTodoStatusIcon,
   getTodoWindow,
@@ -9,6 +10,14 @@ import {
 
 function todo(id: string, status: TodoItem['status']): TodoItem {
   return { id, content: `task ${id}`, status };
+}
+
+function item(
+  id: string,
+  content: string,
+  status: TodoItem['status'],
+): TodoItem {
+  return { id, content, status };
 }
 
 function planMessage(id: string, todos: TodoItem[]): Message {
@@ -144,16 +153,12 @@ describe('computeTodoTimeline', () => {
 
     expect(timeline.get('p1')).toEqual({
       events: [{ kind: 'started', id: '1', content: 'task 1' }],
-      completed: 0,
-      total: 2,
     });
     expect(timeline.get('p2')).toEqual({
       events: [
         { kind: 'completed', id: '1', content: 'task 1' },
         { kind: 'started', id: '2', content: 'task 2' },
       ],
-      completed: 1,
-      total: 2,
     });
   });
 
@@ -176,8 +181,6 @@ describe('computeTodoTimeline', () => {
 
     expect(timeline.get('p1')).toEqual({
       events: [{ kind: 'started', id: '2', content: 'task 2' }],
-      completed: 1,
-      total: 2,
     });
   });
 
@@ -215,6 +218,84 @@ describe('computeTodoTimeline', () => {
     expect(timeline.get('call-m1')?.events).toEqual([
       { kind: 'started', id: '1', content: 'task 1' },
     ]);
+  });
+
+  it('does not diff a reused id against a previous, unrelated plan', () => {
+    // Both plans number their first item "1" (positional/per-plan numbering),
+    // but they are different tasks. Plan A leaves "1" in_progress; plan B's "1"
+    // must still register its own start and completion rather than being
+    // suppressed by plan A's stale id-"1" status.
+    const timeline = computeTodoTimeline([
+      planMessage('a', [item('1', 'Set up project', 'in_progress')]),
+      userMessage('u1'),
+      planMessage('b1', [item('1', 'Write the report', 'in_progress')]),
+      planMessage('b2', [item('1', 'Write the report', 'completed')]),
+    ]);
+
+    expect(timeline.get('b1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'Write the report' },
+    ]);
+    expect(timeline.get('b2')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'Write the report' },
+    ]);
+  });
+
+  it('tracks the same item across a tool call and a later plan snapshot', () => {
+    const timeline = computeTodoTimeline([
+      todoWriteMessage('m1', [todo('1', 'in_progress')]),
+      planMessage('p1', [todo('1', 'completed')]),
+    ]);
+
+    expect(timeline.get('call-m1')?.events).toEqual([
+      { kind: 'started', id: '1', content: 'task 1' },
+    ]);
+    expect(timeline.get('p1')?.events).toEqual([
+      { kind: 'completed', id: '1', content: 'task 1' },
+    ]);
+  });
+});
+
+describe('extractTodosFromToolCall', () => {
+  function toolCall(overrides: Partial<ACPToolCall>): ACPToolCall {
+    return {
+      callId: 'c1',
+      toolName: 'todo_write',
+      status: 'completed',
+      kind: 'think',
+      ...overrides,
+    };
+  }
+
+  it('reads todos from args', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ args: { todos: [item('1', 'A', 'pending')] } }),
+    );
+    expect(todos).toEqual([{ id: '1', content: 'A', status: 'pending' }]);
+  });
+
+  it('reads todos from rawOutput.todos', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ rawOutput: { todos: [item('1', 'A', 'in_progress')] } }),
+    );
+    expect(todos?.map((t) => t.status)).toEqual(['in_progress']);
+  });
+
+  it('reads todos from rawOutput.entries', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({ rawOutput: { entries: [item('1', 'A', 'completed')] } }),
+    );
+    expect(todos?.map((t) => t.status)).toEqual(['completed']);
+  });
+
+  it('returns undefined for a non-todo tool even if it carries a todos array', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        toolName: 'read',
+        kind: 'read',
+        args: { todos: [item('1', 'A', 'pending')] },
+      }),
+    );
+    expect(todos).toBeUndefined();
   });
 });
 

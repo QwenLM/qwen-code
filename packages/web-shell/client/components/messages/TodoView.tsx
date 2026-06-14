@@ -16,9 +16,9 @@ function statusClass(status: TodoItem['status']): string {
 
 /**
  * Collapsed view: the change a single snapshot introduced — items that just
- * completed (with their step time) and items that just started. With no tracked
- * change (an unchanged re-emit, or a snapshot rendered without a timeline) it
- * falls back to the current focus item so the row is never empty.
+ * completed and items that just started. With no tracked change (an unchanged
+ * re-emit, or a snapshot rendered without a timeline) it falls back to the
+ * current focus item so the row is never empty.
  */
 export function TodoEventSummary({
   todos,

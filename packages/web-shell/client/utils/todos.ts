@@ -138,14 +138,24 @@ export interface TodoEvent {
 /** What changed in one todo snapshot relative to the conversation so far. */
 export interface TodoSnapshotDiff {
   events: TodoEvent[];
-  completed: number;
-  total: number;
 }
 
 interface TodoSnapshot {
   /** Key the diff is stored under: tool callId, or plan message id. */
   key: string;
   todos: TodoItem[];
+}
+
+/**
+ * Identity used to track an item across snapshots. Folds content into the key
+ * because todo ids are NOT globally unique: the ACP bridge assigns positional
+ * ids (`plan-0`, `plan-1`, …) and models restart numbering at `1, 2, 3` for each
+ * new `todo_write` plan, so a later, unrelated list reuses an earlier list's
+ * ids. Keying on id alone would diff a new plan's items against a previous
+ * plan's stale terminal status; id+content keeps distinct tasks separate.
+ */
+function todoStateKey(todo: TodoItem): string {
+  return JSON.stringify([todo.id, todo.content]);
 }
 
 /**
@@ -190,7 +200,8 @@ export function computeTodoTimeline(
       const events: TodoEvent[] = [];
 
       for (const todo of todos) {
-        const prev = lastStatus.get(todo.id);
+        const stateKey = todoStateKey(todo);
+        const prev = lastStatus.get(stateKey);
         if (todo.status === 'in_progress' && prev !== 'in_progress') {
           events.push({ kind: 'started', id: todo.id, content: todo.content });
         } else if (
@@ -204,15 +215,33 @@ export function computeTodoTimeline(
             content: todo.content,
           });
         }
-        lastStatus.set(todo.id, todo.status);
+        lastStatus.set(stateKey, todo.status);
       }
 
-      const completed = todos.filter((t) => t.status === 'completed').length;
-      result.set(key, { events, completed, total: todos.length });
+      result.set(key, { events });
     }
   }
 
   return result;
+}
+
+/**
+ * A cheap signature of the todo snapshots in a transcript: each snapshot's key
+ * plus its items' id, status, and content. App memoizes the timeline on this so
+ * the context provider value stays referentially stable across unrelated
+ * streaming ticks (which would otherwise re-render every todo/plan row that
+ * consumes the timeline).
+ */
+export function todoTimelineSignature(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    for (const { key, todos } of todoSnapshotsOf(message)) {
+      parts.push(
+        JSON.stringify([key, todos.map((t) => [t.id, t.status, t.content])]),
+      );
+    }
+  }
+  return parts.join('\n');
 }
 
 export interface TodoWindow {

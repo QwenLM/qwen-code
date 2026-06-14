@@ -121,6 +121,7 @@ import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoTimeline,
   getFloatingTodos,
+  todoTimelineSignature,
   type TodoSnapshotDiff,
 } from './utils/todos';
 import { ThemeProvider } from './themeContext';
@@ -143,10 +144,10 @@ import styles from './App.module.css';
 export const CompactModeContext = createContext(false);
 
 /**
- * Per-plan-snapshot status diffs (keyed by plan message id), so a history row
- * can render what changed in that snapshot — and how long each step took —
- * without re-deriving it from the whole transcript. Empty by default so a
- * PlanMessage rendered outside the provider still falls back gracefully.
+ * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
+ * history row can render what changed in that snapshot without re-deriving it
+ * from the whole transcript. Empty by default so a row rendered outside the
+ * provider still falls back gracefully.
  */
 export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
   new Map(),
@@ -649,7 +650,22 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
-  const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
+  // Keep the timeline Map referentially stable across streaming ticks that
+  // don't touch any todo snapshot. The Map is a context value, so a fresh
+  // reference would re-render every todo/plan row regardless of memoization;
+  // only rebuild when the todo snapshots themselves change.
+  const todoTimelineRef = useRef<{
+    signature: string;
+    timeline: Map<string, TodoSnapshotDiff>;
+  } | null>(null);
+  const todoTimeline = useMemo(() => {
+    const signature = todoTimelineSignature(messages);
+    const cached = todoTimelineRef.current;
+    if (cached && cached.signature === signature) return cached.timeline;
+    const timeline = computeTodoTimeline(messages);
+    todoTimelineRef.current = { signature, timeline };
+    return timeline;
+  }, [messages]);
   const floatingTodos = useStableArray(
     floatingTodosState.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
