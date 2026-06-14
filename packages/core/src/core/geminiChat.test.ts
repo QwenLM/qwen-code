@@ -4071,6 +4071,75 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should pass configured retry error codes into streamed retry diagnostics', async () => {
+      vi.useFakeTimers();
+
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'test-model',
+          retryErrorCodes: [4999],
+        });
+        const providerThrottle = Object.assign(
+          new StreamContentError('Provider-specific throttle'),
+          { status: 4999 },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw providerThrottle;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Success after custom code retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-custom-retry-code',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await secondPromise;
+
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+        }
+
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Rate limit retry scheduled',
+          expect.objectContaining({
+            classificationDiagnosis: 'retryable',
+            classificationReason: 'rate-limit',
+            errorKind: 'provider',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry immediately when skipDelay is called during rate-limit wait', async () => {
       vi.useFakeTimers();
 
