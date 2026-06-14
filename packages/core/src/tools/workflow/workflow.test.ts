@@ -322,4 +322,46 @@ describe('WorkflowTool', () => {
     const llmText = (result.llmContent as Array<{ text: string }>)[0]!.text;
     expect(llmText).toBe('(workflow returned no value)');
   });
+
+  // P4a adversarial review (MEDIUM): if a script's return value happens to
+  // have the same shape as a WorkflowMeta declaration (`{ name, description,
+  // phases }`), the safeStringifyDisplayPayload spread must NOT clobber the
+  // top-level `meta` key with the result. Both must appear distinctly in
+  // the display so the user can see the declared meta independently of
+  // whatever the script happened to return.
+  it('execute() display surfaces meta + meta-shaped result distinctly', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: `
+        export const meta = { name: 'declared', description: 'the declared meta' }
+        return { name: 'returned', description: 'looks like meta but is the script result', phases: [{ title: 'X' }] }
+      `,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const display = result.returnDisplay as string;
+    const jsonText = display.replace(/^```json\n/, '').replace(/\n```$/, '');
+    const parsed = JSON.parse(jsonText) as {
+      meta: { name: string; description: string };
+      result: { name: string; description: string; phases: object[] };
+    };
+    expect(parsed.meta).toEqual({
+      name: 'declared',
+      description: 'the declared meta',
+    });
+    expect(parsed.result).toEqual({
+      name: 'returned',
+      description: 'looks like meta but is the script result',
+      phases: [{ title: 'X' }],
+    });
+    // Defensive: the literal text appearance of both names must be
+    // distinct — a regression that merged them would still satisfy a
+    // single-side toEqual on a shared object, so check the rendered
+    // display contains both string literals at separate offsets.
+    expect(display.indexOf('"declared"')).toBeGreaterThan(-1);
+    expect(display.indexOf('"returned"')).toBeGreaterThan(-1);
+    expect(display.indexOf('"declared"')).not.toBe(display.indexOf('"returned"'));
+  });
 });

@@ -257,6 +257,36 @@ describe('extractAndStripMeta', () => {
     const src = `export const meta = { name: 'x'`;
     expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
   });
+
+  // P4a adversarial review (HIGH × 3 lenses): the docstring at
+  // workflow-sandbox.ts:283-294 promises the returned meta is HOST-realm —
+  // a per-field copy that defends against T1/T8/T14-style vm-realm escape
+  // via `outcome.meta.constructor.constructor('return process')()`. Verify
+  // the contract: returned meta + its nested phases array + each phase
+  // entry must all sit on the host-realm prototype chain so
+  // `.constructor` reaches host `Object` / `Array`, not a vm-realm peer.
+  // Without this, a regression that returns the vm-eval'd value directly
+  // would silently pass every structural `toEqual` check in the suite.
+  it('returned meta + phases array + phase entries are all host-realm objects', () => {
+    const src = `export const meta = {
+      name: 'realm',
+      description: 'realm-identity check',
+      whenToUse: 'tests',
+      phases: [
+        { title: 'a' },
+        { title: 'b', detail: 'has detail', model: 'qwen3' },
+      ],
+    }
+    return 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).not.toBeNull();
+    expect(Object.getPrototypeOf(meta as object)).toBe(Object.prototype);
+    const phases = (meta as { phases: object[] }).phases;
+    expect(Object.getPrototypeOf(phases)).toBe(Array.prototype);
+    for (const p of phases) {
+      expect(Object.getPrototypeOf(p)).toBe(Object.prototype);
+    }
+  });
 });
 
 describe('createWorkflowSandbox', () => {
