@@ -1083,8 +1083,8 @@ export class AgentCore {
     callId: string;
     name: string;
     args: Record<string, unknown>;
-    errorMessage: string | undefined;
     errorMessage: string;
+    responseParts: Part[];
     resultDisplay: ToolResultDisplay | undefined;
     currentRound: number;
     durationMs?: number;
@@ -1190,7 +1190,9 @@ export class AgentCore {
             wasOutputTruncated,
           };
           const response = createDuplicateProviderToolCallResponse(request);
-          const errorMessage = response.error?.message;
+          const errorMessage =
+            response.error?.message ??
+            'Duplicate provider tool call was ignored.';
           const eventCallId = `${callId}:duplicate:${currentRound}:${duplicateEventIndex++}`;
 
           this.runtimeContext
