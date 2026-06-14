@@ -1015,6 +1015,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   let lastSessionMock:
     | {
         captureHistorySnapshot: ReturnType<typeof vi.fn>;
+        emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
       }
@@ -1318,6 +1319,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
+        emitGoalStatus: vi.fn(),
         captureHistorySnapshot: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -2299,6 +2301,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({ cleared: true, condition: 'ship it' });
     expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, sessionId);
+    expect(lastSessionMock?.emitGoalStatus).toHaveBeenCalledWith({
+      kind: 'cleared',
+      condition: 'ship it',
+      iterations: 1,
+      durationMs: expect.any(Number),
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

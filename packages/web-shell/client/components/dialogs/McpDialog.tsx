@@ -22,6 +22,29 @@ interface ServerAction {
   run: () => void;
 }
 
+interface RestartEntry {
+  entryIndex: number;
+  restarted: boolean;
+  durationMs?: number;
+  reason?: string;
+}
+
+interface RestartEntriesResult {
+  serverName: string;
+  entries: RestartEntry[];
+}
+
+function isRestartEntriesResult(
+  result: unknown,
+): result is RestartEntriesResult {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    'entries' in result &&
+    Array.isArray((result as { entries?: unknown }).entries)
+  );
+}
+
 function getServerStatus(server: DaemonWorkspaceMcpServerStatus): string {
   if (server.disabled) {
     return server.disabledReason
@@ -225,7 +248,7 @@ export function McpDialog({ onClose }: McpDialogProps) {
       setMessage(null);
       restartServer(serverName)
         .then((result) => {
-          if ('entries' in result) {
+          if (isRestartEntriesResult(result)) {
             const restartedCount = result.entries.filter(
               (entry) => entry.restarted,
             ).length;

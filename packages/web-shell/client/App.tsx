@@ -20,6 +20,7 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
@@ -113,6 +114,7 @@ import {
 } from './components/messages/McpStatusMessage';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
+  parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
 import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
@@ -177,6 +179,41 @@ interface QueuedPrompt {
 interface ActiveGoalStatus {
   condition: string;
   setAt: number;
+}
+
+interface SendPromptOptionsWithRetry {
+  optimisticUserMessage?: boolean;
+  images?: PromptImage[];
+  retry?: boolean;
+}
+
+type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
+  text: string;
+  source?: string;
+  data?: unknown;
+};
+
+function getLatestActiveGoalFromBlocks(
+  blocks: readonly DaemonTranscriptBlock[],
+): ActiveGoalStatus | null {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block.kind !== 'status') continue;
+    const statusBlock = block as GoalStatusTranscriptBlock;
+    const status =
+      statusBlock.source === 'goal'
+        ? parseGoalStatusMessage(statusBlock.data)
+        : parseGoalStatusMessage(statusBlock.text);
+    if (!status) continue;
+    if (status.kind === 'set' || status.kind === 'checking') {
+      return {
+        condition: status.condition,
+        setAt: status.setAt ?? block.serverTimestamp ?? block.createdAt,
+      };
+    }
+    return null;
+  }
+  return null;
 }
 
 interface LocalAnchoredMessage {
@@ -701,11 +738,17 @@ export function App({
         retriedTurnErrorIdRef.current = null;
       }
       setShowRetryHint(false);
-      return sessionActions.sendPrompt(text, {
+      const promptOptions: SendPromptOptionsWithRetry = {
         images,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
-      });
+      };
+      return (
+        sessionActions.sendPrompt as (
+          promptText: string,
+          options?: SendPromptOptionsWithRetry,
+        ) => ReturnType<typeof sessionActions.sendPrompt>
+      )(text, promptOptions);
     },
     [clearFollowup, sessionActions],
   );
@@ -1287,6 +1330,20 @@ export function App({
   }, [connection.sessionId, onSessionIdChange]);
 
   useEffect(() => {
+    const nextGoal = getLatestActiveGoalFromBlocks(blocks);
+    setActiveGoal((current) => {
+      if (!nextGoal) return current ? null : current;
+      if (
+        current?.condition === nextGoal.condition &&
+        current.setAt === nextGoal.setAt
+      ) {
+        return current;
+      }
+      return nextGoal;
+    });
+  }, [blocks]);
+
+  useEffect(() => {
     const onGoalStatusActive = (event: Event) => {
       const detail = (
         event as CustomEvent<{
@@ -1439,18 +1496,13 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
-      const goalToClear = activeGoalRef.current;
       store.appendLocalUserMessage(text);
-      dispatchGoalCleared(goalToClear);
       sessionActions.clearGoal().catch((error: unknown) => {
-        if (goalToClear) {
-          dispatchGoalSet(goalToClear.condition, goalToClear.setAt);
-        }
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [dispatchGoalCleared, dispatchGoalSet, reportError, sessionActions, store],
+    [reportError, sessionActions, store],
   );
 
   const handleGoalSlashCommand = useCallback(
@@ -1471,10 +1523,9 @@ export function App({
         }
         return handleBusyGoalClear(text);
       } else if (goalArg) {
-        const optimisticGoal = { condition: goalArg, setAt: Date.now() };
         store.appendLocalUserMessage(text);
-        dispatchGoalSet(optimisticGoal.condition, optimisticGoal.setAt);
         if (!sendToDaemon) {
+          dispatchGoalSet(goalArg, Date.now());
           return true;
         }
         sendPrompt(text, images, { optimisticUserMessage: false }).catch(
@@ -1538,10 +1589,6 @@ export function App({
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
-              }
-              const goalArg = text.replace(/^\/goal\b/i, '').trim();
-              if (goalArg) {
-                setActiveGoal({ condition: goalArg, setAt: Date.now() });
               }
               return enqueuePrompt(text, images);
             }

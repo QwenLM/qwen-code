@@ -106,6 +106,27 @@ describe('MessageEmitter', () => {
     });
   });
 
+  describe('emitGoalStatus', () => {
+    it('should send a goal status update in metadata', async () => {
+      const status = {
+        kind: 'set' as const,
+        condition: 'ship goal support',
+        setAt: 1234,
+      };
+
+      await emitter.emitGoalStatus(status);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalStatus: status,
+        },
+      });
+    });
+  });
+
   describe('emitAgentThought', () => {
     it('should send agent_thought_chunk update with text content', async () => {
       await emitter.emitAgentThought('Let me think about this...');

@@ -33,6 +33,7 @@ function statusBlock(
   id: string,
   text: string,
   createdAt: number,
+  overrides: Partial<DaemonStatusTranscriptBlock> = {},
 ): DaemonStatusTranscriptBlock {
   return {
     id,
@@ -41,6 +42,7 @@ function statusBlock(
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
+    ...overrides,
   };
 }
 
@@ -867,6 +869,32 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'system',
       content: 'Shell command exited with code 0',
     });
+  });
+
+  it('preserves structured status source and data', () => {
+    const data = {
+      kind: 'set',
+      condition: 'ship goal sync',
+      setAt: 1234,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('goal-1', '', 1, {
+        source: 'goal',
+        data,
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'goal-1',
+        role: 'system',
+        content: '',
+        variant: 'info',
+        source: 'goal',
+        data,
+        timestamp: 1,
+      },
+    ]);
   });
 
   it('appends shell output to preceding tool_group', () => {
@@ -1932,6 +1960,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'Request failed',
         variant: 'error',
         retryable: true,
+        source: 'turn_error',
         timestamp: 1,
       },
     ]);
