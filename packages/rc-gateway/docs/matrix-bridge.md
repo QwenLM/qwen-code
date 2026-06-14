@@ -151,11 +151,34 @@ breaks — everything else HTML-escaped; no CommonMark dependency). Matrix's
 keeping the room readable; a new turn (after a resolve, or the next inbound
 prompt) starts back in the room timeline.
 
+## End-to-end encryption (scaffolding only)
+
+E2EE is a **second transport, opt-in and OFF by default** (`MATRIX_ENABLE_E2EE`).
+The tested fetch path stays the default and continues to detect-and-refuse
+encrypted rooms, so enabling crypto can never destabilize the working unencrypted
+bridge. The pure layer is in place: the flag, the olm-store convention
+(`$QWEN_BRIDGE_STATE_DIR/olm/`), the `olm_store_missing` warn on first boot, and
+the per-room transport decision (`decideMatrixTransport`). The native crypto
+adapter (`matrix-bot-sdk` + `@matrix-org/matrix-sdk-crypto-nodejs`, an
+`optionalDependency`, dynamically imported) is a separate quarantined slice and is
+**not built in this release** — so even with `MATRIX_ENABLE_E2EE` set, encrypted
+rooms are still refused (the bridge logs that plainly at boot). The native module
+loads in this environment, so when the adapter lands it is compile-checked against
+the real SDK types; the live decrypt/encrypt round-trip remains
+verified-locally-only (no homeserver in CI).
+
 ## Deferred (not yet built)
 
-- **End-to-end encryption.** Needs `matrix-bot-sdk`'s olm/megolm crypto (which
-  also subsumes the sync loop). Encrypted rooms are detect-and-refused, not
-  decrypted. (Tracked separately.)
+- **The E2EE crypto adapter** (the actual decrypt/encrypt transport). The
+  scaffolding above is in place; the SDK-backed adapter is the next slice. It also
+  carries these enumerated requirements, deferred with it:
+  - **`olmStorePresent` on a bridge healthz** (spec "Healthz reflects olm store
+    status") — the in-process bridge has no HTTP listener, so this is its own slice.
+  - **`olm_store_missing` warn on first boot** — emitted only once decryption is
+    active (in the scaffolding state rooms are refused, not re-keyed).
+- **`MATRIX_ENABLE_E2EE` is sidecar-only today.** The in-process path (`cli.ts`)
+  reads Matrix env directly and does not yet know the flag; it gains it with the
+  `cli.ts` → `startBridge` de-dup.
 - Only `agent_message_chunk` (the assistant's prose) is streamed; thought and
   tool-call chunks are skipped to keep rooms readable.
 - A fenced code block that spans a flush boundary (split by the idle timer or the

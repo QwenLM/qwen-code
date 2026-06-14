@@ -121,6 +121,17 @@ describe('resolveSidecarConfig — matrix', () => {
     expect((cfg as { commandPrefix: string }).commandPrefix).toBe('!q');
   });
 
+  it('E2EE is OFF by default and opt-in via MATRIX_ENABLE_E2EE', () => {
+    const off = resolveSidecarConfig('matrix', fullMatrix, HOME);
+    expect((off as { e2eeEnabled: boolean }).e2eeEnabled).toBe(false);
+    const on = resolveSidecarConfig(
+      'matrix',
+      { ...fullMatrix, MATRIX_ENABLE_E2EE: 'true' },
+      HOME,
+    );
+    expect((on as { e2eeEnabled: boolean }).e2eeEnabled).toBe(true);
+  });
+
   it('fails fast on a missing access token', () => {
     const env = { ...fullMatrix, MATRIX_ACCESS_TOKEN: undefined };
     expect(() => resolveSidecarConfig('matrix', env, HOME)).toThrow(

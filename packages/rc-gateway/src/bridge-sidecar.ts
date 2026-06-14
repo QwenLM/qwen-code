@@ -111,6 +111,21 @@ async function main(): Promise<void> {
     const who = await mxRest.whoami(AbortSignal.timeout(10000));
     const mismatch = checkMxid(who.userId, cfg.userId);
     if (mismatch) fail(mismatch);
+
+    // E2EE scaffolding (opt-in, OFF by default). The olm/megolm crypto adapter
+    // is not built yet, so an enabled flag still falls back to refusing encrypted
+    // rooms (decideMatrixTransport with cryptoAvailable=false) — say so plainly
+    // rather than let an operator think ciphertext is being read. The
+    // olm_store_missing warn is intentionally NOT emitted here: with no adapter,
+    // rooms are refused (not re-keyed), so it would describe behavior that does
+    // not happen yet — it lands with the crypto adapter slice.
+    if (cfg.e2eeEnabled) {
+      console.warn(
+        'qwen-rc-bridge: MATRIX_ENABLE_E2EE is set but the encrypted-room ' +
+          'crypto transport is not built in this release — encrypted rooms are ' +
+          'still refused. Use an unencrypted room.',
+      );
+    }
   }
 
   const bridge = await startBridge(cfg, { token, log: (m) => console.log(m) });

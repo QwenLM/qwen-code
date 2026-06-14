@@ -22,6 +22,7 @@
  */
 
 import { join } from 'node:path';
+import { parseE2eeEnabled } from './matrix/e2ee.js';
 
 export type BridgeKind = 'telegram' | 'discord' | 'matrix';
 
@@ -70,6 +71,8 @@ export interface MatrixSidecarConfig extends SidecarConfigBase {
   userId: string;
   accessToken: string;
   commandPrefix: string;
+  /** `MATRIX_ENABLE_E2EE` — opt-in encrypted-room support (default OFF). */
+  e2eeEnabled: boolean;
 }
 
 export type SidecarConfig =
@@ -161,6 +164,7 @@ export function resolveSidecarConfig(
     userId,
     accessToken,
     commandPrefix: optional(env, 'MATRIX_COMMAND_PREFIX') ?? '!qwen',
+    e2eeEnabled: parseE2eeEnabled(env['MATRIX_ENABLE_E2EE']),
     gatewayUrl,
     stateDir,
     ...sharedCredentials(),
