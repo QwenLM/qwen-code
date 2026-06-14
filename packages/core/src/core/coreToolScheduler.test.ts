@@ -8322,7 +8322,7 @@ describe('Fire hook functions integration', () => {
 
       const agentTool = new MockTool({
         name: ToolNames.AGENT,
-        kind: Kind.Other,
+        kind: Kind.Agent,
         execute: async (params) => {
           const id = (params as { id: string }).id;
           executionLog.push(`agent:start:${id}`);

@@ -426,6 +426,9 @@ describe('ToolCallEmitter', () => {
       expect(emitter.mapToolKind(Kind.Execute)).toBe('execute');
       expect(emitter.mapToolKind(Kind.Think)).toBe('think');
       expect(emitter.mapToolKind(Kind.Fetch)).toBe('fetch');
+      // Kind.Agent maps to 'other' on the wire: ACP has no 'agent' ToolKind,
+      // so emitting it would be Zod-rejected at the daemon's ACP boundary.
+      expect(emitter.mapToolKind(Kind.Agent)).toBe('other');
       expect(emitter.mapToolKind(Kind.Other)).toBe('other');
     });
 

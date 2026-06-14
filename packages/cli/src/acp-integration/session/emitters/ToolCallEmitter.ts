@@ -31,6 +31,14 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Execute]: 'execute',
   [Kind.Think]: 'think',
   [Kind.Fetch]: 'fetch',
+  // ACP defines no 'agent' ToolKind (verified through @agentclientprotocol/sdk
+  // 0.25.1). The daemon's ClientSideConnection Zod-validates every session/update
+  // and session/request_permission from the `qwen --acp` child before fanning out
+  // to SSE clients, so emitting 'agent' is rejected at that hop and the frame is
+  // dropped. Map the internal Kind.Agent to 'other' on the wire to stay
+  // protocol-valid; dedicated agent UI is delivered out-of-band (via _meta.toolName)
+  // in a follow-up rather than via a kind the protocol can't carry.
+  [Kind.Agent]: 'other',
   [Kind.Other]: 'other',
 };
 
