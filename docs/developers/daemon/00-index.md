@@ -29,7 +29,7 @@
 
 ### 基础
 
-- [`01-architecture.md`](./01-architecture.md) — 系统架构、进程拓扑、包关系、6 张顶层时序图。
+- [`01-architecture.md`](./01-architecture.md) — 系统架构、进程拓扑、包关系、7 张顶层时序图。
 
 ### 服务端核心
 

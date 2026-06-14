@@ -6,7 +6,7 @@
 
 - **只有一个协议版本 `v1`。** `SERVE_PROTOCOL_VERSION = 'v1'`、`SUPPORTED_SERVE_PROTOCOL_VERSIONS = ['v1']`。v1 内部纯加法；frame 形态破坏性改动留给 v2。
 - **每 tag 一个 `since` 版本**，未来 v2 可以同时广播 v1 与 v2 tag。
-- **条件广播**。九个 tag（`require_auth`、`mcp_workspace_pool`、`mcp_pool_restart`、`allow_origin`、`prompt_absolute_deadline`、`writer_idle_timeout`、`workspace_settings`、`rate_limit`、`workspace_reload`）只在对应部署开关打开时才广播；tag 存在 = 行为存在。
+- **条件广播**。十个 tag（`require_auth`、`mcp_workspace_pool`、`mcp_pool_restart`、`allow_origin`、`prompt_absolute_deadline`、`writer_idle_timeout`、`workspace_settings`、`session_shell_command`、`rate_limit`、`workspace_reload`）只在对应部署开关打开时才广播；tag 存在 = 行为存在。
 - **Capability tag = 行为契约**。在已有 tag 下加新行为会悄悄破坏已有的 pre-flight 检查；**新行为对应新 tag**。
 
 完整注册表在 `packages/cli/src/serve/capabilities.ts`。
@@ -72,6 +72,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       typeof t.writerIdleTimeoutMs === 'number' && t.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (t) => t.persistSettingAvailable === true],
+  ['session_shell_command', (t) => t.sessionShellCommandEnabled === true],
   ['rate_limit', (t) => t.rateLimit === true],
   ['workspace_reload', (t) => t.reloadAvailable === true],
 ]);
@@ -84,11 +85,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
 
 基线 tag（Map 里没有）无条件广播 —— 这个决定是**用「不写」表达**的，不需要专门维护一个 Set。
 
-### 65 个 tag（v1，按域）
+### 66 个 tag（v1，按域）
 
 Foundation：`health`、`capabilities`。
 
-Sessions：`session_create`、`session_scope_override`、`session_load`、`session_resume`、`unstable_session_resume`、`session_list`、`session_prompt`、`session_cancel`、`session_events`、`session_set_model`、`session_close`、`session_metadata`、`session_context`、`session_context_usage`、`session_supported_commands`、`session_tasks`、`session_stats`、`session_approval_mode_control`、`session_recap`、`session_btw`、`session_language`、`session_rewind`、`session_hooks`、`session_branch`。
+Sessions：`session_create`、`session_scope_override`、`session_load`、`session_resume`、`unstable_session_resume`、`session_list`、`session_prompt`、`session_cancel`、`session_events`、`session_set_model`、`session_close`、`session_metadata`、`session_context`、`session_context_usage`、`session_supported_commands`、`session_tasks`、`session_stats`、`session_approval_mode_control`、`session_recap`、`session_btw`、**`session_shell_command`**（条件）、`session_language`、`session_rewind`、`session_hooks`、`session_branch`。
 
 Streaming：`slow_client_warning`、`typed_event_schema`。
 
@@ -155,7 +156,7 @@ sequenceDiagram
 ## 依赖
 
 - 被 `packages/cli/src/serve/server.ts` 读来装 `/capabilities` 响应。
-- Toggle 输入：`runQwenServe` / `createServeApp` 构造 `{ requireAuth, mcpPoolActive, allowOriginActive, promptDeadlineMs, writerIdleTimeoutMs, persistSettingAvailable, rateLimit, reloadAvailable }` 透传到 envelope。
+- Toggle 输入：`runQwenServe` / `createServeApp` 构造 `{ requireAuth, mcpPoolActive, allowOriginActive, promptDeadlineMs, writerIdleTimeoutMs, persistSettingAvailable, sessionShellCommandEnabled, rateLimit, reloadAvailable }` 透传到 envelope。
 - envelope 中激活的 `permission` 策略来自 `BridgeOptions.permissionPolicy`（其本身读 `settings.json` 的 `policy.permissionStrategy`）。
 
 ## 配置
@@ -167,6 +168,7 @@ sequenceDiagram
 | 参数            | `--mcp-client-budget=N`、`--mcp-budget-mode={off,warn,enforce}` | 不改 tag 集合（`mcp_guardrails` 永远广播），但改 per-server 预留 + refusal 行为       |
 | 参数 / Env      | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | `rate_limit` tag 出现                                                                 |
 | 嵌入选项        | `persistSettingAvailable`                                       | `workspace_settings` tag 出现                                                         |
+| 参数 / 嵌入选项 | `--enable-session-shell` / `sessionShellCommandEnabled`         | `session_shell_command` tag 出现                                                      |
 | 嵌入选项        | `reloadAvailable`                                               | `workspace_reload` tag 出现                                                           |
 | `settings.json` | `policy.permissionStrategy`                                     | 设 envelope 的 `policy.permission`                                                    |
 
