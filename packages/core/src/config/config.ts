@@ -1472,6 +1472,8 @@ export class Config {
       terminalHeight: params.shellExecutionConfig?.terminalHeight ?? 24,
       showColor: params.shellExecutionConfig?.showColor ?? false,
       pager: params.shellExecutionConfig?.pager ?? 'cat',
+      maxBufferedOutputBytes:
+        params.shellExecutionConfig?.maxBufferedOutputBytes,
     };
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
@@ -4284,6 +4286,9 @@ export class Config {
         config.terminalHeight ?? this.shellExecutionConfig.terminalHeight,
       showColor: config.showColor ?? this.shellExecutionConfig.showColor,
       pager: config.pager ?? this.shellExecutionConfig.pager,
+      maxBufferedOutputBytes:
+        config.maxBufferedOutputBytes ??
+        this.shellExecutionConfig.maxBufferedOutputBytes,
     };
   }
   getScreenReader(): boolean {
