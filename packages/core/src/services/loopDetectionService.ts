@@ -102,6 +102,10 @@ export class LoopDetectionService {
     return this.lastLoopType;
   }
 
+  getConsecutiveToolCallCount(): number {
+    return this.toolCallRepetitionCount;
+  }
+
   /**
    * Disables loop detection for the current session.
    */
@@ -125,6 +129,14 @@ export class LoopDetectionService {
    * @returns true if a loop is detected, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
+    if (this.addAndCheckDeterministicToolCallLoop(event)) {
+      return true;
+    }
+
+    return this.addAndCheckHeuristicLoops(event);
+  }
+
+  addAndCheckHeuristicLoops(event: ServerGeminiStreamEvent): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
@@ -139,12 +151,11 @@ export class LoopDetectionService {
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
 
-        const toolCallLoop = this.checkToolCallLoop(event.value);
         this.trackToolCall(event.value);
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
 
-        this.loopDetected = toolCallLoop || readFileLoop || actionStagnation;
+        this.loopDetected = readFileLoop || actionStagnation;
         break;
       }
       case GeminiEventType.Content: {
@@ -158,6 +169,31 @@ export class LoopDetectionService {
       }
       default:
         break;
+    }
+    return this.loopDetected;
+  }
+
+  addAndCheckDeterministicToolCallLoop(
+    event: ServerGeminiStreamEvent,
+  ): boolean {
+    if (this.loopDetected) {
+      return true;
+    }
+
+    if (event.type === GeminiEventType.Retry) {
+      this.resetToolCallCount();
+      return false;
+    }
+
+    if (
+      this.disabledForSession ||
+      event.type !== GeminiEventType.ToolCallRequest
+    ) {
+      return false;
+    }
+
+    if (this.checkToolCallLoop(event.value)) {
+      this.loopDetected = true;
     }
     return this.loopDetected;
   }
