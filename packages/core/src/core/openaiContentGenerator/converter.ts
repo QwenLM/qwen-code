@@ -545,7 +545,11 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionCallIds = new Set<string>();
   const emittedFunctionResponseIds = new Set<string>();
+  // New history is normalized before reaching this converter. These local
+  // guards only keep already-corrupted or programmatic duplicate parts from
+  // leaking duplicate IDs into OpenAI payloads.
   // When `splitToolMedia` is enabled, media stripped from tool messages is
   // accumulated here and emitted as a single follow-up user message after
   // ALL tool messages in this group have been pushed. OpenAI Chat
@@ -577,8 +581,19 @@ function processContent(
     }
 
     if ('functionCall' in part && part.functionCall && role === 'assistant') {
+      const callId = part.functionCall.id;
+      if (callId) {
+        if (emittedFunctionCallIds.has(callId)) {
+          debugLogger.debug(
+            `Dropping duplicate functionCall id=${callId} while converting content`,
+          );
+          continue;
+        }
+        emittedFunctionCallIds.add(callId);
+      }
+
       toolCalls.push({
-        id: part.functionCall.id || `call_${toolCallIndex}`,
+        id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
           name: part.functionCall.name || '',

@@ -5,9 +5,11 @@
  */
 
 import type { Content, FunctionCall, Part } from '@google/genai';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
+const debugLogger = createDebugLogger('TOOL_CALL_IDS');
 
 function addId(ids: Set<string>, id: string | undefined): void {
   if (id) {
@@ -67,6 +69,9 @@ export function normalizeModelToolCallIds(
     const rawId = functionCall.id;
     if (rawId) {
       if (rawIdsInCurrentTurn.has(rawId)) {
+        debugLogger.debug(
+          `Dropping same-turn duplicate functionCall id=${rawId} name=${functionCall.name}`,
+        );
         continue;
       }
       rawIdsInCurrentTurn.add(rawId);
@@ -75,6 +80,11 @@ export function normalizeModelToolCallIds(
     const id = rawId
       ? nextAvailableDuplicateId(rawId, usedIds)
       : nextGeneratedId(usedIds);
+    if (rawId && id !== rawId) {
+      debugLogger.debug(
+        `Suffixing cross-turn duplicate functionCall id=${rawId} normalizedId=${id} name=${functionCall.name}`,
+      );
+    }
     usedIds.add(id);
 
     normalized.push({
@@ -99,6 +109,7 @@ export function dedupeToolCallsById<T extends Pick<FunctionCall, 'id'>>(
     const id = functionCall.id;
     if (id) {
       if (seenIds.has(id)) {
+        debugLogger.debug(`Dropping duplicate functionCall id=${id}`);
         continue;
       }
       seenIds.add(id);

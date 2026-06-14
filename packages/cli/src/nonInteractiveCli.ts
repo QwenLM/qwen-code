@@ -746,6 +746,9 @@ export async function runNonInteractive(
         const uniqueBatchRequests = batchRequests.filter((request) => {
           if (request.callId) {
             if (seenBatchCallIds.has(request.callId)) {
+              debugLogger.debug(
+                `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
+              );
               return false;
             }
             seenBatchCallIds.add(request.callId);

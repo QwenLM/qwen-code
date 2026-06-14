@@ -1819,6 +1819,57 @@ describe('OpenAIContentConverter', () => {
       expect(toolResultIds).toEqual(['dup_id_0001']);
     });
 
+    it('should drop duplicate tool call IDs within a single assistant message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'a.ts' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  args: { file_path: 'b.ts' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup_id_0001',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+
+      expect(assistant?.tool_calls).toHaveLength(1);
+      expect(assistant?.tool_calls?.[0].id).toBe('dup_id_0001');
+      expect(assistant?.tool_calls?.[0].function.arguments).toBe(
+        JSON.stringify({ file_path: 'a.ts' }),
+      );
+    });
+
     it('should keep only the first adjacent tool response and its split media for a surviving id', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',

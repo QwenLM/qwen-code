@@ -142,9 +142,7 @@ function dedupeRequestsByCallId(
     if (request.callId) {
       if (seenCallIds.has(request.callId)) {
         debugLogger.debug(
-          'dedupeRequestsByCallId: dropping duplicate callId=%s name=%s',
-          request.callId,
-          request.name,
+          `dedupeRequestsByCallId: dropping duplicate callId=${request.callId} name=${request.name}`,
         );
         continue;
       }
@@ -161,7 +159,6 @@ function dedupeRequestsByCallId(
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
 const GATE_EXEMPT_TOOLS = new Set(['read_file']);
-
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;

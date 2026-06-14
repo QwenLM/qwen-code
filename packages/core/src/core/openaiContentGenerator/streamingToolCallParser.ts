@@ -5,6 +5,9 @@
  */
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
 /**
  * Type definition for the result of parsing a JSON chunk in tool calls
@@ -143,9 +146,12 @@ export class StreamingToolCallParser {
 
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
-    if (isKnownId && chunk && currentBuffer.trim() && currentDepth === 0) {
+    if (isKnownId && currentBuffer.trim() && currentDepth === 0) {
       try {
         JSON.parse(currentBuffer);
+        debugLogger.debug(
+          `Ignoring replay chunk for completed toolCall id=${id}`,
+        );
         return { complete: false };
       } catch {
         // Not complete yet; append the incoming chunk below.

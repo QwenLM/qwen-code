@@ -82,21 +82,37 @@ import {
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
-function syncOwnFunctionCallsField(
+function syncFunctionCallsField(
   response: GenerateContentResponse,
   parts: readonly Part[],
 ): void {
-  const descriptor = Object.getOwnPropertyDescriptor(response, 'functionCalls');
-  if (!descriptor || (!descriptor.writable && !descriptor.set)) {
-    return;
-  }
-
   const functionCalls = parts
     .map((part) => part.functionCall)
     .filter((call): call is FunctionCall => Boolean(call));
-  (
-    response as GenerateContentResponse & { functionCalls?: FunctionCall[] }
-  ).functionCalls = functionCalls.length > 0 ? functionCalls : undefined;
+  const value = functionCalls.length > 0 ? functionCalls : undefined;
+
+  let owner: object | null = response;
+  let descriptor: PropertyDescriptor | undefined;
+  while (owner && !descriptor) {
+    descriptor = Object.getOwnPropertyDescriptor(owner, 'functionCalls');
+    owner = Object.getPrototypeOf(owner);
+  }
+
+  if (descriptor?.set) {
+    (
+      response as GenerateContentResponse & { functionCalls?: FunctionCall[] }
+    ).functionCalls = value;
+    return;
+  }
+
+  if (!descriptor || descriptor.writable || descriptor.get) {
+    Object.defineProperty(response, 'functionCalls', {
+      value,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  }
 }
 
 /**
@@ -2839,7 +2855,7 @@ export class GeminiChat {
               usedToolCallIds,
               rawToolCallIdsInCurrentTurn,
             );
-            syncOwnFunctionCallsField(chunk, content.parts);
+            syncFunctionCallsField(chunk, content.parts);
 
             if (content.parts.some((part) => part.functionCall)) {
               hasToolCall = true;

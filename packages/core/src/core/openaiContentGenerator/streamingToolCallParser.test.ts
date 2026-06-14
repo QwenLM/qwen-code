@@ -568,6 +568,26 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
+    it('should ignore metadata-only replay chunks after a tool call ID completes', () => {
+      parser.addChunk(0, '{"file_path": "a.ts"}', 'call_1', 'read_file');
+
+      const result = parser.addChunk(0, '', 'call_1', 'shell');
+
+      expect(result.complete).toBe(false);
+      expect(parser.getToolCallMeta(0)).toEqual({
+        id: 'call_1',
+        name: 'read_file',
+      });
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+          index: 0,
+        },
+      ]);
+    });
+
     it('should detect index collision and find new index', () => {
       // First complete tool call at index 0
       parser.addChunk(0, '{"param1": "value1"}', 'call_1', 'function1');
