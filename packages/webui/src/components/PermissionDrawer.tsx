@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FC } from 'react';
 import { MarkdownRenderer } from './messages/MarkdownRenderer/MarkdownRenderer.js';
+import { isAgentTool } from '../constants/toolNames.js';
 
 export interface PermissionOption {
   name: string;
@@ -17,6 +18,12 @@ export interface PermissionOption {
 export interface PermissionToolCall {
   title?: string;
   kind?: string;
+  /**
+   * Canonical tool name (from the ACP frame's `_meta.toolName`). Lets the
+   * drawer give specific tools dedicated UI (e.g. the Agent tool) without
+   * depending on a protocol `kind` ACP can't carry.
+   */
+  toolName?: string;
   toolCallId?: string;
   rawInput?: {
     command?: string;
@@ -77,6 +84,11 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
 
   // Get the title for the permission request
   const getTitle = () => {
+    // Check tool name before `kind` so the Agent prompt wins, matching
+    // ToolApproval.tsx's `isAgent`-first ordering across the two surfaces.
+    if (isAgentTool(toolCall.toolName)) {
+      return 'Launch this agent?';
+    }
     if (toolCall.kind === 'edit' || toolCall.kind === 'write') {
       const fileName = getAffectedFileName();
       return (
@@ -236,7 +248,8 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
             toolCall.kind === 'write' ||
             toolCall.kind === 'read' ||
             toolCall.kind === 'execute' ||
-            toolCall.kind === 'bash') &&
+            toolCall.kind === 'bash' ||
+            isAgentTool(toolCall.toolName)) &&
             toolCall.title && (
               <div
                 /* 13px, normal font weight; normal whitespace wrapping + long word breaking; maximum 3 lines with overflow ellipsis */

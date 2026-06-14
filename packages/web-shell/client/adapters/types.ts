@@ -61,6 +61,8 @@ export interface PermissionRequest {
   toolCallId?: string;
   title?: string;
   toolKind?: string;
+  /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
+  toolName?: string;
   content: ContentBlock[];
   options: PermissionOption[];
   rawInput?: Record<string, unknown>;
