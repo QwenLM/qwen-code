@@ -290,7 +290,7 @@ export class GeminiClient {
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
-      replayUiTelemetryFromConversation(
+      const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
       );
@@ -304,9 +304,17 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
-      this.getChat().setLastPromptTokenCount(
-        uiTelemetryService.getLastPromptTokenCount(),
-      );
+      const chat = this.getChat();
+      if (resumeTokenCounts) {
+        chat.seedResumeTokenCounts(
+          resumeTokenCounts.promptTokenCount,
+          resumeTokenCounts.outputTokenCount,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
