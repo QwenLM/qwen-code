@@ -266,7 +266,6 @@ function mapToolKind(kind: Kind | undefined, toolName?: string): string {
     'execute',
     'think',
     'fetch',
-    'agent',
     'other',
   ]);
 

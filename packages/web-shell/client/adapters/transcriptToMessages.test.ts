@@ -1403,7 +1403,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
         toolCall: {
           toolCallId: 'agent-call-1',
-          kind: 'agent',
+          kind: 'other',
           status: 'pending',
           title: '查询阿里云官网活动',
           rawInput: {
@@ -1426,7 +1426,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
         toolCall: {
           toolCallId: 'agent-call-2',
-          kind: 'agent',
+          kind: 'other',
           status: 'pending',
           title: '查询百度云官网活动',
           rawInput: {

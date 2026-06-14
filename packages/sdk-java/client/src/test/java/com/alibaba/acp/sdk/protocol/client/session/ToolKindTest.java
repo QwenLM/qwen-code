@@ -47,10 +47,6 @@ class ToolKindTest {
         assertEquals("\"switch_mode\"", JSON.toJSONString(kind));
         assertEquals(ToolKind.SWITCH_MODE, JSON.parseObject("\"switch_mode\"", ToolKind.class));
 
-        kind = ToolKind.AGENT;
-        assertEquals("\"agent\"", JSON.toJSONString(kind));
-        assertEquals(ToolKind.AGENT, JSON.parseObject("\"agent\"", ToolKind.class));
-
         kind = ToolKind.OTHER;
         assertEquals("\"other\"", JSON.toJSONString(kind));
         assertEquals(ToolKind.OTHER, JSON.parseObject("\"other\"", ToolKind.class));

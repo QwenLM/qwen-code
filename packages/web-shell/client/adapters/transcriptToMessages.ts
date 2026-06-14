@@ -969,6 +969,6 @@ function inferToolKind(
   if (name === 'edit' || name === 'write') return 'edit';
   if (name.includes('search') || name === 'grep' || name === 'glob')
     return 'search';
-  if (name === 'agent' || name === 'task') return 'agent';
+  if (name === 'agent' || name === 'task') return 'other';
   return undefined;
 }

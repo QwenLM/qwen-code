@@ -6,7 +6,6 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { Kind } from '@qwen-code/qwen-code-core';
 import { normalizeSessionData } from './normalize.js';
 
 describe('normalizeSessionData', () => {
@@ -69,51 +68,5 @@ describe('normalizeSessionData', () => {
         },
       },
     ]);
-  });
-
-  it('preserves the agent kind through export normalization', () => {
-    const agentConfig = {
-      getToolRegistry: vi.fn().mockReturnValue({
-        getTool: vi.fn().mockReturnValue({ kind: Kind.Agent }),
-      }),
-    } as unknown as Config;
-
-    const record: ChatRecord = {
-      uuid: 'tool-agent-1',
-      parentUuid: null,
-      sessionId: 'session-agent',
-      timestamp: '2025-01-01T00:00:00.000Z',
-      type: 'tool_result',
-      cwd: '',
-      version: '1.0.0',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-agent-1',
-              name: 'task',
-              response: { output: 'done' },
-            },
-          },
-        ],
-      },
-      toolCallResult: {
-        callId: 'call-agent-1',
-        resultDisplay: 'done',
-      },
-    };
-
-    const normalized = normalizeSessionData(
-      {
-        sessionId: 'session-agent',
-        startTime: '2025-01-01T00:00:00.000Z',
-        messages: [],
-      },
-      [record],
-      agentConfig,
-    );
-
-    expect(normalized.messages[0].toolCall?.kind).toBe('agent');
   });
 });
