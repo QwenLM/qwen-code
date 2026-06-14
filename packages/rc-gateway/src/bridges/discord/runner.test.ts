@@ -197,6 +197,38 @@ describe('DiscordBridge runner', () => {
     expect(ac.signal.aborted).toBe(true);
   });
 
+  it('resumes from the last seen frame id on reconnect (Last-Event-ID)', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const ac = new AbortController();
+    const cursors: Array<number | undefined> = [];
+    let call = 0;
+    const h = harness({ sleep: async () => {} });
+    (
+      h.bridge as unknown as {
+        cfg: {
+          client: {
+            subscribeEvents: (
+              s: string,
+              cb: (ev: { id?: number; type?: string }) => void,
+              sig?: AbortSignal,
+              last?: number,
+            ) => Promise<void>;
+          };
+        };
+      }
+    ).cfg.client.subscribeEvents = async (_s, cb, _sig, last) => {
+      cursors.push(last);
+      call++;
+      if (call === 1) cb({ id: 9, type: 'session_update' }); // a frame arrives
+      if (call >= 2) ac.abort(); // stop after the reconnect
+    };
+
+    void h.bridge.start(ac.signal);
+    await waitFor(() => call >= 2);
+    expect(cursors[0]).toBeUndefined(); // first subscribe: no cursor
+    expect(cursors[1]).toBe(9); // reconnect resumes from the last seen id
+  });
+
   it('deliverEvent renders a permission_request to every bound channel', async () => {
     await channels.bind('chan_1', 'g1', 'sess_q');
     await channels.bind('chan_2', 'g1', 'sess_q');

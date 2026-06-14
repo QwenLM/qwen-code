@@ -22,10 +22,12 @@ let server: Server | undefined;
 let base: string;
 let captured: Captured[];
 let rateLimitNext: boolean;
+let lastEventIdHeader: string | undefined;
 
 beforeEach(() => {
   captured = [];
   rateLimitNext = false;
+  lastEventIdHeader = undefined;
   const app = express();
   app.use(express.json());
   const cap = (req: express.Request) =>
@@ -61,7 +63,8 @@ beforeEach(() => {
     }
     res.status(400).json({ error: 'Invalid or expired invite token' });
   });
-  app.get('/rc/session/:id/events', (_req, res) => {
+  app.get('/rc/session/:id/events', (req, res) => {
+    lastEventIdHeader = req.header('last-event-id');
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write(
       'id: 1\ndata: {"id":1,"type":"session_update","data":{"text":"hi"}}\n\n',
@@ -160,5 +163,12 @@ describe('BridgeClient (loopback contract)', () => {
       bridgeHints?: { recommendedSurface?: string };
     };
     expect(perm.bridgeHints?.recommendedSurface).toBe('inline');
+  });
+
+  it('sends Last-Event-ID when a resume cursor is given (and not otherwise)', async () => {
+    await client().subscribeEvents('s1', () => {});
+    expect(lastEventIdHeader).toBeUndefined(); // first subscribe: no cursor
+    await client().subscribeEvents('s1', () => {}, undefined, 42);
+    expect(lastEventIdHeader).toBe('42'); // reconnect: resume from id 42
   });
 });

@@ -42,6 +42,8 @@ export class TelegramBridge {
   private readonly cfg: TelegramBridgeConfig;
   private readonly bans = new Set<string>();
   private readonly subscribed = new Set<string>();
+  /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
+  private readonly lastEventId = new Map<string, number>();
   private readonly log: (msg: string) => void;
 
   constructor(cfg: TelegramBridgeConfig) {
@@ -105,8 +107,13 @@ export class TelegramBridge {
       void this.cfg.client
         .subscribeEvents(
           sessionId,
-          (ev) => this.deliverEvent(sessionId, ev),
+          (ev) => {
+            if (typeof ev.id === 'number')
+              this.lastEventId.set(sessionId, ev.id);
+            this.deliverEvent(sessionId, ev);
+          },
           signal,
+          this.lastEventId.get(sessionId),
         )
         .finally(() => this.subscribed.delete(sessionId));
     }

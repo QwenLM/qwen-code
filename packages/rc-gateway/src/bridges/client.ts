@@ -154,17 +154,30 @@ export class BridgeClient {
    * `onEvent` for each parsed SSE frame (including `bridgeHints` on
    * permission_request). Resolves when the stream ends or `signal` aborts; never
    * throws on a normal abort. The caller owns reconnection.
+   *
+   * Pass `lastEventId` (the highest frame id already delivered) on a RECONNECT so
+   * the gateway/daemon replays only frames with `id > lastEventId` from its bounded
+   * ring — closing the no-cursor gap where a permission_request or stream chunk
+   * arriving during a blip was silently lost. The daemon skips `id <= cursor`, so
+   * this never re-delivers an already-seen frame. Omit it on the FIRST subscribe
+   * (and after a full gateway restart, when the caller's cursor map is empty) to
+   * get the live stream from now without replaying pre-restart history.
    */
   async subscribeEvents(
     sessionId: string,
     onEvent: (ev: BridgeEvent) => void,
     signal?: AbortSignal,
+    lastEventId?: number,
   ): Promise<void> {
+    const headers = this.authHeaders();
+    if (lastEventId !== undefined && Number.isFinite(lastEventId)) {
+      headers['Last-Event-ID'] = String(lastEventId);
+    }
     let res: Response;
     try {
       res = await this.fetchImpl(
         `${this.baseUrl}/rc/session/${encodeURIComponent(sessionId)}/events`,
-        { headers: this.authHeaders(), signal },
+        { headers, signal },
       );
     } catch {
       return; // network/abort before headers → caller may reconnect

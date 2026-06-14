@@ -85,6 +85,8 @@ export class MatrixBridge {
   private readonly bans = new Set<string>();
   private readonly encryptedRooms = new Set<string>();
   private readonly subscribed = new Set<string>();
+  /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
+  private readonly lastEventId = new Map<string, number>();
   /** eventId → tracked permission_request (reaction → vote lookup). */
   private readonly tracked = new Map<string, TrackedEvent>();
   /** requestId → the sent messages that rendered it (for the resolve edit). */
@@ -205,10 +207,17 @@ export class MatrixBridge {
     let backoff = RECONNECT_INITIAL_MS;
     try {
       while (!signal.aborted) {
+        // Resume from the last frame id seen so a reconnect catches frames that
+        // arrived during the blip (the daemon replays only id > cursor).
         await this.cfg.client.subscribeEvents(
           sessionId,
-          (ev) => this.deliverEvent(sessionId, ev),
+          (ev) => {
+            if (typeof ev.id === 'number')
+              this.lastEventId.set(sessionId, ev.id);
+            this.deliverEvent(sessionId, ev);
+          },
           signal,
+          this.lastEventId.get(sessionId),
         );
         if (signal.aborted) break;
         await this.backoff(signal, backoff);

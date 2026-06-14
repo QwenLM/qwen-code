@@ -89,6 +89,8 @@ export class DiscordBridge {
   private readonly cfg: DiscordBridgeConfig;
   private readonly bans = new Set<string>();
   private readonly subscribed = new Set<string>();
+  /** sessionId → highest SSE frame id seen (resume cursor on reconnect). */
+  private readonly lastEventId = new Map<string, number>();
   /** requestId → every channel message that rendered it (edited on resolve). */
   private readonly sent = new Map<string, SentRequest[]>();
   /** Streams agent prose into channels with buffering + threads-on-long-stream. */
@@ -194,11 +196,17 @@ export class DiscordBridge {
     try {
       while (!signal.aborted) {
         // subscribeEvents resolves when the stream ends (or never opened); the
-        // caller owns reconnection — that's this loop.
+        // caller owns reconnection — that's this loop. Resume from the last frame
+        // id seen so a reconnect catches frames that arrived during the blip.
         await this.cfg.client.subscribeEvents(
           sessionId,
-          (ev) => this.deliverEvent(sessionId, ev),
+          (ev) => {
+            if (typeof ev.id === 'number')
+              this.lastEventId.set(sessionId, ev.id);
+            this.deliverEvent(sessionId, ev);
+          },
           signal,
+          this.lastEventId.get(sessionId),
         );
         if (signal.aborted) break;
         await sleep(jitter(backoff), signal);
