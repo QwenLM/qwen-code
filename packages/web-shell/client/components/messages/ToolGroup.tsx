@@ -64,7 +64,7 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
-    return !!getWriteContent(tool);
+    return !!getWriteContent(tool) || hasEditContent(tool);
   }
   if (tool.status !== 'completed' && tool.status !== 'failed') return false;
   if (isShellToolName(name)) {
@@ -72,7 +72,7 @@ function hasExpandableContent(tool: ACPToolCall): boolean {
     return !!text && text.trim().length > 0 && text.split('\n').length > 1;
   }
   if (name === 'edit' || name === 'write' || name === 'editfile') {
-    return hasDiffContent(tool);
+    return hasEditContent(tool);
   }
   if (name === 'read' || name === 'read_file' || name === 'readfile') {
     const text = extractText(tool);
@@ -104,11 +104,11 @@ function hasDetailView(tool: ACPToolCall): boolean {
 
 function hasDiffContent(tool: ACPToolCall): boolean {
   if (tool.content?.some((b) => b.type === 'diff')) return true;
-  if (tool.rawOutput && typeof tool.rawOutput === 'object') {
-    const raw = tool.rawOutput as Record<string, unknown>;
-    if (typeof raw.fileDiff === 'string' && raw.fileDiff) return true;
-  }
-  return false;
+  return !!getRawFileDiff(tool);
+}
+
+function hasEditContent(tool: ACPToolCall): boolean {
+  return hasDiffContent(tool) || !!extractText(tool);
 }
 
 function extractDiff(tool: ACPToolCall): string {
@@ -118,11 +118,22 @@ function extractDiff(tool: ACPToolCall): string {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
+  return getRawFileDiff(tool);
+}
+
+function getRawFileDiff(tool: ACPToolCall): string {
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
     const raw = tool.rawOutput as Record<string, unknown>;
+    if (isTruncatedSessionDiff(raw)) return '';
     if (typeof raw.fileDiff === 'string') return raw.fileDiff;
   }
   return '';
+}
+
+function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
+  return (
+    raw.truncatedForSession === true && 'fileName' in raw && 'newContent' in raw
+  );
 }
 
 const MAX_DIFF_PRODUCT = 250_000;
@@ -294,12 +305,17 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   );
 }
 
-function ExpandedEditDiff({ tool }: { tool: ACPToolCall }) {
+function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const diff = useMemo(() => extractDiff(tool), [tool]);
-  if (!diff) return null;
+  const text = useMemo(() => extractText(tool) || '', [tool]);
+  if (!diff && !text) return null;
   return (
     <div className={styles.expandedEdit}>
-      <DiffView diff={diff} />
+      {diff ? (
+        <DiffView diff={diff} />
+      ) : (
+        <pre className={styles.expandedOutput}>{text}</pre>
+      )}
     </div>
   );
 }
@@ -845,10 +861,10 @@ export const ToolLine = memo(function ToolLine({
             <ExpandedBashOutput tool={tool} maxLines={shellOutputMaxLines} />
           )}
           {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedEditDiff tool={tool} />
+            <ExpandedEditContent tool={tool} />
           )}
           {(name === 'edit' || name === 'write' || name === 'editfile') && (
-            <ExpandedEditDiff tool={tool} />
+            <ExpandedEditContent tool={tool} />
           )}
           {(name === 'read' || name === 'read_file' || name === 'readfile') && (
             <ExpandedReadContent tool={tool} />

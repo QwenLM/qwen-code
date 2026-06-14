@@ -2328,6 +2328,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool?.rawOutput).toBeUndefined();
+    expect(tool?.content).toEqual([
+      {
+        type: 'content',
+        content: { type: 'text', text: 'rendered elsewhere' },
+      },
+    ]);
   });
 
   it('mergeToolCall updates fields from completion block', () => {
@@ -2582,7 +2588,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(execTool?.subContent).toBe('Running...');
   });
 
-  it('does not pass content, locations, or preview to DaemonMessageToolCall', () => {
+  it('passes content but not locations or preview to DaemonMessageToolCall', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, {
         toolName: 'Edit',
@@ -2603,7 +2609,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool).toBeDefined();
     expect(tool?.callId).toBe('tc1');
-    expect('content' in tool!).toBe(false);
+    expect(tool?.content).toEqual([
+      {
+        type: 'diff',
+        path: '/path/file.ts',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
     expect('locations' in tool!).toBe(false);
     expect('preview' in tool!).toBe(false);
   });

@@ -266,6 +266,7 @@ describe('ToolCallEmitter', () => {
           _meta: { toolName: 'edit_file', provenance: 'builtin' },
         }),
       );
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toBeUndefined();
     });
 
     it('should transform message parts to content', async () => {

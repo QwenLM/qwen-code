@@ -39,6 +39,15 @@ function makeShellTool(
   };
 }
 
+function makeEditTool(overrides: Partial<ACPToolCall>): ACPToolCall {
+  return {
+    callId: 'call-edit-1',
+    toolName: 'edit',
+    status: 'completed',
+    ...overrides,
+  };
+}
+
 function renderTool(tool: ACPToolCall): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -102,6 +111,14 @@ function click(el: Element): void {
   act(() => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+}
+
+function expandTool(container: HTMLElement): void {
+  const chevron = [...container.querySelectorAll('span')].find(
+    (s) => s.textContent === '▸',
+  );
+  expect(chevron).toBeTruthy();
+  click(chevron!.parentElement!);
 }
 
 describe('shell tool output expand toggle', () => {
@@ -345,5 +362,79 @@ describe('auto-collapse on finish', () => {
     // Completion must NOT override the user's explicit expand.
     renderStatus('completed');
     expect(container.textContent).toContain('▾');
+  });
+});
+
+describe('edit raw diff rendering', () => {
+  it('ignores truncated session rawOutput diffs', () => {
+    const fullDiff = '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+
+    const normal = renderTool(
+      makeEditTool({
+        rawOutput: {
+          fileDiff: fullDiff,
+        },
+      }),
+    );
+    expandTool(normal);
+    expect(normal.textContent).toContain('old');
+    expect(normal.textContent).toContain('new');
+
+    const truncated = renderTool(
+      makeEditTool({
+        rawOutput: {
+          fileName: '/test/file.ts',
+          newContent: 'preview only',
+          fileDiff: fullDiff,
+          truncatedForSession: true,
+        },
+      }),
+    );
+    expect(truncated.textContent).not.toContain('old');
+    expect(truncated.textContent).not.toContain('new');
+  });
+
+  it('renders truncated session preview text when no diff is available', () => {
+    const preview =
+      'Full diff omitted from saved session history for /test/file.ts.';
+    const container = renderTool(
+      makeEditTool({
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: preview },
+          },
+        ],
+      }),
+    );
+
+    expandTool(container);
+    expect(container.textContent).toContain(preview);
+  });
+
+  it('expands write preview text when no diff is available', () => {
+    const preview =
+      'Full diff omitted from saved session history for /test/file.ts.';
+    const container = renderTool(
+      makeEditTool({
+        toolName: 'write',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: preview },
+          },
+        ],
+      }),
+    );
+
+    expect(container.querySelector('pre')).toBeNull();
+
+    const writeLabel = Array.from(container.querySelectorAll('span')).find(
+      (el) => el.textContent === 'WriteFile',
+    );
+    expect(writeLabel).toBeDefined();
+    click(writeLabel!);
+
+    expect(container.querySelector('pre')?.textContent).toBe(preview);
   });
 });
